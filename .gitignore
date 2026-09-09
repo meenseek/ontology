@@ -1,0 +1,7 @@
+/target/
+/.scratch/
+/.llm-context-vault-harness/
+/web/node_modules/
+/web/dist/
+.env
+*.dump
