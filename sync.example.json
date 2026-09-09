@@ -1,0 +1,20 @@
+{
+  "interval_seconds": 60,
+  "sources": [
+    {
+      "kind": "git",
+      "root": "/absolute/path/to/repository",
+      "scope": "meenseek",
+      "ref": "HEAD",
+      "paths": ["README.md"]
+    },
+    {
+      "kind": "vault",
+      "root": "/absolute/path/to/vault",
+      "scope": "personal",
+      "vault_scope": "personal",
+      "binary": "/absolute/path/to/llm-context-vault",
+      "paths": ["projects/example.md"]
+    }
+  ]
+}

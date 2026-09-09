@@ -19,6 +19,7 @@ use tokio::process::Command;
 pub struct GitReader {
     allowed: Vec<PathBuf>,
     calls: Arc<AtomicU64>,
+    response_bytes: Arc<AtomicU64>,
     deadline: Duration,
     output_limit: usize,
 }
@@ -37,12 +38,16 @@ impl GitReader {
         Ok(Self {
             allowed,
             calls: Arc::new(AtomicU64::new(0)),
+            response_bytes: Arc::new(AtomicU64::new(0)),
             deadline: Duration::from_secs(3),
             output_limit: MAX_DOCUMENT_BYTES,
         })
     }
     pub fn calls(&self) -> u64 {
         self.calls.load(Ordering::Relaxed)
+    }
+    pub fn response_bytes(&self) -> u64 {
+        self.response_bytes.load(Ordering::Relaxed)
     }
     fn validate(&self, repo: &Path, commit: &str, paths: &[String]) -> Result<(), Error> {
         if !self.allowed.iter().any(|root| root == repo)
@@ -97,7 +102,43 @@ impl GitReader {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        run_bounded(command, self.deadline, self.output_limit).await
+        let bytes = run_bounded(command, self.deadline, self.output_limit).await?;
+        self.response_bytes
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        Ok(bytes)
+    }
+    pub async fn resolve_ref(&self, repo: &Path, reference: &str) -> Result<String, Error> {
+        if !self.allowed.iter().any(|root| root == repo)
+            || reference.is_empty()
+            || reference.len() > 160
+            || reference.starts_with('-')
+            || reference.contains("..")
+            || !reference
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"/_-.".contains(&c))
+        {
+            return Err(Error::Invalid);
+        }
+        if repo.canonicalize().ok().as_deref() != Some(repo) {
+            return Err(Error::Import);
+        }
+        let revision = format!("{reference}^{{commit}}");
+        let bytes = self
+            .git(
+                repo,
+                &["rev-parse", "--verify", "--end-of-options", &revision],
+            )
+            .await?;
+        let resolved = String::from_utf8(bytes).map_err(|_| Error::Import)?;
+        let resolved = resolved.trim_end_matches('\n');
+        if !matches!(resolved.len(), 40 | 64)
+            || !resolved
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Err(Error::Import);
+        }
+        Ok(resolved.to_owned())
     }
     pub async fn read(
         &self,
@@ -208,6 +249,23 @@ impl GitReader {
         commit: &str,
         paths: &[String],
         scope: Scope,
+    ) -> Result<usize, Error> {
+        self.validate(repo, commit, paths)?;
+        let mut guard = store.lock_import().await?;
+        let result = self
+            .import_locked(store, repo, commit, paths, scope, &mut guard)
+            .await;
+        store.finish_import(guard).await?;
+        result
+    }
+    pub(crate) async fn import_locked(
+        &self,
+        store: &Store,
+        repo: &Path,
+        commit: &str,
+        paths: &[String],
+        scope: Scope,
+        _guard: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<usize, Error> {
         self.validate(repo, commit, paths)?;
         match self.read(repo, commit, paths, scope).await {

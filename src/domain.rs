@@ -65,6 +65,7 @@ pub const AREAS: [(&str, &str); 5] = [
 pub enum Error {
     Invalid,
     NotFound,
+    Gone,
     Conflict,
     Forbidden,
     Storage,
@@ -77,6 +78,7 @@ impl fmt::Display for Error {
         f.write_str(match self {
             Self::Invalid => "Invalid request",
             Self::NotFound => "Record not found",
+            Self::Gone => "Memory was forgotten; creation key cannot be reused",
             Self::Conflict => "Revision conflict; refresh the record",
             Self::Forbidden => "Local session verification failed",
             Self::Storage => "Database operation failed",

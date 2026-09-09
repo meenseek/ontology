@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import Memory from "./Memory";
 type Scope = "meenseek" | "personal";
 type SourceKind = "git" | "vault";
 type Area = { id: string; label: string };
@@ -74,6 +75,7 @@ const date = (value: string | null) =>
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "요청을 완료하지 못했습니다.";
 export default function App() {
+  const [view, setView] = useState<"memories" | "sources">("memories");
   const [scope, setScope] = useState<Scope>("meenseek");
   const [session, setSession] = useState<{
     csrf: string;
@@ -130,7 +132,7 @@ export default function App() {
     return () => controller.abort();
   }, []);
   useEffect(() => {
-    if (!session) return;
+    if (!session || view !== "sources") return;
     const controller = new AbortController();
     const sequence = ++listRequest.current;
     setLoading(true);
@@ -154,7 +156,7 @@ export default function App() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [session, scope, query, unclassified, areaFilter, refresh]);
+  }, [session, scope, query, unclassified, areaFilter, refresh, view]);
   useEffect(() => {
     if (!session || !selected) {
       setDetail(null);
@@ -268,13 +270,13 @@ export default function App() {
           <div>
             <p className="eyebrow">KNOWLEDGE, IN CONTEXT</p>
             <h1>
-              자료를 찾고,
+              기억과 자료를 찾고,
               <br />
               맥락을 연결하세요.
             </h1>
             <p className="lead">
-              출처가 있는 자료를 분야와 주제로 정리하고,
-              <br className="desktop" /> 연결할 만한 자료를 직접 확인합니다.
+              기억을 보관하고, 원문 자료를 정리하며,
+              <br className="desktop" /> 필요한 맥락과 관련 자료를 찾습니다.
             </p>
           </div>
           <div className="scope-panel">
@@ -297,8 +299,8 @@ export default function App() {
             </div>
             <p>
               {scope === "meenseek"
-                ? "회사의 5개 분야와 주제로 살펴봅니다."
-                : "개인 자료는 별도의 주제로 살펴봅니다."}
+                ? "회사의 기억과 원문 자료를 살펴봅니다."
+                : "개인의 기억과 원문 자료를 별도로 살펴봅니다."}
             </p>
           </div>
         </section>
@@ -318,7 +320,12 @@ export default function App() {
           )}
           {notice && <div className="notice">{notice}</div>}
         </div>
-        <section className="workspace">
+        <nav className="view-tabs" aria-label="기억과 자료">
+          <button disabled={saving} className={view === "memories" ? "primary" : ""} onClick={() => setView("memories")}>기억</button>
+          <button disabled={saving} className={view === "sources" ? "primary" : ""} onClick={() => setView("sources")}>원문 자료</button>
+        </nav>
+        {view === "memories" && session ? <Memory key={scope} scope={scope} csrf={session.csrf} request={request} onBusy={setSaving} /> : null}
+        {view === "sources" && <section className="workspace">
           <aside className="library">
             <form className="search" onSubmit={search}>
               <label htmlFor="search">자료 검색</label>
@@ -328,7 +335,7 @@ export default function App() {
                   value={input}
                   maxLength={120}
                   onChange={(e) => setInput(e.target.value)}
-                  placeholder="문서 내용, 경로, 주제 검색"
+                  placeholder="문서 내용, 경로, 문서 태그 검색"
                 />
                 <button disabled={!session || saving} type="submit">
                   검색
@@ -468,7 +475,7 @@ export default function App() {
                 )}
                 <section className="section">
                   <h3>
-                    분야와 주제 <span>사용자 확인</span>
+                    분야와 문서 태그 <span>사용자 확인</span>
                   </h3>
                   <form
                     onSubmit={(e) => {
@@ -486,7 +493,7 @@ export default function App() {
                       <legend>
                         {scope === "meenseek"
                           ? "분야 · 여러 개 선택 가능"
-                          : "개인 자료의 주제"}
+                          : "개인 자료의 문서 태그"}
                       </legend>
                       {scope === "meenseek" && (
                         <div className="area-options">
@@ -509,7 +516,7 @@ export default function App() {
                         </div>
                       )}
                       <label className="topic-label" htmlFor="topics">
-                        주제 · 한 줄에 하나, 최대 10개
+                        문서 태그 · 한 줄에 하나, 최대 10개
                       </label>
                       <textarea
                         id="topics"
@@ -653,7 +660,7 @@ export default function App() {
               </>
             )}
           </article>
-        </section>
+        </section>}
         <footer>
           <span>meenseek ontology</span>
           <span>

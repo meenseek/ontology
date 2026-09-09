@@ -584,3 +584,18 @@ footer span:first-child {
   font-size: 12px;
   margin-top: 7px;
 }
+
+.view-tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+.memory-boundary { max-width: none; text-align: left; margin: 0 0 18px; padding: 0; border: 0; font-size: 12px; }
+.brain .facet-filter input, .brain .topic-label input, .brain .topic-label select { display: block; width: 100%; margin: 7px 0 14px; }
+.brain .topic-label { color: #596752; font-size: 12px; }
+.date-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.memory-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.proposal-toggle { display: flex; gap: 8px; font-size: 12px; margin-bottom: 18px; }
+.evidence-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; font-size: 12px; margin: 8px 0; overflow-wrap: anywhere; }
+.evidence-choice { display: block; font-size: 12px; width: 100%; margin-top: 8px; text-align: left; overflow-wrap: anywhere; }
+.brain code { font-size: 11px; overflow-wrap: anywhere; }
+.context-retrieval { margin-top: 24px; }
+.context-card { padding-top: 20px; }
+.brain .notice, .brain .warning, .context-card .hint { overflow-wrap: anywhere; }
+@media (max-width: 650px) { .date-fields { grid-template-columns: 1fr; } }
