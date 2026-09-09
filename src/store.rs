@@ -19,6 +19,7 @@ use std::{
 pub const BASELINE: &str = include_str!("../schema/baseline.sql");
 pub const SOURCE_PROVIDERS_MIGRATION: &str =
     include_str!("../schema/migrations/001-source-providers.sql");
+pub const SECOND_BRAIN_MIGRATION: &str = include_str!("../schema/migrations/002-second-brain.sql");
 const SOURCE_PROVIDERS_NAME: &str = "001-source-providers.sql";
 #[derive(Clone)]
 pub struct Store {
@@ -55,7 +56,7 @@ impl Store {
     pub fn calls(&self) -> u64 {
         self.calls.load(Ordering::Relaxed)
     }
-    fn count(&self, n: u64) {
+    pub(crate) fn count(&self, n: u64) {
         self.calls.fetch_add(n, Ordering::Relaxed);
     }
     pub async fn initialize(&self) -> Result<(), Error> {
@@ -105,31 +106,39 @@ impl Store {
             );
             sqlx::query("INSERT INTO areas SELECT id,label FROM jsonb_to_recordset($1) AS x(id text,label text)").bind(areas).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
         }
-        // The sole upgrade runs under the same lock and transaction as baseline validation.
         sqlx::query("CREATE TABLE IF NOT EXISTS ontology_migrations (name text PRIMARY KEY, digest text NOT NULL)")
             .execute(&mut *tx).await.map_err(|_| Error::Baseline)?;
         let migrations = sqlx::query("SELECT name,digest FROM ontology_migrations ORDER BY name")
             .fetch_all(&mut *tx)
             .await
             .map_err(|_| Error::Baseline)?;
-        let migration_digest = crate::store::digest(SOURCE_PROVIDERS_MIGRATION.as_bytes());
-        match migrations.as_slice() {
-            [] => {
-                sqlx::raw_sql(SOURCE_PROVIDERS_MIGRATION)
+        let expected = [
+            (SOURCE_PROVIDERS_NAME, SOURCE_PROVIDERS_MIGRATION),
+            ("002-second-brain.sql", SECOND_BRAIN_MIGRATION),
+        ];
+        if migrations.len() > expected.len() {
+            return Err(Error::Baseline);
+        }
+        for (index, (name, sql)) in expected.iter().enumerate() {
+            let hash = crate::store::digest(sql.as_bytes());
+            if let Some(migration) = migrations.get(index) {
+                if migration.get::<String, _>("name") != *name
+                    || migration.get::<String, _>("digest") != hash
+                {
+                    return Err(Error::Baseline);
+                }
+            } else {
+                sqlx::raw_sql(*sql)
                     .execute(&mut *tx)
                     .await
                     .map_err(|_| Error::Baseline)?;
                 sqlx::query("INSERT INTO ontology_migrations(name,digest) VALUES($1,$2)")
-                    .bind(SOURCE_PROVIDERS_NAME)
-                    .bind(&migration_digest)
+                    .bind(name)
+                    .bind(hash)
                     .execute(&mut *tx)
                     .await
                     .map_err(|_| Error::Baseline)?;
             }
-            [migration]
-                if migration.get::<String, _>("name") == SOURCE_PROVIDERS_NAME
-                    && migration.get::<String, _>("digest") == migration_digest => {}
-            _ => return Err(Error::Baseline),
         }
         tx.commit().await.map_err(|_| Error::Storage)
     }
@@ -277,6 +286,30 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
         self.count(1);
         tx.commit().await.map_err(|_| Error::Storage)
     }
+    // Hold this transaction from before provider observation through persistence. The shared
+    // try-lock bounds overlap across manual commands, app polling, and other app processes.
+    pub async fn lock_import(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, Error> {
+        self.count(1);
+        let mut tx = self.pool.begin().await.map_err(|_| Error::Storage)?;
+        self.count(1);
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(478310002)")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| Error::Storage)?;
+        if !acquired {
+            self.count(1);
+            tx.rollback().await.map_err(|_| Error::Storage)?;
+            return Err(Error::Conflict);
+        }
+        Ok(tx)
+    }
+    pub async fn finish_import(
+        &self,
+        tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), Error> {
+        self.count(1);
+        tx.commit().await.map_err(|_| Error::Storage)
+    }
     pub async fn apply_import(&self, records: &[ImportedRecord]) -> Result<(), Error> {
         if records.is_empty() {
             return Ok(());
@@ -292,7 +325,7 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
 WITH input AS MATERIALIZED (SELECT * FROM jsonb_to_recordset($1) AS x(source_id text,entity_id text,scope text,repository text,path text,kind text,source_revision text,digest text,content text)),
 s AS (INSERT INTO sources(id,scope,repository,path,kind,status,last_success_at,verified_revision)
  SELECT source_id,scope,repository,path,kind,CASE WHEN content IS NULL THEN 'missing' ELSE 'ok' END,now(),source_revision FROM input
- ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status,last_attempt_at=now(),last_success_at=now(),verified_revision=EXCLUDED.verified_revision,failure_code=NULL RETURNING id),
+ ON CONFLICT(id) DO UPDATE SET generation=sources.generation+CASE WHEN sources.status IS DISTINCT FROM EXCLUDED.status OR sources.verified_revision IS DISTINCT FROM EXCLUDED.verified_revision OR ((SELECT content FROM input WHERE source_id=EXCLUDED.id) IS NOT NULL AND (SELECT content_digest FROM source_records WHERE entity_id=(SELECT entity_id FROM input WHERE source_id=EXCLUDED.id)) IS DISTINCT FROM (SELECT digest FROM input WHERE source_id=EXCLUDED.id)) THEN 1 ELSE 0 END,status=EXCLUDED.status,last_attempt_at=now(),last_success_at=now(),verified_revision=EXCLUDED.verified_revision,failure_code=NULL RETURNING id),
 e AS (INSERT INTO entities(id,scope,source_id) SELECT i.entity_id,i.scope,i.source_id FROM input i JOIN s ON s.id=i.source_id
  ON CONFLICT(id) DO UPDATE SET source_id=EXCLUDED.source_id RETURNING id)
 INSERT INTO source_records(entity_id,scope,content,content_digest,source_revision,present,absence_revision)
@@ -310,7 +343,7 @@ INSERT INTO source_records(entity_id,scope,content,content_digest,source_revisio
             return Ok(());
         }
         self.count(1);
-        sqlx::query("UPDATE sources SET status='failed',failure_code=$2,last_attempt_at=now() WHERE id=ANY($1) AND kind=$3")
+        sqlx::query("UPDATE sources SET generation=generation+CASE WHEN status='failed' THEN 0 ELSE 1 END,status='failed',failure_code=$2,last_attempt_at=now() WHERE id=ANY($1) AND kind=$3")
             .bind(source_ids).bind(kind.failure_code()).bind(kind.as_str())
             .execute(&self.pool).await.map_err(|_| Error::Storage)?;
         Ok(())

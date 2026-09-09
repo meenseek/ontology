@@ -1,6 +1,7 @@
 use crate::{
     config::Config,
     domain::{AREAS, Classification, Error, LinkChange, MAX_RESPONSE_BYTES, Scope},
+    memory::BrainCommand,
     store::Store,
 };
 use axum::{
@@ -29,6 +30,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AppState {
     pub store: Store,
+    pub sync_status: crate::sync::SharedStatus,
     config: Config,
     sessions: Arc<Mutex<HashMap<String, Session>>>,
 }
@@ -40,6 +42,7 @@ impl AppState {
     pub fn new(store: Store, config: Config) -> Self {
         Self {
             store,
+            sync_status: Arc::new(tokio::sync::RwLock::new(crate::sync::SyncStatus::default())),
             config,
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -50,6 +53,8 @@ pub fn router(state: AppState) -> Router {
         .not_found_service(ServeFile::new(state.config.web_dist.join("index.html")));
     Router::new()
         .route("/api/session", get(session))
+        .route("/api/brain", post(brain))
+        .route("/api/sync", get(sync_status))
         .route("/api/records", get(list))
         .route("/api/records/{id}", get(detail))
         .route("/api/records/{id}/classification", post(classify))
@@ -68,6 +73,7 @@ impl IntoResponse for Error {
         let status = match self {
             Self::Invalid => StatusCode::BAD_REQUEST,
             Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Gone => StatusCode::GONE,
             Self::Conflict => StatusCode::CONFLICT,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::Limit => StatusCode::PAYLOAD_TOO_LARGE,
@@ -240,4 +246,18 @@ async fn link(
     let Json(change) = body.map_err(|_| Error::Invalid)?;
     state.store.link(query.scope, &id, change).await?;
     json_response(json!({"saved":true}))
+}
+
+async fn brain(
+    State(state): State<AppState>,
+    body: Result<Json<BrainCommand>, JsonRejection>,
+) -> Result<Response, Error> {
+    let Json(command) = body.map_err(|_| Error::Invalid)?;
+    json_response(state.store.brain(command).await?)
+}
+
+async fn sync_status(State(state): State<AppState>) -> Result<Response, Error> {
+    json_response(
+        serde_json::to_value(&*state.sync_status.read().await).map_err(|_| Error::Storage)?,
+    )
 }

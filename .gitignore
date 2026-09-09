@@ -5,3 +5,4 @@
 /web/dist/
 .env
 *.dump
+/sync.local.json

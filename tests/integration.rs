@@ -300,7 +300,7 @@ async fn git_import_contract() {
             .await
             .expect("import pinned commit");
         assert_eq!(reader.calls() - before_git, 3 + 2 * size as u64);
-        assert_eq!(store.calls() - before_db, 3);
+        assert_eq!(store.calls() - before_db, 6);
     }
     let paths: Vec<String> = vec!["source-0.md".into()];
     let (_, id) = identity(&repo, &paths[0], Scope::Personal).expect("stable identity");
@@ -728,6 +728,7 @@ async fn data_snapshot(store: &Store, upgraded: bool) -> Value {
                     object.insert(old.into(), revision);
                     if table == "sources" {
                         object.remove("kind");
+                        object.remove("generation");
                     }
                 }
             }
@@ -809,12 +810,14 @@ async fn migration_preserves_baseline_contract() {
     store.initialize().await.expect("repeat upgrade safely");
     assert_eq!(data_snapshot(&store, true).await, before);
     assert_eq!(schema_snapshot(&store).await, upgraded_schema);
-    sqlx::query("UPDATE ontology_migrations SET digest='drift'")
-        .execute(store.pool())
-        .await
-        .expect("inject digest drift");
+    sqlx::query(
+        "UPDATE ontology_migrations SET digest='drift' WHERE name='001-source-providers.sql'",
+    )
+    .execute(store.pool())
+    .await
+    .expect("inject digest drift");
     assert_eq!(store.initialize().await, Err(Error::Baseline));
-    sqlx::query("UPDATE ontology_migrations SET digest=$1")
+    sqlx::query("UPDATE ontology_migrations SET digest=$1 WHERE name='001-source-providers.sql'")
         .bind(digest(SOURCE_PROVIDERS_MIGRATION.as_bytes()))
         .execute(store.pool())
         .await
@@ -828,10 +831,12 @@ async fn migration_preserves_baseline_contract() {
         .execute(store.pool())
         .await
         .expect("remove injected marker");
-    sqlx::query("UPDATE ontology_migrations SET name='renamed.sql'")
-        .execute(store.pool())
-        .await
-        .expect("inject migration name drift");
+    sqlx::query(
+        "UPDATE ontology_migrations SET name='renamed.sql' WHERE name='001-source-providers.sql'",
+    )
+    .execute(store.pool())
+    .await
+    .expect("inject migration name drift");
     assert_eq!(store.initialize().await, Err(Error::Baseline));
     assert_eq!(data_snapshot(&store, true).await, before);
     reset_schema(&store).await;
@@ -895,7 +900,7 @@ async fn vault_import_contract() {
             size
         );
         assert_eq!(reader.calls() - before_calls, u64::from(size != 0));
-        assert_eq!(store.calls() - before_db, if size == 0 { 0 } else { 3 });
+        assert_eq!(store.calls() - before_db, if size == 0 { 0 } else { 6 });
         let bytes = reader.response_bytes() - before_bytes;
         assert!(bytes <= MAX_RESPONSE_BYTES as u64);
         assert!(
@@ -1102,7 +1107,7 @@ async fn vault_import_contract() {
             .is_err()
     );
     assert_eq!(reader.calls() - before_calls, 1);
-    assert_eq!(store.calls() - before_db, 1);
+    assert_eq!(store.calls() - before_db, 4);
     for (entity, previous) in [(&id, &updated), (&second_id, &second_before)] {
         let failed = store
             .detail(Scope::Meenseek, entity)

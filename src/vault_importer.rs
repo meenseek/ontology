@@ -212,6 +212,26 @@ impl VaultReader {
         scope: Scope,
     ) -> Result<usize, Error> {
         self.validate(root, paths)?;
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        let mut guard = store.lock_import().await?;
+        let result = self
+            .import_locked(store, root, vault_scope, paths, scope, &mut guard)
+            .await;
+        store.finish_import(guard).await?;
+        result
+    }
+    pub(crate) async fn import_locked(
+        &self,
+        store: &Store,
+        root: &Path,
+        vault_scope: VaultScope,
+        paths: &[String],
+        scope: Scope,
+        _guard: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<usize, Error> {
+        self.validate(root, paths)?;
         match self.read(root, vault_scope, paths, scope).await {
             Ok(records) => {
                 store.apply_import(&records).await?;
