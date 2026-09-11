@@ -1,6 +1,7 @@
 use crate::{
     config::Config,
     domain::{AREAS, Classification, Error, LinkChange, MAX_RESPONSE_BYTES, Scope},
+    graph::GraphQuery,
     memory::BrainCommand,
     store::Store,
 };
@@ -54,6 +55,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/session", get(session))
         .route("/api/brain", post(brain))
+        .route("/api/graph", get(graph))
         .route("/api/sync", get(sync_status))
         .route("/api/records", get(list))
         .route("/api/records/{id}", get(detail))
@@ -260,4 +262,12 @@ async fn sync_status(State(state): State<AppState>) -> Result<Response, Error> {
     json_response(
         serde_json::to_value(&*state.sync_status.read().await).map_err(|_| Error::Storage)?,
     )
+}
+
+async fn graph(
+    State(state): State<AppState>,
+    query: Result<Query<GraphQuery>, QueryRejection>,
+) -> Result<Response, Error> {
+    let Query(query) = query.map_err(|_| Error::Invalid)?;
+    json_response(state.store.graph(query).await?)
 }
