@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
-    "test": "node --import tsx --test src/graph.test.ts"
+    "test": "node --import tsx --test src/graph.test.ts src/document-preview.test.tsx"
   },
   "dependencies": {
     "graphology": "0.26",
@@ -15,6 +15,9 @@
     "react": "19",
     "react-dom": "19",
     "react-force-graph-3d": "1",
+    "react-markdown": "10",
+    "remark-frontmatter": "5",
+    "remark-gfm": "4",
     "three": "0.185"
   },
   "devDependencies": {

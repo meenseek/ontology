@@ -1,68 +1,15 @@
-import { useEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import { Component, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import Documents from "./Documents";
 import Memory from "./Memory";
-type Scope = "meenseek" | "personal";
-type SourceKind = "git" | "vault";
-type Area = { id: string; label: string };
-type RecordItem = {
-  id: string;
-  path: string;
-  kind: SourceKind;
-  areas: string[];
-  topics: string[];
-  excerpt: string;
-  status: string;
-  present: boolean;
-};
-type Listing = {
-  items: RecordItem[];
-  total: number;
-  limit: number;
-  areas: { area: string; count: number }[];
-};
-type Detail = {
-  scope: Scope;
-  id: string;
-  revision: number;
-  areas: string[];
-  topics: string[];
-  source: {
-    kind: SourceKind;
-    repository: string;
-    path: string;
-    status: string;
-    verified_revision: string | null;
-    last_attempt_at: string;
-    last_success_at: string | null;
-  };
-  projection: {
-    content: string | null;
-    content_digest: string | null;
-    source_revision: string | null;
-    present: boolean;
-    absence_revision: string | null;
-    observed_at: string;
-  };
-  related: { id: string; path: string }[];
-  history: {
-    id: number;
-    kind: string;
-    revision: number;
-    previous: unknown;
-    confirmed: unknown;
-    confirmed_at: string;
-  }[];
-};
-const empty: Listing = { items: [], total: 0, limit: 100, areas: [] };
+import { nodePresentation } from "./presentation";
+import { graphUrl, kindName, knowledge, linkName, parseLocation, reconcile, sameGraphLocation, stateName, visibleGraph } from "./graph";
+import type { Filters, Model, Scope, Snapshot } from "./graph";
+const Graph = lazy(() => import("./Graph.tsx"));
+type Session = { csrf: string; areas: { id: string; label: string }[] };
 class ApiError extends Error {
   constructor(public status: number) {
-    super(
-      status === 409
-        ? "다른 변경이 먼저 저장되었습니다. 새로고침한 뒤 다시 확인해 주세요."
-        : status === 403
-          ? "세션을 확인할 수 없습니다. 페이지를 새로고침해 주세요."
-          : "요청을 완료하지 못했습니다. 입력과 서버 상태를 확인해 주세요.",
-    );
+    super(status === 409 ? "다른 변경이 먼저 저장되었습니다. 다시 읽은 뒤 확인해 주세요." : status === 403 ? "세션을 확인할 수 없습니다. 페이지를 새로고침해 주세요." : status === 404 ? "자료가 없거나 이 범위에 속하지 않습니다." : "요청을 완료하지 못했습니다. 입력과 서버 상태를 확인해 주세요.");
   }
 }
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -70,604 +17,206 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   if (!response.ok) throw new ApiError(response.status);
   return response.json() as Promise<T>;
 }
-const date = (value: string | null) =>
-  value ? new Date(value).toLocaleString("ko-KR") : "아직 확인되지 않음";
-const message = (error: unknown) =>
-  error instanceof Error ? error.message : "요청을 완료하지 못했습니다.";
+const message = (e: unknown) => e instanceof Error ? e.message : "요청에 실패했습니다.";
+class GraphBoundary extends Component<{ children: ReactNode; onFailure: () => void }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch() { this.props.onFailure(); }
+  render() { return this.state.failed ? null : this.props.children; }
+}
+const initialFilters: Filters = { kind: "all", state: "all", cluster: null };
 export default function App() {
-  const [view, setView] = useState<"memories" | "sources">("memories");
-  const [scope, setScope] = useState<Scope>("meenseek");
-  const [session, setSession] = useState<{
-    csrf: string;
-    areas: Area[];
-  } | null>(null);
-  const [input, setInput] = useState("");
-  const [query, setQuery] = useState("");
-  const [unclassified, setUnclassified] = useState(false);
-  const [areaFilter, setAreaFilter] = useState("");
-  const [storedListing, setListing] = useState<Listing & { scope?: Scope }>(
-    empty,
-  );
-  const listing = storedListing.scope === scope ? storedListing : empty;
-  const [selected, setSelected] = useState<string | null>(null);
-  const [storedDetail, setDetail] = useState<Detail | null>(null);
-  const detail =
-    storedDetail?.scope === scope && storedDetail.id === selected
-      ? storedDetail
-      : null;
-  const context = useRef({ scope, selected });
-  context.current = { scope, selected };
-  const listRequest = useRef(0);
-  const detailRequest = useRef(0);
-  const choose = (id: string) => {
-    if (context.current.selected === id) return;
-    context.current.selected = id;
-    detailRequest.current += 1;
-    setDetail(null);
-    setSelected(id);
+  const [route, setRoute] = useState(() => parseLocation(window.location.search));
+  const routeRef = useRef(route); routeRef.current = route;
+  const [session, setSession] = useState<Session | null>(null);
+  const [stored, setStored] = useState<{ snapshot: Snapshot; model: Model } | null>(null);
+  const previous = useRef<Model | undefined>(undefined);
+  const data = stored?.snapshot.scope === route.scope && stored.snapshot.query === route.q ? stored : null;
+  const [input, setInput] = useState(route.q), [refresh, setRefresh] = useState(0), [panelEpoch, setPanelEpoch] = useState(0);
+  const [filters, setFilters] = useState<Filters>(initialFilters);
+  const [panel, setPanel] = useState<"node" | "manage" | null>(route.focus ? "node" : null);
+  const [busy, setBusy] = useState(false), [loading, setLoading] = useState(true), [error, setError] = useState("");
+  const [notice, setNotice] = useState(""), [listMode, setListMode] = useState(false), [webglFailed, setWebglFailed] = useState(false);
+  const [visible, setVisible] = useState(document.visibilityState !== "hidden");
+  const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  const [rotate, setRotate] = useState(false), [fit, setFit] = useState(0);
+  const rotating = rotate && !reduced && !route.focus;
+  const [explore, setExplore] = useState(false);
+  const panelElement = useRef<HTMLElement>(null), closeButton = useRef<HTMLButtonElement>(null), manageButton = useRef<HTMLButtonElement>(null);
+  const opener = useRef<HTMLElement | null>(null), filterButton = useRef<HTMLButtonElement>(null);
+  const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 900px)").matches);
+  const selected = data?.model.nodes.find(n => n.id === route.focus) ?? null;
+  const shown = useMemo(() => data ? visibleGraph(data.model, filters) : { nodes: [], links: [] }, [data, filters]);
+  const fallback = listMode || webglFailed;
+  const failed = useCallback(() => { setWebglFailed(true); }, []);
+  const syncRoute = (next: typeof route, replace = false) => {
+    const current = routeRef.current;
+    if ((!data || loading) && next.scope === current.scope && next.q === current.q && next.focus !== current.focus) setRefresh(v => v + 1);
+    window.history[replace ? "replaceState" : "pushState"](null, "", graphUrl(next.scope, next.q, next.focus));
+    routeRef.current = next; setRoute(next);
   };
-  const [areas, setAreas] = useState<string[]>([]);
-  const [topics, setTopics] = useState("");
-  const [relatedQuery, setRelatedQuery] = useState("");
-  const [candidates, setCandidates] = useState<RecordItem[]>([]);
-  const [target, setTarget] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const [refresh, setRefresh] = useState(0);
   useEffect(() => {
-    const controller = new AbortController();
-    request<{ csrf: string; areas: Area[] }>("/api/session", {
-      signal: controller.signal,
-    })
-      .then(setSession)
-      .catch((e) => {
-        if (!controller.signal.aborted) {
-          setError(message(e));
-          setLoading(false);
-        }
-      });
-    return () => controller.abort();
+    const visibility = () => setVisible(document.visibilityState !== "hidden");
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const motion = () => setReduced(media.matches);
+    const pop = () => { const next = parseLocation(window.location.search); routeRef.current = next; setRoute(next); setInput(next.q); setFilters(initialFilters); setPanel(next.focus ? "node" : null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); };
+    document.addEventListener("visibilitychange", visibility); media.addEventListener("change", motion); window.addEventListener("popstate", pop);
+    return () => { document.removeEventListener("visibilitychange", visibility); media.removeEventListener("change", motion); window.removeEventListener("popstate", pop); };
   }, []);
   useEffect(() => {
-    if (!session || view !== "sources") return;
+    if (!visible || session) return;
     const controller = new AbortController();
-    const sequence = ++listRequest.current;
-    setLoading(true);
-    setListing(empty);
-    request<Listing>(
-      `/api/records?scope=${scope}&q=${encodeURIComponent(query)}&unclassified=${unclassified}${areaFilter ? `&area=${encodeURIComponent(areaFilter)}` : ""}`,
-      { signal: controller.signal },
-    )
-      .then((value) => {
-        if (
-          !controller.signal.aborted &&
-          context.current.scope === scope &&
-          listRequest.current === sequence
-        )
-          setListing({ ...value, scope });
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted) setError(message(e));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
+    request<Session>("/api/session", { signal: controller.signal }).then(v => { if (!controller.signal.aborted) setSession(v); }).catch(e => { if (!controller.signal.aborted) { setError(message(e)); setLoading(false); } });
     return () => controller.abort();
-  }, [session, scope, query, unclassified, areaFilter, refresh, view]);
+  }, [visible, session, refresh]);
   useEffect(() => {
-    if (!session || !selected) {
-      setDetail(null);
-      setDetailLoading(false);
-      return;
-    }
-    const controller = new AbortController();
-    const sequence = ++detailRequest.current;
-    setDetail(null);
-    setDetailLoading(true);
-    setCandidates([]);
-    setTarget("");
-    request<Detail>(`/api/records/${selected}?scope=${scope}`, {
-      signal: controller.signal,
-    })
-      .then((value) => {
-        if (
-          !controller.signal.aborted &&
-          context.current.scope === scope &&
-          context.current.selected === selected &&
-          detailRequest.current === sequence
-        ) {
-          setDetail({ ...value, scope });
-          setAreas(value.areas);
-          setTopics(value.topics.join("\n"));
-        }
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted) setError(message(e));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setDetailLoading(false);
-      });
+    if (!visible || !session) return;
+    const controller = new AbortController(); const current = routeRef.current;
+    setLoading(true); setError("");
+    const params = new URLSearchParams({ scope: current.scope, q: current.q });
+    if (current.focus) params.set("focus", current.focus);
+    request<Snapshot>(`/api/graph?${params}`, { signal: controller.signal }).then(snapshot => {
+      if (controller.signal.aborted || !sameGraphLocation(current, routeRef.current)) return;
+      const model = reconcile(snapshot, previous.current); previous.current = model;
+      setStored({ snapshot, model });
+      setFilters(f => f.cluster && !model.clusters.some(c => c.id === f.cluster) ? { ...f, cluster: null } : f);
+      const focus = routeRef.current.focus;
+      if (focus && !model.nodes.some(n => n.id === focus)) {
+        setNotice("초점을 지정한 자료가 없거나 이 범위에서 찾을 수 없습니다.");
+        syncRoute({ ...routeRef.current, focus: null }, true); setPanel(null);
+      }
+    }).catch(e => { if (!controller.signal.aborted && sameGraphLocation(current, routeRef.current)) setError(message(e)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [session, scope, selected, refresh]);
-  const switchScope = (next: Scope) => {
-    context.current = { scope: next, selected: null };
-    listRequest.current += 1;
-    detailRequest.current += 1;
-    setAreaFilter("");
-    setScope(next);
-    setSelected(null);
-    setDetail(null);
-    setListing(empty);
-    setInput("");
-    setQuery("");
-    setUnclassified(false);
-    setError("");
-    setNotice("");
-    setCandidates([]);
-  };
-  const search = (event: FormEvent) => {
-    event.preventDefault();
-    setQuery(input);
-    setError("");
-    setRefresh((v) => v + 1);
-  };
-  const label = (id: string) =>
-    session?.areas.find((area) => area.id === id)?.label ?? id;
-  async function save(kind: "classification" | "links", body: object) {
-    if (!detail || !session) return;
-    setSaving(true);
-    setError("");
-    setNotice("");
-    try {
-      await request(`/api/records/${detail.id}/${kind}?scope=${scope}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-csrf-token": session.csrf,
-        },
-        body: JSON.stringify({ revision: detail.revision, ...body }),
+  }, [visible, session, route.scope, route.q, refresh]);
+  const reload = () => { setRefresh(v => v + 1); setPanelEpoch(v => v + 1); setNotice(""); };
+  function changeScope(scope: Scope) {
+    if (busy || scope === route.scope) return;
+    previous.current = undefined; setStored(null); setInput(""); setFilters(initialFilters); setPanel(null); setNotice(""); setError("");
+    syncRoute({ scope, q: "", focus: null });
+  }
+  function choose(id: string) {
+    if (busy) return;
+    const node = data?.model.nodes.find(n => n.id === id);
+    setNotice(""); setFilters(f => ({ ...initialFilters, cluster: f.cluster === node?.cluster ? f.cluster : null }));
+    syncRoute({ ...route, focus: id }); openPanel("node");
+    if (!node) setRefresh(v => v + 1);
+  }
+  function changed(id: string | null) {
+    syncRoute({ ...routeRef.current, focus: id }, true);
+    setPanel(id ? "node" : "manage"); setFilters(initialFilters); reload();
+  }
+  function openPanel(next: "node" | "manage") {
+    if (!panel) opener.current = document.activeElement instanceof HTMLElement && document.activeElement.matches("button, a[href], input, select, textarea, summary, [tabindex]") ? document.activeElement : manageButton.current;
+    setPanel(next);
+  }
+  function fitView(cluster = filters.cluster) {
+    if (busy) return;
+    setFilters(f => ({ ...f, cluster }));
+    closePanel(); setFit(v => v + 1);
+  }
+  function closePanel() {
+    if (busy) return;
+    setPanel(null); syncRoute({ ...routeRef.current, focus: null });
+    requestAnimationFrame(() => (opener.current?.isConnected ? opener.current : manageButton.current)?.focus());
+  }
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 900px)");
+    const resize = () => setNarrow(media.matches);
+    media.addEventListener("change", resize); return () => media.removeEventListener("change", resize);
+  }, []);
+  useEffect(() => { if (panel) closeButton.current?.focus(); }, [!!panel, !!session]);
+  useEffect(() => {
+    if (!panel) return;
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) { event.preventDefault(); closePanel(); }
+      if (event.key !== "Tab" || !narrow) return;
+      const controls = [...(panelElement.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, [tabindex="0"]') ?? [])].filter(el => {
+        if (!el.getClientRects().length || getComputedStyle(el).visibility !== "visible") return false;
+        for (let ancestor: HTMLElement | null = el; ancestor; ancestor = ancestor.parentElement) {
+          if (ancestor.hidden || ancestor.inert || getComputedStyle(ancestor).opacity === "0") return false;
+          if (ancestor instanceof HTMLDetailsElement && !ancestor.open) {
+            const summary = [...ancestor.children].find(child => child.tagName === "SUMMARY");
+            if (!summary?.contains(el)) return false;
+          }
+        }
+        return true;
       });
-      setNotice("확인 기록을 저장했습니다.");
-      setRefresh((v) => v + 1);
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-  async function findRelated(event: FormEvent) {
-    event.preventDefault();
-    setSaving(true);
-    setError("");
-    try {
-      const result = await request<Listing>(
-        `/api/records?scope=${scope}&q=${encodeURIComponent(relatedQuery)}`,
-      );
-      setCandidates(result.items.filter((item) => item.id !== selected));
-      setTarget("");
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-  return (
-    <div className="app">
-      <header>
-        <a className="wordmark" href="/">
-          meenseek<span> / ontology</span>
-        </a>
-        <span className="local">
-          <i />
-          로컬 자료 연결
-        </span>
-      </header>
-      <main>
-        <section className="intro">
-          <div>
-            <p className="eyebrow">KNOWLEDGE, IN CONTEXT</p>
-            <h1>
-              기억과 자료를 찾고,
-              <br />
-              맥락을 연결하세요.
-            </h1>
-            <p className="lead">
-              기억을 보관하고, 원문 자료를 정리하며,
-              <br className="desktop" /> 필요한 맥락과 관련 자료를 찾습니다.
-            </p>
-          </div>
-          <div className="scope-panel">
-            <span className="field-label">탐색 범위</span>
-            <div className="scope-switch" aria-label="탐색 범위">
-              <button
-                className={scope === "meenseek" ? "active" : ""}
-                disabled={saving}
-                onClick={() => switchScope("meenseek")}
-              >
-                meenseek
-              </button>
-              <button
-                className={scope === "personal" ? "active" : ""}
-                disabled={saving}
-                onClick={() => switchScope("personal")}
-              >
-                개인
-              </button>
-            </div>
-            <p>
-              {scope === "meenseek"
-                ? "회사의 기억과 원문 자료를 살펴봅니다."
-                : "개인의 기억과 원문 자료를 별도로 살펴봅니다."}
-            </p>
-          </div>
-        </section>
-        <div aria-live="polite">
-          {error && (
-            <div className="error" role="alert">
-              {error}
-              <button
-                onClick={() => {
-                  setError("");
-                  setRefresh((v) => v + 1);
-                }}
-              >
-                자료 새로고침
-              </button>
-            </div>
-          )}
-          {notice && <div className="notice">{notice}</div>}
+      const first = controls[0], last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener("keydown", keydown); return () => document.removeEventListener("keydown", keydown);
+  }, [panel, narrow, busy]);
+  const cluster = data?.model.clusters.find(c => c.id === filters.cluster);
+  return <div className="app">
+    <header className="app-header" inert={!!panel && narrow}>
+      <a className="wordmark" href="/">ontology<span> / meenseek</span></a>
+      <div className="scope-switch" role="group" aria-label="탐색 범위">
+        <button aria-pressed={route.scope === "meenseek"} disabled={busy} onClick={() => changeScope("meenseek")}>meenseek</button>
+        <button aria-pressed={route.scope === "personal"} disabled={busy} onClick={() => changeScope("personal")}>개인</button>
+      </div>
+      <form className="map-search" role="search" onSubmit={e => { e.preventDefault(); if (busy) return; const same = route.q === input; syncRoute({ scope: route.scope, q: input, focus: null }); setPanel(null); setFilters(initialFilters); setNotice(""); if (same) setRefresh(v => v + 1); }}>
+        <label className="sr-only" htmlFor="graph-search">현재 범위의 문서·기억 검색</label>
+        <input id="graph-search" value={input} onChange={e => setInput(e.target.value)} maxLength={120} placeholder="문서·기억 검색" />
+        <button type="submit" disabled={busy || !session}>검색</button>
+      </form>
+      <button ref={manageButton} className="manage-button" disabled={!session || busy} onClick={() => { syncRoute({ ...route, focus: null }); openPanel("manage"); }}>기억 쓰기</button>
+    </header>
+    <main className={`map-workspace ${panel ? "panel-open" : ""} ${explore ? "explorer-open" : ""}`}>
+      {explore && <aside className="map-sidebar" aria-label="지식 탐색" inert={!!panel && narrow}>
+        <div className="sidebar-heading"><h2>탐색 조건</h2><button className="quiet" aria-label="탐색 조건 닫기" onClick={() => { setExplore(false); filterButton.current?.focus(); }}>닫기</button></div>
+        <div className="filter-row">
+          <label>표시 종류<select value={filters.kind} disabled={busy} onChange={e => setFilters(f => ({ ...f, kind: e.target.value as Filters["kind"] }))}><option value="all">모두</option><option value="knowledge">문서와 기억</option>{Object.entries(kindName).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
+          <label>표시 상태<select value={filters.state} disabled={busy} onChange={e => setFilters(f => ({ ...f, state: e.target.value as Filters["state"] }))}><option value="all">모든 상태</option><option value="active">현재 사용 가능</option><option value="proposed">제안</option><option value="withdrawn">철회</option><option value="attention">확인 필요·제외</option></select></label>
         </div>
-        <nav className="view-tabs" aria-label="기억과 자료">
-          <button disabled={saving} className={view === "memories" ? "primary" : ""} onClick={() => setView("memories")}>기억</button>
-          <button disabled={saving} className={view === "sources" ? "primary" : ""} onClick={() => setView("sources")}>원문 자료</button>
-        </nav>
-        {view === "memories" && session ? <Memory key={scope} scope={scope} csrf={session.csrf} request={request} onBusy={setSaving} /> : null}
-        {view === "sources" && <section className="workspace">
-          <aside className="library">
-            <form className="search" onSubmit={search}>
-              <label htmlFor="search">자료 검색</label>
-              <div>
-                <input
-                  id="search"
-                  value={input}
-                  maxLength={120}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="문서 내용, 경로, 문서 태그 검색"
-                />
-                <button disabled={!session || saving} type="submit">
-                  검색
-                </button>
-              </div>
-            </form>
-            {scope === "meenseek" && (
-              <label className="facet-filter">
-                분야로 탐색
-                <select
-                  aria-label="분야로 탐색"
-                  value={areaFilter}
-                  onChange={(e) => setAreaFilter(e.target.value)}
-                >
-                  <option value="">전체 분야</option>
-                  {session?.areas.map((area) => (
-                    <option key={area.id} value={area.id}>
-                      {area.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-            <div className="list-meta">
-              <span>
-                {loading ? "불러오는 중…" : `${listing.total}개 자료`}
-              </span>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={unclassified}
-                  onChange={(e) => setUnclassified(e.target.checked)}
-                />{" "}
-                미분류만
-              </label>
-            </div>
-            <div className="record-list" aria-busy={loading}>
-              {!loading && listing.items.length === 0 && (
-                <div className="empty">
-                  <b>표시할 자료가 없습니다.</b>
-                  <p>
-                    {query || unclassified
-                      ? "검색어나 미분류 조건을 바꿔보세요."
-                      : "명시적으로 가져온 Git·Vault 문서가 이곳에 나타납니다."}
-                  </p>
-                </div>
-              )}
-              {listing.items.map((item) => (
-                <button
-                  key={item.id}
-                  className={`record ${selected === item.id ? "selected" : ""}`}
-                  disabled={saving}
-                  onClick={() => {
-                    choose(item.id);
-                    setError("");
-                    setNotice("");
-                  }}
-                >
-                  <span className="record-kind">
-                    {item.kind === "vault" ? "VAULT DOCUMENT" : "GIT DOCUMENT"}{" "}
-                    <span>
-                      {item.status === "failed"
-                        ? "확인 실패"
-                        : item.present
-                          ? "출처 확인"
-                          : "부재 확인"}
-                    </span>
-                  </span>
-                  <strong>{item.path}</strong>
-                  <p>{item.excerpt}</p>
-                  <div className="tags">
-                    {item.areas.map((area) => (
-                      <span key={area}>{label(area)}</span>
-                    ))}
-                    {item.topics.map((topic) => (
-                      <span key={topic}>{topic}</span>
-                    ))}
-                    {item.areas.length + item.topics.length === 0 && (
-                      <span>미분류</span>
-                    )}
-                  </div>
-                </button>
-              ))}
-            </div>
-            {listing.total > listing.limit && (
-              <p className="hint">
-                앞의 {listing.limit}개만 표시합니다. 검색어로 범위를 좁혀주세요.
-              </p>
-            )}
-          </aside>
-          <article className="detail" aria-busy={detailLoading}>
-            {detailLoading ? (
-              <div className="empty">자료를 불러오고 있습니다…</div>
-            ) : !detail ? (
-              <div className="welcome">
-                <div className="connection-symbol">↗</div>
-                <p className="eyebrow">START WITH A SOURCE</p>
-                <h2>자료 하나에서 시작하세요.</h2>
-                <p>
-                  목록에서 자료를 선택하면 원문과 출처,
-                  <br />
-                  분류와 관련 자료를 함께 볼 수 있습니다.
-                </p>
-                <div className="boundary-note">
-                  Git 문서와 지정한 Vault 문서를 가져옵니다.
-                  <br />
-                  Vault 쓰기와 다른 도구 연결은 아직 지원하지 않습니다.
-                </div>
-              </div>
-            ) : (
-              <>
-                <div className="detail-heading">
-                  <span className="eyebrow">SOURCE DOCUMENT</span>
-                  <button
-                    className="quiet"
-                    disabled={saving}
-                    onClick={() => {
-                      setError("");
-                      setRefresh((v) => v + 1);
-                    }}
-                  >
-                    새로고침
-                  </button>
-                  <h2>{detail.source.path}</h2>
-                </div>
-                {detail.source.status === "failed" && (
-                  <p className="error">
-                    최근 출처 확인에 실패했습니다. 아래 내용은 마지막으로 성공한
-                    기록입니다.
-                  </p>
-                )}
-                {!detail.projection.present && (
-                  <p className="warning">
-                    등록한 경로의 부재를 확인했습니다. 마지막 원문과 사용자의
-                    확인 기록은 보존되어 있습니다.
-                  </p>
-                )}
-                <section className="section">
-                  <h3>
-                    분야와 문서 태그 <span>사용자 확인</span>
-                  </h3>
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void save("classification", {
-                        areas,
-                        topics: topics
-                          .split("\n")
-                          .map((v) => v.trim())
-                          .filter(Boolean),
-                      });
-                    }}
-                  >
-                    <fieldset disabled={saving}>
-                      <legend>
-                        {scope === "meenseek"
-                          ? "분야 · 여러 개 선택 가능"
-                          : "개인 자료의 문서 태그"}
-                      </legend>
-                      {scope === "meenseek" && (
-                        <div className="area-options">
-                          {session?.areas.map((area) => (
-                            <label key={area.id}>
-                              <input
-                                type="checkbox"
-                                checked={areas.includes(area.id)}
-                                onChange={(e) =>
-                                  setAreas((current) =>
-                                    e.target.checked
-                                      ? [...current, area.id]
-                                      : current.filter((id) => id !== area.id),
-                                  )
-                                }
-                              />
-                              {area.label}
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                      <label className="topic-label" htmlFor="topics">
-                        문서 태그 · 한 줄에 하나, 최대 10개
-                      </label>
-                      <textarea
-                        id="topics"
-                        value={topics}
-                        onChange={(e) => setTopics(e.target.value)}
-                        rows={2}
-                        maxLength={810}
-                        placeholder="아직 분류하지 않았다면 비워두세요."
-                      />
-                      <button className="primary" type="submit">
-                        {saving ? "저장 중…" : "분류 확인 저장"}
-                      </button>
-                    </fieldset>
-                  </form>
-                </section>
-                <section className="section">
-                  <h3>
-                    관련 자료 <span>{detail.related.length}개 연결</span>
-                  </h3>
-                  <ul className="related">
-                    {detail.related.map((item) => (
-                      <li key={item.id}>
-                        <button
-                          disabled={saving}
-                          onClick={() => choose(item.id)}
-                        >
-                          {item.path} ↗
-                        </button>
-                        <button
-                          className="quiet"
-                          disabled={saving}
-                          aria-label={`${item.path} 연결 해제`}
-                          onClick={() =>
-                            void save("links", {
-                              target_id: item.id,
-                              remove: true,
-                            })
-                          }
-                        >
-                          해제
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                  {detail.related.length === 0 && (
-                    <p className="hint">아직 연결한 자료가 없습니다.</p>
-                  )}
-                  <form className="related-search" onSubmit={findRelated}>
-                    <input
-                      aria-label="관련 자료 검색"
-                      maxLength={120}
-                      value={relatedQuery}
-                      onChange={(e) => setRelatedQuery(e.target.value)}
-                      placeholder="같은 범위에서 연결할 자료 검색"
-                    />
-                    <button disabled={saving}>찾기</button>
-                  </form>
-                  <div className="link-controls">
-                    <select
-                      aria-label="연결할 자료"
-                      value={target}
-                      onChange={(e) => setTarget(e.target.value)}
-                    >
-                      <option value="">연결할 자료 선택</option>
-                      {candidates.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.path}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      disabled={!target || saving}
-                      onClick={() =>
-                        void save("links", { target_id: target, remove: false })
-                      }
-                    >
-                      연결 추가
-                    </button>
-                  </div>
-                </section>
-                <section className="section">
-                  <h3>
-                    원문{" "}
-                    <span>
-                      {detail.source.kind === "vault"
-                        ? "Vault에서 읽은 내용"
-                        : "Git에서 읽은 내용"}
-                    </span>
-                  </h3>
-                  <pre className="source-text">
-                    {detail.projection.content ??
-                      "이 경로에서 성공적으로 읽은 원문이 없습니다."}
-                  </pre>
-                </section>
-                <section className="section provenance">
-                  <h3>출처와 확인 시점</h3>
-                  <dl>
-                    <dt>출처</dt>
-                    <dd>{detail.source.kind === "vault" ? "Vault" : "Git"}</dd>
-                    <dt>{detail.source.kind === "vault" ? "Vault 경로" : "저장소"}</dt>
-                    <dd>{detail.source.repository}</dd>
-                    <dt>{detail.source.kind === "vault" ? "원문 SHA-256" : "원문 커밋"}</dt>
-                    <dd>{detail.projection.source_revision ?? "없음"}</dd>
-                    <dt>{detail.source.kind === "vault" ? "확인한 원문 SHA-256" : "확인 커밋"}</dt>
-                    <dd>{detail.source.verified_revision ?? "없음"}</dd>
-                    <dt>조회 내용 SHA-256</dt>
-                    <dd>{detail.projection.content_digest ?? "없음"}</dd>
-                    <dt>원문 관측</dt>
-                    <dd>{date(detail.projection.observed_at)}</dd>
-                    <dt>마지막 성공</dt>
-                    <dd>{date(detail.source.last_success_at)}</dd>
-                    <dt>최근 확인 시도</dt>
-                    <dd>{date(detail.source.last_attempt_at)}</dd>
-                  </dl>
-                </section>
-                <details className="section">
-                  <summary>
-                    최근 확인·정정 이력 ({detail.history.length}개)
-                  </summary>
-                  {detail.history.map((history) => (
-                    <div className="history" key={history.id}>
-                      <b>
-                        {history.kind === "classification"
-                          ? "분류 확인"
-                          : history.kind === "link-add"
-                            ? "관련 자료 추가"
-                            : "관련 자료 해제"}{" "}
-                        · r{history.revision}
-                      </b>
-                      <time>{date(history.confirmed_at)}</time>
-                      <pre>
-                        {JSON.stringify(
-                          { 이전: history.previous, 확인: history.confirmed },
-                          null,
-                          2,
-                        )}
-                      </pre>
-                    </div>
-                  ))}
-                </details>
-              </>
-            )}
-          </article>
-        </section>}
-        <footer>
-          <span>meenseek ontology</span>
-          <span>
-            출처의 원문과 사용자의 분류·연결 기록을 구분해 보존합니다.
-          </span>
-        </footer>
-      </main>
-    </div>
-  );
+        <section className="cluster-list"><h2>관계에서 찾은 군집</h2>
+          <button className="cluster" aria-pressed={!filters.cluster} disabled={busy} onClick={() => fitView(null)}>전체 보기</button>
+          <div className="compact-list">{data?.model.clusters.filter(c => c.members.length > 1).map(c => <button className="cluster" key={c.id} disabled={busy} aria-pressed={filters.cluster === c.id} onClick={() => fitView(c.id)}><i style={{ background: c.color }} /><strong>{c.label}</strong><small>문서·기억 {c.knowledge} · 분류 표식 {c.members.length - c.knowledge}</small></button>)}</div>
+          <p className="hint">{data?.model.clusters.filter(c => c.members.length > 1).length ?? 0}개 군집 · 단독 항목 {data?.model.clusters.filter(c => c.members.length === 1).length ?? 0}개</p>
+          <p className="hint">표시된 현재 관계로 계산합니다. 군집은 자동 분류가 아닙니다.</p>
+        </section>
+        <details className="section"><summary>검색 방법</summary><p className="hint">현재 범위에서 제목·내용·경로·문서 태그의 문자열을 찾습니다. 표시 조건은 조회한 결과 안에서 적용합니다.</p></details>
+      </aside>}
+      <section className="galaxy" aria-label="지식 지도" aria-busy={loading} inert={!!panel && narrow}>
+        <div className="map-toolbar"><div className="map-title"><h1>{cluster ? cluster.label : route.q ? `“${route.q}” 검색` : "지식 지도"}</h1><p className="count-breakdown">문서 {data?.snapshot.totals.documents ?? "—"} · 기억 {data?.snapshot.totals.memories ?? "—"} · 관계 {data?.snapshot.totals.links ?? "—"}</p></div>
+          <div className="map-actions">
+            <button ref={filterButton} disabled={busy} aria-expanded={explore} onClick={() => setExplore(v => !v)}>필터·군집</button>
+            <button disabled={busy} aria-pressed={fallback} onClick={() => { if (webglFailed) { setWebglFailed(false); setListMode(false); } else setListMode(v => !v); }}>{fallback ? "3D 보기" : "목록 보기"}</button>
+            <details className="view-options"><summary>보기 설정</summary><div>
+              <button disabled={busy || loading} aria-busy={loading} onClick={reload}>{loading ? "새로고침 중…" : "새로고침"}</button>
+              {!fallback && <><button disabled={busy} onClick={() => fitView()}>전체 맞춤</button><button disabled={reduced || !!route.focus} aria-pressed={rotating} title={route.focus ? "자료 선택을 해제하면 설정한 지도 회전이 재개됩니다." : undefined} onClick={() => setRotate(v => !v)}>{reduced ? "동작 줄이기 · 지도 회전 멈춤" : route.focus ? "자료 선택 중 · 지도 회전 멈춤" : rotating ? "지도 회전 멈춤" : "지도 천천히 회전"}</button></>}
+            </div></details>
+          </div>
+        </div>
+        <div className="map-status" aria-live="polite">
+          {error && <p className="error" role="alert">{error} <button onClick={reload}>다시 불러오기</button></p>}
+          {notice && <p className="notice">{notice}</p>}
+          {loading && !data && <p className="loading" role="status">지식을 불러오는 중…</p>}
+          {webglFailed && <p className="warning">3D 화면을 표시할 수 없어 같은 조회 결과를 목록으로 보여드립니다.</p>}
+          {(route.q || cluster) && <div className="active-filters">{route.q && <button className="quiet" disabled={busy} onClick={() => { setInput(""); syncRoute({ scope: route.scope, q: "", focus: null }); setFilters(initialFilters); setPanel(null); }}>검색 해제</button>}{cluster && <button className="quiet" disabled={busy} onClick={() => fitView(null)}>군집 해제</button>}</div>}
+          {data && <p className="data-limits">표시: 문서·기억 {shown.nodes.filter(knowledge).length} · 분류 표식 {shown.nodes.filter(n => !knowledge(n)).length} · 관계 {shown.links.length}{route.q && ` · 검색 일치 ${data.snapshot.matched}개`}</p>}
+          {data && <details className="limits-detail"><summary>{data.snapshot.truncated ? "반환 한도로 일부 생략 · 조회 범위" : "조회 범위"}</summary><p>범위 전체: 문서 {data.snapshot.totals.documents}개 · 기억 {data.snapshot.totals.memories}개 · 분류 표식 {data.snapshot.totals.markers}개 · 관계 {data.snapshot.totals.links}개. 조회 결과: 문서·기억 {data.snapshot.returned.knowledge}개 · 표식 {data.snapshot.returned.markers}개 · 관계 {data.snapshot.returned.links}개. 한 번에 점 {data.snapshot.limits.nodes}개, 관계 {data.snapshot.limits.links}개, {data.snapshot.limits.response_bytes.toLocaleString()}바이트까지 반환합니다. 현재 조회에서 점 {data.snapshot.omitted.nodes}개·관계 {data.snapshot.omitted.links}개가 제외되었습니다{route.q ? " (검색 범위 밖 포함)" : ""}.{data.snapshot.limits.byte_limited && " 응답 크기 상한도 적용했습니다."} 범위 검색과 자료 초점 URL로 상한 밖 자료를 찾을 수 있습니다.</p></details>}
+          {data && shown.nodes.length > 0 && !shown.links.length && <p className="hint no-relations">{data.snapshot.totals.links === 0 ? "아직 등록된 관계가 없습니다." : "현재 표시한 항목 사이에는 조회된 관계가 없습니다."}</p>}
+          {selected && !shown.nodes.some(n => n.id === selected.id) && <p className="notice">선택한 자료가 현재 필터 밖에 있습니다. <button onClick={() => setFilters(initialFilters)}>필터 해제</button></p>}
+        </div>
+        {data && !loading && !shown.nodes.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{route.q || filters.kind !== "all" || filters.state !== "all" ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 보관한 기억이 이곳에 나타납니다."}</p><button disabled={!session || busy} onClick={() => openPanel("manage")}>기억 쓰기</button></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{shown.nodes.map(n => { const label = nodePresentation(n); return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} aria-hidden="true">{knowledge(n) ? "·" : "○"}</span><span><small>{kindName[n.kind]} · {stateName(n)}</small><strong>{label.title}</strong>{label.subtitle && <span className="node-location">{label.subtitle}</span>}</span>{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph nodes={shown.nodes} links={shown.links} selected={route.focus} rotate={rotating} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onFailure={failed} /></Suspense></GraphBoundary>)}
+        <div className="map-legend"><span><i className="legend-star document" />문서</span><span><i className="legend-star memory" />기억</span><span>○ 분류 표식</span><details><summary>관계·상태 읽기</summary><p>가는 원은 선택, 바깥 점선 원은 이전 조회 이후의 기록·관계 변경입니다. 흐린 점은 제안·철회·유효기간·출처 확인 상태를 살펴보세요. {Object.values(linkName).join(" · ")} 관계만 선으로 표시하며 선택하면 연결된 선을 강조합니다. 과거 출처 근거는 갈색의 가는 선이며 군집에서 제외합니다. ‘보관’은 사실 검증을 뜻하지 않습니다. 출처 확인 시각만 바뀌면 변경으로 표시하지 않습니다.</p></details></div>
+      </section>
+      {panel && session && <aside ref={panelElement} className="management-panel" role="dialog" aria-modal={narrow || undefined} aria-label={panel === "manage" ? "기억 쓰기" : "선택한 자료 상세"}>
+        <div className="panel-heading"><span>{panel === "manage" ? "기억 쓰기" : selected ? kindName[selected.kind] : "자료 상세"}</span><button ref={closeButton} disabled={busy} aria-label="관리 패널 닫기" onClick={closePanel}>닫기 ×</button></div>
+        {panel === "manage" ? <><Memory visible={visible} key={`${route.scope}:manage:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={null} onBusy={setBusy} onChange={changed} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /><SyncPanel key={panelEpoch} visible={visible} /></> : !selected ? <p className="empty">선택한 자료를 불러오는 중…</p> : <>
+          {selected.changed && <p className="notice">이전 조회 이후 기록이나 관계가 변경되었습니다.</p>}
+          {selected.kind === "document" ? <Documents visible={visible} key={`${route.scope}:${selected.id}:${panelEpoch}`} scope={route.scope} id={selected.id} csrf={session.csrf} allAreas={session.areas} request={request} onBusy={setBusy} onChange={reload} onNavigate={choose} /> : selected.kind === "memory" ? <Memory visible={visible} key={`${route.scope}:${selected.id}:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={selected.id} onBusy={setBusy} onChange={changed} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /> : <><h2>{selected.label}</h2><p className="hint">{kindName[selected.kind]} 표식입니다.</p><button onClick={() => fitView(selected.cluster)}>이 군집 보기</button><div className="compact-list">{data?.model.links.filter(l => l.source === selected.id || l.target === selected.id).map(l => { const other = data.model.nodes.find(n => n.id === (l.source === selected.id ? l.target : l.source)); return other && <button key={`${l.kind}:${other.id}`} disabled={busy} onClick={() => choose(other.id)}><span>{linkName[l.kind]}</span><strong>{nodePresentation(other).title}</strong>{nodePresentation(other).subtitle && <small>{nodePresentation(other).subtitle}</small>}</button>; })}</div></>}
+          <details className="section node-permalink"><summary>자료 링크</summary><p><a href={graphUrl(route.scope, route.q, selected.id)}>이 자료의 초점 URL</a></p><code>{selected.id}</code></details>
+        </>}
+      </aside>}
+    </main>
+  </div>;
+}
+
+type SyncStatus = { enabled: boolean; running: boolean; last_completed_at: number | null; error: string | null; report: { ok: boolean; sources: { index: number; kind: string; documents: number; ok: boolean }[] } | null };
+function SyncPanel({ visible }: { visible: boolean }) {
+  const [value, setValue] = useState<SyncStatus | null>(null), [error, setError] = useState(""), [refresh, setRefresh] = useState(0);
+  useEffect(() => { if (!visible) return; const controller = new AbortController(); request<SyncStatus>("/api/sync", { signal: controller.signal }).then(v => { if (!controller.signal.aborted) setValue(v); }).catch(e => { if (!controller.signal.aborted) setError(message(e)); }); return () => controller.abort(); }, [visible, refresh]);
+  return <details className="section"><summary>출처 갱신 · {value ? value.enabled ? value.running ? "확인 중" : value.error || value.report?.ok === false ? "확인 필요" : "실행 중" : "꺼짐" : "불러오는 중"}</summary><p className="hint">앱 실행 중 지정된 원문만 갱신합니다. 기억 내용은 자동으로 바꾸지 않습니다.</p>{error && <p className="error">{error}</p>}{value?.last_completed_at && <p className="hint">최근 확인: {new Date(value.last_completed_at * 1000).toLocaleString("ko-KR")}</p>}{value?.report?.sources.map(s => <p className={s.ok ? "hint" : "warning"} key={s.index}>설정 {s.index + 1} · {s.kind} · {s.documents}개 · {s.ok ? "확인 완료" : "확인 실패"}</p>)}<button onClick={() => setRefresh(v => v + 1)}>갱신 상태 다시 읽기</button></details>;
 }

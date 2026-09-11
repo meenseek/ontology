@@ -1,0 +1,162 @@
+import { useEffect, useRef, useState } from "react";
+import type { FormEvent } from "react";
+import type { Request, Scope } from "./graph";
+import { documentTitle, fileName } from "./presentation";
+import DocumentPreview from "./DocumentPreview";
+type SourceKind = "git" | "vault";
+type Area = { id: string; label: string };
+type RecordItem = {
+  id: string;
+  path: string;
+  kind: SourceKind;
+  areas: string[];
+  topics: string[];
+  excerpt: string;
+  status: string;
+  present: boolean;
+};
+type Listing = {
+  items: RecordItem[];
+  total: number;
+  limit: number;
+  areas: { area: string; count: number }[];
+};
+type Detail = {
+  scope: Scope;
+  id: string;
+  revision: number;
+  areas: string[];
+  topics: string[];
+  source: {
+    kind: SourceKind;
+    repository: string;
+    path: string;
+    status: string;
+    verified_revision: string | null;
+    last_attempt_at: string;
+    last_success_at: string | null;
+  };
+  projection: {
+    content: string | null;
+    content_digest: string | null;
+    source_revision: string | null;
+    present: boolean;
+    absence_revision: string | null;
+    observed_at: string;
+  };
+  related: { id: string; path: string }[];
+  history: {
+    id: number;
+    kind: string;
+    revision: number;
+    previous: unknown;
+    confirmed: unknown;
+    confirmed_at: string;
+  }[];
+};
+
+type Props = { visible: boolean; scope: Scope; id: string; csrf: string; allAreas: Area[]; request: Request; onBusy: (busy: boolean) => void; onChange: () => void; onNavigate: (id: string) => void };
+const date = (value: string | null) => value ? new Date(value).toLocaleString("ko-KR") : "아직 확인되지 않음";
+const message = (error: unknown) => error instanceof Error ? error.message : "요청을 완료하지 못했습니다.";
+export default function Documents({ visible, scope, id, csrf, allAreas, request, onBusy, onChange, onNavigate }: Props) {
+  const [detail, setDetail] = useState<Detail | null>(null), [areas, setAreas] = useState<string[]>([]), [topics, setTopics] = useState("");
+  const [relatedQuery, setRelatedQuery] = useState(""), [candidates, setCandidates] = useState<RecordItem[]>([]), [target, setTarget] = useState("");
+  const [saving, setSaving] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
+  const [loading, setLoading] = useState(true), [candidateTotal, setCandidateTotal] = useState<number | null>(null);
+  const mounted = useRef(true), pending = useRef(false), requests = useRef(new Set<AbortController>());
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; for (const request of requests.current) request.abort(); onBusy(false); };
+  }, []);
+  useEffect(() => {
+    // A loaded editor keeps its original revision and unsaved fields on resume.
+    // Explicit refresh/remount still reads a fresh record after a save or conflict.
+    if (!visible || detail) return;
+    const controller = new AbortController(); setLoading(true);
+    request<Detail>(`/api/records/${id}?scope=${scope}`, { signal: controller.signal }).then(v => {
+      if (!controller.signal.aborted) { setDetail(v); setAreas(v.areas); setTopics(v.topics.join("\n")); }
+    }).catch(e => { if (!controller.signal.aborted) setError(message(e)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [scope, id, request, visible]);
+  const choose = (next: string) => { if (!saving) onNavigate(next); };
+  async function run(action: (signal: AbortSignal) => Promise<void>) {
+    if (pending.current) return; pending.current = true; setSaving(true); onBusy(true); setError(""); setNotice("");
+    const controller = new AbortController(); requests.current.add(controller);
+    try { await action(controller.signal); } catch (e) { if (mounted.current) setError(message(e)); }
+    finally { requests.current.delete(controller); pending.current = false; if (mounted.current) { setSaving(false); onBusy(false); } }
+  }
+  async function save(kind: "classification" | "links", body: object) {
+    if (!detail) return;
+    await run(async signal => {
+      await request(`/api/records/${id}/${kind}?scope=${scope}`, { method: "POST", headers: { "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify({ revision: detail.revision, ...body }), signal });
+      if (mounted.current) { setNotice(kind === "classification" ? "분류 확인을 저장했습니다." : "자료 연결을 변경했습니다."); onChange(); }
+    });
+  }
+  async function findRelated(event: FormEvent) {
+    event.preventDefault();
+    await run(async signal => {
+      const result = await request<Listing>(`/api/records?scope=${scope}&q=${encodeURIComponent(relatedQuery)}`, { signal });
+      if (mounted.current) { setCandidates(result.items.filter(item => item.id !== id)); setCandidateTotal(result.total); setTarget(""); }
+    });
+  }
+  return <section className="documents" aria-busy={loading}>
+    {error && <p className="error" role="alert">{error}<button disabled={saving} onClick={onChange}>자료 다시 읽기</button></p>}
+    {notice && <p className="notice">{notice}</p>}
+    {loading ? <p role="status">자료를 불러오는 중…</p> : detail && <>
+      <div className="detail-heading">
+        <p className="source-identity">{detail.source.kind === "vault" ? "Vault" : "Git"} · 로컬 원문</p>
+        <h2>{fileName(detail.source.path)}</h2>
+      </div>
+      {detail.source.status === "failed" && <p className="error">최근 출처 확인에 실패했습니다. 아래 내용은 마지막으로 성공한 기록입니다.</p>}
+      {!detail.projection.present && <p className="warning">등록한 경로의 부재를 확인했습니다. 마지막 원문과 사용자의 확인 기록은 보존되어 있습니다.</p>}
+      <DocumentPreview path={detail.source.path} content={detail.projection.content} title={documentTitle(detail.source.path, detail.projection.content)} />
+      <section className="section">
+        <h3>관련 자료 <span>{detail.related.length}개 연결</span></h3>
+        <ul className="related">{detail.related.map(item => <li key={item.id}><button disabled={saving} onClick={() => choose(item.id)}><strong>{fileName(item.path)}</strong><span className="node-location">{item.path}</span></button></li>)}</ul>
+        {!detail.related.length && <p className="hint">연결된 자료가 없습니다.</p>}
+      </section>
+      {(detail.areas.length > 0 || detail.topics.length > 0) && <p className="classification-summary">{[...detail.areas.map(id => allAreas.find(area => area.id === id)?.label ?? id), ...detail.topics].join(" · ")}</p>}
+      <details className="section">
+        <summary>분류 수정</summary>
+        <p className="hint">문서의 분야와 태그를 확인합니다. 원문 내용은 바꾸지 않습니다.</p>
+        <form onSubmit={event => { event.preventDefault(); void save("classification", { areas, topics: topics.split("\n").map(v => v.trim()).filter(Boolean) }); }}>
+          <fieldset disabled={saving}>
+            <legend>{scope === "meenseek" ? "분야 · 여러 개 선택 가능" : "개인 자료의 문서 태그"}</legend>
+            {scope === "meenseek" && <div className="area-options">{allAreas.map(area => <label key={area.id}><input type="checkbox" checked={areas.includes(area.id)} onChange={event => setAreas(current => event.target.checked ? [...current, area.id] : current.filter(id => id !== area.id))} />{area.label}</label>)}</div>}
+            <label className="topic-label" htmlFor="topics">문서 태그 · 한 줄에 하나, 최대 10개</label>
+            <textarea id="topics" value={topics} onChange={event => setTopics(event.target.value)} rows={3} maxLength={810} placeholder="태그가 없으면 비워두세요." />
+            <button className="primary" type="submit">{saving ? "저장 중…" : "분류 확인 저장"}</button>
+          </fieldset>
+        </form>
+      </details>
+      <details className="section">
+        <summary>자료 연결 수정</summary>
+        <p className="hint">같은 범위의 문서 사이에 관련 자료 관계를 추가하거나 해제합니다.</p>
+        {detail.related.length > 0 && <ul className="related">{detail.related.map(item => <li key={item.id}><span>{item.path}</span><button disabled={saving} aria-label={`${item.path} 연결 해제`} onClick={() => void save("links", { target_id: item.id, remove: true })}>연결 해제</button></li>)}</ul>}
+        <form className="related-search" onSubmit={findRelated}><input aria-label="관련 자료 검색" maxLength={120} value={relatedQuery} onChange={event => setRelatedQuery(event.target.value)} placeholder="연결할 자료 검색" /><button disabled={saving}>찾기</button></form>
+        {candidateTotal !== null && <p className="hint">검색 결과 {candidateTotal}개 · 앞의 100개까지 연결 후보로 표시합니다. 경로나 검색어를 좁혀 찾을 수 있습니다.</p>}
+        <div className="link-controls"><select aria-label="연결할 자료" value={target} disabled={saving} onChange={event => setTarget(event.target.value)}><option value="">연결할 자료 선택</option>{candidates.map(item => <option key={item.id} value={item.id}>{item.path}</option>)}</select><button disabled={!target || saving} onClick={() => void save("links", { target_id: target, remove: false })}>연결 추가</button></div>
+      </details>
+      <details className="section provenance">
+        <summary>출처 상세</summary>
+        <p className="hint">관측·성공 시각은 출처를 확인한 시점이며 내용 변경 시점이 아닙니다.</p>
+        <dl>
+          <dt>출처</dt><dd>{detail.source.kind === "vault" ? "Vault" : "Git"}</dd>
+          <dt>{detail.source.kind === "vault" ? "Vault 경로" : "로컬 저장소"}</dt><dd>{detail.source.repository}</dd>
+          <dt>원문 경로</dt><dd>{detail.source.path}</dd>
+          <dt>{detail.source.kind === "vault" ? "원문 SHA-256" : "원문 커밋"}</dt><dd>{detail.projection.source_revision ?? "없음"}</dd>
+          <dt>{detail.source.kind === "vault" ? "확인한 SHA-256" : "확인 커밋"}</dt><dd>{detail.source.verified_revision ?? "없음"}</dd>
+          <dt>내용 SHA-256</dt><dd>{detail.projection.content_digest ?? "없음"}</dd>
+          <dt>원문 관측</dt><dd>{date(detail.projection.observed_at)}</dd>
+          <dt>마지막 성공</dt><dd>{date(detail.source.last_success_at)}</dd>
+          <dt>최근 확인 시도</dt><dd>{date(detail.source.last_attempt_at)}</dd>
+        </dl>
+        <button disabled={saving} onClick={() => { setError(""); onChange(); }}>자료 다시 읽기</button>
+      </details>
+      <details className="section">
+        <summary>확인·정정 이력 ({detail.history.length}개)</summary>
+        {detail.history.map(history => <div className="history" key={history.id}><b>{history.kind === "classification" ? "분류 확인" : history.kind === "link-add" ? "관련 자료 추가" : "관련 자료 해제"} · r{history.revision}</b><time>{date(history.confirmed_at)}</time><pre>{JSON.stringify({ 이전: history.previous, 확인: history.confirmed }, null, 2)}</pre></div>)}
+      </details>
+    </>}
+  </section>;
+}
