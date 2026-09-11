@@ -1,0 +1,331 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ForceGraph3D from "react-force-graph-3d";
+import type { ForceGraphMethods } from "react-force-graph-3d";
+import { CanvasTexture, Color, Group, Mesh, PlaneGeometry, ShaderMaterial, Sprite, SpriteMaterial, Vector2, Vector3 } from "three";
+import type { Camera, PerspectiveCamera } from "three";
+import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { active, kindName, linkColor, linkName, stateName } from "./graph";
+import type { GraphLink, PositionedNode } from "./graph";
+import { MAX_VISIBLE_LABELS, advanceStarClock, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, starMotion, starPhase, visibleLabels, type StarClock } from "./presentation";
+
+type RenderLink = Omit<GraphLink, "source" | "target">;
+type Props = { nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onFailure: () => void };
+function texture(kind: "ring" | "selection" | "change") {
+  const canvas = document.createElement("canvas"); canvas.width = canvas.height = 128;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("별 모양을 그릴 수 없습니다.");
+  context.strokeStyle = "white"; context.lineWidth = kind === "selection" ? 1 : kind === "ring" ? 4 : 3;
+  if (kind === "change") context.setLineDash([12, 10]);
+  context.beginPath(); context.arc(64, 64, 56, 0, Math.PI * 2); context.stroke();
+  return new CanvasTexture(canvas);
+}
+/** One program and quad serve every star; only its spherical sampling field rotates. */
+// After shader/motion edits, run the actual GPU checks in web/star-check.html.
+export function starMaterial() {
+  return new ShaderMaterial({
+    transparent: true, depthWrite: false, depthTest: false, toneMapped: false,
+    uniforms: {
+      uColor: { value: new Color() }, uOpacity: { value: 1 }, uPhase: { value: 0 },
+      uRotation: { value: 0 }, uTilt: { value: 0 }, uDetail: { value: 0 }, uShimmer: { value: 1 }, uPixels: { value: 26 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vec4 center = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        vec2 size = vec2(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz));
+        center.xy += position.xy * size * -center.z;
+        gl_Position = projectionMatrix * center;
+      }
+    `,
+    fragmentShader: `
+      varying vec2 vUv;
+      uniform vec3 uColor;
+      uniform float uOpacity, uPhase, uRotation, uTilt, uDetail, uShimmer, uPixels;
+      float hash(vec3 p) {
+        p = fract(p * 0.1031);
+        p += dot(p, p.yzx + 33.33);
+        return fract((p.x + p.y) * p.z);
+      }
+      float noise(vec3 p) {
+        vec3 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mix(hash(i), hash(i + vec3(1,0,0)), f.x),
+                       mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
+                   mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
+                       mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
+      }
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float distance = length(p), radius = mix(0.30, 0.54, uDetail);
+        float r = distance / radius;
+        if (distance >= 1.0) discard;
+        float edge = fwidth(r);
+        float disc = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, r);
+        vec3 normal = vec3(p / radius, sqrt(max(0.0, 1.0 - r * r)));
+        float grain = 0.0;
+        if (uDetail > 0.0 && r < 1.0) {
+          // Tilt the sampling axis in the view plane; the spherical outline stays still.
+          float ct = cos(uTilt), st = sin(uTilt);
+          vec3 q = vec3(ct * normal.x - st * normal.y, st * normal.x + ct * normal.y, normal.z);
+          float c = cos(uRotation), s = sin(uRotation);
+          q = vec3(c * q.x + s * q.z, q.y, -s * q.x + c * q.z);
+          q += vec3(uPhase, 0.0, uPhase * 0.37);
+          float broad = noise(q * 3.4) * 0.75 + noise(q * 7.8) * 0.25;
+          grain = ((broad - 0.5) * 0.8 + (noise(q * 20.0) - 0.5) * 0.10) * uDetail;
+        }
+        // Broad emissive structures cross the hot center without a dark hemisphere.
+        float pulse = clamp((uShimmer - 0.7) / 0.3, 0.0, 1.0);
+        float coreShimmer = mix(0.86, 1.0, pulse);
+        float heat = exp(-r * r * 4.5);
+        vec3 surface = mix(uColor, vec3(1.0), 0.35 + 0.55 * heat)
+          * (0.90 + 0.10 * normal.z + grain) * coreShimmer;
+        float fade = 1.0 - smoothstep(0.72, 1.0, distance);
+        float halo = mix(0.24, 0.28, uDetail) * exp(-mix(10.0, 8.0, uDetail)
+          * max(0.0, distance - mix(radius * 0.7, 0.40, uDetail)));
+        // Keep the glint about one CSS pixel wide, including at overview size.
+        vec2 pixel = p * uPixels * 0.5;
+        float primary = (exp(-pow(abs(pixel.x) / 0.55, 1.4)) * exp(-p.y * p.y * 2.0)
+          + exp(-pow(abs(pixel.y) / 0.55, 1.4)) * exp(-p.x * p.x * 2.0))
+          * (0.08 + 0.82 * pulse);
+        vec2 diagonal = vec2(pixel.x + pixel.y, pixel.x - pixel.y) * 0.70710678;
+        float secondary = (exp(-pow(abs(diagonal.x) / 0.42, 1.4))
+          + exp(-pow(abs(diagonal.y) / 0.42, 1.4))) * exp(-distance * distance * 3.5)
+          * (0.02 + 0.22 * pulse);
+        // A brighter crest stays inside the same footprint and fades out at close range.
+        halo *= 1.0 + 0.70 * pulse * (1.0 - uDetail);
+        halo = (halo + (primary + secondary) * (1.0 - uDetail)) * fade * uShimmer;
+        float alpha = disc + halo * (1.0 - disc);
+        vec3 color = mix(uColor, surface, disc / max(alpha, 0.0001));
+        gl_FragColor = vec4(color, alpha * uOpacity);
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+}
+function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean) {
+  const mesh = new Mesh(geometry, material), viewport = new Vector2(), position = new Vector3();
+  const color = new Color(node.kind === "document" ? "#bad3ee" : "#efd8ac");
+  const phase = starPhase(node.id), opacity = active(node) ? 1 : .35;
+  mesh.renderOrder = 1;
+  // Its screen-sized quad is not a world-space culling or picking boundary.
+  mesh.frustumCulled = false;
+  mesh.raycast = () => {};
+  mesh.onBeforeRender = (renderer, _scene, camera) => {
+    renderer.getSize(viewport);
+    mesh.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
+    const pixels = nodeScreenSize(node.kind, -position.z, viewport.y, camera.projectionMatrix.elements[5]);
+    mesh.scale.setScalar(spriteScale(pixels, viewport.y, camera.projectionMatrix.elements[5]));
+    mesh.updateMatrixWorld();
+    const motion = starMotion(pixels, phase, advanceStarClock(clock, performance.now(), isReduced()));
+    // A shared material must upload every node's values, even between consecutive star draws.
+    material.uniforms.uColor.value.copy(color);
+    material.uniforms.uOpacity.value = opacity;
+    material.uniforms.uPhase.value = phase;
+    material.uniforms.uRotation.value = motion.rotation;
+    material.uniforms.uTilt.value = motion.tilt;
+    material.uniforms.uDetail.value = motion.detail;
+    material.uniforms.uShimmer.value = motion.shimmer;
+    material.uniforms.uPixels.value = pixels;
+    material.uniformsNeedUpdate = true;
+  };
+  return mesh;
+}
+function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean) {
+  const sprite = new Sprite(material), viewport = new Vector2(), position = new Vector3();
+  const resize = (camera: Camera) => {
+    sprite.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
+    const pixels = nodeScreenSize(node.kind, -position.z, viewport.y, camera.projectionMatrix.elements[5]);
+    sprite.scale.setScalar(spriteScale(nodeScreenMetrics(pixels, selected, node.changed)[part], viewport.y, camera.projectionMatrix.elements[5]));
+    sprite.updateMatrixWorld();
+  };
+  sprite.onBeforeRender = (renderer, _scene, camera) => { renderer.getSize(viewport); resize(camera); };
+  // Draw luminous bodies over native relation lines while retaining their positions.
+  sprite.renderOrder = part === "hit" ? 0 : 1;
+  const raycast = sprite.raycast;
+  sprite.raycast = part === "hit" ? (raycaster, intersections) => {
+    // Picking can precede a render after the camera moves, including behind a node.
+    if (!raycaster.camera) return;
+    raycaster.camera.updateMatrixWorld();
+    resize(raycaster.camera);
+    if (sprite.scale.x > 0) raycast.call(sprite, raycaster, intersections);
+  } : () => {};
+  return sprite;
+}
+const endpoint = (value: string | number | { id?: string | number } | undefined) => typeof value === "object" ? value.id : value;
+export default function Graph({ nodes, links, selected, rotate, reduced, visible, fit, disabled, onSelect, onFailure }: Props) {
+  const container = useRef<HTMLDivElement>(null);
+  const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
+  const labelLayer = useRef<HTMLDivElement>(null);
+  const hoveredId = useRef<string | null>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const [hover, setHover] = useState<{ title: string; detail: string } | null>(null);
+  // Renderer endpoint mutation stays out of the reconciled model.
+  const data = useMemo(() => ({ nodes: nodes.map(n => ({ ...n })), links: links.map(l => ({ ...l })) }), [nodes, links]);
+  const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
+  const motionReduced = useRef(reduced); motionReduced.current = reduced;
+  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), ring: texture("ring"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>() }), []);
+  useEffect(() => {
+    const element = container.current;
+    if (!element) return;
+    const observer = new ResizeObserver(entries => {
+      const rect = entries[0]?.contentRect;
+      if (rect) setSize({ width: Math.max(1, Math.floor(rect.width)), height: Math.max(1, Math.floor(rect.height)) });
+    });
+    observer.observe(element); return () => observer.disconnect();
+  }, []);
+  useEffect(() => () => {
+    resources.geometry.dispose(); resources.star.dispose(); resources.ring.dispose(); resources.selection.dispose(); resources.change.dispose();
+    for (const material of resources.materials.values()) material.dispose();
+    resources.materials.clear();
+  }, [resources]);
+  const ready = size.width > 0 && size.height > 0;
+  useEffect(() => {
+    const instance = graph.current;
+    if (!ready || !instance) return;
+    const renderer = instance.renderer(); renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const canvas = renderer.domElement;
+    const lost = (event: Event) => { event.preventDefault(); instance.pauseAnimation(); onFailure(); };
+    canvas.addEventListener("webglcontextlost", lost);
+    return () => { canvas.removeEventListener("webglcontextlost", lost); };
+  }, [ready, onFailure]);
+  useEffect(() => {
+    const instance = graph.current;
+    if (!ready || !instance) return;
+    // Keep the camera and elapsed surface time; only discard the suspended interval.
+    motionClock.current.lastTime = null;
+    if (visible) instance.resumeAnimation(); else instance.pauseAnimation();
+    return () => { motionClock.current.lastTime = null; instance.pauseAnimation(); };
+  }, [ready, visible]);
+  useEffect(() => {
+    const controls = graph.current?.controls() as OrbitControls | undefined;
+    if (controls) { controls.zoomToCursor = true; controls.autoRotate = rotate; controls.autoRotateSpeed = .2; controls.enableDamping = !reduced; }
+  }, [ready, rotate, reduced]);
+  const viewKey = nodes.map(n => n.id).sort().join("|");
+  const cameraKey = `${viewKey}:${selected}:${fit}:${size.width}:${size.height}`;
+  const appliedCamera = useRef("");
+  const positionCamera = useCallback(() => {
+    const instance = graph.current;
+    if (!ready || !instance || !nodes.length || appliedCamera.current === cameraKey) return;
+    appliedCamera.current = cameraKey;
+    const target = nodes.find(n => n.id === selected);
+    if (target) {
+      instance.cameraPosition({ x: target.x + 80, y: target.y + 45, z: target.z + 130 }, { x: target.x, y: target.y, z: target.z }, reduced ? 0 : 650);
+      return;
+    }
+    const bounds = nodes.reduce((b, n) => ({ minX: Math.min(b.minX, n.x), maxX: Math.max(b.maxX, n.x), minY: Math.min(b.minY, n.y), maxY: Math.max(b.maxY, n.y), minZ: Math.min(b.minZ, n.z), maxZ: Math.max(b.maxZ, n.z) }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity });
+    const center = { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2, z: (bounds.minZ + bounds.maxZ) / 2 };
+    const radius = Math.max(18, ...nodes.map(n => Math.hypot(n.x - center.x, n.y - center.y, n.z - center.z) + 6));
+    const camera = instance.camera() as PerspectiveCamera;
+    const vertical = camera.fov * Math.PI / 180;
+    const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
+    const distance = radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2);
+    instance.cameraPosition({ x: center.x, y: center.y, z: center.z + distance }, center, reduced ? 0 : 650);
+  }, [ready, cameraKey, nodes, selected, reduced, size]);
+  useEffect(() => {
+    let second = 0;
+    const first = requestAnimationFrame(() => { second = requestAnimationFrame(positionCamera); });
+    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
+  }, [positionCamera]);
+  useEffect(() => {
+    const layer = labelLayer.current;
+    if (!ready || !layer || !visible) return;
+    const elements = [...layer.children] as HTMLElement[];
+    for (const element of elements) { element.hidden = true; delete element.dataset.nodeId; }
+    const measuring = elements[0];
+    if (!measuring) return;
+    const labels = new Map(nodes.map(node => [node.id, {
+      node, ...nodePresentation(node, true),
+      status: `${kindName[node.kind]}${!active(node) ? ` · ${stateName(node)}` : ""}${node.changed ? " · 변경" : ""}`,
+    }]));
+    const fill = (element: HTMLElement, id: string) => {
+      const label = labels.get(id)!;
+      element.dataset.nodeId = id;
+      element.className = `node-label ${active(label.node) ? "" : "inactive"}`;
+      element.children[0].textContent = label.title;
+      const subtitle = element.children[1] as HTMLElement;
+      subtitle.textContent = label.subtitle; subtitle.hidden = !label.subtitle;
+      element.children[2].textContent = label.status;
+    };
+    // Measure each literal label once per model/viewport change using an existing slot.
+    // Animation frames only project points and reposition the same bounded DOM pool.
+    const dimensions = new Map<string, { width: number; height: number }>();
+    measuring.hidden = false; measuring.style.visibility = "hidden";
+    for (const node of nodes) {
+      fill(measuring, node.id);
+      dimensions.set(node.id, { width: measuring.offsetWidth, height: measuring.offsetHeight });
+    }
+    measuring.hidden = true; measuring.style.visibility = "";
+    let frame = 0, lastProjection = "";
+    const projected = new Vector3();
+    const draw = () => {
+      const camera = graph.current?.camera();
+      if (camera) {
+        camera.updateMatrixWorld();
+        const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}`;
+        if (key !== lastProjection) {
+          lastProjection = key;
+          const candidates = nodes.map(node => {
+            projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
+            const pixels = nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]);
+            const { radius } = nodeScreenMetrics(pixels, node.id === selected, node.changed);
+            projected.applyMatrix4(camera.projectionMatrix);
+            return { id: node.id, kind: node.kind, active: active(node), x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)! };
+          });
+          const visible = visibleLabels(candidates, size.width, size.height, selected, hoveredId.current);
+          for (const [index, element] of elements.entries()) {
+            const box = visible[index];
+            element.hidden = !box;
+            if (box && element.dataset.nodeId !== box.id) fill(element, box.id);
+            element.classList.toggle("hovered", !!box && box.id === hoveredId.current);
+            if (!box) continue;
+            element.style.left = `${box.left}px`; element.style.top = `${box.top}px`;
+          }
+        }
+      }
+      frame = requestAnimationFrame(draw);
+    };
+    draw(); return () => cancelAnimationFrame(frame);
+  }, [ready, nodes, selected, size, visible]);
+  const object = useCallback((node: PositionedNode) => {
+    const group = new Group();
+    const material = (kind: "ring" | "selection" | "change" | "hit", color: string, opacity: number) => {
+      const key = `${kind}:${color}:${opacity}`;
+      let value = resources.materials.get(key);
+      if (!value) {
+        value = new SpriteMaterial({ map: kind === "hit" ? null : resources[kind], color, transparent: true, opacity, depthWrite: false, depthTest: true, sizeAttenuation: false });
+        resources.materials.set(key, value);
+      }
+      return value;
+    };
+    const isKnowledge = node.kind === "document" || node.kind === "memory";
+    const color = node.kind === "document" ? "#bad3ee" : node.kind === "memory" ? "#efd8ac" : node.color;
+    const isSelected = node.id === selected;
+    group.add(isKnowledge
+      ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current)
+      : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected));
+    if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected));
+    if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected));
+    // The invisible plane follows the star and status rings, with a 36px minimum.
+    group.add(screenSprite(material("hit", "#ffffff", 0), node, "hit", isSelected));
+    return group;
+  }, [resources, selected]);
+  return <div className="graph-canvas" ref={container} aria-label="3D 지식 지도. 드래그로 회전하고 스크롤로 커서 위치를 중심으로 확대·축소합니다. 키보드는 목록 보기를 이용하세요.">
+    {ready && <ForceGraph3D<PositionedNode, RenderLink>
+      ref={graph} width={size.width} height={size.height} graphData={data}
+      backgroundColor="rgba(0,0,0,0)" controlType="orbit" showNavInfo={false}
+      nodeLabel={() => ""} linkLabel={() => ""} nodeThreeObject={object}
+      linkColor={link => selected && endpoint(link.source) !== selected && endpoint(link.target) !== selected ? "#35404b" : link.current ? linkColor[link.kind] : "#947867"}
+      linkWidth={0}
+      linkOpacity={.65} linkDirectionalArrowLength={link => link.kind === "evidence" ? 2 : 0} linkDirectionalArrowRelPos={.8}
+      enableNodeDrag={false} enablePointerInteraction={!disabled}
+      cooldownTicks={0} warmupTicks={0} onEngineStop={positionCamera}
+      onNodeClick={node => { hoveredId.current = null; setHover(null); if (!disabled) onSelect(node.id); }}
+      onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
+      onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
+    />}
+    <div className="node-labels" ref={labelLayer} aria-hidden="true">{Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /></div>)}</div>
+    {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
+    <div className="graph-instructions" aria-hidden="true">드래그로 회전 · 스크롤로 커서 위치 중심 확대·축소</div>
+  </div>;
+}

@@ -30,6 +30,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo audit --file Cargo.lock
 pnpm --dir web install --frozen-lockfile
+pnpm --dir web test
 pnpm --dir web build
 pnpm --dir web audit --prod
 printf '%s\n' 'Verify isolated PostgreSQL, Git/Vault import, migration preservation, API contracts, Rust checks and frontend build successfully'
