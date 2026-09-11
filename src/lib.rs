@@ -1,6 +1,7 @@
 pub mod api;
 pub mod config;
 pub mod domain;
+pub mod graph;
 pub mod importer;
 pub mod memory;
 mod source_process;

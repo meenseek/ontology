@@ -1,7 +1,15 @@
+// One predicate owns evidence freshness for memory retrieval and the derived graph.
+// The aliases x/e/s/p are evidence, entity, source and projection respectively.
+macro_rules! evidence_current {
+    () => {
+        "COALESCE(s.status='ok' AND p.present AND s.id=x->>'source_id' AND p.source_revision=x->>'source_revision' AND p.content_digest=x->>'content_digest' AND s.generation=(x->>'generation')::bigint,false)"
+    };
+}
+pub(crate) use evidence_current;
 macro_rules! memory_query { ($tail:literal) => { concat!(r#"WITH visible AS (
  SELECT m.*, ((document->>'effective_from' IS NULL OR (document->>'effective_from')::bigint<=extract(epoch FROM now())) AND (document->>'effective_until' IS NULL OR (document->>'effective_until')::bigint>extract(epoch FROM now()))) AS effective,
- NOT EXISTS(SELECT 1 FROM jsonb_array_elements(document->'evidence') x LEFT JOIN entities e ON e.scope=m.scope AND e.id=x->>'entity_id' LEFT JOIN sources s ON s.scope=e.scope AND s.id=e.source_id LEFT JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE s.status IS DISTINCT FROM 'ok' OR p.present IS DISTINCT FROM true OR s.id IS DISTINCT FROM x->>'source_id' OR p.source_revision IS DISTINCT FROM x->>'source_revision' OR p.content_digest IS DISTINCT FROM x->>'content_digest' OR s.generation IS DISTINCT FROM (x->>'generation')::bigint) AS supported,
- (to_jsonb(m)-'document') || document || jsonb_build_object('subject_name',(SELECT name FROM subjects WHERE scope=m.scope AND id=m.subject_id),'evidence',COALESCE((SELECT jsonb_agg(x || jsonb_build_object('current',COALESCE(s.status='ok' AND p.present AND s.id=x->>'source_id' AND p.source_revision=x->>'source_revision' AND p.content_digest=x->>'content_digest' AND s.generation=(x->>'generation')::bigint,false))) FROM jsonb_array_elements(document->'evidence') x LEFT JOIN entities e ON e.scope=m.scope AND e.id=x->>'entity_id' LEFT JOIN sources s ON s.scope=e.scope AND s.id=e.source_id LEFT JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id),'[]'::jsonb),'support',CASE WHEN jsonb_array_length(document->'evidence')=0 THEN 'user-recorded' ELSE 'source-linked' END) AS value
+ NOT EXISTS(SELECT 1 FROM jsonb_array_elements(document->'evidence') x LEFT JOIN entities e ON e.scope=m.scope AND e.id=x->>'entity_id' LEFT JOIN sources s ON s.scope=e.scope AND s.id=e.source_id LEFT JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE NOT "#, evidence_current!(), r#") AS supported,
+ (to_jsonb(m)-'document') || document || jsonb_build_object('subject_name',(SELECT name FROM subjects WHERE scope=m.scope AND id=m.subject_id),'evidence',COALESCE((SELECT jsonb_agg(x || jsonb_build_object('current',"#, evidence_current!(), r#")) FROM jsonb_array_elements(document->'evidence') x LEFT JOIN entities e ON e.scope=m.scope AND e.id=x->>'entity_id' LEFT JOIN sources s ON s.scope=e.scope AND s.id=e.source_id LEFT JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id),'[]'::jsonb),'support',CASE WHEN jsonb_array_length(document->'evidence')=0 THEN 'user-recorded' ELSE 'source-linked' END) AS value
  FROM memories m WHERE m.scope=$1
 )"#, $tail) }; }
 use crate::{
