@@ -1,0 +1,167 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { renderToStaticMarkup } from "react-dom/server";
+import DocumentPreview, { findDocumentFragment } from "./DocumentPreview";
+
+const render = (content: string | null, path = "notes.md") => renderToStaticMarkup(<DocumentPreview path={path} content={content} title="문서 제목" />);
+const preview = (content: string, path?: string) => render(content, path).split('<details class="section document-source">')[0];
+const decode = (value: string) => value.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+function attributes(tag: string): Record<string, string> {
+  return Object.fromEntries([...tag.matchAll(/([\w-]+)="([^"]*)"/g)].map(match => [match[1], decode(match[2])]));
+}
+function anchors(html: string) {
+  return [...html.matchAll(/<a\b[^>]*>/g)].map(match => attributes(match[0]));
+}
+function fragmentRoot(html: string) {
+  const targets = [...html.matchAll(/<[a-z][^>]*\bid="[^"]*"[^>]*>/gi)].map(match => {
+    const props = attributes(match[0]);
+    return { id: props.id, getAttribute: (name: string) => props[name] ?? null } as unknown as HTMLElement;
+  });
+  const root = { querySelectorAll(selector: string) { assert.equal(selector, "[id]"); return targets; } } as unknown as ParentNode;
+  return { root, targets };
+}
+function noNestedControls(html: string) {
+  const stack: string[] = [];
+  for (const match of html.matchAll(/<(\/?)(a|button)\b[^>]*>/g)) {
+    if (match[1]) assert.equal(stack.pop(), match[2]);
+    else { assert.equal(stack.length, 0, `Nested control: ${match[0]}`); stack.push(match[2]); }
+  }
+  assert.equal(stack.length, 0);
+}
+
+test("renders headings, formatted prose, GFM lists/tasks/table and code through the component", () => {
+  const html = preview('# 제목\n\n첫 줄\n둘째 줄 **강조** *기울임* ~~취소~~ `a < b`\n\n- 항목\n- [x] 완료\n- [ ] 예정\n\n1. 순서\n\n| 이름 | 값 |\n| --- | --- |\n| 데이터 | 1 |\n\n```js\n  a();\n\n\tb();\n```');
+  for (const pattern of [/<h1[^>]*>제목<\/h1>/, /<strong>강조<\/strong>/, /<em>기울임<\/em>/, /<del>취소<\/del>/, /<ul/, /<ol>/, /<table>/, /<th>이름<\/th>/, /<td>데이터<\/td>/, /<code>a &lt; b<\/code>/]) assert.match(html, pattern);
+  assert.match(html, /<p>첫 줄\n둘째 줄/);
+  assert.doesNotMatch(html, /<br\s*\/>/);
+  assert.match(html, /<input type="checkbox" disabled="" checked=""\/>/);
+  assert.match(html, /<input type="checkbox" disabled=""\/>/);
+  assert.match(html, /<pre><code class="language-js">  a\(\);\n\n\tb\(\);\n<\/code><\/pre>/);
+  assert.match(html, /class="document-table" role="region" aria-label="문서 표" tabindex="0"/);
+});
+
+test("hides front matter only in preview and retains exact source in a closed disclosure", () => {
+  const source = '\uFEFF---\r\ntitle: "숨김"\r\n---\r\n# 본문 제목\r\n\r\n <tag> & \t끝  \r\n';
+  const html = render(source);
+  assert.match(preview(source), /<h1[^>]*>본문 제목<\/h1>/);
+  assert.doesNotMatch(preview(source), /숨김/);
+  assert.match(html, /<details class="section document-source"><summary>원문 보기<\/summary>/);
+  assert.doesNotMatch(html, /<details[^>]*\bopen/);
+  assert.ok(html.includes(renderToStaticMarkup(<pre className="source-text">{source}</pre>)));
+  assert.match(html, /aria-label="문서 제목 미리보기"/);
+});
+
+test("keeps thematic breaks and fenced front matter examples visible", () => {
+  const html = preview('문단\n\n---\n\n# 실제 제목\n\n```yaml\n---\ntitle: 코드\n---\n```');
+  assert.match(html, /<hr\/>/);
+  assert.match(html, /<h1[^>]*>실제 제목<\/h1>/);
+  assert.match(html, /<code class="language-yaml">---\ntitle: 코드\n---\n<\/code>/);
+  assert.match(preview('---\n\n# 제목'), /<hr\/>/);
+});
+
+test("recognizes only Markdown extensions, case insensitively", () => {
+  for (const path of ["docs/notes.md", "docs/notes.MD", "notes.MarkDown"]) assert.match(preview("# 제목", path), /<h1/);
+  for (const path of ["notes.txt", "notes.json", "notes.md.txt", "README"]) {
+    const html = render('# 제목\n\n**문자** <tag>', path);
+    assert.match(html, /<pre class="source-text"># 제목\n\n\*\*문자\*\* &lt;tag&gt;<\/pre>/);
+    assert.doesNotMatch(html, /<h1|<strong>|<details/);
+  }
+});
+
+test("distinguishes unavailable content from empty content and preserves whitespace source", () => {
+  for (const path of ["notes.md", "notes.txt"]) {
+    assert.match(render(null, path), /성공적으로 읽은 원문이 없습니다/);
+    assert.doesNotMatch(render(null, path), /<details|원문이 비어/);
+    assert.match(render("", path), /원문이 비어 있습니다/);
+  }
+  const source = " \t\r\n";
+  assert.ok(render(source).includes(renderToStaticMarkup(<pre className="source-text">{source}</pre>)));
+});
+
+test("raw HTML stays inert and images never create network-loading elements", () => {
+  const html = preview('<script>alert(1)</script>\n\n<img src="https://example.com/track" onerror="alert(1)">\n\n<iframe src="https://example.com/frame"></iframe>\n\n![외부 이미지](https://example.com/image.png)\n\n![상대 이미지](./assets/pic.png)');
+  assert.doesNotMatch(html, /<(?:script|img|iframe|object|embed|link|meta|video|audio|source)\b/i);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /이미지: 외부 이미지/);
+  assert.match(html, /href="https:\/\/example.com\/image.png" target="_blank" rel="noreferrer"/);
+  assert.match(html, /\.\/assets\/pic.png · 이 원문 경로는 여기서 열 수 없습니다/);
+});
+
+test("only explicit HTTP(S) and mailto destinations become external controls", () => {
+  const html = preview('[보안](https://example.com/a?q=1&b=2) [일반](http://example.com) [메일](mailto:hello@example.com)\n\n[스크립트](javascript:alert%281%29) [데이터](data:text/html,test) [파일](file:///tmp/a) [프로토콜 상대](//example.com/a) [문서](../other.md) [절대 경로](/etc/passwd)\n\n![위험 이미지](javascript:alert%281%29)');
+  assert.equal(anchors(html).length, 3);
+  for (const link of anchors(html)) { assert.equal(link.rel, "noreferrer"); assert.equal(link.target, "_blank"); }
+  for (const label of ["스크립트", "데이터", "파일", "프로토콜 상대", "문서", "절대 경로"]) assert.ok(html.includes(label));
+  assert.match(html, /\.\.\/other.md · 이 원문 경로는 여기서 열 수 없습니다/);
+  assert.match(html, /\/etc\/passwd · 이 원문 경로는 여기서 열 수 없습니다/);
+  assert.doesNotMatch(html, /href="(?:javascript:|data:|file:|\/)/i);
+});
+
+for (const parent of ["https://example.com/parent", "#topics"]) {
+  for (const formatted of ["**![도표](https://example.com/image.png)**", "*깊게 **![도표](https://example.com/image.png)** 감싸기*"]) {
+    test(`formatted linked images keep parent and image destinations separate: ${parent}, ${formatted}`, () => {
+      const html = preview(`# Topics\n\n[${formatted}](${parent})`);
+      noNestedControls(html);
+      assert.deepEqual(anchors(html).map(link => link.href), ["https://example.com/image.png", parent]);
+    });
+  }
+  for (const label of ["본문 [^한글]", "*본문 **![도표](https://example.com/image.png)** [^한글]*"]) {
+    test(`nested footnote references keep all destinations separate: ${parent}, ${label}`, () => {
+      const html = preview(`# Topics\n\n[${label}](${parent})\n\n[^한글]: 각주 내용`);
+      noNestedControls(html);
+      const links = anchors(html);
+      assert.equal(links.filter(link => link.href === parent).length, 1);
+      const reference = links.find(link => link["data-footnote-ref"]);
+      assert.ok(reference);
+      assert.equal(reference["aria-describedby"], "footnote-label");
+      const back = links.find(link => "data-footnote-backref" in link);
+      assert.ok(back);
+      assert.equal(back.href, `#${reference.id}`);
+      assert.match(back["aria-label"], /각주로 돌아가기/);
+      const { root } = fragmentRoot(html);
+      assert.equal(findDocumentFragment(root, reference.href)?.id, reference.href.slice(1));
+      assert.equal(findDocumentFragment(root, back.href)?.id, reference.id);
+      if (label.includes("![")) assert.equal(links.filter(link => link.href === "https://example.com/image.png").length, 1);
+    });
+  }
+}
+
+test("heading IDs cannot shadow app fields, and encoded Korean fragments resolve locally", () => {
+  const html = preview('# Topics\n\n# Topics\n\n# 한글 제목\n\n[태그](#topics) [한글](#%ED%95%9C%EA%B8%80-%EC%A0%9C%EB%AA%A9)');
+  const { root, targets } = fragmentRoot(html);
+  assert.ok(targets.every(target => target.id.startsWith("document-")));
+  assert.equal(new Set(targets.map(target => target.id)).size, targets.length);
+  assert.ok(targets.every(target => target.id !== "topics"));
+  assert.equal(findDocumentFragment(root, "#topics")?.getAttribute("data-heading-key"), "topics");
+  assert.equal(findDocumentFragment(root, "#topics-1")?.getAttribute("data-heading-key"), "topics-1");
+  assert.equal(findDocumentFragment(root, "#%ED%95%9C%EA%B8%80-%EC%A0%9C%EB%AA%A9")?.getAttribute("data-heading-key"), "한글-제목");
+  assert.equal(findDocumentFragment(root, "#graph-search"), null);
+  const pair = renderToStaticMarkup(<><DocumentPreview path="a.md" content="# Topics" title="A" /><DocumentPreview path="b.md" content="# Topics" title="B" /></>);
+  const headings = [...pair.matchAll(/<h1 id="([^"]+)"/g)].map(match => match[1]);
+  assert.equal(new Set(headings).size, 2);
+});
+
+test("actual fragment lookup resolves Korean, percent-encoded and malformed-percent footnotes and their return links", () => {
+  const html = preview('본문 [^한글] [^c%20d] [^bad%zz] 다시 [^한글]\n\n[^한글]: 한글 각주\n\n[^c%20d]: 퍼센트 각주\n\n[^bad%zz]: 퍼센트 오류 각주');
+  const { root } = fragmentRoot(html);
+  const links = anchors(html);
+  assert.equal(links.length, 8);
+  assert.match(html, /id="footnote-label">각주<\/h2>/);
+  for (const link of links) {
+    assert.ok(link.href.startsWith("#"));
+    assert.equal(findDocumentFragment(root, link.href)?.id, link.href.slice(1), link.href);
+  }
+  assert.ok(links.some(link => link.href.includes("%ED%95%9C%EA%B8%80")));
+  assert.ok(links.some(link => link.href.includes("c%20d")));
+  assert.ok(links.some(link => link.href.includes("bad%zz")));
+  assert.equal(findDocumentFragment(root, "#missing%zz"), null);
+  assert.equal(findDocumentFragment(root, "#missing"), null);
+  assert.equal(findDocumentFragment(root, "https://example.com/#topics"), null);
+});
+
+test("literal IDs win over decoded IDs and heading keys before any decoding", () => {
+  const { root, targets } = fragmentRoot('<p id="c d"></p><p id="c%20d"></p><p id="broken%zz"></p><h1 id="namespaced-heading" data-heading-key="c d"></h1>');
+  assert.equal(findDocumentFragment(root, "#c%20d"), targets[1]);
+  assert.equal(findDocumentFragment(root, "#broken%zz"), targets[2]);
+  assert.equal(findDocumentFragment(root, "#namespaced%2Dheading"), targets[3]);
+});
