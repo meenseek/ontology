@@ -73,7 +73,8 @@ const GRAPH_SQL: &str = concat!(
  jsonb_build_object('id',e.id,'scope',e.scope,'kind','document','label',s.path,'repository',s.repository,
  'revision',e.revision::text,'content_digest',p.content_digest,'source_revision',p.source_revision,
  'generation',s.generation::text,'status',s.status,'present',p.present,'source_kind',s.kind,
- 'last_success_at',s.last_success_at,'observed_at',p.observed_at) AS value,
+ 'last_success_at',s.last_success_at,'observed_at',p.observed_at,
+ 'excerpt',CASE WHEN $2<>'' AND strpos(lower(p.content),lower($2))>0 THEN '…' || substring(p.content FROM greatest(1,strpos(lower(p.content),lower($2))-80) FOR 400) || '…' END) AS value,
  ($2='' OR strpos(lower(concat(s.path,' ',p.content)),lower($2))>0 OR EXISTS(
  SELECT 1 FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id
  WHERE et.scope=e.scope AND et.entity_id=e.id AND strpos(lower(t.name),lower($2))>0)) AS matched
@@ -86,9 +87,19 @@ const GRAPH_SQL: &str = concat!(
  'temporal',CASE WHEN (m.document->>'effective_from')::bigint>extract(epoch FROM now()) THEN 'future'
  WHEN (m.document->>'effective_until')::bigint<=extract(epoch FROM now()) THEN 'expired' ELSE 'current' END,
  'supported',stale.memory_id IS NULL,
- 'support',CASE WHEN jsonb_array_length(m.document->'evidence')=0 THEN 'user-recorded' ELSE 'source-linked' END),
- ($2='' OR strpos(lower(concat(m.document->>'title',' ',m.document->>'body')),lower($2))>0)
- FROM memories m LEFT JOIN stale_memories stale ON stale.memory_id=m.id WHERE m.scope=$1
+ 'support',CASE WHEN jsonb_array_length(m.document->'evidence')=0 THEN 'user-recorded' ELSE 'source-linked' END,
+ 'matched_revision',CASE WHEN old.revision IS NOT NULL THEN old.revision::text ELSE m.revision::text END,
+ 'historical_match',old.revision IS NOT NULL,
+ 'excerpt',CASE WHEN $2<>'' AND strpos(lower(COALESCE(old.document,m.document)->>'body'),lower($2))>0 THEN '…' || substring(COALESCE(old.document,m.document)->>'body' FROM greatest(1,strpos(lower(COALESCE(old.document,m.document)->>'body'),lower($2))-80) FOR 400) || '…' END),
+ ($2='' OR strpos(lower(concat(m.document->>'title',' ',m.document->>'body')),lower($2))>0 OR old.revision IS NOT NULL)
+ FROM memories m LEFT JOIN stale_memories stale ON stale.memory_id=m.id
+ LEFT JOIN LATERAL (
+   SELECT h.revision,h.document FROM memory_history h
+   WHERE $2<>'' AND strpos(lower(concat(m.document->>'title',' ',m.document->>'body')),lower($2))=0
+     AND h.scope=m.scope AND h.memory_id=m.id AND h.revision<m.revision
+     AND strpos(lower(concat(h.document->>'title',' ',h.document->>'body')),lower($2))>0
+   ORDER BY h.revision DESC LIMIT 1
+ ) old ON true WHERE m.scope=$1
  UNION ALL
  SELECT 't_'||t.id,'topic',jsonb_build_object('id','t_'||t.id,'scope',t.scope,'kind','topic','label',t.name),
  ($2='' OR strpos(lower(t.name),lower($2))>0)
@@ -132,9 +143,9 @@ const GRAPH_SQL: &str = concat!(
  SELECT l.* FROM eligible_links l JOIN selected s ON s.id=l.source JOIN selected t ON t.id=l.target
  ORDER BY (l.source=$3 OR l.target=$3) DESC NULLS LAST,l.kind,l.source,l.target LIMIT $5
 )
-SELECT jsonb_build_object('scope',$1,'query',$2,
+SELECT jsonb_build_object('scope',$1,'query',$2,'purpose','discovery','instruction','Search excerpts locate records; they are not complete decision evidence or verified facts. Read the current record, applicable rules and linked sources before acting.',
  'focus',jsonb_build_object('id',$3,'found',EXISTS(SELECT 1 FROM nodes WHERE id=$3)),
- 'nodes',COALESCE((SELECT jsonb_agg(value||jsonb_build_object('relation_digest',relation_digest) ORDER BY focused DESC,neighbor DESC,kind IN ('document','memory') DESC,id) FROM selected),'[]'::jsonb),
+ 'nodes',COALESCE((SELECT jsonb_agg(value||jsonb_build_object('relation_digest',relation_digest,'search_match',matched) ORDER BY focused DESC,neighbor DESC,kind IN ('document','memory') DESC,id) FROM selected),'[]'::jsonb),
  'links',COALESCE((SELECT jsonb_agg(to_jsonb(l)) FROM selected_links l),'[]'::jsonb),
  'totals',jsonb_build_object('documents',(SELECT count(*) FROM nodes WHERE kind='document'),
  'memories',(SELECT count(*) FROM nodes WHERE kind='memory'),'markers',(SELECT count(*) FROM nodes WHERE kind NOT IN ('document','memory')),

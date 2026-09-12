@@ -6,3 +6,4 @@
 .env
 *.dump
 /sync.local.json
+/.state/

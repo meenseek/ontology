@@ -77,31 +77,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   }
   return [...survivors, insertion];
 }
-/** Read a Markdown heading without treating front matter or fenced code as a title. */
-export function documentTitle(path: string, content: string | null): string {
-  const lines = (content ?? "").replace(/^\uFEFF/, "").split(/\r?\n/);
-  let start = 0;
-  if (lines[0]?.trim() === "---") {
-    const end = lines.findIndex((line, index) => index > 0 && /^(---|\.\.\.)\s*$/.test(line));
-    if (end < 0) return fileName(path);
-    start = end + 1;
-  }
-  let fence: { char: string; length: number } | null = null;
-  for (const line of lines.slice(start)) {
-    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (marker) {
-      if (!fence) fence = { char: marker[1][0], length: marker[1].length };
-      else if (marker[1][0] === fence.char && marker[1].length >= fence.length && /^ {0,3}(`+|~+)\s*$/.test(line)) fence = null;
-      continue;
-    }
-    if (fence) continue;
-    const heading = /^ {0,3}#{1,6}\s+(.+?)\s*$/.exec(line);
-    const title = heading?.[1].replace(/\s+#+\s*$/, "").trim();
-    if (title) return title;
-  }
-  return fileName(path);
-}
-export const memoryKindName: Record<string, string> = { fact: "사실", decision: "결정", preference: "선호", idea: "아이디어" };
+export const memoryKindName: Record<string, string> = { record: "일반 기록", fact: "사실", decision: "결정", preference: "선호", idea: "아이디어" };
 /** SpriteMaterial.sizeAttenuation=false projects these local units to CSS pixels. */
 export function spriteScale(pixels: number, viewportHeight: number, projectionY: number): number {
   if (![pixels, viewportHeight, projectionY].every(Number.isFinite) || pixels <= 0 || viewportHeight <= 0 || projectionY <= 0) return 0;

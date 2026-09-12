@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>App 읽기·저장 호출 검증</title>
+  </head>
+  <body>
+    <p>개발 전용: <code>pnpm --dir web exec vite --host 127.0.0.1 --port 47832</code> 실행 후
+      <code>http://127.0.0.1:47832/app-reading-check.html</code>을 여세요.
+      실제 App과 DOM 이벤트를 사용하고 모든 API는 합성 응답으로 대체합니다. 서버·DB·실제 전송량이나 레이아웃 성능 검증은 아닙니다.</p>
+    <pre id="result" role="status">RUNNING</pre>
+    <div id="app-check"></div>
+    <script type="module" src="/src/app-reading.check.tsx"></script>
+  </body>
+</html>

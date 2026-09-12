@@ -19,6 +19,8 @@ use std::{
 pub const BASELINE: &str = include_str!("../schema/baseline.sql");
 pub const SOURCE_PROVIDERS_MIGRATION: &str =
     include_str!("../schema/migrations/001-source-providers.sql");
+pub const EVIDENCE_SNAPSHOTS_MIGRATION: &str =
+    include_str!("../schema/migrations/003-evidence-snapshots.sql");
 pub const SECOND_BRAIN_MIGRATION: &str = include_str!("../schema/migrations/002-second-brain.sql");
 const SOURCE_PROVIDERS_NAME: &str = "001-source-providers.sql";
 #[derive(Clone)]
@@ -115,6 +117,11 @@ impl Store {
         let expected = [
             (SOURCE_PROVIDERS_NAME, SOURCE_PROVIDERS_MIGRATION),
             ("002-second-brain.sql", SECOND_BRAIN_MIGRATION),
+            ("003-evidence-snapshots.sql", EVIDENCE_SNAPSHOTS_MIGRATION),
+            (
+                "004-curation-reviews.sql",
+                include_str!("../schema/migrations/004-curation-reviews.sql"),
+            ),
         ];
         if migrations.len() > expected.len() {
             return Err(Error::Baseline);
