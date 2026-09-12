@@ -96,7 +96,7 @@ http://127.0.0.1:47831/?scope=meenseek&focus=실제_노드_ID
 
 문서 태그(`topics`)는 문서마다 선택적으로 최대 10개 붙일 수 있다. 기억은 같은 범위의 기억 묶음(`subjects`) 하나를 `subject_id`로 선택하거나 소속 없이 둘 수 있다. 문서 태그와 기억 묶음은 서로 별도의 분류다.
 
-에이전트나 터미널에서는 `bash scripts/brain.sh`에 JSON 객체 하나를 표준 입력으로 보낸다. 실행 중인 DB가 필요하며 HTTP 서버는 없어도 된다. 스크립트는 앱 루트로 이동하고, 명시한 `DATABASE_URL`이 없으면 신뢰하는 기존 로컬 `.env`의 `ONTOLOGY_DB_PASSWORD`로 DB 주소를 만든다. 내부적으로 `cargo run --quiet --locked -- brain`을 실행하며, 표준 출력은 JSON이고 오류 시 종료 코드는 0이 아니다.
+에이전트나 터미널에서는 `bash scripts/brain.sh`에 JSON 객체 하나를 표준 입력으로 보낸다. 실행 중인 DB가 필요하며 HTTP 서버는 없어도 된다. 스크립트는 앱 루트로 이동하고, 명시한 `DATABASE_URL`이 없으면 신뢰하는 기존 로컬 `.env`의 `ONTOLOGY_DB_PASSWORD`로 DB 주소를 만든다. 미리 `cargo build --locked`로 만든 `target/debug/meenseek-ontology brain`을 실행하며, 표준 출력은 JSON이고 오류 시 종료 코드는 0이 아니다.
 
 아래 내용은 **바꿔 쓸 예시**다. 실행하면 지정된 DB에 실제로 저장된다. 작은따옴표를 붙인 heredoc으로 JSON을 전달해 본문에 셸 변수나 명령 치환이 적용되지 않게 한다.
 
