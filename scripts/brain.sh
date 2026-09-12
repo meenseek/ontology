@@ -13,4 +13,4 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
     export DATABASE_URL="postgresql://ontology:${ONTOLOGY_DB_PASSWORD}@127.0.0.1:55432/ontology"
   fi
 fi
-exec cargo run --quiet --locked -- brain
+exec target/debug/meenseek-ontology brain
