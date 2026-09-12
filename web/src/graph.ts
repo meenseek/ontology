@@ -12,6 +12,7 @@ export type GraphNode = {
   generation?: string; status?: string; present?: boolean; source_kind?: string; repository?: string;
   temporal?: "future" | "expired" | "current"; supported?: boolean;
   support?: string; subject_id?: string | null; memory_kind?: string;
+  excerpt?: string | null; historical_match?: boolean; matched_revision?: string; search_match?: boolean;
   last_success_at?: string | null; observed_at?: string | null;
 };
 export type GraphLink = { source: string; target: string; kind: LinkKind; current: boolean };
@@ -30,8 +31,8 @@ export type PositionedNode = GraphNode & {
 };
 export type Cluster = { id: string; label: string; color: string; members: string[]; knowledge: number };
 export type Model = { scope: Scope; nodes: PositionedNode[]; links: GraphLink[]; clusters: Cluster[] };
-export const kindName: Record<NodeKind, string> = { document: "문서", memory: "기억", topic: "문서 태그", subject: "기억 묶음", area: "회사 분야" };
-export const linkName: Record<LinkKind, string> = { related: "관련 자료", evidence: "출처 근거", topic: "문서 태그", subject: "기억 묶음", area: "회사 분야" };
+export const kindName: Record<NodeKind, string> = { document: "문서", memory: "기록", topic: "문서 태그", subject: "기록 묶음", area: "회사 분야" };
+export const linkName: Record<LinkKind, string> = { related: "관련 자료", evidence: "출처 근거", topic: "문서 태그", subject: "기록 묶음", area: "회사 분야" };
 export const linkColor: Record<LinkKind, string> = { related: "#b2c5f0", evidence: "#e7bb76", topic: "#97bbde", subject: "#ad98d4", area: "#7ecab7" };
 const colors = ["#91b8ff", "#ba9aef", "#7bd6c2", "#ecc68f", "#df9dbc", "#8accdc", "#cad990"];
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
@@ -44,7 +45,7 @@ export function active(n: GraphNode): boolean {
 export function stateName(n: GraphNode): string {
   if (n.kind === "document") return n.status === "failed" ? "출처 확인 실패" : n.present ? "출처 확인" : "원문 부재";
   if (n.kind !== "memory") return "분류 표식";
-  const parts = [{ accepted: "보관", proposed: "제안", withdrawn: "철회" }[n.status ?? ""] ?? "기억"];
+  const parts = [{ accepted: "저장됨", proposed: "제안", withdrawn: "철회" }[n.status ?? ""] ?? "기록"];
   if (n.temporal === "future") parts.push("미래");
   if (n.temporal === "expired") parts.push("만료");
   if (n.supported === false) parts.push("근거 재확인 필요");

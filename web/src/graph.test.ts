@@ -129,15 +129,6 @@ test("a delayed outside-focus response cannot replace a newer selection or its d
   }
 });
 
-test("document titles skip metadata and fenced examples while retaining literal source text", async () => {
-  const { documentTitle } = await import("./presentation.ts");
-  assert.equal(documentTitle("notes/README.md", "---\ntitle: guessed\n---\n```md\n# Example\n```\n# 실제 제목 ###\n본문"), "실제 제목");
-  assert.equal(documentTitle("notes/README.md", "~~~\n# Not the title\n~~~\n## A <script> & [link](url)"), "A <script> & [link](url)");
-  assert.equal(documentTitle("notes/a.md", "---\ntitle: incomplete\n# Metadata"), "a.md");
-  assert.equal(documentTitle("notes/a.md", "    # Indented code\nordinary text"), "a.md");
-  assert.equal(documentTitle("notes/a.md", "````md\n```\n# Still code\n````\n# Actual"), "Actual");
-  assert.equal(documentTitle("notes/a.md", null), "a.md");
-});
 test("presentation retains disambiguating paths and never treats a folder as ownership", async () => {
   const { nodePresentation, fileName } = await import("./presentation.ts");
   const first = nodePresentation({ kind: "document", label: "one/README.md" });

@@ -3,8 +3,8 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import DocumentPreview, { findDocumentFragment } from "./DocumentPreview";
 
-const render = (content: string | null, path = "notes.md") => renderToStaticMarkup(<DocumentPreview path={path} content={content} title="문서 제목" />);
-const preview = (content: string, path?: string) => render(content, path).split('<details class="section document-source">')[0];
+const render = (content: string | null, path = "notes.md", kind: "git" | "vault" = "git") => renderToStaticMarkup(<DocumentPreview path={path} content={content} kind={kind} />);
+const preview = (content: string, path?: string, kind?: "git" | "vault") => render(content, path, kind);
 const decode = (value: string) => value.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 function attributes(tag: string): Record<string, string> {
   return Object.fromEntries([...tag.matchAll(/([\w-]+)="([^"]*)"/g)].map(match => [match[1], decode(match[2])]));
@@ -40,15 +40,13 @@ test("renders headings, formatted prose, GFM lists/tasks/table and code through 
   assert.match(html, /class="document-table" role="region" aria-label="문서 표" tabindex="0"/);
 });
 
-test("hides front matter only in preview and retains exact source in a closed disclosure", () => {
+test("shows one Markdown preview without duplicating source or front matter", () => {
   const source = '\uFEFF---\r\ntitle: "숨김"\r\n---\r\n# 본문 제목\r\n\r\n <tag> & \t끝  \r\n';
   const html = render(source);
   assert.match(preview(source), /<h1[^>]*>본문 제목<\/h1>/);
   assert.doesNotMatch(preview(source), /숨김/);
-  assert.match(html, /<details class="section document-source"><summary>원문 보기<\/summary>/);
-  assert.doesNotMatch(html, /<details[^>]*\bopen/);
-  assert.ok(html.includes(renderToStaticMarkup(<pre className="source-text">{source}</pre>)));
-  assert.match(html, /aria-label="문서 제목 미리보기"/);
+  assert.doesNotMatch(html, /원문 보기|document-source|<pre class="source-text">/);
+  assert.match(html, /aria-label="문서 미리보기"/);
 });
 
 test("keeps thematic breaks and fenced front matter examples visible", () => {
@@ -64,18 +62,19 @@ test("recognizes only Markdown extensions, case insensitively", () => {
   for (const path of ["notes.txt", "notes.json", "notes.md.txt", "README"]) {
     const html = render('# 제목\n\n**문자** <tag>', path);
     assert.match(html, /<pre class="source-text"># 제목\n\n\*\*문자\*\* &lt;tag&gt;<\/pre>/);
-    assert.doesNotMatch(html, /<h1|<strong>|<details/);
+    assert.match(html, /<h1 class="document-title">/);
+    assert.doesNotMatch(html, /<strong>|<details/);
   }
 });
 
-test("distinguishes unavailable content from empty content and preserves whitespace source", () => {
+test("distinguishes unavailable content from empty content", () => {
   for (const path of ["notes.md", "notes.txt"]) {
     assert.match(render(null, path), /성공적으로 읽은 원문이 없습니다/);
     assert.doesNotMatch(render(null, path), /<details|원문이 비어/);
     assert.match(render("", path), /원문이 비어 있습니다/);
   }
   const source = " \t\r\n";
-  assert.ok(render(source).includes(renderToStaticMarkup(<pre className="source-text">{source}</pre>)));
+  assert.doesNotMatch(render(source), /document-source|원문 보기/);
 });
 
 test("raw HTML stays inert and images never create network-loading elements", () => {
@@ -136,7 +135,7 @@ test("heading IDs cannot shadow app fields, and encoded Korean fragments resolve
   assert.equal(findDocumentFragment(root, "#topics-1")?.getAttribute("data-heading-key"), "topics-1");
   assert.equal(findDocumentFragment(root, "#%ED%95%9C%EA%B8%80-%EC%A0%9C%EB%AA%A9")?.getAttribute("data-heading-key"), "한글-제목");
   assert.equal(findDocumentFragment(root, "#graph-search"), null);
-  const pair = renderToStaticMarkup(<><DocumentPreview path="a.md" content="# Topics" title="A" /><DocumentPreview path="b.md" content="# Topics" title="B" /></>);
+  const pair = renderToStaticMarkup(<><DocumentPreview path="a.md" content="# Topics" kind="git" /><DocumentPreview path="b.md" content="# Topics" kind="git" /></>);
   const headings = [...pair.matchAll(/<h1 id="([^"]+)"/g)].map(match => match[1]);
   assert.equal(new Set(headings).size, 2);
 });
@@ -164,4 +163,75 @@ test("literal IDs win over decoded IDs and heading keys before any decoding", ()
   assert.equal(findDocumentFragment(root, "#c%20d"), targets[1]);
   assert.equal(findDocumentFragment(root, "#broken%zz"), targets[2]);
   assert.equal(findDocumentFragment(root, "#namespaced%2Dheading"), targets[3]);
+});
+
+test("Vault title appears once while authored formatting and every heading destination survive", () => {
+  const source = '# 회사 기준\r\n\r\n# **회사 기준**\r\n\r\n본문\r\n\r\n# 회사 기준\r\n\r\n[처음](#회사-기준) [본문 제목](#회사-기준-1) [나중](#회사-기준-2)\r\n';
+  const html = preview(source, "personal/company.md", "vault");
+  assert.equal([...html.matchAll(/<h1\b/g)].length, 2, "only the added title is collapsed; the later heading stays");
+  assert.match(html, /<h1[^>]*><strong>회사 기준<\/strong><\/h1>/);
+  assert.doesNotMatch(html, /company\.md/);
+  const { root } = fragmentRoot(html);
+  for (const key of ["회사-기준", "회사-기준-1", "회사-기준-2"]) assert.equal(findDocumentFragment(root, `#${key}`)?.getAttribute("data-heading-key"), key);
+  assert.match(html, /<div[^>]*class="document-title-anchor"><\/div>/);
+  assert.doesNotMatch(render(source, "personal/company.md", "vault"), /document-source|원문 보기/);
+  assert.equal(preview(source, "personal/company.md", "vault"), html, "repeated display is stable and does not edit the input");
+});
+
+test("only the known added Vault heading is collapsed; distinct or meaningful headings remain", () => {
+  assert.equal([...preview('# Title\n\n# Title').matchAll(/<h1\b/g)].length, 2, "Git does not add a title");
+  for (const source of [
+    '# Title\n\n# title', '# Title\n\n# Title!', '# Title\n\n本文\n\n# Title',
+    '# Title\n\n## Title', '# [Title](https://example.com)\n\n# Title',
+    '# `Title`\n\n# Title', '# ![Title](https://example.com/image.png)\n\n# Title',
+    '# Title [^n]\n\n# Title\n\n[^n]: 근거',
+  ]) assert.doesNotMatch(preview(source, "a.md", "vault"), /document-title-anchor/, source);
+  const linkedBody = preview('# Title\n\n# [Title](https://example.com)', "a.md", "vault");
+  assert.equal([...linkedBody.matchAll(/<h1\b/g)].length, 1);
+  assert.equal(anchors(linkedBody)[0].href, "https://example.com");
+});
+
+test("Markdown itself owns the leading title, including Setext and front matter", () => {
+  for (const source of ['# **제목** ###\n\n본문', '제목\n====\n\n본문', '\uFEFF---\r\ntitle: metadata\r\n---\r\n# 제목\r\n']) {
+    const html = preview(source);
+    assert.equal([...html.matchAll(/<h1\b/g)].length, 1);
+    assert.doesNotMatch(html, /notes\.md|metadata/);
+    assert.match(html, /제목/);
+  }
+});
+
+test("a missing leading title falls back once without stealing a section or code example", () => {
+  for (const source of ['문단\n\n## 하위 제목', '```md\n# Example\n```\n\n# Later', '    # Indented code', '---\ntitle: metadata\n---', '', ' \t\r\n']) {
+    const html = preview(source);
+    assert.equal([...html.matchAll(/<h1>notes\.md<\/h1>/g)].length, 1, source);
+    assert.doesNotMatch(render(source), /document-source|원문 보기/);
+  }
+  for (const path of ["notes.md", "notes.txt"]) {
+    for (const source of [null, ""]) assert.equal([...render(source, path).matchAll(new RegExp(`>${path.replace('.', '\\.')}<`, 'g'))].length, 1);
+  }
+});
+
+
+test("direct records retain YAML-shaped content, literal source, and their explicit title", () => {
+  const html = renderToStaticMarkup(<DocumentPreview kind="record" path="record" title="A 고객 실험" content={'---\n가격: 12000\n---\n\n# 관찰 결과\n\n<script>alert(1)</script>'} />);
+  assert.match(html, /A 고객 실험/);
+  assert.match(html, /가격: 12000/);
+  assert.match(html, /관찰 결과/);
+  assert.doesNotMatch(html, /<script>/);
+});
+test("direct record headings keep authored links and avoid a repeated title", () => {
+  const html = renderToStaticMarkup(<DocumentPreview kind="record" path="record" title="실험 결과" content={'# 실험 결과\n\n[결과](#실험-결과)\n\n내용'} />);
+  assert.equal((html.match(/<h1\b/g) ?? []).length, 1);
+  const { root } = fragmentRoot(html);
+  assert.ok(findDocumentFragment(root, "#실험-결과"));
+});
+
+
+test("generated labels never repeat or truncate the authored record heading", () => {
+  for (const content of ['# ' + '가'.repeat(81) + '\n\n본문', '# ~~이전~~ 새 결정\n\n본문', '관찰한 내용 그대로']) {
+    const html = renderToStaticMarkup(<DocumentPreview kind="record" generatedTitle title="자동 목록 이름" path="record" content={content} />);
+    assert.doesNotMatch(html, /자동 목록 이름/);
+    assert.equal((html.match(/<h1\b/g) ?? []).length, content.startsWith('# ') ? 1 : 0);
+    if (content.includes('가')) assert.ok(html.includes('가'.repeat(81)));
+  }
 });

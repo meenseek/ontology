@@ -1,5 +1,6 @@
 pub mod api;
 pub mod config;
+pub mod curation;
 pub mod domain;
 pub mod graph;
 pub mod importer;

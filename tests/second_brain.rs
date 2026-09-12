@@ -33,7 +33,7 @@ async fn call(store: &Store, v: Value) -> Value {
 async fn native_memory_contract() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE memory_history,memories,memory_creations,subjects")
+    sqlx::query("TRUNCATE evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects")
         .execute(store.pool())
         .await
         .expect("reset synthetic memories only");
@@ -80,19 +80,19 @@ async fn native_memory_contract() {
     assert_eq!(current["revision"], 2);
     assert_eq!(current["body"], changed["body"]);
     assert!(current.get("history").is_none());
-    let recall = call(
+    let search = call(
         &store,
-        json!({"op":"recall","scope":"personal","query":"새 결정"}),
+        json!({"op":"search","scope":"personal","query":"새 결정"}),
     )
     .await;
-    assert_eq!(recall["items"][0]["id"], id);
+    assert_eq!(search["nodes"][0]["id"], id);
     assert_eq!(
         call(
             &store,
-            json!({"op":"recall","scope":"meenseek","query":"새 결정"})
+            json!({"op":"search","scope":"meenseek","query":"새 결정"})
         )
-        .await["status"],
-        "insufficient-evidence"
+        .await["matched"],
+        0
     );
     call(
         &store,
@@ -102,10 +102,10 @@ async fn native_memory_contract() {
     assert_eq!(
         call(
             &store,
-            json!({"op":"recall","scope":"personal","query":"새 결정"})
+            json!({"op":"search","scope":"personal","query":"새 결정"})
         )
-        .await["status"],
-        "insufficient-evidence"
+        .await["nodes"][0]["status"],
+        "withdrawn"
     );
     assert_eq!(
         call(&store, json!({"op":"history","scope":"personal","id":id})).await["items"]
@@ -145,10 +145,10 @@ async fn native_memory_contract() {
     assert_eq!(
         call(
             &store,
-            json!({"op":"recall","scope":"personal","query":"experiment"})
+            json!({"op":"search","scope":"personal","query":"experiment"})
         )
-        .await["status"],
-        "insufficient-evidence"
+        .await["nodes"][0]["status"],
+        "proposed"
     );
     call(
         &store,
@@ -158,10 +158,10 @@ async fn native_memory_contract() {
     assert_eq!(
         call(
             &store,
-            json!({"op":"recall","scope":"personal","query":"EXPERIMENT"})
+            json!({"op":"search","scope":"personal","query":"EXPERIMENT"})
         )
-        .await["status"],
-        "ok"
+        .await["nodes"][0]["status"],
+        "accepted"
     );
     for (key, from, until) in [
         ("future-key", Some(253402300000i64), None),
@@ -180,10 +180,10 @@ async fn native_memory_contract() {
     assert_eq!(
         call(
             &store,
-            json!({"op":"recall","scope":"personal","query":"windowonly"})
+            json!({"op":"search","scope":"personal","query":"windowonly"})
         )
-        .await["status"],
-        "insufficient-evidence"
+        .await["matched"],
+        2
     );
     let hash = digest(b"brain-source");
     let mut record = ImportedRecord {
@@ -236,10 +236,10 @@ async fn native_memory_contract() {
     assert_eq!(
         call(
             &store,
-            json!({"op":"recall","scope":"personal","query":"supportedonly"})
+            json!({"op":"search","scope":"personal","query":"supportedonly"})
         )
-        .await["status"],
-        "insufficient-evidence",
+        .await["nodes"][0]["supported"],
+        false,
         "recovery requires explicit evidence reconfirmation"
     );
     let options = call(
@@ -252,10 +252,10 @@ async fn native_memory_contract() {
     assert_eq!(
         call(
             &store,
-            json!({"op":"recall","scope":"personal","query":"supportedonly"})
+            json!({"op":"search","scope":"personal","query":"supportedonly"})
         )
-        .await["status"],
-        "ok"
+        .await["nodes"][0]["supported"],
+        true
     );
     record.source_revision = "b".repeat(40);
     store
@@ -265,10 +265,10 @@ async fn native_memory_contract() {
     assert_eq!(
         call(
             &store,
-            json!({"op":"recall","scope":"personal","query":"supportedonly"})
+            json!({"op":"search","scope":"personal","query":"supportedonly"})
         )
-        .await["status"],
-        "insufficient-evidence"
+        .await["nodes"][0]["supported"],
+        false
     );
     record.content = None;
     record.digest = None;
@@ -293,7 +293,7 @@ async fn native_memory_contract() {
         let before = store.calls();
         let result = call(
             &store,
-            json!({"op":"recall","scope":"meenseek","query":format!("batch{size}")}),
+            json!({"op":"search","scope":"meenseek","query":format!("batch{size}")}),
         )
         .await;
         assert_eq!(store.calls() - before, 1);
@@ -302,7 +302,7 @@ async fn native_memory_contract() {
     let list = call(&store, json!({"op":"list","scope":"meenseek","limit":1})).await;
     assert!(list["next_after"].is_string());
     for bad in [
-        json!({"op":"recall","scope":"personal","query":"x","extra":true}),
+        json!({"op":"search","scope":"personal","query":"x","extra":true}),
         json!({"op":"remember","scope":"personal","idempotency_key":"long-key","memory":{"kind":"arbitrary","title":"x","body":"y"}}),
     ] {
         assert!(serde_json::from_value::<BrainCommand>(bad).is_err());
@@ -310,11 +310,176 @@ async fn native_memory_contract() {
     assert_eq!(
         store
             .brain(cmd(
-                json!({"op":"recall","scope":"personal","query":"x".repeat(121)})
+                json!({"op":"search","scope":"personal","query":"x".repeat(121)})
             ))
             .await,
         Err(Error::Invalid)
     );
+}
+
+#[tokio::test]
+async fn detail_and_subject_queries_stay_bounded_across_cardinalities() {
+    use meenseek_ontology::domain::{Classification, LinkChange, MAX_RESPONSE_BYTES};
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    for size in [0, 1, 20] {
+        sqlx::query("TRUNCATE evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
+            .execute(store.pool()).await.expect("reset isolated query fixture");
+        let attached = if size == 20 { 10 } else { 0 };
+        let records: Vec<_> = (0..=attached)
+            .map(|i| {
+                let hash = digest(format!("detail-bounds-{size}-{i}").as_bytes());
+                ImportedRecord {
+                    source_id: format!("s_{hash}"),
+                    entity_id: format!("e_{hash}"),
+                    scope: Scope::Personal,
+                    repository: "/synthetic/detail-bounds".into(),
+                    path: format!("document-{i}.md"),
+                    kind: SourceKind::Git,
+                    source_revision: "a".repeat(40),
+                    digest: Some(digest(b"synthetic source")),
+                    content: Some("synthetic source".into()),
+                }
+            })
+            .collect();
+        store
+            .apply_import(&records)
+            .await
+            .expect("synthetic documents");
+        let document_id = &records[0].entity_id;
+        if attached > 0 {
+            store
+                .classify(
+                    Scope::Personal,
+                    document_id,
+                    Classification {
+                        revision: 0,
+                        areas: vec![],
+                        topics: (0..attached).map(|i| format!("topic-{i}")).collect(),
+                    },
+                )
+                .await
+                .expect("synthetic topics");
+            for (i, record) in records.iter().skip(1).enumerate() {
+                store
+                    .link(
+                        Scope::Personal,
+                        document_id,
+                        LinkChange {
+                            revision: 1 + i as i64,
+                            target_id: record.entity_id.clone(),
+                            remove: false,
+                        },
+                    )
+                    .await
+                    .expect("synthetic relation");
+            }
+        }
+        let options = call(
+            &store,
+            json!({"op":"evidence","scope":"personal","query":"document-","limit":20}),
+        )
+        .await;
+        let evidence: Vec<_> = options["items"].as_array().expect("evidence options").iter().take(attached)
+            .map(|e| json!({"entity_id":e["entity_id"],"source_revision":e["source_revision"],"content_digest":e["content_digest"],"generation":e["generation"]})).collect();
+        assert_eq!(evidence.len(), attached);
+        let mut ids = Vec::new();
+        for i in 0..size {
+            let subject = call(&store, json!({"op":"subject-create","scope":"personal","idempotency_key":format!("subject-{i}"),"name":format!("subject-{i}")})).await;
+            let mut memory = input();
+            memory["subject_id"] = subject["id"].clone();
+            memory["body"] = json!("x".repeat(8192));
+            memory["evidence"] = json!(evidence);
+            let created = call(&store, json!({"op":"remember","scope":"personal","idempotency_key":format!("memory-{i}"),"memory":memory})).await;
+            ids.push(created["id"].as_str().expect("memory id").to_owned());
+        }
+        let before = store.calls();
+        let subjects = call(
+            &store,
+            json!({"op":"subjects","scope":"personal","limit":20}),
+        )
+        .await;
+        assert_eq!(store.calls() - before, 1, "subjects with {size} memories");
+        assert_eq!(subjects["items"].as_array().expect("subjects").len(), size);
+        assert!(serde_json::to_vec(&subjects).expect("subjects JSON").len() <= MAX_RESPONSE_BYTES);
+        for id in &ids {
+            let before = store.calls();
+            let memory = store
+                .memory_detail(Scope::Personal, id)
+                .await
+                .expect("memory detail");
+            assert_eq!(
+                store.calls() - before,
+                1,
+                "memory detail with {attached} evidence among {size} memories"
+            );
+            assert_eq!(
+                memory["evidence"].as_array().expect("evidence").len(),
+                attached
+            );
+            assert!(memory["subject_name"].is_string());
+            assert_eq!(memory["body"].as_str().expect("body").len(), 8192);
+            assert!(serde_json::to_vec(&memory).expect("memory JSON").len() <= MAX_RESPONSE_BYTES);
+        }
+        let before = store.calls();
+        let document = store
+            .detail(Scope::Personal, document_id)
+            .await
+            .expect("document detail");
+        assert_eq!(
+            store.calls() - before,
+            1,
+            "document detail with {attached} relations and topics"
+        );
+        assert_eq!(
+            document["related"].as_array().expect("related").len(),
+            attached
+        );
+        assert_eq!(
+            document["topics"].as_array().expect("topics").len(),
+            attached
+        );
+        assert!(serde_json::to_vec(&document).expect("document JSON").len() <= MAX_RESPONSE_BYTES);
+        for (id, expected, count) in [
+            ("invalid".to_owned(), Error::Invalid, 0),
+            (
+                "m_00000000-0000-0000-0000-000000000000".to_owned(),
+                Error::NotFound,
+                1,
+            ),
+        ] {
+            let before = store.calls();
+            assert_eq!(
+                store.memory_detail(Scope::Personal, &id).await,
+                Err(expected)
+            );
+            assert_eq!(store.calls() - before, count);
+        }
+        for (scope, id, expected, count) in [
+            (Scope::Personal, "invalid".to_owned(), Error::Invalid, 0),
+            (
+                Scope::Personal,
+                format!("e_{}", "0".repeat(64)),
+                Error::NotFound,
+                1,
+            ),
+            (Scope::Meenseek, document_id.clone(), Error::NotFound, 1),
+        ] {
+            let before = store.calls();
+            assert_eq!(store.detail(scope, &id).await, Err(expected));
+            assert_eq!(store.calls() - before, count);
+        }
+        let before = store.calls();
+        assert_eq!(
+            store
+                .brain(cmd(
+                    json!({"op":"subjects","scope":"personal","after":"invalid"})
+                ))
+                .await,
+            Err(Error::Invalid)
+        );
+        assert_eq!(store.calls() - before, 0);
+    }
 }
 
 #[tokio::test]
@@ -378,7 +543,7 @@ async fn brain_transport_contract() {
         (
             "http://127.0.0.1:47831",
             session["csrf"].as_str().expect("csrf"),
-            json!({"op":"recall","scope":"personal","query":"x","body":"sensitive-marker"})
+            json!({"op":"search","scope":"personal","query":"x","body":"sensitive-marker"})
                 .to_string(),
             400,
         ),
@@ -430,10 +595,10 @@ async fn brain_transport_contract() {
     assert_eq!(first, repeat);
     let id = &first["id"];
     let (ok, recalled) =
-        cli(&json!({"op":"recall","scope":"personal","query":"experiment"}).to_string()).await;
+        cli(&json!({"op":"search","scope":"personal","query":"experiment"}).to_string()).await;
     assert!(ok);
     assert!(
-        recalled["items"]
+        recalled["nodes"]
             .as_array()
             .expect("items")
             .iter()
@@ -756,4 +921,322 @@ async fn sync_contract() {
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).expect("report");
     assert_eq!(report["ok"], true);
+}
+
+#[tokio::test]
+async fn capture_search_and_historical_evidence_contract() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    sqlx::query("TRUNCATE evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
+    let content_only = json!({"op":"remember","scope":"meenseek","idempotency_key":"body-only-record","memory":{"body":"  관찰한 내용\n\n아직 판단하지 않았다."}});
+    let record = call(&store, content_only.clone()).await;
+    assert_eq!(record["kind"], "record");
+    assert_eq!(record["title_from_body"], true);
+    assert_eq!(record["title"], "관찰한 내용");
+    assert_eq!(record["body"], content_only["memory"]["body"]);
+    assert!(record["subject_id"].is_null());
+    assert_eq!(call(&store, content_only.clone()).await, record);
+    let mut explicit = content_only;
+    explicit["memory"]["kind"] = json!("record");
+    explicit["memory"]["title"] = record["title"].clone();
+    assert_eq!(
+        store.brain(cmd(explicit)).await,
+        Err(Error::Conflict),
+        "a manual title has different future editing behavior from an automatic title"
+    );
+    let retry = json!({"op":"remember","scope":"meenseek","idempotency_key":"body-only-record","memory":{"kind":"record","title":"  ","body":"  관찰한 내용\n\n아직 판단하지 않았다."}});
+    assert_eq!(
+        call(&store, retry).await,
+        record,
+        "same automatic intent normalizes consistently"
+    );
+    let manual = call(&store,json!({"op":"remember","scope":"meenseek","idempotency_key":"legacy-manual-key","memory":{"kind":"fact","title":"Manual","body":"Body"}})).await;
+    let stored_digest: String =
+        sqlx::query_scalar("SELECT payload_digest FROM memory_creations WHERE memory_id=$1")
+            .bind(manual["id"].as_str().unwrap())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored_digest,digest(br#"[false,{"kind":"fact","title":"Manual","body":"Body","subject_id":null,"effective_from":null,"effective_until":null,"evidence":[]}]"#),"explicit title keeps the previously deployed request digest");
+    call(&store, json!({"op":"correct","scope":"meenseek","id":record["id"],"revision":1,"memory":{"body":"결론을 내릴 근거가 부족하다."}})).await;
+    call(
+        &store,
+        json!({"op":"withdraw","scope":"meenseek","id":record["id"],"revision":2}),
+    )
+    .await;
+    let result = call(
+        &store,
+        json!({"op":"search","scope":"meenseek","query":"관찰한 내용"}),
+    )
+    .await;
+    assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
+    let found = &result["nodes"][0];
+    assert_eq!(found["id"], record["id"]);
+    assert_eq!(found["revision"], "3");
+    assert_eq!(found["label"], "결론을 내릴 근거가 부족하다.");
+    assert_eq!(found["status"], "withdrawn");
+    assert_eq!(found["historical_match"], true);
+    assert_eq!(found["matched_revision"], "1");
+    assert_eq!(
+        call(
+            &store,
+            json!({"op":"search","scope":"personal","query":"관찰한 내용"})
+        )
+        .await["matched"],
+        0
+    );
+
+    let source = |scope: Scope| {
+        let hash = digest(format!("evidence-lifecycle-{}", scope.as_str()).as_bytes());
+        ImportedRecord {
+            source_id: format!("s_{hash}"),
+            entity_id: format!("e_{hash}"),
+            scope,
+            repository: "/synthetic/preserved".into(),
+            path: "policy.md".into(),
+            kind: SourceKind::Git,
+            source_revision: "a".repeat(40),
+            digest: Some(digest(b"# Original\n\nOnly if all conditions apply.")),
+            content: Some("# Original\n\nOnly if all conditions apply.".into()),
+        }
+    };
+    let mut original = source(Scope::Meenseek);
+    let personal = source(Scope::Personal);
+    store
+        .apply_import(&[original.clone(), personal])
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for (scope, key) in [
+        ("meenseek", "first-evidence"),
+        ("meenseek", "second-evidence"),
+        ("personal", "private-evidence"),
+    ] {
+        let options = call(
+            &store,
+            json!({"op":"evidence","scope":scope,"query":"policy.md"}),
+        )
+        .await;
+        let e = &options["items"][0];
+        let reference = json!({"entity_id":e["entity_id"],"source_revision":e["source_revision"],"content_digest":e["content_digest"],"generation":e["generation"]});
+        let memory = call(&store,json!({"op":"propose","scope":scope,"idempotency_key":key,"memory":{"body":"조건을 모두 확인하고 실행한다.","evidence":[reference]}})).await;
+        ids.push(memory["id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_contents")
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
+        2,
+        "identical bytes deduplicate only inside each scope"
+    );
+    for (i, body, title) in [
+        (0, "# 회의\n\n본문", "회의"),
+        (1, "# **회의** `결과`\n\n본문", "회의 결과"),
+        (
+            2,
+            "# [운영 정책](https://example.invalid)\n\n본문",
+            "운영 정책",
+        ),
+    ] {
+        let created = call(&store,json!({"op":"remember","scope":"meenseek","idempotency_key":format!("markdown-title-{i}"),"memory":{"body":body}})).await;
+        assert_eq!(created["title"], title);
+        assert_eq!(created["body"], body);
+    }
+    let old_body = original.content.clone().unwrap();
+    original.content = Some("# Changed\n\nDo not proceed.".into());
+    original.digest = Some(digest(original.content.as_ref().unwrap().as_bytes()));
+    original.source_revision = "b".repeat(40);
+    store.apply_import(&[original.clone()]).await.unwrap();
+    call(
+        &store,
+        json!({"op":"accept","scope":"meenseek","id":ids[0],"revision":1}),
+    )
+    .await;
+    call(
+        &store,
+        json!({"op":"withdraw","scope":"meenseek","id":ids[0],"revision":2}),
+    )
+    .await;
+    for revision in 1..=3 {
+        let before = store.calls();
+        let read = call(&store,json!({"op":"evidence-read","scope":"meenseek","id":ids[0],"revision":revision,"entity_id":original.entity_id})).await;
+        assert_eq!(store.calls() - before, 1);
+        assert_eq!(read["content"], old_body);
+        assert_eq!(read["evidence"]["source_revision"], "a".repeat(40));
+        assert_eq!(read["available"], true);
+    }
+    assert_eq!(store.brain(cmd(json!({"op":"evidence-read","scope":"personal","id":ids[0],"revision":1,"entity_id":original.entity_id}))).await,Err(Error::NotFound));
+    let found = call(
+        &store,
+        json!({"op":"search","scope":"meenseek","query":"조건을"}),
+    )
+    .await;
+    assert!(
+        found["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| node["supported"] == false)
+    );
+    original.content = None;
+    original.digest = None;
+    store.apply_import(&[original.clone()]).await.unwrap();
+    assert_eq!(call(&store,json!({"op":"evidence-read","scope":"meenseek","id":ids[0],"revision":3,"entity_id":original.entity_id})).await["content"],old_body);
+    call(
+        &store,
+        json!({"op":"forget","scope":"meenseek","id":ids[0],"revision":3}),
+    )
+    .await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM evidence_contents WHERE scope='meenseek'"
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        1
+    );
+    call(
+        &store,
+        json!({"op":"forget","scope":"meenseek","id":ids[1],"revision":1}),
+    )
+    .await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM evidence_contents WHERE scope='meenseek'"
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM evidence_contents WHERE scope='personal'"
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        1
+    );
+
+    // Creating another reference concurrently with removal of the last owner cannot lose the body.
+    let original = source(Scope::Meenseek);
+    store
+        .apply_import(std::slice::from_ref(&original))
+        .await
+        .unwrap();
+    let e = &call(&store, json!({"op":"evidence","scope":"meenseek"})).await["items"][0];
+    let memory = json!({"body":"Concurrent evidence","evidence":[{"entity_id":e["entity_id"],"source_revision":e["source_revision"],"content_digest":e["content_digest"],"generation":e["generation"]}]});
+    let first = call(
+        &store,
+        json!({"op":"remember","scope":"meenseek","idempotency_key":"race-first","memory":memory}),
+    )
+    .await;
+    let (forget, create) = tokio::join!(
+        store.brain(cmd(json!({"op":"forget","scope":"meenseek","id":first["id"],"revision":1}))),
+        store.brain(cmd(json!({"op":"remember","scope":"meenseek","idempotency_key":"race-second","memory":memory})))
+    );
+    forget.unwrap();
+    let created = create.unwrap();
+    assert_eq!(call(&store,json!({"op":"evidence-read","scope":"meenseek","id":created["id"],"revision":1,"entity_id":original.entity_id})).await["content"],old_body);
+    let search = call(&store, json!({"op":"search","scope":"meenseek","query":""})).await;
+    assert!(
+        search["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["kind"] == "document")
+    );
+    assert!(
+        search["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["kind"] == "memory")
+    );
+}
+
+#[tokio::test]
+async fn evidence_migration_preserves_existing_records() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    sqlx::query("TRUNCATE evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
+    let hash = digest(b"migration-evidence");
+    let mut source = ImportedRecord {
+        source_id: format!("s_{hash}"),
+        entity_id: format!("e_{hash}"),
+        scope: Scope::Meenseek,
+        repository: "/synthetic/migration".into(),
+        path: "policy.md".into(),
+        kind: SourceKind::Git,
+        source_revision: "a".repeat(40),
+        digest: Some(digest(b"Original policy")),
+        content: Some("Original policy".into()),
+    };
+    store.apply_import(&[source.clone()]).await.unwrap();
+    let e = &call(&store, json!({"op":"evidence","scope":"meenseek"})).await["items"][0];
+    let evidence = json!({"entity_id":e["entity_id"],"source_revision":e["source_revision"],"content_digest":e["content_digest"],"generation":e["generation"]});
+    let m = call(&store,json!({"op":"propose","scope":"meenseek","idempotency_key":"migration-memory","memory":{"body":"First decision","evidence":[evidence]}})).await;
+    source.content = Some("Changed policy".into());
+    source.digest = Some(digest(b"Changed policy"));
+    source.source_revision = "b".repeat(40);
+    store.apply_import(&[source.clone()]).await.unwrap();
+    let e = &call(&store, json!({"op":"evidence","scope":"meenseek"})).await["items"][0];
+    let evidence = json!({"entity_id":e["entity_id"],"source_revision":e["source_revision"],"content_digest":e["content_digest"],"generation":e["generation"]});
+    call(&store,json!({"op":"correct","scope":"meenseek","id":m["id"],"revision":1,"memory":{"body":"Corrected decision","evidence":[evidence]}})).await;
+    for i in 0..3 {
+        call(&store,json!({"op":"remember","scope":"meenseek","idempotency_key":format!("migration-plain-{i}"),"memory":{"body":"No classification required"}})).await;
+    }
+    async fn existing(store: &Store) -> Value {
+        sqlx::query_scalar("SELECT jsonb_build_object('memories',(SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM memories m),'history',(SELECT jsonb_agg(to_jsonb(h) ORDER BY memory_id,revision) FROM memory_history h),'creations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY memory_id) FROM memory_creations c),'subjects',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM subjects s),'sources',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM sources s),'records',(SELECT jsonb_agg(to_jsonb(r) ORDER BY entity_id) FROM source_records r),'entities',(SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM entities e))").fetch_one(store.pool()).await.unwrap()
+    }
+    let before = existing(&store).await;
+    // Recreate the actual pre-upgrade schema, retaining every existing row, timestamp and digest.
+    sqlx::raw_sql("DROP TABLE curation_reviews; DROP TABLE evidence_snapshots; DROP TABLE evidence_contents; DELETE FROM ontology_migrations WHERE name IN ('003-evidence-snapshots.sql','004-curation-reviews.sql');").execute(store.pool()).await.unwrap();
+    sqlx::query("CREATE TABLE evidence_snapshots (failure_fixture boolean)")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(store.initialize().await, Err(Error::Baseline));
+    assert_eq!(existing(&store).await, before);
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass('evidence_contents')::text")
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
+        None,
+        "failed append rolls back preceding CREATE and migration marker"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ontology_migrations")
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
+        2
+    );
+    sqlx::query("DROP TABLE evidence_snapshots")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.initialize().await.unwrap();
+    assert_eq!(existing(&store).await, before);
+    assert_eq!(call(&store,json!({"op":"evidence-read","scope":"meenseek","id":m["id"],"revision":1,"entity_id":source.entity_id})).await["available"],false,"missing old bytes cannot be replaced by today's source");
+    assert_eq!(call(&store,json!({"op":"evidence-read","scope":"meenseek","id":m["id"],"revision":2,"entity_id":source.entity_id})).await["content"],"Changed policy");
+    store.initialize().await.unwrap();
+    assert_eq!(existing(&store).await, before);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_snapshots")
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    call(
+        &store,
+        json!({"op":"accept","scope":"meenseek","id":m["id"],"revision":2}),
+    )
+    .await;
+    assert_eq!(call(&store,json!({"op":"evidence-read","scope":"meenseek","id":m["id"],"revision":3,"entity_id":source.entity_id})).await["content"],"Changed policy");
 }
