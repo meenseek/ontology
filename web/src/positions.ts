@@ -1,3 +1,4 @@
+import { visualSatellites } from "./graph";
 import type { Model, PositionedNode } from "./graph";
 
 export type Point = { x: number; y: number; z: number };
@@ -52,6 +53,7 @@ type Spring = { anchor: Point; followers: Map<string, Follower>; last: number; d
 export class Positions {
   revision = 0;
   private nodes = new Map<string, PositionedNode>();
+  private satellites = new Map<string, string>();
   private adjacency = new Map<string, Set<string>>();
   private baseline = new Map<string, Point>();
   private gesture: Pull | null = null;
@@ -59,7 +61,8 @@ export class Positions {
   get dragging() { return this.gesture !== null; }
   install(model: Model) {
     this.cancel();
-    const retained = this.nodes;
+    const retained = this.nodes, priorSatellites = this.satellites;
+    this.satellites = visualSatellites(model);
     this.baseline = new Map(model.nodes.map(n => [n.id, point(n)]));
     this.nodes = new Map(model.nodes.map(n => [n.id, n]));
     this.adjacency = new Map(model.nodes.map(n => [n.id, new Set<string>()]));
@@ -68,7 +71,13 @@ export class Positions {
     }
     for (const node of model.nodes) {
       const prior = retained.get(node.id);
-      if (prior) fixPosition(node, prior);
+      const host = this.satellites.get(node.id);
+      if (prior && host === priorSatellites.get(node.id)) fixPosition(node, prior);
+      else if (host && retained.has(host)) {
+        // New/reanchored satellites follow a host's temporary session translation.
+        const original = this.baseline.get(host)!, current = retained.get(host)!;
+        fixPosition(node, add(node, add(current, original, -1)));
+      }
     }
     this.revision++;
   }
@@ -81,7 +90,9 @@ export class Positions {
     this.cancel();
     const node = this.nodes.get(id);
     if (!node || !Number.isFinite(unitsPerPixel) || unitsPerPixel <= 0) return;
-    const members = [...this.nodes.values()].filter(n => n.cluster === node.cluster && n.id !== id).sort((a, b) => a.id < b.id ? -1 : 1);
+    const visualCluster = (n: PositionedNode) => this.nodes.get(this.satellites.get(n.id) ?? n.id)!.cluster;
+    const hostCluster = visualCluster(node);
+    const members = [...this.nodes.values()].filter(n => visualCluster(n) === hostCluster && n.id !== id).sort((a, b) => a.id < b.id ? -1 : 1);
     const followers = new Map<string, Follower>();
     const spacing = Math.max(24, plane.spacingPixels) * unitsPerPixel;
     for (const [member, slot] of compactSlots(id, members.map(n => n.id), this.adjacency)) {
