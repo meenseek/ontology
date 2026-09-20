@@ -7,7 +7,10 @@ use crate::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{
+    PgPool, Row,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 use std::{
     sync::{
         Arc,
@@ -23,13 +26,43 @@ pub const EVIDENCE_SNAPSHOTS_MIGRATION: &str =
     include_str!("../schema/migrations/003-evidence-snapshots.sql");
 pub const SECOND_BRAIN_MIGRATION: &str = include_str!("../schema/migrations/002-second-brain.sql");
 const SOURCE_PROVIDERS_NAME: &str = "001-source-providers.sql";
+/// Application helper boundaries, not PostgreSQL encoder or socket bytes.
+/// Store-call deltas require an isolated Store workload, as native projection observations do.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DependencyObservation {
+    pub dependency: &'static str,
+    pub request_digest: String,
+    pub input_bytes: usize,
+    pub returned_bytes: usize,
+    pub returned_format: &'static str,
+    pub store_call_delta: u64,
+    pub succeeded: bool,
+    pub started: u64,
+    pub finished: u64,
+}
+pub(crate) struct DependencyStart {
+    dependency: &'static str,
+    request_digest: String,
+    input_bytes: usize,
+    calls: u64,
+    started: u64,
+}
+#[derive(Default)]
+struct DependencyObservations {
+    entries: Vec<DependencyObservation>,
+    sequence: u64,
+    dropped: usize,
+}
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
+    pub(crate) database_options: PgConnectOptions,
     calls: Arc<AtomicU64>,
+    dependencies: Arc<std::sync::Mutex<DependencyObservations>>,
 }
 impl Store {
     pub async fn connect(url: &str) -> Result<Self, Error> {
+        let options = database_options(url)?;
         let pool = PgPoolOptions::new()
             .max_connections(5)
             .acquire_timeout(Duration::from_secs(3))
@@ -44,12 +77,14 @@ impl Store {
                     Ok(())
                 })
             })
-            .connect_with(database_options(url)?)
+            .connect_with(options.clone())
             .await
             .map_err(|_| Error::Storage)?;
         Ok(Self {
+            database_options: options,
             pool,
             calls: Arc::new(AtomicU64::new(0)),
+            dependencies: Arc::new(std::sync::Mutex::new(DependencyObservations::default())),
         })
     }
     pub fn pool(&self) -> &PgPool {
@@ -60,6 +95,124 @@ impl Store {
     }
     pub(crate) fn count(&self, n: u64) {
         self.calls.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn dependency_observations(&self) -> Vec<DependencyObservation> {
+        self.dependencies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .clone()
+    }
+    pub fn dependency_observations_dropped(&self) -> usize {
+        self.dependencies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .dropped
+    }
+    pub(crate) fn dependency_start(
+        &self,
+        dependency: &'static str,
+        input: &impl serde::Serialize,
+    ) -> Result<DependencyStart, Error> {
+        let bytes = serde_json::to_vec(input).map_err(|_| Error::Storage)?;
+        let mut state = self
+            .dependencies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.sequence = state.sequence.saturating_add(1);
+        Ok(DependencyStart {
+            dependency,
+            request_digest: digest(&bytes),
+            input_bytes: bytes.len(),
+            calls: self.calls(),
+            started: state.sequence,
+        })
+    }
+    pub(crate) fn dependency_finish<T: serde::Serialize>(
+        &self,
+        start: DependencyStart,
+        result: &Result<T, Error>,
+    ) {
+        let returned_bytes = result
+            .as_ref()
+            .ok()
+            .and_then(|v| serde_json::to_vec(v).ok())
+            .map_or(0, |v| v.len());
+        self.record_dependency(
+            start,
+            returned_bytes,
+            "serialized-helper-json",
+            result.is_ok(),
+        );
+    }
+    fn record_dependency(
+        &self,
+        start: DependencyStart,
+        returned_bytes: usize,
+        returned_format: &'static str,
+        succeeded: bool,
+    ) {
+        let mut state = self
+            .dependencies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.sequence = state.sequence.saturating_add(1);
+        let finished = state.sequence;
+        if state.entries.len() == 4096 {
+            state.entries.remove(0);
+            state.dropped = state.dropped.saturating_add(1);
+        }
+        state.entries.push(DependencyObservation {
+            dependency: start.dependency,
+            request_digest: start.request_digest,
+            input_bytes: start.input_bytes,
+            returned_bytes,
+            returned_format,
+            store_call_delta: self.calls().saturating_sub(start.calls),
+            succeeded,
+            started: start.started,
+            finished,
+        });
+    }
+    pub(crate) fn dependency_finish_rows(
+        &self,
+        start: DependencyStart,
+        result: &Result<Vec<sqlx::postgres::PgRow>, Error>,
+    ) {
+        use sqlx::ValueRef;
+        let bytes = result.as_ref().ok().and_then(|rows| {
+            rows.iter().try_fold(0usize, |total, row| {
+                (0..row.len()).try_fold(total, |total, index| {
+                    let value = row.try_get_raw(index).ok()?;
+                    if value.is_null() {
+                        Some(total)
+                    } else {
+                        total.checked_add(row.try_get_unchecked::<&[u8], _>(index).ok()?.len())
+                    }
+                })
+            })
+        });
+        self.record_dependency(
+            start,
+            bytes.unwrap_or(0),
+            "postgres-application-row-values",
+            result.is_ok() && bytes.is_some(),
+        );
+    }
+    pub(crate) async fn consumer_control(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        statement: &'static str,
+    ) -> Result<(), Error> {
+        let observation = self.dependency_start(statement, &Vec::<String>::new())?;
+        self.count(1);
+        let result = sqlx::query(statement)
+            .execute(conn)
+            .await
+            .map(|r| r.rows_affected())
+            .map_err(|_| Error::Storage);
+        self.dependency_finish(observation, &result);
+        result.map(|_| ())
     }
     pub async fn initialize(&self) -> Result<(), Error> {
         self.initialize_baseline(BASELINE).await
@@ -122,6 +275,22 @@ impl Store {
                 "004-curation-reviews.sql",
                 include_str!("../schema/migrations/004-curation-reviews.sql"),
             ),
+            (
+                "005-context-materials.sql",
+                include_str!("../schema/migrations/005-context-materials.sql"),
+            ),
+            (
+                "006-context-history.sql",
+                include_str!("../schema/migrations/006-context-history.sql"),
+            ),
+            (
+                "007-context-native.sql",
+                include_str!("../schema/migrations/007-context-native.sql"),
+            ),
+            (
+                "008-context-consumers.sql",
+                include_str!("../schema/migrations/008-context-consumers.sql"),
+            ),
         ];
         if migrations.len() > expected.len() {
             return Err(Error::Baseline);
@@ -156,12 +325,15 @@ impl Store {
         unclassified: bool,
         area: Option<&str>,
     ) -> Result<Value, Error> {
+        let observation =
+            self.dependency_start("source-list", &(scope, query, unclassified, area))?;
+        let result=async {
         validate_search(query)?;
         crate::domain::validate_area(scope, area)?;
         self.count(1);
         sqlx::query_scalar(r#"
 WITH scoped AS MATERIALIZED (
- SELECT e.id,e.revision,s.kind,s.path,s.status,p.present,left(COALESCE(p.content,''),200) AS excerpt,
+ SELECT e.id,e.revision,s.kind,s.path,s.status,p.present,(s.status='ok' AND p.present AND p.source_revision=s.verified_revision) AS current,left(COALESCE(p.content,''),200) AS excerpt,
  ARRAY(SELECT a.area FROM entity_areas a WHERE a.scope=$1 AND a.entity_id=e.id ORDER BY a.area) AS areas,
  ARRAY(SELECT t.name FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id WHERE et.scope=$1 AND et.entity_id=e.id ORDER BY t.name) AS topics
  FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id
@@ -171,8 +343,14 @@ WITH scoped AS MATERIALIZED (
 SELECT jsonb_build_object('items',COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY path,id) FROM page),'[]'::jsonb),'total',(SELECT count(*) FROM scoped),'limit',100,
  'areas',COALESCE((SELECT jsonb_agg(x) FROM (SELECT area,count(*) FROM scoped CROSS JOIN unnest(areas) area GROUP BY area ORDER BY area) x),'[]'::jsonb))
 "#).bind(scope.as_str()).bind(query).bind(unclassified).bind(area).fetch_one(&self.pool).await.map_err(|_|Error::Storage)
+
+ }.await;
+        self.dependency_finish(observation, &result);
+        result
     }
     pub async fn detail(&self, scope: Scope, id: &str) -> Result<Value, Error> {
+        let observation = self.dependency_start("source-detail", &(scope, id))?;
+        let result=async {
         validate_id(id)?;
         self.count(1);
         sqlx::query_scalar(r#"
@@ -180,13 +358,17 @@ SELECT jsonb_build_object('id',e.id,'revision',e.revision,
  'areas',ARRAY(SELECT a.area FROM entity_areas a WHERE a.scope=$1 AND a.entity_id=e.id ORDER BY a.area),
  'topics',ARRAY(SELECT t.name FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id WHERE et.scope=$1 AND et.entity_id=e.id ORDER BY t.name),
  'source',jsonb_build_object('kind',s.kind,'path',s.path,'repository',s.repository,'status',s.status,'last_attempt_at',s.last_attempt_at,'last_success_at',s.last_success_at,'verified_revision',s.verified_revision,'failure_code',s.failure_code),
- 'projection',to_jsonb(p)-'entity_id'-'scope',
+ 'current',(s.status='ok' AND p.present AND p.source_revision=s.verified_revision),'projection',to_jsonb(p)-'entity_id'-'scope',
  'related',COALESCE((SELECT jsonb_agg(x ORDER BY x.path,x.id) FROM (
  SELECT other.id,os.path FROM related_materials r JOIN entities other ON other.scope=r.scope AND other.id=CASE WHEN r.left_id=e.id THEN r.right_id ELSE r.left_id END
  JOIN sources os ON os.scope=other.scope AND os.id=other.source_id WHERE r.scope=$1 AND (r.left_id=e.id OR r.right_id=e.id) ORDER BY os.path,other.id LIMIT 100) x),'[]'::jsonb),
  'history',COALESCE((SELECT jsonb_agg(x ORDER BY x.id DESC) FROM (SELECT h.id,h.kind,h.revision,h.previous,h.confirmed,h.confirmed_at FROM confirmation_history h WHERE h.scope=$1 AND h.entity_id=e.id ORDER BY h.id DESC LIMIT 30) x),'[]'::jsonb))
 FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE e.scope=$1 AND e.id=$2
 "#).bind(scope.as_str()).bind(id).fetch_optional(&self.pool).await.map_err(|_|Error::Storage)?.ok_or(Error::NotFound)
+
+ }.await;
+        self.dependency_finish(observation, &result);
+        result
     }
     pub async fn classify(
         &self,
@@ -324,9 +506,26 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
         if records.len() > 100 {
             return Err(Error::Limit);
         }
-        let value = serde_json::to_value(records).map_err(|_| Error::Invalid)?;
         self.count(1);
         let mut tx = self.pool.begin().await.map_err(|_| Error::Storage)?;
+        self.apply_import_in(&mut tx, records).await?;
+        self.count(1);
+        tx.commit().await.map_err(|_| Error::Storage)
+    }
+    pub(crate) async fn apply_import_in(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        records: &[ImportedRecord],
+    ) -> Result<(), Error> {
+        let observation = self.dependency_start("apply_import_in", &records)?;
+        let result=async {
+        if records.is_empty() {
+            return Ok(());
+        }
+        if records.len() > 100 {
+            return Err(Error::Limit);
+        }
+        let value = serde_json::to_value(records).map_err(|_| Error::Invalid)?;
         self.count(1);
         sqlx::query(r#"
 WITH input AS MATERIALIZED (SELECT * FROM jsonb_to_recordset($1) AS x(source_id text,entity_id text,scope text,repository text,path text,kind text,source_revision text,digest text,content text)),
@@ -338,11 +537,31 @@ e AS (INSERT INTO entities(id,scope,source_id) SELECT i.entity_id,i.scope,i.sour
 INSERT INTO source_records(entity_id,scope,content,content_digest,source_revision,present,absence_revision)
  SELECT i.entity_id,i.scope,i.content,i.digest,CASE WHEN i.content IS NULL THEN NULL ELSE i.source_revision END,i.content IS NOT NULL,CASE WHEN i.content IS NULL THEN i.source_revision ELSE NULL END FROM input i JOIN e ON e.id=i.entity_id
  ON CONFLICT(entity_id) DO UPDATE SET content=COALESCE(EXCLUDED.content,source_records.content),content_digest=COALESCE(EXCLUDED.content_digest,source_records.content_digest),source_revision=COALESCE(EXCLUDED.source_revision,source_records.source_revision),observed_at=now(),present=EXCLUDED.present,absence_revision=EXCLUDED.absence_revision
-"#).bind(value).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
-        self.count(1);
-        tx.commit().await.map_err(|_| Error::Storage)
+"#).bind(value).execute(&mut *conn).await.map_err(|_| Error::Storage)?;
+        Ok(())
+
+        }.await;
+        self.dependency_finish(observation, &result);
+        result
     }
     pub async fn mark_failed(&self, source_ids: &[String], kind: SourceKind) -> Result<(), Error> {
+        if source_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.pool.acquire().await.map_err(|_| Error::Storage)?;
+        self.mark_failed_in(&mut conn, source_ids, kind).await
+    }
+    pub(crate) async fn mark_failed_in(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        source_ids: &[String],
+        kind: SourceKind,
+    ) -> Result<(), Error> {
+        let observation = self.dependency_start(
+            "mark_failed_in",
+            &(source_ids, kind.failure_code(), kind.as_str()),
+        )?;
+        let result=async {
         if source_ids.len() > 100 {
             return Err(Error::Limit);
         }
@@ -352,8 +571,12 @@ INSERT INTO source_records(entity_id,scope,content,content_digest,source_revisio
         self.count(1);
         sqlx::query("UPDATE sources SET generation=generation+CASE WHEN status='failed' THEN 0 ELSE 1 END,status='failed',failure_code=$2,last_attempt_at=now() WHERE id=ANY($1) AND kind=$3")
             .bind(source_ids).bind(kind.failure_code()).bind(kind.as_str())
-            .execute(&self.pool).await.map_err(|_| Error::Storage)?;
+            .execute(conn).await.map_err(|_| Error::Storage)?;
         Ok(())
+
+        }.await;
+        self.dependency_finish(observation, &result);
+        result
     }
 }
 

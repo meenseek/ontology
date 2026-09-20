@@ -235,3 +235,19 @@ test("generated labels never repeat or truncate the authored record heading", ()
     if (content.includes('가')) assert.ok(html.includes('가'.repeat(81)));
   }
 });
+
+test("Context synthetic heading preserves authored formatting and destinations", () => {
+  const html = renderToStaticMarkup(<DocumentPreview kind="context" path="personal/note.md" content={'# Title\n\n# **Title**\n\n[body](#title-1)'} />);
+  assert.equal((html.match(/<h1\b/g) ?? []).length, 1);
+  assert.match(html, /<strong>Title<\/strong>/);
+  assert.ok(findDocumentFragment(fragmentRoot(html).root, "#title-1"));
+});
+
+test("seeded Memory renders Context, Vault, Git and record provenance through its actual component", async () => {
+  const { default: Memory } = await import("./Memory");
+  const kinds = ["context", "vault", "git", "record"] as const;
+  const item = { id: "m_seed", scope: "personal" as const, revision: 1, status: "proposed", origin: "assistant", subject_name: null, updated_at: "2026-01-01", support: "source-linked", kind: "record" as const, title: "Evidence", body: "Preserved record", subject_id: null, effective_from: null, effective_until: null, evidence: kinds.map((kind, i) => ({ entity_id: `e_${i}`, kind, repository: kind === "context" ? "ontology-context:00000000-0000-0000-0000-000000000001" : kind === "record" ? "분신" : "/original/root", path: kind === "record" ? "A record" : "personal/note.md", source_revision: "a".repeat(64), content_digest: "b".repeat(64), generation: 1, current: true })) };
+  const html = renderToStaticMarkup(<Memory initialItem={item} selectedId={item.id} visible scope="personal" csrf="fixture" request={async () => { throw new Error("Static seeded render needs no request"); }} onBusy={() => {}} onChange={() => {}} onNavigate={() => {}} onMetadataChange={() => {}} />);
+  for (const label of ["Context", "Vault", "Git", "기록"]) assert.match(html, new RegExp(`<dt>출처<\/dt><dd>${label}<\/dd>`));
+  assert.match(html, /ontology-context:/);
+});

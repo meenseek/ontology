@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import DocumentPreview from "./DocumentPreview";
 import type { GraphNode, Request, Scope } from "./graph";
 import { fileName, memoryKindName } from "./presentation";
-type Evidence = { entity_id: string; source_id?: string; source_revision: string; content_digest: string; generation: number; kind?: "git" | "vault" | "record"; repository?: string; path?: string; current?: boolean; semantics?: { kind: string; title_from_body?: boolean; effective_from: number | null; effective_until: number | null; applicability?: string } };
+type Evidence = { entity_id: string; source_id?: string; source_revision: string; content_digest: string; generation: number; kind?: "git" | "vault" | "context" | "record"; repository?: string; path?: string; current?: boolean; semantics?: { kind: string; title_from_body?: boolean; effective_from: number | null; effective_until: number | null; applicability?: string } };
 type Curation = { review_id: string; source_id: string; applicability: string; reason: string };
 type Input = { title_from_body?: boolean; kind: "record" | "fact" | "decision" | "preference" | "idea"; title: string; body: string; subject_id: string | null; effective_from: number | null; effective_until: number | null; evidence: Evidence[] };
 export type Item = Input & { id: string; scope: Scope; revision: number; status: string; origin: string; subject_name: string | null; updated_at: string; support: string; curation?: Curation };
@@ -24,7 +24,7 @@ function CurationDetails({ value }: { value?: Curation }) {
 }
 function EvidenceLocation({ evidence }: { evidence: Evidence }) {
   return <details><summary>출처 위치</summary><dl>
-    {evidence.kind && <><dt>출처</dt><dd>{evidence.kind === "record" ? "기록" : evidence.kind === "vault" ? "Vault" : "Git"}</dd></>}
+    {evidence.kind && <><dt>출처</dt><dd>{evidence.kind === "record" ? "기록" : evidence.kind === "vault" ? "Vault" : evidence.kind === "context" ? "Context" : "Git"}</dd></>}
     {evidence.semantics && <><dt>기록 종류</dt><dd>{memoryKindName[evidence.semantics.kind] ?? evidence.semantics.kind}</dd><dt>당시 유효기간</dt><dd>{date(evidence.semantics.effective_from)} ~ {date(evidence.semantics.effective_until)}</dd>{evidence.semantics.applicability && <><dt>당시 적용 범위</dt><dd>{evidence.semantics.applicability}</dd></>}</>}
     {evidence.repository && <><dt>저장소</dt><dd>{evidence.repository}</dd></>}
     <dt>{evidence.kind === "record" ? "기록 제목" : "원문 경로"}</dt><dd>{evidence.path ?? "경로가 기록되지 않았습니다."}</dd>

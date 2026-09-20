@@ -9,7 +9,7 @@ export type Request = <T>(url: string, options?: RequestInit) => Promise<T>;
 export type GraphNode = {
   id: string; scope: Scope; kind: NodeKind; label: string;
   revision?: string; relation_digest?: string; content_digest?: string | null; source_revision?: string | null;
-  generation?: string; status?: string; present?: boolean; source_kind?: string; repository?: string;
+  generation?: string; status?: string; present?: boolean; current?: boolean; source_kind?: string; repository?: string;
   temporal?: "future" | "expired" | "current"; supported?: boolean;
   support?: string; subject_id?: string | null; memory_kind?: string;
   excerpt?: string | null; historical_match?: boolean; matched_revision?: string; search_match?: boolean;
@@ -38,12 +38,12 @@ const colors = ["#91b8ff", "#ba9aef", "#7bd6c2", "#ecc68f", "#df9dbc", "#8accdc"
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 export const knowledge = (n: GraphNode) => n.kind === "document" || n.kind === "memory";
 export function active(n: GraphNode): boolean {
-  if (n.kind === "document") return n.status === "ok" && n.present === true;
+  if (n.kind === "document") return n.status === "ok" && n.present === true && n.current === true;
   if (n.kind === "memory") return n.status === "accepted" && n.temporal === "current" && n.supported !== false;
   return true;
 }
 export function stateName(n: GraphNode): string {
-  if (n.kind === "document") return n.status === "failed" ? "출처 확인 실패" : n.present ? "출처 확인" : "원문 부재";
+  if (n.kind === "document") return n.status === "failed" ? "출처 확인 실패" : n.present ? n.current ? "출처 확인" : "갱신 대기" : "원문 부재";
   if (n.kind !== "memory") return "분류 표식";
   const parts = [{ accepted: "저장됨", proposed: "제안", withdrawn: "철회" }[n.status ?? ""] ?? "기록"];
   if (n.temporal === "future") parts.push("미래");
@@ -131,7 +131,7 @@ export function parseLocation(search: string): { scope: Scope; q: string; focus:
   const params = new URLSearchParams(search);
   const q = params.get("q") ?? "";
   const focus = params.get("focus");
-  return { scope: params.get("scope") === "personal" ? "personal" : "meenseek", q: [...q.replaceAll("\0", "")].slice(0, 120).join(""), focus: focus && /^(e_[a-f\d]{64}|[mp]_[a-f\d-]{36}|t_[1-9]\d*|a_[a-z-]+)$/.test(focus) ? focus : null };
+  return { scope: params.get("scope") === "meenseek" ? "meenseek" : "personal", q: [...q.replaceAll("\0", "")].slice(0, 120).join(""), focus: focus && /^(e_[a-f\d]{64}|[mp]_[a-f\d-]{36}|t_[1-9]\d*|a_[a-z-]+)$/.test(focus) ? focus : null };
 }
 export function sameGraphLocation(a: ReturnType<typeof parseLocation>, b: ReturnType<typeof parseLocation>): boolean {
   return a.scope === b.scope && a.q === b.q && a.focus === b.focus;

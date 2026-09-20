@@ -1,5 +1,6 @@
 use crate::{
     config::Config,
+    context::{ContextScope, MAX_READ_BYTES},
     domain::{AREAS, Classification, Error, LinkChange, MAX_RESPONSE_BYTES, Scope},
     graph::GraphQuery,
     memory::BrainCommand,
@@ -17,7 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -57,6 +58,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/brain", post(brain))
         .route("/api/graph", get(graph))
         .route("/api/sync", get(sync_status))
+        .route("/api/context/scopes", get(context_scopes))
+        .route("/api/context", get(context_search))
+        .route("/api/context/read", get(context_read))
+        .route("/api/context/download", get(context_download))
         .route("/api/records", get(list))
         .route("/api/records/{id}", get(detail))
         .route("/api/records/{id}/classification", post(classify))
@@ -76,7 +81,7 @@ impl IntoResponse for Error {
             Self::Invalid => StatusCode::BAD_REQUEST,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Gone => StatusCode::GONE,
-            Self::Conflict => StatusCode::CONFLICT,
+            Self::Conflict | Self::ContextPending => StatusCode::CONFLICT,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::Limit => StatusCode::PAYLOAD_TOO_LARGE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -270,4 +275,188 @@ async fn graph(
 ) -> Result<Response, Error> {
     let Query(query) = query.map_err(|_| Error::Invalid)?;
     json_response(state.store.graph(query).await?)
+}
+
+// This surface deliberately accepts no ContextCommand or archive/write options.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextSearch {
+    scope: ContextScope,
+    #[serde(default)]
+    q: String,
+    after: Option<String>,
+    #[serde(default = "context_limit")]
+    limit: usize,
+}
+fn context_limit() -> usize {
+    20
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextSelection {
+    scope: ContextScope,
+    path: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextDiscovery {}
+
+async fn context_scopes(
+    State(state): State<AppState>,
+    query: Result<Query<ContextDiscovery>, QueryRejection>,
+) -> Result<Response, Error> {
+    query.map_err(|_| Error::Invalid)?;
+    bounded_context_json(
+        &json!({ "scopes": state.store.context_scopes().await? }),
+        MAX_RESPONSE_BYTES,
+    )
+}
+async fn context_search(
+    State(state): State<AppState>,
+    query: Result<Query<ContextSearch>, QueryRejection>,
+) -> Result<Response, Error> {
+    let Query(query) = query.map_err(|_| Error::Invalid)?;
+    if query.limit == 0 || query.limit > context_limit() {
+        return Err(Error::Invalid);
+    }
+    let mut page = state
+        .store
+        .search_context(&query.scope, &query.q, query.after.as_deref(), query.limit)
+        .await?;
+    // The CLI retains complete transport provenance; HTTP never returns server locations.
+    if let Some(items) = page["items"].as_array_mut() {
+        for item in items {
+            if let Some(item) = item.as_object_mut() {
+                item.remove("source_root");
+            }
+        }
+    }
+    bounded_context_json(&page, MAX_RESPONSE_BYTES)
+}
+async fn context_read(
+    State(state): State<AppState>,
+    query: Result<Query<ContextSelection>, QueryRejection>,
+) -> Result<Response, Error> {
+    let Query(query) = query.map_err(|_| Error::Invalid)?;
+    let material = state
+        .store
+        .read_context_material(&query.scope, &query.path)
+        .await?;
+    // One byte may require six JSON escape bytes. Other API response limits stay unchanged.
+    bounded_context_json(&material, 6 * MAX_READ_BYTES + 16 * 1024)
+}
+async fn context_download(
+    State(state): State<AppState>,
+    query: Result<Query<ContextSelection>, QueryRejection>,
+) -> Result<Response, Error> {
+    let Query(query) = query.map_err(|_| Error::Invalid)?;
+    let material = state
+        .store
+        .download_context(&query.scope, &query.path)
+        .await?;
+    let filename = material
+        .metadata
+        .path
+        .rsplit('/')
+        .next()
+        .ok_or(Error::Invalid)?;
+    let disposition = attachment_disposition(filename)?;
+    let length =
+        HeaderValue::from_str(&material.bytes.len().to_string()).map_err(|_| Error::Storage)?;
+    let mut response = Response::new(Body::from(material.bytes));
+    let headers = response.headers_mut();
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    headers.insert("content-disposition", disposition);
+    headers.insert("content-length", length);
+    Ok(response)
+}
+fn attachment_disposition(filename: &str) -> Result<HeaderValue, Error> {
+    use std::fmt::Write;
+    let mut fallback = String::new();
+    let mut encoded = String::new();
+    for character in filename.chars() {
+        match character {
+            '\"' | '\\' => {
+                fallback.push('\\');
+                fallback.push(character);
+            }
+            c if c.is_ascii() && !c.is_control() => fallback.push(c),
+            _ => fallback.push('_'),
+        }
+    }
+    // Percent-encoding every UTF-8 byte is valid RFC 8187 and cannot inject a header delimiter.
+    for byte in filename.bytes() {
+        write!(&mut encoded, "%{byte:02X}").map_err(|_| Error::Storage)?;
+    }
+    HeaderValue::from_str(&format!(
+        "attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
+    ))
+    .map_err(|_| Error::Storage)
+}
+fn bounded_context_json<T: Serialize>(value: &T, limit: usize) -> Result<Response, Error> {
+    struct Buffer {
+        bytes: Vec<u8>,
+        limit: usize,
+        exceeded: bool,
+    }
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self
+                .bytes
+                .len()
+                .checked_add(bytes.len())
+                .is_none_or(|len| len > self.limit)
+            {
+                self.exceeded = true;
+                return Err(std::io::Error::other("Response limit"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut buffer = Buffer {
+        bytes: Vec::new(),
+        limit,
+        exceeded: false,
+    };
+    if serde_json::to_writer(&mut buffer, value).is_err() {
+        return Err(if buffer.exceeded {
+            Error::Limit
+        } else {
+            Error::Storage
+        });
+    }
+    let mut response = Response::new(Body::from(buffer.bytes));
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    Ok(response)
+}
+
+#[cfg(test)]
+mod context_response_tests {
+    use super::*;
+    #[test]
+    fn context_serialization_stops_at_its_own_limit() {
+        assert!(bounded_context_json(&"\0".repeat(100), 602).is_ok());
+        assert!(matches!(
+            bounded_context_json(&"\0".repeat(100), 601),
+            Err(Error::Limit)
+        ));
+        assert!(bounded_context_json(&"", 2).is_ok());
+        assert!(matches!(bounded_context_json(&"", 1), Err(Error::Limit)));
+    }
+    #[test]
+    fn attachment_headers_preserve_unicode_and_quote_delimiters() {
+        let header = attachment_disposition("한글 \";name.html").expect("validated filename");
+        let value = header.to_str().expect("ASCII header");
+        assert!(value.starts_with("attachment; filename=\"__ \\\";name.html\"; filename*=UTF-8''"));
+        assert!(value.ends_with("%ED%95%9C%EA%B8%80%20%22%3B%6E%61%6D%65%2E%68%74%6D%6C"));
+    }
 }

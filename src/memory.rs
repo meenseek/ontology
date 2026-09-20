@@ -2,7 +2,7 @@
 // The aliases m/x/e/s/p are owner memory, evidence, entity, source and projection.
 macro_rules! evidence_current {
     () => {
-        "CASE WHEN left(x->>'entity_id',2)='m_' THEN EXISTS(SELECT 1 FROM memories native WHERE native.scope=m.scope AND native.id=x->>'entity_id' AND native.id=x->>'source_id' AND native.status='accepted' AND native.revision=(x->>'generation')::bigint AND (native.document->>'effective_from' IS NULL OR (native.document->>'effective_from')::bigint<=extract(epoch FROM now())) AND (native.document->>'effective_until' IS NULL OR (native.document->>'effective_until')::bigint>extract(epoch FROM now())) AND x->>'source_revision'=x->>'content_digest' AND encode(sha256(convert_to(native.document->>'body','UTF8')),'hex')=x->>'content_digest') ELSE COALESCE(s.status='ok' AND p.present AND s.id=x->>'source_id' AND p.source_revision=x->>'source_revision' AND p.content_digest=x->>'content_digest' AND s.generation=(x->>'generation')::bigint,false) END"
+        "CASE WHEN left(x->>'entity_id',2)='m_' THEN EXISTS(SELECT 1 FROM memories native WHERE native.scope=m.scope AND native.id=x->>'entity_id' AND native.id=x->>'source_id' AND native.status='accepted' AND native.revision=(x->>'generation')::bigint AND (native.document->>'effective_from' IS NULL OR (native.document->>'effective_from')::bigint<=extract(epoch FROM now())) AND (native.document->>'effective_until' IS NULL OR (native.document->>'effective_until')::bigint>extract(epoch FROM now())) AND x->>'source_revision'=x->>'content_digest' AND encode(sha256(convert_to(native.document->>'body','UTF8')),'hex')=x->>'content_digest') ELSE COALESCE(s.status='ok' AND p.present AND p.source_revision=s.verified_revision AND s.id=x->>'source_id' AND p.source_revision=x->>'source_revision' AND p.content_digest=x->>'content_digest' AND s.generation=(x->>'generation')::bigint,false) END"
     };
 }
 pub(crate) use evidence_current;
@@ -501,6 +501,8 @@ impl Store {
         input: &MemoryInput,
         options: PrepareMemory<'_>,
     ) -> Result<Value, Error> {
+        let observation = self.dependency_start("prepare-memory", &(scope, input))?;
+        let result = async {
         input.validate()?;
         if let Some(subject) = &input.subject_id {
             self.count(1);
@@ -585,9 +587,13 @@ impl Store {
         let rows = if source_ids.is_empty() {
             Vec::new()
         } else {
+            let observation =
+                self.dependency_start("memory-source-rows", &(scope.as_str(), &source_ids))?;
             self.count(1);
-            sqlx::query("SELECT e.id,s.id AS source_id,s.kind,s.repository,s.path,s.status,s.generation,p.present,p.source_revision,p.content_digest,p.content FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE e.scope=$1 AND e.id=ANY($2) ORDER BY s.id FOR SHARE OF s,p")
-                .bind(scope.as_str()).bind(source_ids).fetch_all(&mut **tx).await.map_err(|_|Error::Storage)?
+            let result=sqlx::query("SELECT e.id,s.id AS source_id,s.kind,s.repository,s.path,s.status,s.generation,s.verified_revision,p.present,p.source_revision,p.content_digest,p.content FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE e.scope=$1 AND e.id=ANY($2) ORDER BY s.id FOR SHARE OF s,p")
+                .bind(scope.as_str()).bind(source_ids).fetch_all(&mut **tx).await.map_err(|_|Error::Storage);
+            self.dependency_finish_rows(observation, &result);
+            result?
         };
         let mut evidence = Vec::new();
         let mut contents = Vec::new();
@@ -608,6 +614,8 @@ impl Store {
                 .ok_or(Error::Invalid)?;
             if row.get::<String, _>("status") != "ok"
                 || !row.get::<bool, _>("present")
+                || row.get::<Option<String>, _>("source_revision")
+                    != row.get::<Option<String>, _>("verified_revision")
                 || row.get::<Option<String>, _>("source_revision").as_deref()
                     != Some(&expected.source_revision)
                 || row.get::<Option<String>, _>("content_digest").as_deref()
@@ -630,6 +638,9 @@ impl Store {
                 .bind(scope.as_str()).bind(json!(contents)).execute(&mut **tx).await.map_err(|_|Error::Storage)?;
         }
         Ok(document)
+        }.await;
+        self.dependency_finish(observation, &result);
+        result
     }
     async fn check_memory_size(
         &self,
@@ -712,6 +723,58 @@ impl Store {
         sqlx::query("INSERT INTO memory_history(scope,memory_id,revision,status,subject_id,document) SELECT scope,id,revision,status,subject_id,document FROM memories WHERE scope=$1 AND id=$2").bind(scope.as_str()).bind(id).execute(&mut **tx).await.map_err(|_|Error::Storage)?;
         Ok(())
     }
+    async fn revalidate_memory_evidence(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        scope: Scope,
+        id: &str,
+        document: &Value,
+    ) -> Result<(), Error> {
+        let observation = self.dependency_start(
+            "memory-evidence-revalidate",
+            &(scope, id, &document["evidence"]),
+        )?;
+        let result=async {
+        let evidence = document["evidence"].as_array().ok_or(Error::Storage)?;
+        if evidence.is_empty() {
+            return Ok(());
+        }
+        let native: Vec<_> = evidence
+            .iter()
+            .filter_map(|e| e["entity_id"].as_str())
+            .filter(|id| id.starts_with("m_"))
+            .collect();
+        let sources: Vec<_> = evidence
+            .iter()
+            .filter_map(|e| e["source_id"].as_str())
+            .filter(|id| id.starts_with("s_"))
+            .collect();
+        if !native.is_empty() {
+            let observation=self.dependency_start("accept-native-locks",&(scope.as_str(),&native))?;
+            self.count(1);
+            let result=sqlx::query("SELECT id FROM memories WHERE scope=$1 AND id=ANY($2) ORDER BY id FOR SHARE").bind(scope.as_str()).bind(native).fetch_all(&mut **tx).await.map_err(|_|Error::Storage);
+            self.dependency_finish_rows(observation,&result);result?;
+        }
+        if !sources.is_empty() {
+            let observation=self.dependency_start("accept-source-locks",&(scope.as_str(),&sources))?;
+            self.count(1);
+            let result=sqlx::query("SELECT s.id FROM sources s JOIN source_records p ON p.scope=s.scope JOIN entities e ON e.scope=s.scope AND e.source_id=s.id AND e.id=p.entity_id WHERE s.scope=$1 AND s.id=ANY($2) ORDER BY s.id FOR SHARE OF s,p").bind(scope.as_str()).bind(sources).fetch_all(&mut **tx).await.map_err(|_| Error::Storage);
+            self.dependency_finish_rows(observation,&result);result?;
+        }
+        let current_observation = self.dependency_start("accept-current", &(scope.as_str(), id))?;
+        self.count(1);
+        let current: Result<bool, Error> = sqlx::query_scalar(concat!("SELECT NOT EXISTS(SELECT 1 FROM jsonb_array_elements(m.document->'evidence') x LEFT JOIN entities e ON e.scope=m.scope AND e.id=x->>'entity_id' LEFT JOIN sources s ON s.scope=e.scope AND s.id=e.source_id LEFT JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE NOT ", evidence_current!(), ") FROM memories m WHERE m.scope=$1 AND m.id=$2"))
+            .bind(scope.as_str()).bind(id).fetch_one(&mut **tx).await.map_err(|_| Error::Storage);
+        self.dependency_finish(current_observation, &current);
+        if !current? {
+            return Err(Error::Conflict);
+        }
+        Ok(())
+
+        }.await;
+        self.dependency_finish(observation, &result);
+        result
+    }
     async fn change_memory(
         &self,
         scope: Scope,
@@ -720,6 +783,9 @@ impl Store {
         input: Option<MemoryInput>,
         action: &str,
     ) -> Result<Value, Error> {
+        let observation =
+            self.dependency_start("change-memory", &(scope, id, revision, &input, action))?;
+        let result = async {
         native_id(id, "m_")?;
         revision_valid(revision)?;
         let title_from_body = input
@@ -778,6 +844,10 @@ impl Store {
             "correct" if old_status != "withdrawn" => old_status.as_str(),
             _ => return Err(Error::Conflict),
         };
+        if action == "accept" && input.is_none() {
+            self.revalidate_memory_evidence(&mut tx, scope, id, &document)
+                .await?;
+        }
         if let Some(input) = input {
             document = self
                 .prepare_memory(
@@ -812,6 +882,9 @@ impl Store {
         self.count(1);
         tx.commit().await.map_err(|_| Error::Storage)?;
         self.memory_detail(scope, id).await
+        }.await;
+        self.dependency_finish(observation, &result);
+        result
     }
     pub async fn memory_detail(&self, scope: Scope, id: &str) -> Result<Value, Error> {
         native_id(id, "m_")?;

@@ -1,18 +1,35 @@
 use meenseek_ontology::{
     api::{AppState, router},
     config::Config,
+    context::{ContextCommand, ContextOutput},
+    context_importer::{ContextReader, validate_paths, validate_store_id},
     domain::{Error, Scope},
     importer::GitReader,
     memory::{BrainCommand, MAX_INPUT_BYTES},
     store::Store,
-    vault_importer::{VaultReader, VaultScope},
 };
-use std::{io::Read, path::PathBuf, str::FromStr};
+use std::{
+    io::{Read, Write},
+    path::PathBuf,
+    str::FromStr,
+};
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("harness") {
+        if let Err(error) =
+            meenseek_ontology::native_harness::run(std::env::args().skip(2).collect()).await
+        {
+            eprintln!("{}", serde_json::json!({"error":error.to_string()}));
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Err(error) = run().await {
         if std::env::args().nth(1).as_deref() == Some("brain") {
             println!("{}", serde_json::json!({"error":error.to_string()}));
+        } else if std::env::args().nth(1).as_deref() == Some("context") {
+            eprintln!("{}", serde_json::json!({"error":error.to_string()}));
         } else {
             eprintln!("{error}");
         }
@@ -21,6 +38,47 @@ async fn main() {
 }
 async fn run() -> Result<(), Error> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().map(String::as_str) == Some("context") {
+        return context(&args).await;
+    }
+    if args.first().map(String::as_str) == Some("import-vault")
+        || args.iter().any(|v| v.starts_with("--vault-"))
+    {
+        eprintln!(
+            "Use import-context --store-id UUID --context-scope SCOPE --scope SCOPE --file PATH; legacy Vault filesystem transport is retired"
+        );
+        return Err(Error::Invalid);
+    }
+    let context_import = if args.first().map(String::as_str) == Some("import-context") {
+        let (mut store_id, mut context_scope, mut scope, mut paths) =
+            (None, None, None, Vec::new());
+        let mut iter = args.iter().skip(1);
+        while let Some(key) = iter.next() {
+            let value = iter.next().ok_or(Error::Invalid)?;
+            match key.as_str() {
+                "--store-id" if store_id.is_none() => {
+                    validate_store_id(value)?;
+                    store_id = Some(value.clone());
+                }
+                "--context-scope" if context_scope.is_none() => {
+                    context_scope = Some(value.parse::<meenseek_ontology::context::ContextScope>()?)
+                }
+                "--scope" if scope.is_none() => scope = Some(Scope::from_str(value)?),
+                "--file" => paths.push(value.clone()),
+                _ => return Err(Error::Invalid),
+            }
+        }
+        let context_scope = context_scope.ok_or(Error::Invalid)?;
+        validate_paths(&context_scope, &paths, true)?;
+        Some((
+            store_id.ok_or(Error::Invalid)?,
+            context_scope,
+            scope.ok_or(Error::Invalid)?,
+            paths,
+        ))
+    } else {
+        None
+    };
     let brain = if args.first().map(String::as_str) == Some("brain") {
         if args.len() != 1 {
             return Err(Error::Invalid);
@@ -37,9 +95,30 @@ async fn run() -> Result<(), Error> {
     } else {
         None
     };
+    let sync_path = if args.first().map(String::as_str) == Some("sync-once") {
+        if args.len() != 1 {
+            return Err(Error::Invalid);
+        }
+        let path = std::env::var_os("ONTOLOGY_SYNC_CONFIG")
+            .map(PathBuf::from)
+            .ok_or(Error::Invalid)?;
+        meenseek_ontology::sync::SyncConfig::load(&path).inspect_err(|_| {
+            eprintln!("Use bounded Git/Context sync sources; Context requires store_id, context_scope, scope and paths; legacy Vault filesystem sources are retired");
+        })?;
+        Some(path)
+    } else {
+        None
+    };
     let url = std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?;
     let store = Store::connect(&url).await?;
     store.initialize().await?;
+    if let Some((store_id, context_scope, scope, paths)) = context_import {
+        let count = ContextReader::new()
+            .import(&store, &store_id, &context_scope, &paths, scope)
+            .await?;
+        println!("Verify and import {count} registered Context documents");
+        return Ok(());
+    }
     if let Some(command) = brain {
         let value = store.brain(command).await?;
         let bytes = serde_json::to_vec(&value).map_err(|_| Error::Storage)?;
@@ -49,10 +128,7 @@ async fn run() -> Result<(), Error> {
         println!("{}", String::from_utf8(bytes).map_err(|_| Error::Storage)?);
         return Ok(());
     }
-    if args.first().map(String::as_str) == Some("sync-once") && args.len() == 1 {
-        let path = std::env::var_os("ONTOLOGY_SYNC_CONFIG")
-            .map(PathBuf::from)
-            .ok_or(Error::Invalid)?;
+    if let Some(path) = sync_path {
         let report = meenseek_ontology::sync::refresh(&store, &path).await?;
         println!(
             "{}",
@@ -100,45 +176,6 @@ async fn run() -> Result<(), Error> {
             println!("Verify and import {count} registered Git documents");
             Ok(())
         }
-        Some("import-vault") => {
-            let mut binary = None;
-            let mut root = None;
-            let mut vault_scope = None;
-            let mut scope = None;
-            let mut paths = Vec::new();
-            let mut iter = args.iter().skip(1);
-            while let Some(key) = iter.next() {
-                let value = iter.next().ok_or(Error::Invalid)?;
-                match key.as_str() {
-                    "--vault-binary" if binary.is_none() => binary = Some(PathBuf::from(value)),
-                    "--vault-root" if root.is_none() => root = Some(PathBuf::from(value)),
-                    "--vault-scope" if vault_scope.is_none() => {
-                        vault_scope = Some(VaultScope::from_str(value)?)
-                    }
-                    "--scope" if scope.is_none() => scope = Some(Scope::from_str(value)?),
-                    "--file" => paths.push(value.clone()),
-                    _ => return Err(Error::Invalid),
-                }
-            }
-            if paths.is_empty() {
-                return Err(Error::Invalid);
-            }
-            let allowed = std::env::var_os("ONTOLOGY_ALLOWED_VAULT_ROOTS")
-                .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
-                .ok_or(Error::Invalid)?;
-            let reader = VaultReader::new(binary.ok_or(Error::Invalid)?, allowed)?;
-            let count = reader
-                .import(
-                    &store,
-                    &root.ok_or(Error::Invalid)?,
-                    vault_scope.ok_or(Error::Invalid)?,
-                    &paths,
-                    scope.ok_or(Error::Invalid)?,
-                )
-                .await?;
-            println!("Verify and import {count} registered Vault documents");
-            Ok(())
-        }
         Some("serve") if args.len() == 1 => serve(store).await,
         None => serve(store).await,
         _ => Err(Error::Invalid),
@@ -172,4 +209,46 @@ async fn serve(store: Store) -> Result<(), Error> {
         let _ = task.await;
     }
     result
+}
+
+// Context inventory is offline. Other context operations require an explicitly initialized
+// database; a read or inventory command must never apply an additive migration implicitly.
+async fn context(args: &[String]) -> Result<(), Error> {
+    use meenseek_ontology::context::{MAX_COMMAND_BYTES, MAX_OUTPUT_BYTES, inventory};
+    if args.len() != 1 {
+        return Err(Error::Invalid);
+    }
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take((MAX_COMMAND_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::Invalid)?;
+    if bytes.len() > MAX_COMMAND_BYTES {
+        return Err(Error::Limit);
+    }
+    let command: ContextCommand = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
+    let result = if let ContextCommand::Inventory { root, scopes } = command {
+        ContextOutput::Json(
+            serde_json::to_value(inventory(&root, &scopes)?).map_err(|_| Error::Storage)?,
+        )
+    } else {
+        let url = std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?;
+        let store = Store::connect(&url).await?;
+        store.context(command).await?
+    };
+    let output = match result {
+        ContextOutput::Json(value) => {
+            let mut output = serde_json::to_vec(&value).map_err(|_| Error::Storage)?;
+            output.push(b'\n');
+            output
+        }
+        ContextOutput::Text(text) => text.into_bytes(),
+    };
+    if output.len() > MAX_OUTPUT_BYTES {
+        return Err(Error::Limit);
+    }
+    std::io::stdout()
+        .lock()
+        .write_all(&output)
+        .map_err(|_| Error::Storage)
 }

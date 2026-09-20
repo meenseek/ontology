@@ -1,18 +1,20 @@
-# meenseek 분신
+# 개인 통합 온톨로지
 
-현재 구현은 meenseek의 운영·판단·실험·개선에 필요한 지식을 저장·검색·갱신하는 분신의 기반이다. 원문 자료와 직접 기록을 함께 찾고, 저장된 관계를 3D 지식 지도에서 탐색하는 단일 사용자용 로컬 앱이다. 내용만 저장할 수 있으며 종류·묶음·연결은 필수가 아니다. Git에 커밋된 문서와 명시적으로 허용한 Vault 문서도 조회 사본으로 가져와 검색·분류·연결하고 기록의 근거로 선택할 수 있다.
+현재 구현은 사용자 한 명의 학습, 프로젝트, 개인 사업과 여러 조직의 맥락을 연결하는 개인 통합 온톨로지의 기반이다. meenseek은 그 안의 사업·활동 영역 하나다. 원문 자료와 직접 기록을 함께 찾고, 저장된 관계를 3D 지식 지도에서 탐색하는 단일 사용자용 로컬 앱이다. 내용만 저장할 수 있으며 종류·묶음·연결은 필수가 아니다. Git에 커밋된 문서와 명시적으로 허용한 native context 원문을 앱의 조회 사본으로 가져와 검색·분류·연결하고 기록의 근거로 선택할 수 있다.
 
-현재 새 기억, 범위별 기억 묶음, 분류·연결·이력은 PostgreSQL이 소유한다. Git·Vault 원본은 원래 도구에 남는다. 앱은 아직 Vault Markdown을 이전하거나 쓰지 않으며, 다른 대화를 자동으로 수집하거나 사실을 스스로 확정하지 않는다.
+지식·규칙의 Markdown 원문 bytes와 frontmatter, 첨부 파일, material identity와 revision·history는 PostgreSQL의 native store가 소유한다. 새 기억, 범위별 기억 묶음, 분류·연결·이력도 같은 DB에 저장한다. [Native 원문 CLI](#native-원문-보존과-조회)로 범위를 지정해 읽고 내보내며, 원문 변경은 검토된 Core 작업으로 반영한다. 검색·ontology·앱 조회 사본은 파생 projection이다. 다른 대화를 자동으로 수집하거나 사실을 스스로 확정하지 않는다.
 
 HTTP 서버와 PostgreSQL은 `127.0.0.1`에만 연결하며, 네트워크 배포나 OS 사용자 사이의 인증을 제공하지 않는다. 정제 작성과 독립 검토는 native Codex가 맡고, 앱은 근거 검증과 원자적 저장을 담당한다. 별도 유료 모델 API·벡터 DB·앱 내부 실행기는 사용하지 않는다. 제품 실험·측정·제작은 기존 도구가 소유하며, 실제 성과가 관측되기 전에는 개선이나 매출 달성을 주장하지 않는다.
 
-## Vault에서 온톨로지로 전환
+## 원문 소유권과 운영 경계
 
-목표는 Vault의 지식·규칙과 맥락 관리 책임을 온톨로지로 옮겨 해당 범위의 단일 기준 원본(SoT)으로 삼는 것이다.
+Native 원문은 같은 material identity 아래 revision과 history를 남긴다. 가져온 자료의 origin과 최초 원문 digest는 이후 수정에도 보존하며, native `Create`로 만든 자료를 외부에서 가져온 자료로 표시하지 않는다. 이전 filesystem 원본을 다시 가져와 native 수정을 덮어쓰지 않는다. Git 문서의 소유권은 원래 Git 저장소에 남고 앱에서는 조회 사본을 사용한다.
 
-1. 항목별로 원문·출처·적용 조건을 보존하고 저장·검색·범위 분리·검토·수락과 기존 참조를 전환한다. 검증된 항목은 온톨로지에서만 수정하고, 이전 위치의 안내는 참조 전환이 끝날 때까지 유지한다.
-2. 필요한 자료·기능의 이전 또는 대체가 모두 끝나고 남은 Vault 의존성이 없음을 확인한 뒤, Vault 원문·실행 파일·SQLite 없이 새 환경에서 대표 작업과 [백업 복원](#백업과-복원-확인)을 검증한다.
-3. 검증 후 이전된 자료의 중복 활성 원문·임시 사본, SQLite 색인, 대체된 Vault 코드·연결 설정·옛 경로 참조를 정리한다. Git 이력 보존을 확인한 뒤, 미이전 자료·미반영 변경·진행 중 작업이 없는 로컬 checkout까지 정리하면 전환 완료로 본다. 원격 저장소의 영구 삭제는 별도 승인 대상으로 둔다.
+공통 정책의 단일 기준은 기존 논리 경로 `vault/profile/preferences/context-vault-operating-model.md`와 `vault/profile/rules/agent-harness.md`다. 전자는 저장·직접 읽기·projection·개인정보 경계를, 후자는 검토된 쓰기·실행·복구를 소유한다. 논리 `vault/...`는 native scoped material을 가리키며 이전 checkout의 파일 읽기를 요구하지 않는다. 이 README는 설치된 runtime과 로컬 연결을 설명하는 adapter다.
+
+현재 로컬 store는 `e85a39eb-9e6a-4460-9bdb-6030d7ef69d9`다. 실제 연결의 `identity` 응답과 대조해 사용한다. Source 읽기는 아래 native CLI로 수행하며 HTTP 서버가 필요하지 않다. 저장·열람만으로 내용의 검증·수락, 사업 성장 또는 자율 학습 효과를 주장하지 않는다.
+
+이전 checkout은 Git history, 고유 로컬 작업과 미해결 복구 근거를 확인하는 역사 자료다. 현재 원문의 두 번째 소유자가 아니다. 원본 삭제·Git 정리·미수행 브라우저 시나리오의 완료는 각각의 실제 검증 근거가 있어야 하며, 이 문서 전환만으로 전체 정리가 끝났다고 보지 않는다.
 
 ## 실행과 종료
 
@@ -25,7 +27,7 @@ HTTP 서버와 PostgreSQL은 `127.0.0.1`에만 연결하며, 네트워크 배포
 기존 DB를 사용하는 버전 업그레이드에서는 새 서버를 시작하기 전에 다음 순서를 따른다.
 
 1. `Ctrl-C`로 기존 HTTP 서버와 자동 갱신을 종료하고, importer·`sync-once`·기억 CLI 등 모든 DB 쓰기를 중단한다. PostgreSQL은 실행 상태로 둔다.
-2. 아래 [백업과 복원 확인](#백업과-복원-확인)을 실행해 전체 백업을 보관하고, **별도의 빈 DB**에서 복원·업그레이드와 건수 보존을 확인한다.
+2. 아래 [백업과 복원 확인](#백업과-복원-확인)에 따라 현재 전체 백업을 보관하고, **별도의 빈 DB**에서 해당 업그레이드의 복원·데이터 보존을 확인한다. 건수와 내용 동일성 검증을 구분한다.
 3. 복원 확인이 성공한 뒤 다음 명령으로 운영 DB에 `init`을 실행한다. 적용된 baseline과 migration을 검사하고 아직 적용하지 않은 migration을 반영한다.
 
 ```bash
@@ -37,7 +39,9 @@ export DATABASE_URL="postgresql://ontology:${ONTOLOGY_DB_PASSWORD}@127.0.0.1:554
 cargo run --locked -- init
 ```
 
-운영 `init`까지 성공한 뒤 아래 앱 시작 명령으로 새 서버를 실행한다. 새 버전의 서버와 CLI도 migration을 검사·적용하므로 **업그레이드가 끝나기 전에 실행하지 않는다.** 어느 단계든 실패하면 DB 쓰기를 재개하기 전에 원인을 확인한다.
+운영 `init`까지 성공한 뒤 아래 앱 시작 명령으로 새 서버를 실행한다. 새 버전의 서버와 기존 앱 CLI도 migration을 검사·적용하므로 **업그레이드가 끝나기 전에 실행하지 않는다.** `context`와 `harness`는 schema를 자동 초기화하거나 migration을 적용하지 않는다. DB 없이 실행하는 `context inventory`를 제외한 native 작업에는 초기화·업그레이드한 DB가 필요하다. 어느 단계든 실패하면 DB 쓰기를 재개하기 전에 원인을 확인한다.
+
+이번 native 전환의 최초 전체 복원과 운영 DB 업그레이드는 이미 검증했다. 일반 문서 수정이나 연결 재개에 같은 restore·native 실험을 반복하지 않는다. 이후 schema 업그레이드는 그 변경에 필요한 보존 근거를 별도로 확인한다.
 
 ### 앱 시작과 종료
 
@@ -70,6 +74,21 @@ bash scripts/dev.sh
 docker compose stop postgres
 ```
 
+### 연결 상태와 복구
+
+앱 루트에서 `python3 scripts/connection.py check --target database`는 DB 상태를,
+`python3 scripts/connection.py check --target app`은 앱 상태를 실제로 확인한다.
+`alert`는 상태를 확인하고 연결 실패 시 설치된 Desktop launcher를 연다.
+
+Desktop의 `온톨로지 연결 복구.command`를 열면 macOS 상태 대화상자가 나온다. 연결 실패 시
+**연결 복구**를 선택할 수 있다. 기존 `repair`는 Docker·DB·schema를 확인하고 정상 앱이
+있으면 재사용한다. 필요하면 현재 실행 파일을 offline build한 뒤 그 Terminal에서 서버를
+실행한다. 앱 내부 지식 지도 버튼이 아니며, 이 안내가 실제 UI 클릭 검증을 뜻하지 않는다.
+
+Wrong store, missing source, pending apply와 아직 준비되지 않은 projection은 DB outage가
+아니다. 이런 오류를 연결 복구나 이전 자료 재import로 처리하지 않고 해당 source·작업
+상태를 확인한다.
+
 ## 3D 지식 지도에서 탐색하기
 
 첫 화면에서 `meenseek` 또는 `개인` 범위를 고르고 군집 전체나 선택한 군집 내부를 본다. 화면을 드래그해 회전하고 스크롤로 확대하며, 점을 선택하면 같은 화면의 상세 패널이 열린다. 카메라 자동 회전은 기본으로 꺼져 있으며 필요할 때 켜거나 멈출 수 있다. `전체 맞춤`과 `새로고침`도 이용할 수 있다. 목록에서는 같은 조회 자료를 키보드로 탐색하고 3D 지도로 돌아갈 수 있다. WebGL을 사용할 수 없을 때도 목록을 제공한다.
@@ -98,13 +117,25 @@ http://127.0.0.1:47831/?scope=meenseek&focus=실제_노드_ID
 
 지도는 새로고침, 앱 내 변경 저장, 범위·검색 전환, 숨겼던 화면 복귀 때 다시 조회하며 상시 폴링하지 않는다. 변경 강조는 내용·출처·관계의 실제 변경을 기준으로 하고, 검색·초점으로 반환 대상만 바뀌거나 마지막 확인 시각만 바뀐 경우는 제외한다. 지정 원문을 서버에서 자동으로 가져오는 기능은 아래 [지정한 원문 자동 갱신](#지정한-원문-자동-갱신) 설정을 따른다. 지도는 외부 CDN·폰트·유료 모델 호출 없이 로컬 번들로 실행된다.
 
+## 자료 보관함에서 원문 찾기
+
+상단 **자료 보관함**에서 보존된 원문 자료를 찾는다. 보관함의 범위 선택은 기존 지식 지도의 `meenseek`·`개인` 선택과 별개다.
+
+1. 프로필(`profile`), 개인(`personal`), 업무 공통(`work/common`) 또는 목록에 표시된 저장된 회사 범위 하나(`work/<회사 slug>`)를 직접 고른다. 여러 범위를 한꺼번에 조회하지 않는다.
+2. 검색어로 자료의 메타데이터를 검색하고 다음 페이지로 결과를 이어 본다. 원문 본문 전체를 검색하는 기능은 아니다.
+3. 결과 한 개를 선택해 원문 텍스트를 읽거나 원본 파일을 다운로드한다. 읽기는 최대 1 MiB의 UTF-8 원문을 실행하지 않는 일반 텍스트로 표시한다. 첨부 파일과 읽기 한도를 넘는 원문은 파일당 최대 16 MiB까지 원래 바이트 그대로 다운로드한다.
+
+범위를 바꾸면 선택한 자료를 비우고 이전 요청을 취소한다. 보관함을 열고 닫아도 **기록 남기기**에서 작성 중인 초안은 유지한다. 보존·열람은 자료의 내용을 지식으로 검증·수락하거나 규칙을 활성화하는 동작이 아니다.
+
+숨김 경로와 `journal`·`raw` 경로의 제한된 보관 자료는 일반 보관함에서 제외한다. 웹에서는 이 제한을 해제하거나 서버 경로를 지정해 파일을 내보낼 수 없다. 제한된 보관 자료의 명시적 조회·내보내기는 기존 [Native 원문 CLI](#native-원문-보존과-조회) 절차를 따른다.
+
 ## 기억 저장과 다시 찾기
 
 **기록 남기기**에서는 내용만 입력하면 된다. 종류는 일반 기록(`record`)이고, 제목을 비우면 본문의 첫 내용에서 Markdown 문법을 제외해 목록용 이름을 자동으로 정한다. 자동 이름은 읽기 화면에 반복하지 않으며, 직접 지정한 제목은 표시한다. 제목·종류·묶음·기간·근거는 추가 설정이다. 묶음은 선택할 때만 조회하며, 분류나 연결을 미리 만들지 않아도 저장·검색할 수 있다. 상단 지식 검색은 문서와 직접 기록을 함께 찾는다. 지도는 저장된 관계를 보여주는 파생 화면이고, 거리가 가깝다고 같은 대상이나 인과관계가 되는 것은 아니다. 읽기와 기록 당시 근거는 Markdown 미리보기를 사용한다. **관리**에서 정정·철회·삭제·이력을 확인하며, 관리 전환과 입력 중 검색·해제는 초안을 유지한다. UI·CLI·API는 같은 처리 규칙을 사용한다.
 
 문서 태그(`topics`)는 문서마다 선택적으로 최대 10개 붙일 수 있다. 기억은 같은 범위의 기억 묶음(`subjects`) 하나를 `subject_id`로 선택하거나 소속 없이 둘 수 있다. 문서 태그와 기억 묶음은 서로 별도의 분류다.
 
-에이전트나 터미널에서는 `bash scripts/brain.sh`에 JSON 객체 하나를 표준 입력으로 보낸다. 실행 중인 DB가 필요하며 HTTP 서버는 없어도 된다. 스크립트는 앱 루트로 이동하고, 명시한 `DATABASE_URL`이 없으면 신뢰하는 기존 로컬 `.env`의 `ONTOLOGY_DB_PASSWORD`로 DB 주소를 만든다. 미리 `cargo build --locked`로 만든 `target/debug/meenseek-ontology brain`을 실행하며, 표준 출력은 JSON이고 오류 시 종료 코드는 0이 아니다.
+에이전트나 터미널에서는 `bash scripts/brain.sh`에 JSON 객체 하나를 표준 입력으로 보낸다. 실행 중인 DB가 필요하며 HTTP 서버는 없어도 된다. 스크립트는 앱 루트로 이동하고, 명시한 `DATABASE_URL`이 없으면 신뢰하는 기존 로컬 `.env`의 `ONTOLOGY_DB_PASSWORD`로 DB 주소를 만든다. 비밀번호를 출력하거나 공유하지 않는다. 현재 `meenseek-ontology` 실행 파일을 사용하며 기본 subcommand는 `brain`이다. `context`와 `harness`를 지정하면 그 argv·stdin·종료 코드를 그대로 전달한다. Brain 응답은 JSON이고 오류 시 종료 코드는 0이 아니다.
 
 아래 내용은 **바꿔 쓸 예시**다. 실행하면 지정된 DB에 실제로 저장된다. 작은따옴표를 붙인 heredoc으로 JSON을 전달해 본문에 셸 변수나 명령 치환이 적용되지 않게 한다.
 
@@ -239,43 +270,130 @@ cargo run --locked -- import \
 
 동일한 저장소·경로·scope를 다시 가져오면 Git 원문 사본과 출처 확인 정보를 갱신한다. 사용자가 저장한 기억·분류·연결·이력은 유지한다. 고정 커밋에서 파일이 사라진 경우에는 부재를 기록하고 마지막 원문을 보존한다. 읽기 실패 시에도 마지막 성공 자료를 보존하며 화면에 확인 실패를 표시한다.
 
-## Vault 문서 가져오기
+## Native context를 앱으로 가져오기
 
-Vault 원본은 그대로 두고 공식 `read` 명령이 반환한 제목·본문을 앱의 조회 사본으로 저장한다. 먼저 기존 Vault 저장소에서 실행 파일을 빌드한다.
-
-```bash
-cd /Users/meenseek/Desktop/llm-context-vault
-cargo build --locked -p llm-context-vault
-```
-
-`--vault-binary`는 위에서 빌드한 실행 파일의 **절대 경로**, `--vault-root`와 `ONTOLOGY_ALLOWED_VAULT_ROOTS`는 **Vault 데이터 루트의 절대 경로**다. 아래 예시는 프로젝트 목적 문서 한 개만 가져온다.
+`import-context`는 설정된 native store의 scoped 원문에서 parsed/redacted 조회 사본을
+만든다. Native 원문을 새로 생성하거나 수정하는 명령이 아니다. 앱 루트에서 DB 연결을
+설정한 뒤 다음처럼 정확한 store와 source scope, 앱 scope, 파일을 지정한다.
 
 ```bash
-cd /Users/meenseek/Desktop/meenseek-ontology
-set -a
-source .env
-set +a
-export DATABASE_URL="postgresql://ontology:${ONTOLOGY_DB_PASSWORD}@127.0.0.1:55432/ontology"
-export ONTOLOGY_ALLOWED_VAULT_ROOTS="/Users/meenseek/Desktop/llm-context-vault/vault"
-cargo run --locked -- import-vault \
-  --vault-binary /Users/meenseek/Desktop/llm-context-vault/target/debug/llm-context-vault \
-  --vault-root /Users/meenseek/Desktop/llm-context-vault/vault \
-  --vault-scope personal \
-  --scope meenseek \
+cargo run --locked -- import-context \
+  --store-id e85a39eb-9e6a-4460-9bdb-6030d7ef69d9 \
+  --context-scope personal \
+  --scope personal \
   --file projects/meenseek-ontology.md
 ```
 
-`--vault-scope personal`은 읽을 위치인 `vault/personal`을 고르고, `--scope meenseek`는 앱에서 검색·분류·연결할 범위를 고른다. **Vault의 자료 범위와 앱의 분류 범위는 별개**다. `--file`은 Vault scope 안의 상대 Markdown 경로이므로 `personal/`을 붙이지 않는다. 앱에 표시되는 출처 경로는 `personal/projects/meenseek-ontology.md`다. 현재 초기 자료는 위 Git 조직 문서 2개와 이 Vault 프로젝트 목적 문서 1개다.
+`--context-scope personal`은 읽을 native 범위이고 `--scope personal`은 앱의
+검색·분류·연결 범위다. **원문 scope와 앱 scope는 별개**다. `--file`은 source scope 안의
+상대 Markdown 경로이므로 `personal/`을 붙이지 않는다. 위 예시는 개인 통합 온톨로지의
+목적 문서를 앱의 개인 범위에서 조회하도록 가져온다.
 
-Vault 루트는 허용 목록 항목과 정확히 일치해야 하며, 하위 디렉터리를 자동 허용하지 않는다. macOS에서 복수 루트는 `:`로 구분한다. 한 번에 중복 없는 Markdown 파일 1~100개를 `--file`로 각각 지정한다. 상위 경로·와일드카드는 받지 않으며 Vault `read`의 파일 크기·경로·민감 자료 제외 규칙도 적용된다.
+기존 `personal` 원문인 `business/decisions/meenseek-business-objective.md`는
+`--context-scope personal --scope meenseek`로 가져와 앱의 사업 범위에서 조회할 수 있다.
+이는 조회 사본의 분류이며 원문의 scope, material identity, revision·history를 옮기거나
+바꾸지 않는다.
 
-같은 Vault 루트·Vault scope·파일 경로·앱 scope로 다시 가져오면 조회 사본과 출처 확인 정보를 갱신하고, 사용자가 저장한 기억·분류·연결·이력은 유지한다. Vault 읽기가 실패하면 요청 전체의 새 사본을 반영하지 않고, 이미 등록된 요청 자료에는 확인 실패를 표시하며 마지막 성공 사본을 보존한다. **Vault 파일의 부재도 읽기 실패로 처리한다.** Git처럼 고정 커밋에서 확인한 부재 상태를 기록하지 않는다.
+한 번에 중복 없는 정확한 Markdown 경로 1~100개를 지정한다. 상위 경로나 와일드카드로
+권한을 넓히지 않는다. Store identity와 source의 경로·크기·제한 자료 경계를 검증하며,
+같은 store·context scope·경로·앱 scope의 재가져오기는 조회 사본과 출처 확인 정보를
+갱신하고 사용자 기억·분류·연결·이력을 보존한다.
 
-Vault가 민감값을 가린 제목·본문으로 조회 사본을 만들기 때문에 원문 SHA-256과 조회 내용 SHA-256은 구분한다. 원문 SHA-256은 가리기 전 파일의 해시이고, 조회 내용 SHA-256은 앱이 저장한 조회 사본의 해시다.
+Native revision이 바뀌면 stale consumer 근거는 갱신될 때까지 현재 근거로 쓰지 않는다.
+과거 기억에 보존된 근거는 계속 읽을 수 있으며 새 조회 사본으로 그 이력을 덮어쓰지 않는다.
+원문 부재는 삭제 명령이 아니다. 실패 시 요청 묶음의 새 사본을 반영하지 않고 마지막 성공
+사본을 보존한다. Pending apply나 잠금 오류는 해당 작업이 끝난 뒤 재시도할 수 있다.
+
+Raw 원문 SHA와 parsed/redacted 조회 내용 SHA는 다르다. 이전 filesystem 원본의
+재import를 native update 대신 사용하지 않는다.
+
+## Native 원문 보존과 조회
+
+`bash scripts/brain.sh context`에 JSON 객체 하나를 stdin으로 보낸다. 입력은 최대 32 KiB다.
+원문 bytes·frontmatter·첨부 파일과 immutable origin, 현재 revision·history는 PostgreSQL의
+native store에 보존한다. App consumer, 검색과 ontology projection은 이 원문에서 파생된다.
+
+범위는 `profile`, `personal`, `work/common`, `work/<회사 slug 하나>`다. `work`나
+`all`은 허용하지 않는다. `path`와 `paths`는 선택한 scope 안의 정확한 상대 경로이며,
+다른 범위의 자료를 함께 읽지 않는다. 아래 JSON은 각각 별도 요청이다.
+
+```json
+{"op":"identity"}
+```
+
+반환된 `store_id`를 위 로컬 설정과 대조한다. Identity 확인과 다음 read는 별개 호출이며
+하나의 transaction이라고 주장하지 않는다.
+
+```json
+{"op":"read","scope":"profile","path":"preferences/agent-operating-preferences.md","archive":false}
+```
+
+`read`는 UTF-8 원문 한 개를 최대 1 MiB까지 frontmatter 포함 그대로 출력한다. JSON wrapper나
+추가 newline이 없으며 종료 코드와 완전한 출력을 확인해야 한다. 실패·truncation은 policy를
+읽은 것이 아니다. Raw policy 읽기는 HTTP 서버나 파생 projection 초기화를 요구하지 않는다.
+
+`read-documents`는 source identity·digest를 가진 parsed/redacted 문서 조회이고 raw read와
+다른 상한을 적용한다. 그 body를 원문 SHA 입력으로 쓰거나 raw policy 읽기의 선행 조건으로
+두지 않는다. Metadata `search`는 본문 전체 검색이 아니며 exact path를 찾는 데 사용한다.
+
+```json
+{"op":"search","scope":"personal","query":"검색어","limit":20,"after":null}
+```
+
+다음 페이지에는 반환된 커서를 `after`로 보낸다. Derived `semantic-search`와
+`ontology-edges`를 쓰려면 허용 scope의 `projection-status`를 확인하고 필요할 때 실제
+`manifest_digest`로 `project`한 뒤 다시 확인한다. 준비되지 않은 projection은 DB 연결
+실패와 구분한다. 상세 source 읽기와 저장 경계는 기존 논리
+`vault/profile/preferences/context-vault-operating-model.md`가 소유한다.
+
+```json
+{"op":"export","scope":"personal","paths":["projects/meenseek-ontology.md"],"destination":"/absolute/path/to/new-directory","archive":false}
+```
+
+`export`는 아직 없는 대상 디렉터리에 선택한 파일을 원래 bytes 그대로 내보낸다.
+기존 대상 디렉터리, 안전하지 않은 경로, 심볼릭 링크·하드 링크 입력은 거부한다. 파일당
+최대 16 MiB를 보존하며 바이너리 첨부 파일도 이 경로로 내보낸다. 숨김 경로와
+`journal`·`raw`의 제한된 보관 자료는 기본 조회·검색·내보내기에서 제외한다. 승인된 정확한
+경로와 `archive:true`를 지정한 `read`·`export`로만 접근한다. 선택 material export는
+[전체 DB 백업](#백업과-복원-확인)이나 baseline LLM context export가 아니다.
+
+### 최초 자료 반입
+
+`inventory`·`import`·`verify`는 명시적으로 요청한 새 자료의 최초 반입 경계다. Native
+revision을 수정하는 수단으로 쓰지 않는다. `inventory`는 DB 없이 실행하고,
+`import`·`verify`는 초기화·업그레이드한 DB를 사용한다. 아래 root·scope·digest는 실제
+승인된 입력으로 바꾼다.
+
+```json
+{"op":"inventory","root":"/absolute/path/to/source-materials","scopes":["personal"]}
+```
+
+```json
+{"op":"import","root":"/absolute/path/to/source-materials","scopes":["personal"],"inventory_digest":"inventory가 반환한 정확한 digest"}
+```
+
+```json
+{"op":"verify","root":"/absolute/path/to/source-materials","scopes":["personal"]}
+```
+
+같은 inventory 재시도는 중복 저장하지 않는다. 기존 원문이나 저장 내용이 다르면 덮어쓰지
+않고 충돌로 닫힌다. `verify`는 해당 intake 원문과 저장된 digest를 대조한다. 한 번에 최대
+10,000개, 파일당 16 MiB, 합계 256 MiB를 가져오며 archive·출력 제한을 우회하지 않는다.
+
+### 검토된 원문 변경
+
+기존 `bash scripts/brain.sh harness`는 `meenseek-ontology harness`를 실행한다. 현재
+명령은 `resolve`, `prepare`, `replay`, `begin`, `advance`, `revise`, `evaluate`,
+`validate`, `apply`, `recover`, `attest-career`, `compose-career`다. 실제 owned source view,
+설정된 store identity와 작업 workspace를 `--context-view`, `--store-id`,
+`--workspace-root`로 결합한다. `context`와 `harness`는 schema를 자동 초기화하지 않는다.
+
+세부 역할·수락·적용·복구는 native `vault/profile/rules/agent-harness.md`가 단독 소유한다.
+Source view나 DB를 직접 고치거나 별도 protocol·version 축·호환 실행 경로를 만들지 않는다.
 
 ## 지정한 원문 자동 갱신
 
-자동 갱신은 `ONTOLOGY_SYNC_CONFIG`를 설정해야 켜진다. 추적되는 형식 예시는 `sync.example.json`이며 실제 설정 파일 `sync.local.json`은 Git에서 제외된다. 아래는 초기 자료인 **정확히 세 경로**만 갱신하는 설정이다. 앱 루트의 `sync.local.json`에 저장하고, 위 Vault 실행 파일 빌드를 먼저 마친다.
+자동 갱신은 `ONTOLOGY_SYNC_CONFIG`를 설정해야 켜진다. 추적되는 형식 예시는 `sync.example.json`이며 실제 설정 파일 `sync.local.json`은 Git에서 제외된다. 아래는 앱 조회용 **정확히 세 경로**만 갱신하는 설정이다. 설정된 native store identity를 확인한 뒤 앱 루트의 `sync.local.json`에서 사용한다.
 
 ```json
 {
@@ -289,11 +407,10 @@ Vault가 민감값을 가린 제목·본문으로 조회 사본을 만들기 때
       "paths": ["docs/repository-model.md", "profile/README.md"]
     },
     {
-      "kind": "vault",
-      "root": "/Users/meenseek/Desktop/llm-context-vault/vault",
+      "kind": "context",
+      "store_id": "e85a39eb-9e6a-4460-9bdb-6030d7ef69d9",
+      "context_scope": "personal",
       "scope": "meenseek",
-      "vault_scope": "personal",
-      "binary": "/Users/meenseek/Desktop/llm-context-vault/target/debug/llm-context-vault",
       "paths": ["projects/meenseek-ontology.md"]
     }
   ]
@@ -312,9 +429,9 @@ export ONTOLOGY_SYNC_CONFIG="$PWD/sync.local.json"
 cargo run --locked -- sync-once && bash scripts/dev.sh
 ```
 
-이 설정 자체가 자동 갱신의 유일한 허용 목록이다. 수동 가져오기의 `ONTOLOGY_ALLOWED_REPOSITORIES`·`ONTOLOGY_ALLOWED_VAULT_ROOTS`는 수동 명령에 계속 필요하지만 자동 갱신에는 쓰지 않는다. 디렉터리·와일드카드로 파일을 열거하거나 원격 저장소를 가져오지 않는다. Git은 매번 지정한 로컬 `ref`를 전체 커밋으로 확정하며 미커밋 텍스트는 읽지 않는다. 따라서 위 `HEAD` 설정은 초기 고정 커밋 이후의 로컬 커밋도 반영한다. Vault는 지정한 파일의 공식 `read`만 호출한다.
+이 설정 자체가 자동 갱신의 유일한 허용 목록이다. 수동 Git 가져오기의 `ONTOLOGY_ALLOWED_REPOSITORIES`는 수동 명령에 필요하며 자동 갱신에는 쓰지 않는다. Context 항목은 `kind`, `store_id`, `context_scope`, `scope`, `paths`로 지정한다. 디렉터리·와일드카드로 파일을 열거하거나 원격 저장소를 가져오지 않는다. Git은 매번 지정한 로컬 `ref`를 전체 커밋으로 확정하며 미커밋 텍스트는 읽지 않는다. 따라서 위 `HEAD` 설정은 초기 고정 커밋 이후의 로컬 커밋도 반영한다. Context는 해당 store와 정확한 scoped native source를 읽는다.
 
-설정은 최대 32 KiB, 원문 항목 1~8개, 전체 경로 100개, 간격 15~3,600초다. 읽기 전에 설정 전체를 검증하고, 잘못된 설정이면 자동 원문 읽기를 멈춘다. 파일을 고치면 다음 주기에 다시 읽는다. 실패는 설정 항목별로 격리되어 다른 항목은 계속 처리하며, 한 항목 안의 파일 묶음은 함께 반영한다. 실패한 조회 사본은 마지막 성공 내용을 보존하면서 확인 실패로 표시한다.
+설정은 최대 32 KiB, 원문 항목 1~8개, 전체 경로 100개, 간격 15~3,600초다. 읽기 전에 설정 전체를 검증하고, 잘못된 설정이면 자동 원문 읽기를 멈춘다. 파일을 고치면 다음 주기에 다시 읽는다. 실패는 설정 항목별로 격리되어 다른 항목은 계속 처리하며, 한 항목 안의 파일 묶음은 함께 반영한다. 실패한 조회 사본은 마지막 성공 내용을 보존하면서 확인 실패로 표시한다. Native source 부재를 삭제로 해석하지 않으며, pending apply·잠금 오류는 해당 작업이 끝난 뒤 재시도한다.
 
 서버의 `serve`가 실행되는 동안 시작 시 한 번, 이후 지정 간격마다 설정과 원문 상태를 다시 읽는다. 재시작·절전 복귀 뒤에는 현재 상태를 확인하고 놓친 횟수만큼 몰아서 실행하지 않는다. macOS 로그인 시 자동 실행되는 데몬은 아니다. 자동 갱신을 끄려면 서버를 종료하고 `ONTOLOGY_SYNC_CONFIG`를 환경과 `.env`에서 해제한 뒤 다시 시작한다.
 
@@ -322,7 +439,7 @@ cargo run --locked -- sync-once && bash scripts/dev.sh
 
 ## 화면에서 문서 읽고 분류·연결하기
 
-1. 지도나 목록에서 문서를 선택하면 Markdown 미리보기와 현재 분류·관련 자료를 읽는다. 선두 H1을 문서 제목으로 쓰며, 제목이 없을 때만 파일명을 대신 표시한다. Vault가 추가한 일반 텍스트 제목이 바로 뒤 본문 H1과 같으면 한 번만 표시한다. 본문 서식과 내부 제목 이동은 유지하며 원본과 저장된 조회 사본은 바꾸지 않는다. 같은 Markdown을 원시 텍스트로 중복 표시하지 않는다. 출처 부재·확인 실패 경고는 읽기 화면에도 남는다.
+1. 지도나 목록에서 문서를 선택하면 Markdown 미리보기와 현재 분류·관련 자료를 읽는다. 선두 H1을 문서 제목으로 쓰며, 제목이 없을 때만 파일명을 대신 표시한다. 조회 자료의 일반 텍스트 제목이 바로 뒤 본문 H1과 같으면 한 번만 표시한다. 본문 서식과 내부 제목 이동은 유지하며 원본과 저장된 조회 사본은 바꾸지 않는다. 같은 Markdown을 원시 텍스트로 중복 표시하지 않는다. 출처 부재·확인 실패 경고는 읽기 화면에도 남는다.
 2. **관리**에서 출처 경로·최근 확인 시각과 **다시 불러오기**를 이용한다. 확인 시각은 원본을 읽은 시점이며 내용 수정일이 아니다. 해시·내부 ID·원시 JSON은 화면에 표시하지 않으며 검증용 데이터는 그대로 보존한다.
 3. 분류가 필요하면 관리의 **분류 수정**을 연다. 처음 가져온 문서는 미분류다. `meenseek`은 여러 분야를 선택할 수 있고, 두 범위 모두 문서 태그를 한 줄에 하나씩 최대 10개 저장할 수 있다. 태그 하나는 최대 80자다. 분류를 저장하면 이전 값과 확인한 값이 이력에 남으며, 문서 원문을 저장하는 동작은 아니다.
 4. **자료 연결 수정**에서 같은 범위의 문서를 찾아 연결하거나 해제한다. 연결은 양쪽 문서에 표시된다. 관리의 **분류·연결 변경 이력**은 기록이 있을 때만 표시하며 최근 30건의 전후 값을 읽을 수 있다. 읽기와 관리를 전환해도 입력 중인 분류·연결 값은 유지된다.
@@ -333,11 +450,13 @@ cargo run --locked -- sync-once && bash scripts/dev.sh
 
 ## 백업과 복원 확인
 
-Git 원문 사본(`source_records`)은 해당 저장소와 커밋으로 다시 만들 수 있다. **기억·기억 묶음·분류·연결·이력은 앱이 소유하는 데이터이므로 원문 재가져오기로 복구할 수 없다.** PostgreSQL 전체 백업을 보관한다. 전체 `pg_dump`에는 `subjects`, `memory_creations`, `memories`, `memory_history`, `evidence_contents`, `evidence_snapshots`가 포함된다. 근거 원문 보존본도 앱 소유 데이터다.
+Git 원문 사본(`source_records`)은 해당 저장소와 커밋으로 다시 만들 수 있다. **Native 원문·첨부·revision·history와 앱 기억·기억 묶음·분류·연결·이력·과거 근거는 원문 재가져오기로 복구할 수 없다.** Custom 형식의 전체 `pg_dump`에 canonical originals, immutable origin, source/store binding, projection metadata, native apply 기록과 앱 memory/evidence를 함께 보존한다. SHA만으로 과거 bytes를 복원할 수 없으며, 선택 material export나 retired filesystem 사본은 전체 백업을 대신하지 않는다.
 
-Vault 조회 사본은 현재 파일을 다시 읽어 갱신할 수 있지만, 원문 SHA-256만으로 과거 파일 내용을 복원할 수 없다. 마지막 성공 조회 사본과 앱 기록은 PostgreSQL 백업으로 보관하고, Vault 원본은 Vault 쪽에서 별도로 보존한다.
+Pending native 효과는 대응하는 Core journals·attempts·heads와 함께 canonical `harness recover` 경계로 해결한다. DB dump만으로 미해결 Core evidence까지 재생성할 수 있다고 보지 않는다. 복구 확인에 필요한 미해결 근거는 해당 작업과 함께 보존한다.
 
-먼저 `Ctrl-C`로 HTTP 서버와 자동 갱신을 멈추고, 가져오기·`sync-once`·기억 CLI 등 DB 쓰기를 모두 중단한다. PostgreSQL은 실행 상태로 둔다. 다음 Bash 블록은 최종 전체 백업을 custom 형식으로 만들고 **별도의 빈 DB**에 복원한다. 문서·분류·연결·이력과 기억 관련 네 테이블의 건수를 비교하고, 복원 DB에 `init`으로 baseline 검사와 migration을 적용한 뒤 재확인한다. `002-second-brain.sql` 첫 적용 전에는 없는 네 테이블의 건수를 0으로 취급하고, 존재할 때만 실제 조회문을 실행한다. 모두 성공한 뒤 임시 복원 DB만 삭제한다. 운영 DB `ontology`에는 복원을 덮어쓰지 않는다.
+새 복원 확인이 필요한 업그레이드에서는 먼저 `Ctrl-C`로 HTTP 서버와 자동 갱신을 멈추고, 가져오기·`sync-once`·기억 CLI·Harness 등 DB 쓰기를 모두 중단한다. PostgreSQL은 실행 상태로 둔다. 다음 Bash 블록은 전체 custom 백업을 **이번 실행이 만든 별도의 빈 DB**에 복원하는 절차와 기존 주요 테이블의 건수 점검 예시다. 복원 DB에 `init`으로 baseline 검사와 migration을 적용하고, 같은 `init`을 한 번 더 실행해 반복 초기화도 확인한다. 운영 DB `ontology`에는 복원을 덮어쓰지 않는다.
+
+건수 비교는 내용 동일성의 증명이 아니다. 복원 전후의 전체 table·row·column을 결정적 순서로 해시해 원문 bytes·history·근거·binding의 동일성을 확인한다. Schema 업그레이드 뒤에는 새로 생긴 column 때문에 전체 row 표현이 달라질 수 있으므로 **업그레이드 전부터 있던 column 전체**의 값과 hash를 비교하고 새 migration 결과는 별도로 확인한다. 반복 `init` 전후에는 현재 전체 상태가 같아야 한다. 아래 건수 예시만 통과한 결과를 이 세 가지 검증의 완료로 보고하지 않는다.
 
 ```bash
 cd /Users/meenseek/Desktop/meenseek-ontology
@@ -364,7 +483,7 @@ SELECT CASE WHEN to_regclass('public.' || table_name) IS NULL
   THEN format('SELECT %L, 0::bigint;', table_name)
   ELSE format('SELECT %L, count(*) FROM public.%I;', table_name, table_name)
 END
-FROM (VALUES (1, 'subjects'), (2, 'memory_creations'), (3, 'memories'), (4, 'memory_history')) AS tables(position, table_name)
+FROM (VALUES (1, 'subjects'), (2, 'memory_creations'), (3, 'memories'), (4, 'memory_history'), (5, 'context_materials')) AS tables(position, table_name)
 ORDER BY position
 \gexec
 SQL
@@ -376,38 +495,54 @@ DATABASE_URL="postgresql://ontology:${ONTOLOGY_DB_PASSWORD}@127.0.0.1:55432/${re
   cargo run --locked -- init
 upgraded_counts="$(snapshot_counts "$restore_db")"
 test "$original_counts" = "$upgraded_counts"
+DATABASE_URL="postgresql://ontology:${ONTOLOGY_DB_PASSWORD}@127.0.0.1:55432/${restore_db}" \
+  cargo run --locked -- init
+repeated_counts="$(snapshot_counts "$restore_db")"
+test "$upgraded_counts" = "$repeated_counts"
 
-docker compose exec -T postgres dropdb -U ontology "$restore_db"
-printf '복원 확인 완료. 백업 보관: %s\n' "$backup"
+printf '건수 점검 완료. 전체 내용 검증을 위해 임시 DB 보존: %s\n백업: %s\n' "$restore_db" "$backup"
 BASH
 ```
 
-어느 단계든 실패하면 이후 단계는 중단된다. 출력된 백업 경로와 임시 복원 DB 이름으로 원인을 확인한다. 확인 후 정리할 대상은 그 실행에서 만든 `ontology_restore_…` DB뿐이다. `.dump`는 Git에서 제외되며, 백업 파일은 필요한 별도 보관 위치에도 보존한다. 건수 비교는 모든 내용의 동일성을 증명하는 검사는 아니다.
+어느 단계든 실패하면 이후 단계는 중단된다. 출력된 백업 경로와 임시 복원 DB 이름으로 원인을 확인한다. 위 예시는 건수 점검 뒤 임시 DB를 남긴다. 전체 내용과 업그레이드 보존 검증이 끝난 뒤에만 출력된 정확한 `ontology_restore_…` 이름을 확인해 다음으로 정리한다. 운영 DB나 다른 실행의 DB를 지정하지 않는다.
+
+```bash
+docker compose exec -T postgres dropdb -U ontology "ontology_restore_출력된_정확한_이름"
+```
+
+`.dump`는 Git에서 제외한다. 현재 복구용 백업과 명시적으로 보존해야 하는 예외만 남기며 같은 검증의 중복 백업을 계속 쌓지 않는다. 기존 백업을 대체할 때는 새 백업의 복구 근거와 필요한 보존 범위를 먼저 확인한다.
+
+이번 migration의 최초 full-row 복원 확인, 기존 column 보존을 포함한 운영 업그레이드와 반복 `init`은 이미 검증했다. 일반 문서 편집·source 읽기·연결 재개에서는 이 확인을 반복하거나 별도 영구 backup helper를 만들지 않는다.
 
 `schema/baseline.sql`은 최초 빈 DB 전용이다. 앱은 초기화 때 적용한 파일의 digest를 저장하고, 이후 다른 digest를 거부한다. 이후 스키마 변경은 `schema/migrations/`에 새 migration을 추가한다. `init`은 재실행 시에도 적용 기록을 검사하며, 이미 적용한 migration의 이름 또는 digest가 달라지면 거부한다. 이미 적용한 baseline과 migration SQL은 수정하거나 기존 DB에 수동으로 다시 적용하지 않는다. 불일치가 발생하면 DB에 적용된 버전의 소스와 백업을 먼저 확인한다.
 
-`003-evidence-snapshots.sql`은 기존 001·002가 적용된 운영 DB에 당시 근거 본문 보존을 추가하기 위한 변경이다. 최초 적용 전 확인한 데이터는 문서 3개·직접 기록 4개·이력 4개·묶음 1개다. 저장·삭제·당시 근거 읽기의 소유자는 이 저장소다. `evidence_contents`는 범위별 같은 바이트를 한 번 보존하고, `evidence_snapshots`는 기록 이력의 참조를 보존한다. Git·Vault 원문 삭제와 무관하게 유지되며 마지막 기록 참조를 삭제하면 해당 범위의 미사용 보존본도 삭제한다. 기존 이력은 현재 보유 원문의 ID와 digest가 일치할 때만 복원한다. 원래 메타데이터는 바꾸지 않고, 복원할 수 없는 이력은 본문 미보존으로 남긴다. 생성·정정과 상태 변경은 하나의 범위 잠금과 트랜잭션을 사용한다. 완료 기준은 기존 데이터·digest 보존, 반복 적용 안전성, 원문 변경·삭제·공유 보존본·범위 격리·동시 삭제/저장의 회귀 통과다. API나 문서에 별도 내부 버전 계층을 만들지 않는다.
+`003-evidence-snapshots.sql`은 기존 001·002가 적용된 운영 DB에 당시 근거 본문 보존을 추가하기 위한 변경이다. 최초 적용 전 확인한 데이터는 문서 3개·직접 기록 4개·이력 4개·묶음 1개다. 저장·삭제·당시 근거 읽기의 소유자는 이 저장소다. `evidence_contents`는 범위별 같은 바이트를 한 번 보존하고, `evidence_snapshots`는 기록 이력의 참조를 보존한다. Git·native 원문 삭제와 무관하게 유지되며 마지막 기록 참조를 삭제하면 해당 범위의 미사용 보존본도 삭제한다. 기존 이력은 현재 보유 원문의 ID와 digest가 일치할 때만 복원한다. 원래 메타데이터는 바꾸지 않고, 복원할 수 없는 이력은 본문 미보존으로 남긴다. 생성·정정과 상태 변경은 하나의 범위 잠금과 트랜잭션을 사용한다. 완료 기준은 기존 데이터·digest 보존, 반복 적용 안전성, 원문 변경·삭제·공유 보존본·범위 격리·동시 삭제/저장의 회귀 통과다. API나 문서에 별도 내부 버전 계층을 만들지 않는다.
 
 ## 개발 검증
 
-Vault CLI를 먼저 빌드하고, 검증에 사용할 실행 파일을 `TEST_VAULT_BINARY`에 지정한다.
+현재 Rust workspace와 native Core, native consumer, Web 검증은 기존 스크립트가 담당한다.
 
 ```bash
-cd /Users/meenseek/Desktop/llm-context-vault
-cargo build --locked -p llm-context-vault
 cd /Users/meenseek/Desktop/meenseek-ontology
-export TEST_VAULT_BINARY="/Users/meenseek/Desktop/llm-context-vault/target/debug/llm-context-vault"
 bash scripts/verify.sh
 ```
 
-`TEST_VAULT_BINARY`가 없거나 절대 경로의 실행 가능한 파일이 아니면 임시 DB 컨테이너를 만들기 전에 실패한다.
+이 스크립트는 소유한 임시 PostgreSQL 컨테이너와 저장 공간을 만들고 종료 시 제거한다.
+앱 DB와 `meenseek-ontology-data` 볼륨을 사용하지 않는다. 현재 workspace의 Rust
+형식·컴파일·Clippy·테스트·의존성 보안 점검, pnpm 잠금 파일 기준 설치와 웹 테스트·타입
+검사·빌드·운영 의존성 보안 점검을 수행한다. 기존 audit와 install 정책을 유지한다.
 
-이 스크립트는 새 임시 PostgreSQL 컨테이너와 임시 저장 공간을 만들고 종료 시 제거한다. 앱 DB와 `meenseek-ontology-data` 볼륨은 사용하지 않는다. Rust 형식·컴파일·Clippy·테스트·의존성 보안 점검과 pnpm 잠금 파일 기준 설치, 웹 테스트(`pnpm --dir web test`, Node 내장 테스트)·타입 검사·빌드·운영 의존성 보안 점검을 수행한다.
+검증 범위는 native Core의 source/version binding·역할·적용·복구 경계, native context
+consumer와 갱신, Git 커밋 가져오기와 실패·부재 처리, 사용자 기록 보존, 검색·분류·연결·이력,
+기억 상태·정정·중복 방지·근거 보존, 자동 갱신과 실패 격리, scope·변경 충돌, 로컬 요청 보호와
+입출력 제한이다. 그래프 테스트(`tests/graph.rs`, `web/src/graph.test.ts`)는 범위·근거
+최신성·반환 상한·단일 SQL 호출·검색·초점, 군집·입력 순열·고립점과 상태 변경을 다룬다.
 
-테스트 범위는 Git 커밋 가져오기와 실패·부재 처리, 공식 Vault CLI 읽기 연동, 재가져오기 후 사용자 기록 보존, 검색·분류·연결·이력, 기억의 상태·정정·중복 방지·근거 보존과 통합 검색, 자동 갱신과 실패 격리, scope 격리, 변경 충돌, API 로컬 요청 보호와 입력·응답 제한이다. 그래프 테스트(`tests/graph.rs`, `web/src/graph.test.ts`)는 범위·근거 최신성·반환 상한·단일 SQL 호출·검색·초점, 밀집 군집과 연결 다리·입력 순열·고립점, 상태·삭제·검색 창 변경을 다룬다. 웹 테스트와 빌드는 브라우저 전체 동작 시험을 대신하지 않으며, 위 백업·복원 확인은 `verify.sh`와 별도로 실행한다.
+이번 문서 전환은 이미 수락된 native 검증과 Web build 근거를 재사용한다. 문서 수정만으로
+build·테스트·restore를 다시 실행하거나 성공을 새로 주장하지 않는다. 웹 테스트와 빌드는
+브라우저 전체 동작 시험을 대신하지 않으며, 아래 미수행 화면 시나리오는 별도 검증으로 남는다.
 
-
-읽기·관리·저장 흐름의 호출 수를 바꿨다면 개발 서버에서 두 브라우저 검증 페이지도 실행한다.
+읽기·관리·저장 흐름의 호출 수나 자료 보관함 흐름을 바꿨다면 개발 서버에서 아래 브라우저 검증 페이지도 실행한다.
 
 ```bash
 pnpm --dir web exec vite --host 127.0.0.1 --port 47832 --strictPort
@@ -415,5 +550,6 @@ pnpm --dir web exec vite --host 127.0.0.1 --port 47832 --strictPort
 
 - `http://127.0.0.1:47832/reading-check.html`: 실제 Memory·Documents 컴포넌트에서 0·1·20개 자료의 필요한 시점 조회, 관리·탭 전환 시 입력 보존, 이력 페이지, 실패·취소·명시 재시도를 검사한다.
 - `http://127.0.0.1:47832/app-reading-check.html`: 실제 App에서 기억 1·20개 조건의 초기 조회, 생성·정정 응답 재사용, 범위 이동, 명시 새로고침, 갱신 상태 조회를 검사한다.
+- `http://127.0.0.1:47832/context-check.html`: 실제 자료 보관함과 App 컴포넌트에서 범위 전환, 지연 응답·요청 취소, 명시적 재시도와 기록 초안 보존을 확인하도록 준비한 페이지다. 페이지 제공은 검증 통과를 뜻하지 않으며 실제 화면 시나리오 검증은 아직 남아 있다.
 
-두 페이지는 합성 응답만 사용하며 API를 실제 서버로 전달하지 않는다. 호출 시도와 성공한 JSON 응답 바이트를 기록하고 상한을 검사한다. 측정 바이트는 HTTP 전송량이 아니다. DB 호출 수와 응답 크기는 `tests/second_brain.rs`의 `detail_and_subject_queries_stay_bounded_across_cardinalities`가 별도 임시 DB에서 검사한다. 브라우저 검증은 `verify.sh`에 자동 포함되지 않으며 두 페이지의 PASS와 실제 앱 화면을 함께 확인한다.
+`reading-check.html`과 `app-reading-check.html`은 합성 응답만 사용하며 API를 실제 서버로 전달하지 않는다. 호출 시도와 성공한 JSON 응답 바이트를 기록하고 상한을 검사한다. 측정 바이트는 HTTP 전송량이 아니다. DB 호출 수와 응답 크기는 `tests/second_brain.rs`의 `detail_and_subject_queries_stay_bounded_across_cardinalities`가 별도 임시 DB에서 검사한다. 브라우저 검증은 `verify.sh`에 자동 포함되지 않으며 각 페이지의 PASS와 실제 앱 화면을 함께 확인한다.

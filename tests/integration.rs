@@ -23,7 +23,6 @@ fn record(index: usize, scope: Scope) -> ImportedRecord {
     }
 }
 async fn store() -> Store {
-    test_vault_binary();
     let url = std::env::var("TEST_DATABASE_URL").expect(
         "TEST_DATABASE_URL must point to an explicitly created temporary PostgreSQL database",
     );
@@ -677,21 +676,6 @@ async fn api_protection_contract() {
     );
 }
 
-fn test_vault_binary() -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = std::path::PathBuf::from(
-        std::env::var_os("TEST_VAULT_BINARY")
-            .expect("TEST_VAULT_BINARY must name the built Vault executable by absolute path"),
-    );
-    assert!(
-        path.is_absolute()
-            && std::fs::metadata(&path)
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0),
-        "TEST_VAULT_BINARY must be an executable absolute file path"
-    );
-    path
-}
-
 async fn reset_schema(store: &Store) {
     // store() has checked the explicitly supplied loopback ontology_test_ database.
     sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
@@ -847,443 +831,740 @@ async fn migration_preserves_baseline_contract() {
     assert_eq!(schema_snapshot(&store).await, upgraded_schema);
 }
 
-fn vault_document(scope: &str, number: usize) -> String {
-    format!(
-        "---\ntitle: 합성 문서 {number}\nscope: {scope}\nexport: false\n---\n\n자료 연결 합성 {number}\napi_key: synthetic-secret-{number}\n"
+#[tokio::test]
+async fn vault_import_contract() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_materials,context_apply_batches").execute(store.pool()).await.expect("context reset");
+    let temp = tempfile::tempdir().expect("fixture");
+    let root = temp.path().canonicalize().expect("root");
+    std::fs::create_dir_all(root.join("personal")).expect("scope");
+    std::fs::write(
+        root.join("personal/one.md"),
+        "---\ntitle: One\nexport: false\n---\n\nBody\n",
     )
+    .expect("body");
+    let scopes = vec!["personal".parse().expect("scope")];
+    let inventory = meenseek_ontology::context::inventory(&root, &scopes).expect("inventory");
+    store
+        .import_context(&root, &scopes, &inventory.inventory_digest)
+        .await
+        .expect("original bytes");
+    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        .fetch_one(store.pool())
+        .await
+        .expect("store id");
+    std::fs::remove_dir_all(&root).expect("no old transport");
+    let mut reader = meenseek_ontology::context_importer::ContextReader::new();
+    assert_eq!(
+        reader
+            .import(
+                &store,
+                &store_id,
+                &scopes[0],
+                &["one.md".into()],
+                Scope::Personal
+            )
+            .await
+            .expect("canonical consumer"),
+        1
+    );
+    assert_eq!(reader.body_calls, 1);
 }
 
 #[tokio::test]
-async fn vault_import_contract() {
-    use meenseek_ontology::vault_importer::{VaultReader, VaultScope, identity};
+async fn context_http_read_download_scope_and_protection_contract() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use meenseek_ontology::{
+        api::{AppState, router},
+        config::Config,
+        context::{ContextScope, MAX_FILE_BYTES, MAX_READ_BYTES, inventory},
+    };
+    use tower::ServiceExt;
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    let temp = tempfile::tempdir().expect("synthetic Vault only");
+    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_materials, context_apply_batches")
+        .execute(store.pool())
+        .await
+        .expect("isolated original fixtures");
+    let source = tempfile::tempdir().expect("synthetic originals");
+    let root = source
+        .path()
+        .canonicalize()
+        .expect("canonical synthetic root");
+    let scopes: Vec<ContextScope> = ["personal", "work/alpha", "work/beta", "work/restricted"]
+        .into_iter()
+        .map(|value| value.parse().expect("synthetic scope"))
+        .collect();
+    let text = "\u{feff}---\r\ntitle: 합성\r\n---\r\n<script>alert('fixture')</script>\n"
+        .as_bytes()
+        .to_vec();
+    let binary = vec![0xff; MAX_FILE_BYTES];
+    let files = [
+        ("personal/한글 \";문서.html", text.clone()),
+        ("personal/empty.txt", vec![]),
+        ("personal/escaped.txt", vec![0; MAX_READ_BYTES]),
+        ("personal/large.txt", vec![b'x'; MAX_READ_BYTES + 1]),
+        ("personal/full.bin", binary.clone()),
+        ("personal/small.bin", vec![255, 128, 0]),
+        ("personal/journal/private.md", b"private-marker".to_vec()),
+        ("personal/raw/data", b"private-marker".to_vec()),
+        ("personal/.hidden", b"private-marker".to_vec()),
+        ("work/alpha/same.md", b"alpha original".to_vec()),
+        ("work/beta/same.md", b"beta original".to_vec()),
+        (
+            "work/restricted/journal/only.md",
+            b"private-marker".to_vec(),
+        ),
+    ];
+    for (path, bytes) in &files {
+        let target = root.join(path);
+        std::fs::create_dir_all(target.parent().expect("synthetic parent")).expect("fixture dirs");
+        std::fs::write(target, bytes).expect("synthetic bytes");
+    }
+    let manifest = inventory(&root, &scopes).expect("scoped fixture inventory");
+    store
+        .import_context(&root, &scopes, &manifest.inventory_digest)
+        .await
+        .expect("fixture originals");
+    let app = router(AppState::new(
+        store.clone(),
+        Config {
+            address: "127.0.0.1:47831".parse().expect("loopback"),
+            web_dist: "web/dist".into(),
+        },
+    ));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/session")
+                .header("host", "127.0.0.1:47831")
+                .body(Body::empty())
+                .expect("session request"),
+        )
+        .await
+        .expect("session");
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .expect("cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_owned();
+    let session: Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("session body")
+            .to_bytes(),
+    )
+    .expect("session JSON");
+    let csrf = session["csrf"].as_str().expect("CSRF token");
+    let get = |path: &str| {
+        Request::builder()
+            .uri(path)
+            .header("host", "127.0.0.1:47831")
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .expect("read request")
+    };
+    let before = store.calls();
+    let response = app
+        .clone()
+        .oneshot(get("/api/context/scopes"))
+        .await
+        .expect("discovery");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("metadata")
+        .to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).expect("scope JSON"),
+        serde_json::json!({"scopes":["personal","work/alpha","work/beta"]})
+    );
+    assert_eq!(store.calls() - before, 5);
+    assert!(bytes.len() < 1024);
+    // Cardinality affects only bounded metadata transfer; a page never prefetches its bodies.
+    for size in [0usize, 1, 25] {
+        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_materials, context_apply_batches")
+            .execute(store.pool())
+            .await
+            .expect("reset complete isolated context fixture");
+        store
+            .import_context(&root, &scopes, &manifest.inventory_digest)
+            .await
+            .expect("restore same visible imported dataset");
+        for number in 0..size {
+            let path = format!("{number:02}.md");
+            sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('profile',$1,'/synthetic',$2,$3,$3,$4,7,false,'fixture')")
+                .bind(&path).bind(format!("profile/{path}")).bind(digest(b"fixture")).bind(b"fixture".as_slice()).execute(store.pool()).await.expect("synthetic metadata cardinality");
+        }
+        let before = store.calls();
+        let response = app
+            .clone()
+            .oneshot(get("/api/context?scope=profile&q=fixture&limit=20"))
+            .await
+            .expect("metadata page");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(store.calls() - before, 5);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("page")
+            .to_bytes();
+        assert!(bytes.len() <= 512 + size.min(20) * 512);
+        let page: Value = serde_json::from_slice(&bytes).expect("page JSON");
+        assert_eq!(page["items"].as_array().expect("items").len(), size.min(20));
+        for item in page["items"].as_array().expect("metadata only") {
+            for key in ["content", "search_text", "source_root", "restricted"] {
+                assert!(item.get(key).is_none(), "omit {key}");
+            }
+        }
+        if size > 20 {
+            assert_eq!(page["next_after"], "19.md");
+            let before = store.calls();
+            let response = app
+                .clone()
+                .oneshot(get(
+                    "/api/context?scope=profile&q=fixture&limit=20&after=19.md",
+                ))
+                .await
+                .expect("next page");
+            let page: Value = serde_json::from_slice(
+                &response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("next body")
+                    .to_bytes(),
+            )
+            .expect("next JSON");
+            assert_eq!(store.calls() - before, 5);
+            assert_eq!(page["items"].as_array().expect("remaining").len(), 5);
+            assert!(page["next_after"].is_null());
+        }
+    }
+    let encoded = "%ED%95%9C%EA%B8%80%20%22%3B%EB%AC%B8%EC%84%9C.html";
+    for (path, expected) in [
+        (
+            format!("/api/context/read?scope=personal&path={encoded}"),
+            text.clone(),
+        ),
+        (
+            "/api/context/read?scope=personal&path=empty.txt".into(),
+            vec![],
+        ),
+        (
+            "/api/context/read?scope=personal&path=escaped.txt".into(),
+            vec![0; MAX_READ_BYTES],
+        ),
+        (
+            "/api/context/read?scope=work/alpha&path=same.md".into(),
+            b"alpha original".to_vec(),
+        ),
+        (
+            "/api/context/read?scope=work/beta&path=same.md".into(),
+            b"beta original".to_vec(),
+        ),
+    ] {
+        let before = store.calls();
+        let response = app
+            .clone()
+            .oneshot(get(&path))
+            .await
+            .expect("selected text");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(store.calls() - before, 5);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("text body")
+            .to_bytes();
+        assert!(bytes.len() <= 6 * MAX_READ_BYTES + 16 * 1024);
+        let result: Value = serde_json::from_slice(&bytes).expect("selected JSON");
+        assert_eq!(
+            result["content"]
+                .as_str()
+                .expect("UTF-8 original")
+                .as_bytes(),
+            expected
+        );
+        assert_eq!(result["metadata"]["content_digest"], digest(&expected));
+        assert_eq!(result["metadata"]["source_digest"], digest(&expected));
+        assert!(result["metadata"].get("source_root").is_none());
+    }
+    for (path, expected) in [(encoded, &text), ("full.bin", &binary)] {
+        let before = store.calls();
+        let response = app
+            .clone()
+            .oneshot(get(&format!(
+                "/api/context/download?scope=personal&path={path}"
+            )))
+            .await
+            .expect("attachment");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(store.calls() - before, 5);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/octet-stream"
+        );
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            response.headers()["content-length"]
+                .to_str()
+                .expect("length"),
+            expected.len().to_string()
+        );
+        let disposition = response.headers()["content-disposition"]
+            .to_str()
+            .expect("safe attachment header");
+        assert!(disposition.starts_with("attachment; filename=\""));
+        assert!(disposition.contains("filename*=UTF-8''"));
+        assert!(!disposition.contains(root.to_str().expect("temporary root")));
+        if path == encoded {
+            assert!(
+                disposition
+                    .ends_with("%ED%95%9C%EA%B8%80%20%22%3B%EB%AC%B8%EC%84%9C%2E%68%74%6D%6C")
+            );
+        }
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("original bytes")
+            .to_bytes();
+        assert_eq!(digest(&bytes), digest(expected));
+        assert!(bytes.len() <= MAX_FILE_BYTES);
+    }
+    for (path, status, calls) in [
+        (
+            "/api/context/read?scope=personal&path=large.txt",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            5,
+        ),
+        (
+            "/api/context/read?scope=personal&path=full.bin",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            5,
+        ),
+        (
+            "/api/context/read?scope=personal&path=absent",
+            StatusCode::NOT_FOUND,
+            5,
+        ),
+        (
+            "/api/context/download?scope=work/alpha&path=full.bin",
+            StatusCode::NOT_FOUND,
+            5,
+        ),
+        (
+            "/api/context/read?scope=personal&path=journal/private.md",
+            StatusCode::NOT_FOUND,
+            4,
+        ),
+        (
+            "/api/context/download?scope=personal&path=raw/data",
+            StatusCode::NOT_FOUND,
+            4,
+        ),
+        (
+            "/api/context/download?scope=personal&path=.hidden",
+            StatusCode::NOT_FOUND,
+            4,
+        ),
+        (
+            "/api/context/download?scope=personal&path=%2E%2E/x",
+            StatusCode::BAD_REQUEST,
+            0,
+        ),
+        (
+            "/api/context/read?scope=work&path=same.md",
+            StatusCode::BAD_REQUEST,
+            0,
+        ),
+        (
+            "/api/context/read?scope=personal&path=empty.txt&archive=true",
+            StatusCode::BAD_REQUEST,
+            0,
+        ),
+        (
+            "/api/context/read?scope=personal&scope=work/alpha&path=empty.txt",
+            StatusCode::BAD_REQUEST,
+            0,
+        ),
+        (
+            "/api/context/download?scope=personal&path=empty.txt&destination=/tmp/out",
+            StatusCode::BAD_REQUEST,
+            0,
+        ),
+        (
+            "/api/context?scope=personal&limit=21",
+            StatusCode::BAD_REQUEST,
+            0,
+        ),
+        (
+            "/api/context?scope=personal&limit=0",
+            StatusCode::BAD_REQUEST,
+            0,
+        ),
+        (
+            "/api/context?scope=personal&after=../x",
+            StatusCode::BAD_REQUEST,
+            0,
+        ),
+        (
+            "/api/context/scopes?archive=true",
+            StatusCode::BAD_REQUEST,
+            0,
+        ),
+        ("/api/context/import", StatusCode::NOT_FOUND, 0),
+        ("/api/context/export", StatusCode::NOT_FOUND, 0),
+    ] {
+        let before = store.calls();
+        let response = app
+            .clone()
+            .oneshot(get(path))
+            .await
+            .expect("bounded failure");
+        assert_eq!(response.status(), status, "{path}");
+        assert_eq!(store.calls() - before, calls, "no failure retry: {path}");
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("small error")
+            .to_bytes();
+        assert!(bytes.len() < 256);
+        assert!(!String::from_utf8_lossy(&bytes).contains("private-marker"));
+    }
+    for path in [
+        "/api/context/read?scope=personal&path=small.bin".to_owned(),
+        "/api/context?scope=personal&q=%0A".to_owned(),
+        format!("/api/context?scope=personal&q={}", "x".repeat(241)),
+        format!(
+            "/api/context/download?scope=personal&path={}",
+            "x".repeat(1025)
+        ),
+    ] {
+        let before = store.calls();
+        let response = app
+            .clone()
+            .oneshot(get(&path))
+            .await
+            .expect("bounded invalid input");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            store.calls() - before,
+            5 * u64::from(path.ends_with("small.bin"))
+        );
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .expect("error body")
+                .to_bytes()
+                .len()
+                < 256
+        );
+    }
+    let response = app
+        .clone()
+        .oneshot(get("/api/context?scope=personal&q=private-marker"))
+        .await
+        .expect("restricted search");
+    let page: Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("metadata body")
+            .to_bytes(),
+    )
+    .expect("metadata JSON");
+    assert!(
+        page["items"]
+            .as_array()
+            .expect("restricted entries excluded")
+            .is_empty()
+    );
+    // Synthetic persistence records exercise the real read-only HTTP boundary.
+    let apply: String = sqlx::query_scalar("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-http',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s RETURNING apply_id::text")
+        .fetch_one(store.pool()).await.expect("synthetic pending HTTP fixture");
+    sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,imported_at,origin_kind,content,content_digest,byte_len,restricted,search_text,last_apply_id) VALUES('personal','native.md',NULL,'personal/native.md',NULL,NULL,'native',$1,$2,6,false,'native',$3::uuid)")
+        .bind(b"native".as_slice()).bind(digest(b"native")).bind(&apply).execute(store.pool()).await.expect("native fixture before synthetic commit");
+    for state in ["pending", "committed"] {
+        if state == "committed" {
+            sqlx::query("UPDATE context_apply_batches SET state='committed',actual_batch_id=expected_batch_id,actual_journal_locator=expected_journal_locator,commit_receipt='{\"synthetic\":true}' WHERE apply_id=$1::uuid")
+                .bind(&apply).execute(store.pool()).await.expect("synthetic committed fixture");
+        }
+        for endpoint in [
+            "/api/context/scopes",
+            "/api/context?scope=personal",
+            "/api/context/read?scope=personal&path=native.md",
+            "/api/context/download?scope=personal&path=native.md",
+            "/api/context/read?scope=personal&path=absent",
+            "/api/context/download?scope=personal&path=absent",
+            "/api/context/read?scope=personal&path=journal/private.md",
+            "/api/context/download?scope=personal&path=raw/data",
+        ] {
+            let before = store.calls();
+            let response = app
+                .clone()
+                .oneshot(get(endpoint))
+                .await
+                .expect("pending read boundary");
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "{state}: {endpoint}"
+            );
+            assert_eq!(store.calls() - before, 4, "no data query while unresolved");
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .expect("bounded pending error")
+                .to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).expect("error JSON"),
+                serde_json::json!({"error":Error::ContextPending.to_string()})
+            );
+        }
+    }
+    sqlx::query("UPDATE context_apply_batches SET state='finalized',final_core_receipt_digest=repeat('c',64) WHERE apply_id=$1::uuid")
+        .bind(&apply).execute(store.pool()).await.expect("synthetic final fixture");
+    let response = app
+        .clone()
+        .oneshot(get("/api/context/read?scope=personal&path=native.md"))
+        .await
+        .expect("native read");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("native response")
+        .to_bytes();
+    let native: Value = serde_json::from_slice(&bytes).expect("native JSON");
+    assert_eq!(native["content"], "native");
+    assert_eq!(native["metadata"]["origin_kind"], "native");
+    assert_eq!(native["metadata"]["revision"], 1);
+    assert!(
+        native["metadata"]["material_id"]
+            .as_str()
+            .is_some_and(|id| id.len() == 36)
+    );
+    assert!(native["metadata"]["source_digest"].is_null());
+    assert!(
+        native["metadata"].get("source_root").is_none(),
+        "HTTP still omits server paths"
+    );
+    for endpoint in [
+        "/api/context/scopes",
+        "/api/context?scope=personal",
+        "/api/context/read?scope=personal&path=empty.txt",
+        "/api/context/download?scope=personal&path=empty.txt",
+    ] {
+        for scenario in 0..7 {
+            let mut builder = Request::builder().uri(endpoint).header(
+                "host",
+                if scenario == 0 {
+                    "evil.invalid"
+                } else {
+                    "127.0.0.1:47831"
+                },
+            );
+            if scenario != 1 {
+                builder = builder.header("cookie", &cookie);
+            }
+            match scenario {
+                2 => builder = builder.header("origin", "http://evil.invalid"),
+                3 => builder = builder.header("sec-fetch-site", "cross-site"),
+                4 => builder = builder.header("host", "127.0.0.1:47831"),
+                5 => {
+                    builder = builder
+                        .header("origin", "http://127.0.0.1:47831")
+                        .header("origin", "http://127.0.0.1:47831")
+                }
+                6 => builder = builder.header("cookie", &cookie),
+                _ => {}
+            }
+            let before = store.calls();
+            let response = app
+                .clone()
+                .oneshot(builder.body(Body::empty()).expect("hostile read"))
+                .await
+                .expect("protection");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{endpoint}: {scenario}"
+            );
+            assert_eq!(store.calls() - before, 0);
+        }
+        // No write command is routed, even with a valid write session.
+        for authorized in [false, true] {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(endpoint)
+                .header("host", "127.0.0.1:47831")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json");
+            if authorized {
+                builder = builder
+                    .header("origin", "http://127.0.0.1:47831")
+                    .header("x-csrf-token", csrf);
+            }
+            let before = store.calls();
+            let response = app
+                .clone()
+                .oneshot(
+                    builder
+                        .body(Body::from("{\"op\":\"export\"}"))
+                        .expect("write probe"),
+                )
+                .await
+                .expect("write rejection");
+            assert_eq!(
+                response.status(),
+                if authorized {
+                    StatusCode::METHOD_NOT_ALLOWED
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+            assert_eq!(store.calls() - before, 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn context_005_upgrade_preserves_exact_imports_and_backfills_one_version() {
+    use meenseek_ontology::{
+        context::{ContextScope, inventory},
+        store::BASELINE,
+    };
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    reset_schema(&store).await;
+    sqlx::raw_sql(BASELINE)
+        .execute(store.pool())
+        .await
+        .expect("historical baseline");
+    sqlx::raw_sql("CREATE TABLE ontology_baseline(singleton boolean PRIMARY KEY CHECK(singleton),digest text NOT NULL); CREATE TABLE ontology_migrations(name text PRIMARY KEY,digest text NOT NULL)")
+        .execute(store.pool()).await.expect("historical migration ledger");
+    sqlx::query("INSERT INTO ontology_baseline VALUES(true,$1)")
+        .bind(digest(BASELINE.as_bytes()))
+        .execute(store.pool())
+        .await
+        .expect("historical baseline digest");
+    let areas = serde_json::json!(
+        meenseek_ontology::domain::AREAS
+            .iter()
+            .map(|(id, label)| serde_json::json!({"id":id,"label":label}))
+            .collect::<Vec<_>>()
+    );
+    sqlx::query(
+        "INSERT INTO areas SELECT id,label FROM jsonb_to_recordset($1) AS x(id text,label text)",
+    )
+    .bind(areas)
+    .execute(store.pool())
+    .await
+    .expect("seed canonical baseline areas");
+    for (name, sql) in [
+        (
+            "001-source-providers.sql",
+            include_str!("../schema/migrations/001-source-providers.sql"),
+        ),
+        (
+            "002-second-brain.sql",
+            include_str!("../schema/migrations/002-second-brain.sql"),
+        ),
+        (
+            "003-evidence-snapshots.sql",
+            include_str!("../schema/migrations/003-evidence-snapshots.sql"),
+        ),
+        (
+            "004-curation-reviews.sql",
+            include_str!("../schema/migrations/004-curation-reviews.sql"),
+        ),
+        (
+            "005-context-materials.sql",
+            include_str!("../schema/migrations/005-context-materials.sql"),
+        ),
+    ] {
+        sqlx::raw_sql(sql)
+            .execute(store.pool())
+            .await
+            .expect("migrate through 005 only");
+        sqlx::query("INSERT INTO ontology_migrations VALUES($1,$2)")
+            .bind(name)
+            .bind(digest(sql.as_bytes()))
+            .execute(store.pool())
+            .await
+            .expect("pin historical digest");
+    }
+    let temp = tempfile::tempdir().expect("synthetic 005 source");
     let root = temp
         .path()
         .canonicalize()
         .expect("canonical synthetic root");
-    for scope in ["profile", "personal", "work"] {
-        std::fs::create_dir_all(root.join(scope).join("projects")).expect("create synthetic scope");
-    }
-    for i in 0..100 {
-        std::fs::write(
-            root.join(format!("personal/projects/source-{i}.md")),
-            vault_document("personal", i),
-        )
-        .expect("write synthetic notes");
-    }
-    std::fs::write(
-        root.join("work/projects/source-0.md"),
-        vault_document("work", 0),
-    )
-    .expect("write colliding relative work path");
-    std::fs::write(
-        root.join("profile/projects/source-0.md"),
-        vault_document("profile", 0),
-    )
-    .expect("write synthetic profile");
-    let reader = VaultReader::new(test_vault_binary(), vec![root.clone()])
-        .expect("explicit binary and root");
-    for size in [0, 1, 100] {
-        let paths = (0..size)
-            .map(|i| format!("projects/source-{i}.md"))
-            .collect::<Vec<_>>();
-        let before_calls = reader.calls();
-        let before_bytes = reader.response_bytes();
-        let before_db = store.calls();
-        assert_eq!(
-            reader
-                .import(&store, &root, VaultScope::Personal, &paths, Scope::Meenseek)
-                .await
-                .expect("one verified Vault batch"),
-            size
-        );
-        assert_eq!(reader.calls() - before_calls, u64::from(size != 0));
-        assert_eq!(store.calls() - before_db, if size == 0 { 0 } else { 6 });
-        let bytes = reader.response_bytes() - before_bytes;
-        assert!(bytes <= MAX_RESPONSE_BYTES as u64);
-        assert!(
-            bytes <= (size as u64 * 1024) + 32,
-            "fixture transfer grows only with requested documents"
-        );
-        assert_eq!(bytes == 0, size == 0);
-    }
-    let path = "projects/source-0.md".to_owned();
-    let (_, id) =
-        identity(&root, "personal/projects/source-0.md", Scope::Meenseek).expect("Vault identity");
-    let first = store
-        .detail(Scope::Meenseek, &id)
-        .await
-        .expect("Vault detail");
-    assert_eq!(first["source"]["kind"], "vault");
-    assert_eq!(
-        first["source"]["repository"],
-        root.to_str().expect("UTF-8 fixture root")
-    );
-    assert_eq!(first["source"]["path"], "personal/projects/source-0.md");
-    assert_eq!(
-        first["source"]["verified_revision"],
-        digest(vault_document("personal", 0).as_bytes())
-    );
-    assert_eq!(
-        first["projection"]["source_revision"],
-        first["source"]["verified_revision"]
-    );
-    let content = first["projection"]["content"]
-        .as_str()
-        .expect("redacted content");
-    assert!(content.contains("[REDACTED]") && !content.contains("synthetic-secret"));
-    assert_eq!(
-        first["projection"]["content_digest"],
-        digest(content.as_bytes())
-    );
-    assert_ne!(
-        first["projection"]["content_digest"],
-        first["projection"]["source_revision"]
-    );
-    assert_eq!(
-        std::fs::read_to_string(root.join("personal").join(&path)).expect("unchanged fixture"),
-        vault_document("personal", 0)
-    );
-    let git_record = record(501, Scope::Meenseek);
-    store
-        .apply_import(std::slice::from_ref(&git_record))
-        .await
-        .expect("same-scope Git source");
-    store
-        .classify(
-            Scope::Meenseek,
-            &id,
-            Classification {
-                revision: 0,
-                areas: vec!["strategy-portfolio".into(), "market-customer".into()],
-                topics: vec!["정정 주제".into()],
-            },
-        )
-        .await
-        .expect("classify Vault projection");
-    store
-        .link(
-            Scope::Meenseek,
-            &id,
-            LinkChange {
-                revision: 1,
-                target_id: git_record.entity_id.clone(),
-                remove: false,
-            },
-        )
-        .await
-        .expect("connect Git and Vault within app scope");
-    let confirmed = store
-        .detail(Scope::Meenseek, &id)
-        .await
-        .expect("confirmed detail");
-    reader
-        .import(
-            &store,
-            &root,
-            VaultScope::Personal,
-            std::slice::from_ref(&path),
-            Scope::Meenseek,
-        )
-        .await
-        .expect("idempotent import");
-    let reimported = store
-        .detail(Scope::Meenseek, &id)
-        .await
-        .expect("reimported detail");
-    for key in ["revision", "areas", "topics", "related", "history"] {
-        assert_eq!(reimported[key], confirmed[key], "preserve {key}");
-    }
-    let changed = vault_document("personal", 0).replace("자료 연결 합성 0", "변경된 합성 원문");
-    std::fs::write(root.join("personal").join(&path), &changed).expect("change synthetic note");
-    reader
-        .import(
-            &store,
-            &root,
-            VaultScope::Personal,
-            std::slice::from_ref(&path),
-            Scope::Meenseek,
-        )
-        .await
-        .expect("new original digest");
-    let updated = store
-        .detail(Scope::Meenseek, &id)
-        .await
-        .expect("updated projection");
-    assert_eq!(
-        updated["projection"]["source_revision"],
-        digest(changed.as_bytes())
-    );
-    assert_ne!(
-        updated["projection"]["source_revision"],
-        first["projection"]["source_revision"]
-    );
-    assert_eq!(updated["history"], confirmed["history"]);
-    // Same relative path in another Vault scope is a distinct source in the same app scope.
-    reader
-        .import(
-            &store,
-            &root,
-            VaultScope::Work,
-            std::slice::from_ref(&path),
-            Scope::Meenseek,
-        )
-        .await
-        .expect("explicit synthetic work scope");
-    let (_, work_id) =
-        identity(&root, "work/projects/source-0.md", Scope::Meenseek).expect("work identity");
-    assert_ne!(id, work_id);
-    assert_eq!(
-        store
-            .detail(Scope::Meenseek, &work_id)
-            .await
-            .expect("work source")["source"]["path"],
-        "work/projects/source-0.md"
-    );
-    let (_, git_id) = meenseek_ontology::importer::identity(
-        &root,
-        "personal/projects/source-0.md",
-        Scope::Meenseek,
-    )
-    .expect("existing Git formula");
-    assert_ne!(id, git_id);
-    reader
-        .import(
-            &store,
-            &root,
-            VaultScope::Profile,
-            std::slice::from_ref(&path),
-            Scope::Personal,
-        )
-        .await
-        .expect("profile scope is separate from app scope");
-    let (_, personal_id) = identity(&root, "profile/projects/source-0.md", Scope::Personal)
-        .expect("personal app identity");
-    assert_eq!(
-        store.detail(Scope::Meenseek, &personal_id).await,
-        Err(Error::NotFound)
-    );
-    let listing = store
-        .list(Scope::Meenseek, "source-0.md", false, None)
-        .await
-        .expect("search both Vault scopes");
-    assert!(
-        listing["items"]
-            .as_array()
-            .expect("items")
-            .iter()
-            .all(|item| item["kind"] == "vault")
-    );
-    assert!(serde_json::to_vec(&listing).expect("bounded JSON").len() < MAX_RESPONSE_BYTES);
-    // Middle-document failure preserves every old projection and confirmation, without retry.
-    let second_path = "projects/source-1.md".to_owned();
-    let (_, second_id) =
-        identity(&root, "personal/projects/source-1.md", Scope::Meenseek).expect("second identity");
-    let second_before = store
-        .detail(Scope::Meenseek, &second_id)
-        .await
-        .expect("second projection");
-    std::fs::write(
-        root.join("personal").join(&path),
-        changed.replace("변경된", "미반영"),
-    )
-    .expect("first staged change");
-    std::fs::write(root.join("personal").join(&second_path), b"\xff\xfe")
-        .expect("malformed second fixture");
-    let before_calls = reader.calls();
-    let before_db = store.calls();
-    assert!(
-        reader
-            .import(
-                &store,
-                &root,
-                VaultScope::Personal,
-                &[path.clone(), second_path.clone()],
-                Scope::Meenseek
-            )
-            .await
-            .is_err()
-    );
-    assert_eq!(reader.calls() - before_calls, 1);
-    assert_eq!(store.calls() - before_db, 4);
-    for (entity, previous) in [(&id, &updated), (&second_id, &second_before)] {
-        let failed = store
-            .detail(Scope::Meenseek, entity)
-            .await
-            .expect("failure preserves previous success");
-        assert_eq!(failed["projection"], previous["projection"]);
-        assert_eq!(failed["source"]["status"], "failed");
-        assert_eq!(failed["source"]["failure_code"], "vault-read-failed");
-        assert_eq!(
-            failed["source"]["last_success_at"],
-            previous["source"]["last_success_at"]
-        );
-        assert_eq!(failed["history"], previous["history"]);
-    }
-    std::fs::remove_file(root.join("personal").join(&path)).expect("simulate missing live source");
-    assert!(
-        reader
-            .import(
-                &store,
-                &root,
-                VaultScope::Personal,
-                std::slice::from_ref(&path),
-                Scope::Meenseek
-            )
-            .await
-            .is_err()
-    );
-    let missing = store
-        .detail(Scope::Meenseek, &id)
-        .await
-        .expect("missing live source is failure");
-    assert_eq!(missing["projection"], updated["projection"]);
-    assert_eq!(missing["projection"]["present"], true);
-    assert_eq!(missing["projection"]["absence_revision"], Value::Null);
-    std::fs::write(root.join("personal").join(&path), &changed).expect("restore synthetic source");
-    std::fs::write(
-        root.join("personal").join(&second_path),
-        vault_document("personal", 1),
-    )
-    .expect("restore second fixture");
-    // The real provider owns filesystem and document policy; the adapter propagates each failure.
-    std::os::unix::fs::symlink("source-0.md", root.join("personal/projects/symlink.md"))
-        .expect("synthetic symlink");
-    std::fs::hard_link(
-        root.join("personal").join(&path),
-        root.join("personal/projects/hardlink.md"),
-    )
-    .expect("synthetic hardlink");
-    for file in ["projects/symlink.md", "projects/hardlink.md"] {
-        assert!(
-            reader
-                .read(&root, VaultScope::Personal, &[file.into()], Scope::Meenseek)
-                .await
-                .is_err()
-        );
-    }
-    std::fs::remove_file(root.join("personal/projects/hardlink.md"))
-        .expect("remove fixture hardlink");
-    std::fs::write(
-        root.join("personal/projects/wrong-scope.md"),
-        vault_document("work", 999),
-    )
-    .expect("scope mismatch fixture");
-    std::fs::write(
-        root.join("personal/projects/invalid.md"),
-        "---\ntitle: [\n---\nbody",
-    )
-    .expect("invalid YAML fixture");
-    std::fs::write(root.join("personal/projects/large.md"), "x".repeat(65_537))
-        .expect("oversized fixture");
-    for file in [
-        "projects/wrong-scope.md",
-        "projects/invalid.md",
-        "projects/large.md",
-        "projects/missing.md",
+    for (path, content, restricted) in [
+        ("note.md", b"\xef\xbb\xbf---\r\nexact\r\n".as_slice(), false),
+        ("raw/binary", &[0, 255, 10], true),
+        ("empty.md", b"", false),
     ] {
-        assert!(
-            reader
-                .read(&root, VaultScope::Personal, &[file.into()], Scope::Meenseek)
-                .await
-                .is_err()
-        );
+        let target = root.join("personal").join(path);
+        std::fs::create_dir_all(target.parent().expect("synthetic parent")).expect("directories");
+        std::fs::write(target, content).expect("exact synthetic bytes");
+        sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text,imported_at) VALUES('personal',$1,$2,$3,$4,$4,$5,$6,$7,$8,'2025-01-02T03:04:05Z')")
+            .bind(path).bind(root.to_str().expect("UTF8 root")).bind(format!("personal/{path}")).bind(digest(content)).bind(content).bind(content.len() as i64).bind(restricted)
+            .bind(if restricted {None} else {std::str::from_utf8(content).ok()}).execute(store.pool()).await.expect("populated 005 originals");
     }
-    for directory in ["journal", "conversations/raw"] {
-        std::fs::create_dir_all(root.join("personal").join(directory))
-            .expect("excluded fixture directory");
-        std::fs::write(
-            root.join("personal").join(directory).join("x.md"),
-            vault_document("personal", 999),
-        )
-        .expect("excluded fixture note");
-        assert!(
-            reader
-                .read(
-                    &root,
-                    VaultScope::Personal,
-                    &[format!("{directory}/x.md")],
-                    Scope::Meenseek
-                )
-                .await
-                .is_err()
-        );
-    }
-    let absent_root = root.join("absent-root");
-    let missing_root_reader = VaultReader::new(test_vault_binary(), vec![absent_root.clone()])
-        .expect("register explicit missing root");
-    assert!(
-        missing_root_reader
-            .read(
-                &absent_root,
-                VaultScope::Personal,
-                std::slice::from_ref(&path),
-                Scope::Meenseek
-            )
+    let before: Value =
+        sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) ORDER BY path) FROM context_materials m")
+            .fetch_one(store.pool())
             .await
-            .is_err()
-    );
-    assert!(
-        !absent_root.exists(),
-        "failed read must not create its root"
-    );
-    // Exercise the installed CLI surface with the explicit canonical test dependency.
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env(
-            "DATABASE_URL",
-            std::env::var("TEST_DATABASE_URL").expect("validated synthetic DB URL"),
-        )
-        .env("ONTOLOGY_ALLOWED_VAULT_ROOTS", &root)
-        .arg("import-vault")
-        .arg("--vault-binary")
-        .arg(test_vault_binary())
-        .arg("--vault-root")
-        .arg(&root)
-        .args([
-            "--vault-scope",
-            "personal",
-            "--scope",
-            "meenseek",
-            "--file",
-            &path,
-        ])
-        .output()
-        .await
-        .expect("run candidate import-vault CLI");
-    assert!(
-        output.status.success(),
-        "candidate CLI must import the real Vault fixture"
-    );
-    assert!(
-        String::from_utf8(output.stdout)
-            .expect("CLI status")
-            .contains("1 registered Vault documents")
-    );
-    let restored = store
-        .detail(Scope::Meenseek, &id)
-        .await
-        .expect("CLI persisted success");
-    assert_eq!(restored["source"]["status"], "ok");
-    assert_eq!(restored["source"]["failure_code"], Value::Null);
-    for key in ["revision", "areas", "topics", "related", "history"] {
-        assert_eq!(restored[key], confirmed[key]);
-    }
-    let reconnected = Store::connect(&std::env::var("TEST_DATABASE_URL").expect("synthetic URL"))
-        .await
-        .expect("restart app storage");
-    reconnected
-        .initialize()
-        .await
-        .expect("migration replay on restart");
-    assert_eq!(
-        reconnected
-            .detail(Scope::Meenseek, &id)
+            .expect("complete old bytes and provenance");
+    store.initialize().await.expect("006 additive migration");
+    let after: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) - ARRAY['material_id','revision','deleted','origin_kind','created_at','last_apply_id'] ORDER BY path) FROM context_materials m").fetch_one(store.pool()).await.expect("original columns");
+    assert_eq!(before, after);
+    let exact: bool = sqlx::query_scalar("SELECT bool_and(m.revision=1 AND NOT m.deleted AND m.origin_kind='imported-file' AND m.created_at=m.imported_at AND m.last_apply_id IS NULL AND ROW(m.content,m.content_digest,m.byte_len,m.restricted,m.search_text,m.deleted,m.last_apply_id,m.created_at) IS NOT DISTINCT FROM ROW(v.content,v.content_digest,v.byte_len,v.restricted,v.search_text,v.deleted,v.apply_id,v.recorded_at)) FROM context_materials m JOIN context_material_versions v USING(material_id,revision)").fetch_one(store.pool()).await.expect("backfilled bytes and original timestamps");
+    assert!(exact);
+    let stable: Value = sqlx::query_scalar("SELECT jsonb_build_object('store',(SELECT to_jsonb(s) FROM context_store s),'materials',(SELECT jsonb_agg(to_jsonb(m) ORDER BY path) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v))")
+        .fetch_one(store.pool()).await.expect("new canonical records");
+    let scopes: Vec<ContextScope> = vec!["personal".parse().expect("synthetic scope")];
+    let manifest = inventory(&root, &scopes).expect("same originals");
+    for _ in 0..2 {
+        store.initialize().await.expect("repeat additive init");
+        assert_eq!(
+            store
+                .import_context(&root, &scopes, &manifest.inventory_digest)
+                .await
+                .expect("idempotent imported originals")["inserted"],
+            0
+        );
+        let unchanged: Value = sqlx::query_scalar("SELECT jsonb_build_object('store',(SELECT to_jsonb(s) FROM context_store s),'materials',(SELECT jsonb_agg(to_jsonb(m) ORDER BY path) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v))")
+            .fetch_one(store.pool()).await.expect("unchanged canonical records");
+        assert_eq!(unchanged, stable);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM context_material_versions")
+            .fetch_one(store.pool())
             .await
-            .expect("persisted confirmation"),
-        restored
-    );
+            .expect("one history per original");
+        assert_eq!(count, 3);
+    }
 }

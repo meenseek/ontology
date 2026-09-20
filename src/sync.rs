@@ -1,8 +1,9 @@
 use crate::{
+    context::ContextScope,
+    context_importer::{ContextReader, validate_paths, validate_store_id},
     domain::{Error, Scope, SourceKind},
     importer::GitReader,
     store::Store,
-    vault_importer::{VaultReader, VaultScope},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -31,11 +32,10 @@ pub enum SyncSource {
         reference: String,
         paths: Vec<String>,
     },
-    Vault {
-        root: PathBuf,
+    Context {
+        store_id: String,
         scope: Scope,
-        vault_scope: VaultScope,
-        binary: PathBuf,
+        context_scope: ContextScope,
         paths: Vec<String>,
     },
 }
@@ -50,33 +50,41 @@ fn absolute(path: &Path) -> bool {
     })
 }
 impl SyncSource {
-    fn parts(&self) -> (&Path, Scope, SourceKind, &[String]) {
+    fn paths(&self) -> &[String] {
         match self {
-            Self::Git {
-                root, scope, paths, ..
-            } => (root, *scope, SourceKind::Git, paths),
-            Self::Vault {
-                root, scope, paths, ..
-            } => (root, *scope, SourceKind::Vault, paths),
+            Self::Git { paths, .. } | Self::Context { paths, .. } => paths,
+        }
+    }
+    fn kind(&self) -> SourceKind {
+        match self {
+            Self::Git { .. } => SourceKind::Git,
+            Self::Context { .. } => SourceKind::Context,
         }
     }
     fn identities(&self) -> Result<Vec<String>, Error> {
-        let (root, scope, kind, paths) = self.parts();
-        paths
-            .iter()
-            .map(|path| match self {
-                Self::Vault { vault_scope, .. } => crate::vault_importer::identity(
-                    root,
-                    &format!("{}/{path}", vault_scope.as_str()),
-                    scope,
-                )
-                .map(|v| v.0),
-                _ if kind == SourceKind::Git => {
-                    crate::importer::identity(root, path, scope).map(|v| v.0)
-                }
-                _ => Err(Error::Invalid),
-            })
-            .collect()
+        match self {
+            Self::Git {
+                root, scope, paths, ..
+            } => paths
+                .iter()
+                .map(|p| crate::importer::identity(root, p, *scope).map(|v| v.0))
+                .collect(),
+            Self::Context {
+                store_id,
+                context_scope,
+                scope,
+                paths,
+            } => Ok(paths
+                .iter()
+                .map(|p| {
+                    format!(
+                        "context:{store_id}:{}:{}:{p}",
+                        context_scope.as_str(),
+                        scope.as_str()
+                    )
+                })
+                .collect()),
+        }
     }
 }
 impl SyncConfig {
@@ -112,34 +120,28 @@ impl SyncConfig {
         let mut identities = HashSet::new();
         let mut count = 0usize;
         for source in &self.sources {
-            let (root, _, kind, paths) = source.parts();
-            if !absolute(root) || paths.is_empty() || paths.len() > 100 {
+            let paths = source.paths();
+            if paths.is_empty() || paths.len() > 100 {
                 return Err(Error::Invalid);
             }
             count = count.checked_add(paths.len()).ok_or(Error::Limit)?;
             if count > 100 {
                 return Err(Error::Limit);
             }
-            for path in paths {
-                if path.len() > 512
-                    || path
-                        .chars()
-                        .any(|c| c.is_control() || "\\:*?[]{}".contains(c))
-                    || path
-                        .split('/')
-                        .any(|p| matches!(p, "" | "." | ".." | ".git"))
-                    || !matches!(
-                        Path::new(path).extension().and_then(|e| e.to_str()),
-                        Some("md" | "txt" | "rst")
-                    )
-                    || (kind == SourceKind::Vault && !path.ends_with(".md"))
-                {
-                    return Err(Error::Invalid);
-                }
-            }
             match source {
-                SyncSource::Git { reference, .. } => {
-                    if reference.is_empty()
+                SyncSource::Context {
+                    store_id,
+                    context_scope,
+                    ..
+                } => {
+                    validate_store_id(store_id)?;
+                    validate_paths(context_scope, paths, true)?;
+                }
+                SyncSource::Git {
+                    root, reference, ..
+                } => {
+                    if !absolute(root)
+                        || reference.is_empty()
                         || reference.len() > 160
                         || reference.starts_with('-')
                         || reference.contains("..")
@@ -149,10 +151,21 @@ impl SyncConfig {
                     {
                         return Err(Error::Invalid);
                     }
-                }
-                SyncSource::Vault { binary, .. } => {
-                    if !absolute(binary) {
-                        return Err(Error::Invalid);
+                    for path in paths {
+                        if path.len() > 512
+                            || path
+                                .chars()
+                                .any(|c| c.is_control() || "\\:*?[]{}".contains(c))
+                            || path
+                                .split('/')
+                                .any(|p| matches!(p, "" | "." | ".." | ".git"))
+                            || !matches!(
+                                Path::new(path).extension().and_then(|e| e.to_str()),
+                                Some("md" | "txt" | "rst")
+                            )
+                        {
+                            return Err(Error::Invalid);
+                        }
                     }
                 }
             }
@@ -183,65 +196,91 @@ pub struct SyncReport {
 }
 // Both sync-once and the app loop call this function. Read config completely before any source.
 pub async fn refresh(store: &Store, path: &Path) -> Result<SyncReport, Error> {
-    let config = SyncConfig::load(path)?;
-    let guard = store.lock_import().await?;
-    let mut results = Vec::new();
-    for (index, source) in config.sources.iter().enumerate() {
-        let (_, _, kind, paths) = source.parts();
-        let (result, provider_calls, response_bytes) = refresh_source(store, source).await;
-        if result.is_err() {
-            store.mark_failed(&source.identities()?, kind).await?;
+    let observation = store.dependency_start("sync-refresh", &path)?;
+    let result = async {
+        let config = SyncConfig::load(path)?;
+        let mut tx = store.lock_import().await?;
+        if config
+            .sources
+            .iter()
+            .any(|s| matches!(s, SyncSource::Context { .. }))
+            && let Err(error) = store.context_gate_in(&mut tx, false).await
+        {
+            return store.finish_context(tx, Err(error)).await;
         }
-        results.push(SourceResult {
-            index,
-            kind,
-            documents: paths.len(),
-            provider_calls,
-            response_bytes,
-            ok: result.is_ok(),
-            error: result.err().map(|e| e.to_string()),
-        });
+        let mut results = Vec::new();
+        for (index, source) in config.sources.iter().enumerate() {
+            let (result, provider_calls, response_bytes) = match source {
+                SyncSource::Context {
+                    store_id,
+                    context_scope,
+                    scope,
+                    paths,
+                } => {
+                    let mut reader = ContextReader::new();
+                    let result = reader
+                        .refresh_in(store, &mut tx, store_id, context_scope, paths, *scope)
+                        .await;
+                    (result, reader.body_calls, reader.response_bytes)
+                }
+                SyncSource::Git {
+                    root,
+                    scope,
+                    reference,
+                    paths,
+                } => {
+                    store
+                        .consumer_control(&mut tx, "SAVEPOINT git_consumer_source")
+                        .await?;
+                    let reader = GitReader::new(vec![root.clone()]);
+                    let result = async {
+                        let reader = reader.as_ref().map_err(Clone::clone)?;
+                        let commit = reader.resolve_ref(root, reference).await?;
+                        let records = reader.read(root, &commit, paths, *scope).await?;
+                        store.apply_import_in(&mut tx, &records).await?;
+                        Ok(records.len())
+                    }
+                    .await;
+                    if result.is_err() {
+                        store
+                            .consumer_control(&mut tx, "ROLLBACK TO SAVEPOINT git_consumer_source")
+                            .await?;
+                        store
+                            .mark_failed_in(&mut tx, &source.identities()?, SourceKind::Git)
+                            .await?;
+                    }
+                    store
+                        .consumer_control(&mut tx, "RELEASE SAVEPOINT git_consumer_source")
+                        .await?;
+                    (
+                        result,
+                        reader.as_ref().map_or(0, GitReader::calls),
+                        reader.as_ref().map_or(0, GitReader::response_bytes),
+                    )
+                }
+            };
+            results.push(SourceResult {
+                index,
+                kind: source.kind(),
+                documents: source.paths().len(),
+                provider_calls,
+                response_bytes,
+                ok: result.is_ok(),
+                error: result.err().map(|e| e.to_string()),
+            });
+        }
+        store.finish_import(tx).await?;
+        Ok(SyncReport {
+            interval_seconds: config.interval_seconds,
+            ok: results.iter().all(|r| r.ok),
+            sources: results,
+        })
     }
-    store.finish_import(guard).await?;
-    Ok(SyncReport {
-        interval_seconds: config.interval_seconds,
-        ok: results.iter().all(|r| r.ok),
-        sources: results,
-    })
+    .await;
+    store.dependency_finish(observation, &result);
+    result
 }
-async fn refresh_source(store: &Store, source: &SyncSource) -> (Result<usize, Error>, u64, u64) {
-    let (root, scope, _, paths) = source.parts();
-    let (records, calls, bytes) = match source {
-        SyncSource::Git { reference, .. } => {
-            let reader = match GitReader::new(vec![root.to_path_buf()]) {
-                Ok(reader) => reader,
-                Err(e) => return (Err(e), 0, 0),
-            };
-            let records = match reader.resolve_ref(root, reference).await {
-                Ok(commit) => reader.read(root, &commit, paths, scope).await,
-                Err(e) => Err(e),
-            };
-            (records, reader.calls(), reader.response_bytes())
-        }
-        SyncSource::Vault {
-            binary,
-            vault_scope,
-            ..
-        } => {
-            let reader = match VaultReader::new(binary.clone(), vec![root.to_path_buf()]) {
-                Ok(reader) => reader,
-                Err(e) => return (Err(e), 0, 0),
-            };
-            let records = reader.read(root, *vault_scope, paths, scope).await;
-            (records, reader.calls(), reader.response_bytes())
-        }
-    };
-    let result = match records {
-        Ok(records) => store.apply_import(&records).await.map(|()| records.len()),
-        Err(e) => Err(e),
-    };
-    (result, calls, bytes)
-}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SyncStatus {
     pub enabled: bool,

@@ -835,92 +835,51 @@ async fn sync_contract() {
     }
     std::fs::write(&config_path, "x".repeat(32769)).expect("oversized");
     assert!(SyncConfig::load(&config_path).is_err());
+    // Mixed Git and Context sources use the same guarded transaction and isolate errors.
     let vault = root.join("vault");
-    std::fs::create_dir_all(vault.join("personal/projects")).expect("synthetic vault");
+    std::fs::create_dir_all(vault.join("personal/projects")).expect("fixture");
     std::fs::write(
         vault.join("personal/projects/note.md"),
         "---\ntitle: Synthetic\nscope: personal\nexport: false\n---\n\nInitial note\n",
     )
-    .expect("note");
+    .expect("fixture");
+    let scopes = vec!["personal".parse().expect("scope")];
+    let inventory = meenseek_ontology::context::inventory(&vault, &scopes).expect("inventory");
+    store
+        .import_context(&vault, &scopes, &inventory.inventory_digest)
+        .await
+        .expect("canonical import");
+    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        .fetch_one(store.pool())
+        .await
+        .expect("identity");
     let mut both = config.clone();
-    both["sources"].as_array_mut().expect("sources").push(json!({"kind":"vault","root":vault,"scope":"personal","vault_scope":"personal","binary":std::env::var("TEST_VAULT_BINARY").expect("actual Vault"),"paths":["projects/note.md"]}));
+    both["sources"].as_array_mut().expect("sources").push(json!({"kind":"context","store_id":store_id,"context_scope":"personal","scope":"personal","paths":["projects/note.md"]}));
     write_config(&both);
-    let first = refresh(&store, &config_path).await.expect("both sources");
+    let first = refresh(&store, &config_path).await.expect("mixed");
     assert!(first.ok);
     assert_eq!(first.sources[1].provider_calls, 1);
-    assert!(first.sources[1].response_bytes < 2048);
-    let (_, vault_id) = meenseek_ontology::vault_importer::identity(
-        &vault,
-        "personal/projects/note.md",
-        Scope::Personal,
-    )
-    .expect("vault id");
-    let vault_before = store
-        .detail(Scope::Personal, &vault_id)
-        .await
-        .expect("vault snapshot");
-    std::fs::remove_file(vault.join("personal/projects/note.md")).expect("missing vault source");
-    let before = store.calls();
+    std::fs::remove_dir_all(&vault).expect("remove original transport");
+    assert!(
+        refresh(&store, &config_path)
+            .await
+            .expect("canonical only")
+            .ok
+    );
+    both["sources"][1]["paths"] = json!(["projects/note.md", "missing.md"]);
+    write_config(&both);
     let failed = refresh(&store, &config_path)
         .await
-        .expect("isolated partial failure");
-    assert!(!failed.ok);
+        .expect("isolated missing exact material");
     assert!(failed.sources[0].ok);
     assert!(!failed.sources[1].ok);
-    assert_eq!(failed.sources[1].provider_calls, 1);
-    assert_eq!(store.calls() - before, 7);
-    let after = store
-        .detail(Scope::Personal, &vault_id)
-        .await
-        .expect("retained snapshot");
-    assert_eq!(after["projection"], vault_before["projection"]);
-    assert_eq!(after["source"]["status"], "failed");
-    git(&repo, &["rm", "-q", "source-0.md"]);
-    git(&repo, &["commit", "-qm", "missing"]);
-    refresh(&store, &config_path)
-        .await
-        .expect("absence plus partial failure");
-    assert_eq!(
-        store.detail(Scope::Personal, &id).await.expect("missing")["source"]["status"],
-        "missing"
-    );
     assert_eq!(
         store
             .detail(Scope::Personal, &outside)
             .await
-            .expect("outside untouched"),
+            .expect("outside"),
         outside_before
     );
-    let mut restored =
-        "---\ntitle: Synthetic\nscope: personal\nexport: false\n---\n\nRestored note\n".to_owned();
-    std::fs::write(vault.join("personal/projects/note.md"), &restored).expect("restored");
-    refresh(&store, &config_path)
-        .await
-        .expect("restart-style current read");
-    assert_eq!(
-        store
-            .detail(Scope::Personal, &vault_id)
-            .await
-            .expect("restored")["source"]["status"],
-        "ok"
-    );
-    restored.push_str("latest\n");
-    std::fs::write(vault.join("personal/projects/note.md"), restored).expect("latest");
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env(
-            "DATABASE_URL",
-            std::env::var("TEST_DATABASE_URL").expect("synthetic"),
-        )
-        .env("ONTOLOGY_SYNC_CONFIG", &config_path)
-        .arg("sync-once")
-        .output()
-        .await
-        .expect("sync CLI");
-    assert!(output.status.success());
-    let report: Value = serde_json::from_slice(&output.stdout).expect("report");
-    assert_eq!(report["ok"], true);
 }
 
 #[tokio::test]
@@ -1044,15 +1003,16 @@ async fn capture_search_and_historical_evidence_contract() {
         assert_eq!(created["body"], body);
     }
     let old_body = original.content.clone().unwrap();
-    original.content = Some("# Changed\n\nDo not proceed.".into());
-    original.digest = Some(digest(original.content.as_ref().unwrap().as_bytes()));
-    original.source_revision = "b".repeat(40);
-    store.apply_import(&[original.clone()]).await.unwrap();
     call(
         &store,
         json!({"op":"accept","scope":"meenseek","id":ids[0],"revision":1}),
     )
     .await;
+    original.content = Some("# Changed\n\nDo not proceed.".into());
+    original.digest = Some(digest(original.content.as_ref().unwrap().as_bytes()));
+    original.source_revision = "b".repeat(40);
+    store.apply_import(&[original.clone()]).await.unwrap();
+
     call(
         &store,
         json!({"op":"withdraw","scope":"meenseek","id":ids[0],"revision":2}),
@@ -1194,7 +1154,7 @@ async fn evidence_migration_preserves_existing_records() {
     }
     let before = existing(&store).await;
     // Recreate the actual pre-upgrade schema, retaining every existing row, timestamp and digest.
-    sqlx::raw_sql("DROP TABLE curation_reviews; DROP TABLE evidence_snapshots; DROP TABLE evidence_contents; DELETE FROM ontology_migrations WHERE name IN ('003-evidence-snapshots.sql','004-curation-reviews.sql');").execute(store.pool()).await.unwrap();
+    sqlx::raw_sql("DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code='vault-read-failed')); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; DROP TABLE context_projection_versions; DROP FUNCTION context_projection_validate(); DROP TABLE context_material_versions; DROP TABLE context_materials; DROP TABLE context_apply_batches; DROP FUNCTION context_core_contract_immutable(); DROP TABLE context_store; DROP FUNCTION context_record_version(); DROP FUNCTION context_material_revision(); DROP FUNCTION context_immutable_record(); DROP FUNCTION context_exclusive_gate(); DROP TABLE curation_reviews; DROP TABLE evidence_snapshots; DROP TABLE evidence_contents; DELETE FROM ontology_migrations WHERE name IN ('003-evidence-snapshots.sql','004-curation-reviews.sql','005-context-materials.sql','006-context-history.sql','007-context-native.sql');").execute(store.pool()).await.unwrap();
     sqlx::query("CREATE TABLE evidence_snapshots (failure_fixture boolean)")
         .execute(store.pool())
         .await

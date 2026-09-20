@@ -1,0 +1,17 @@
+[package]
+name = "context-core"
+version = "0.1.0"
+publish = false
+edition = "2024"
+rust-version = "1.98"
+license = "UNLICENSED"
+autobins = false
+
+[dependencies]
+errno = { version = "0.3", default-features = false }
+libc = { version = "0.2", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+sha2 = { version = "0.11", default-features = false }
+syn = { version = "2", features = ["full", "visit"] }

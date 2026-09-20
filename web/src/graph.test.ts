@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { active, graphUrl, parseLocation, reconcile, sameGraphLocation, stateName, visibleGraph } from "./graph.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
-const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true });
+const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
 const memory = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "memory", label: id, revision: "1", status: "accepted", temporal: "current", supported: true });
 const edge = (source: string, target: string, current = true): GraphLink => ({ source, target, kind: "related", current });
 function snapshot(nodes: GraphNode[], links: GraphLink[] = []): Snapshot {
@@ -88,7 +88,9 @@ test("URL focus and Unicode search are explicit and round-trip without executing
   const id = `e_${"a".repeat(64)}`;
   const url = graphUrl("personal", "한글 <script>& question", id);
   assert.deepEqual(parseLocation(url.slice(1)), { scope: "personal", q: "한글 <script>& question", focus: id });
-  assert.equal(parseLocation("?scope=other&focus=<script>").scope, "meenseek");
+  assert.deepEqual(parseLocation(""), { scope: "personal", q: "", focus: null });
+  assert.equal(parseLocation("?scope=other&focus=<script>").scope, "personal");
+  assert.deepEqual(parseLocation(graphUrl("meenseek", "사업 & 계획", id).slice(1)), { scope: "meenseek", q: "사업 & 계획", focus: id });
   assert.equal(parseLocation("?focus=<script>").focus, null);
   assert.equal([...parseLocation(`?q=${"가".repeat(121)}`).q].length, 120);
   const model = reconcile(snapshot([{ ...doc(id), label: "한글 <script>" }]));
@@ -462,4 +464,15 @@ test("distant twinkle repeats smoothly every seven seconds with one restrained c
       assert.ok(Math.abs(starMotion(26, phase, time).shimmer - (1 - .3 * (1 - priorPulse))) < 1e-12, "far twinkle retains the previous curve and phase");
     }
   }
+});
+
+test("current, stale, failed and missing Context documents retain their honest states", () => {
+  const current = { ...doc("context"), source_kind: "context" };
+  const stale = { ...current, current: false };
+  assert.equal(active(current), true); assert.equal(active(stale), false);
+  assert.equal(stateName(stale), "갱신 대기");
+  assert.equal(stateName({ ...stale, status: "failed" }), "출처 확인 실패");
+  assert.equal(stateName({ ...stale, status: "missing", present: false }), "원문 부재");
+  const model = reconcile(snapshot([stale, doc("other")], [edge("context", "other")]));
+  assert.equal(model.links.length, 1); assert.equal(model.clusters.length, 2);
 });
