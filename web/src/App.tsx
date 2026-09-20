@@ -4,6 +4,7 @@ import Documents from "./Documents";
 import Context from "./Context";
 import Memory from "./Memory";
 import type { Item as MemoryItem } from "./Memory";
+import { Positions } from "./positions";
 import { nodePresentation } from "./presentation";
 import { graphUrl, kindName, knowledge, linkName, parseLocation, reconcile, sameGraphLocation, stateName, visibleGraph } from "./graph";
 import type { Filters, Model, Scope, Snapshot } from "./graph";
@@ -29,6 +30,7 @@ class GraphBoundary extends Component<{ children: ReactNode; onFailure: () => vo
 const initialFilters: Filters = { kind: "all", state: "all", cluster: null };
 export default function App() {
   const [route, setRoute] = useState(() => parseLocation(window.location.search));
+  const positions = useMemo(() => new Positions(), [route.scope, route.q]);
   const routeRef = useRef(route); routeRef.current = route;
   const [session, setSession] = useState<Session | null>(null);
   const [stored, setStored] = useState<{ snapshot: Snapshot; model: Model } | null>(null);
@@ -94,7 +96,9 @@ export default function App() {
     if (current.focus) params.set("focus", current.focus);
     request<Snapshot>(`/api/graph?${params}`, { signal: controller.signal }).then(snapshot => {
       if (controller.signal.aborted || !sameGraphLocation(current, routeRef.current)) return;
-      const model = reconcile(snapshot, previous.current); previous.current = model;
+      const model = reconcile(snapshot, previous.current);
+      previous.current = { ...model, nodes: model.nodes.map(node => ({ ...node })) };
+      positions.install(model);
       setStored({ snapshot, model });
       setFilters(f => f.cluster && !model.clusters.some(c => c.id === f.cluster) ? { ...f, cluster: null } : f);
       const focus = routeRef.current.focus;
@@ -104,7 +108,7 @@ export default function App() {
       }
     }).catch(e => { if (!controller.signal.aborted && sameGraphLocation(current, routeRef.current)) setError(message(e)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [visible, session, route.scope, route.q, refresh]);
+  }, [visible, session, route.scope, route.q, refresh, positions]);
   const reload = () => { setSavedMemory(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); setNotice(""); };
   function search(query: string) {
     if (busy) return;
@@ -217,6 +221,7 @@ export default function App() {
             <button ref={filterButton} disabled={busy} aria-expanded={explore} onClick={() => setExplore(v => !v)}>필터·군집</button>
             <button disabled={busy} aria-pressed={fallback} onClick={() => { if (webglFailed) { setWebglFailed(false); setListMode(false); } else setListMode(v => !v); }}>{fallback ? "3D 보기" : "목록 보기"}</button>
             <details className="view-options"><summary>보기 설정</summary><div>
+              <button disabled={busy || !data} onClick={() => { positions.reset(); setFit(v => v + 1); }}>배치 초기화</button>
               <button disabled={busy || loading} aria-busy={loading} onClick={reload}>{loading ? "새로고침 중…" : "새로고침"}</button>
               {!fallback && <><button disabled={busy} onClick={() => fitView()}>전체 맞춤</button><button disabled={reduced || !!route.focus} aria-pressed={rotating} title={route.focus ? "자료 선택을 해제하면 설정한 지도 회전이 재개됩니다." : undefined} onClick={() => setRotate(v => !v)}>{reduced ? "동작 줄이기 · 지도 회전 멈춤" : route.focus ? "자료 선택 중 · 지도 회전 멈춤" : rotating ? "지도 회전 멈춤" : "지도 천천히 회전"}</button></>}
             </div></details>
@@ -233,7 +238,7 @@ export default function App() {
           {data && shown.nodes.length > 0 && !shown.links.length && <p className="hint no-relations">{data.snapshot.totals.links === 0 ? "아직 등록된 관계가 없습니다." : "현재 표시한 항목 사이에는 조회된 관계가 없습니다."}</p>}
           {selected && !shown.nodes.some(n => n.id === selected.id) && <p className="notice">선택한 자료가 현재 필터 밖에 있습니다. <button onClick={() => setFilters(initialFilters)}>필터 해제</button></p>}
         </div>
-        {data && !loading && !displayed.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{route.q || filters.kind !== "all" || filters.state !== "all" ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 저장한 기록이 이곳에 나타납니다."}</p><button disabled={!session || busy} onClick={() => openPanel("manage")}>기록 남기기</button></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{displayed.map(n => { const label = nodePresentation(n); return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} aria-hidden="true">{knowledge(n) ? "·" : "○"}</span><span><small>{kindName[n.kind]} · {stateName(n)}</small><strong>{label.title}</strong>{label.subtitle && <span className="node-location">{label.subtitle}</span>}{route.q && n.historical_match && <small className="warning">이전 내용에서 일치 · 현재 상태를 확인하세요</small>}{route.q && n.excerpt && <span className="search-excerpt">{n.excerpt}</span>}</span>{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph nodes={shown.nodes} links={shown.links} selected={route.focus} rotate={rotating} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onFailure={failed} /></Suspense></GraphBoundary>)}
+        {data && !loading && !displayed.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{route.q || filters.kind !== "all" || filters.state !== "all" ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 저장한 기록이 이곳에 나타납니다."}</p><button disabled={!session || busy} onClick={() => openPanel("manage")}>기록 남기기</button></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{displayed.map(n => { const label = nodePresentation(n); return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} aria-hidden="true">{knowledge(n) ? "·" : "○"}</span><span><small>{kindName[n.kind]} · {stateName(n)}</small><strong>{label.title}</strong>{label.subtitle && <span className="node-location">{label.subtitle}</span>}{route.q && n.historical_match && <small className="warning">이전 내용에서 일치 · 현재 상태를 확인하세요</small>}{route.q && n.excerpt && <span className="search-excerpt">{n.excerpt}</span>}</span>{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph key={`${route.scope}:${route.q}`} positions={positions} snapshot={data.model} nodes={shown.nodes} links={shown.links} selected={route.focus} rotate={rotating} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onFailure={failed} /></Suspense></GraphBoundary>)}
         <div className="map-legend"><span><i className="legend-star document" />문서</span><span><i className="legend-star memory" />기록</span><span>○ 분류 표식</span><details><summary>관계·상태 읽기</summary><p>가는 원은 선택, 바깥 점선 원은 이전 조회 이후의 기록·관계 변경입니다. 흐린 점은 제안·철회·유효기간·출처 확인 상태를 살펴보세요. {Object.values(linkName).join(" · ")} 관계만 선으로 표시하며 선택하면 연결된 선을 강조합니다. 과거 출처 근거는 갈색의 가는 선이며 군집에서 제외합니다. ‘저장’은 사실 검증을 뜻하지 않습니다. 출처 확인 시각만 바뀌면 변경으로 표시하지 않습니다.</p></details></div>
       </section>
       {panel && session && <aside ref={panelElement} hidden={libraryOpen} inert={libraryOpen} className="management-panel" role="dialog" aria-modal={narrow || undefined} aria-label={panel === "manage" ? "기록 남기기" : "선택한 자료 상세"}>

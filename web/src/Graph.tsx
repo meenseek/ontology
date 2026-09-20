@@ -5,11 +5,13 @@ import { CanvasTexture, Color, Group, Mesh, PlaneGeometry, ShaderMaterial, Sprit
 import type { Camera, PerspectiveCamera } from "three";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { active, kindName, linkColor, linkName, stateName } from "./graph";
-import type { GraphLink, PositionedNode } from "./graph";
-import { MAX_VISIBLE_LABELS, advanceStarClock, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, starMotion, starPhase, visibleLabels, type StarClock } from "./presentation";
+import { fixPosition } from "./positions";
+import type { Positions } from "./positions";
+import type { GraphLink, Model, PositionedNode } from "./graph";
+import { MAX_VISIBLE_LABELS, advanceStarClock, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, screenPickDistance, starMotion, starPhase, visibleLabels, type StarClock } from "./presentation";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
-type Props = { nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onFailure: () => void };
+type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onFailure: () => void };
 function texture(kind: "ring" | "selection" | "change") {
   const canvas = document.createElement("canvas"); canvas.width = canvas.height = 128;
   const context = canvas.getContext("2d");
@@ -132,7 +134,7 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
   return mesh;
 }
 function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean) {
-  const sprite = new Sprite(material), viewport = new Vector2(), position = new Vector3();
+  const sprite = new Sprite(material), viewport = new Vector2(), position = new Vector3(), cursor = new Vector3();
   const resize = (camera: Camera) => {
     sprite.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
     const pixels = nodeScreenSize(node.kind, -position.z, viewport.y, camera.projectionMatrix.elements[5]);
@@ -148,16 +150,30 @@ function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "bod
     if (!raycaster.camera) return;
     raycaster.camera.updateMatrixWorld();
     resize(raycaster.camera);
-    if (sprite.scale.x > 0) raycast.call(sprite, raycaster, intersections);
+    if (sprite.scale.x <= 0) return;
+    const first = intersections.length;
+    raycast.call(sprite, raycaster, intersections);
+    if (intersections.length === first) return;
+    sprite.getWorldPosition(position).project(raycaster.camera);
+    raycaster.ray.at(1, cursor).project(raycaster.camera);
+    const score = screenPickDistance(position, cursor, viewport.x, viewport.y);
+    if (!Number.isFinite(score)) { intersections.splice(first); return; }
+    // Both forcegraph hover/click and DragControls sort these hits by distance.
+    // Preserve native hit eligibility, point and object; rank overlapping nodes by
+    // screen-center proximity instead of camera depth. Native drag uses the object
+    // world position for its plane, so this sort key does not alter dragging.
+    for (let i = first; i < intersections.length; i++) intersections[i].distance = score;
   } : () => {};
   return sprite;
 }
 const endpoint = (value: string | number | { id?: string | number } | undefined) => typeof value === "object" ? value.id : value;
-export default function Graph({ nodes, links, selected, rotate, reduced, visible, fit, disabled, onSelect, onFailure }: Props) {
+export default function Graph({ positions, snapshot, nodes, links, selected, rotate, reduced, visible, fit, disabled, onSelect, onFailure }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
   const labelLayer = useRef<HTMLDivElement>(null);
   const hoveredId = useRef<string | null>(null);
+  const allowDrag = useRef(true), suppressClickUntil = useRef(0);
+  const pointer = useRef<{ pointerId: number; pointerType: string } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [hover, setHover] = useState<{ title: string; detail: string } | null>(null);
   // Renderer endpoint mutation stays out of the reconciled model.
@@ -206,7 +222,7 @@ export default function Graph({ nodes, links, selected, rotate, reduced, visible
   const appliedCamera = useRef("");
   const positionCamera = useCallback(() => {
     const instance = graph.current;
-    if (!ready || !instance || !nodes.length || appliedCamera.current === cameraKey) return;
+    if (!ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
     appliedCamera.current = cameraKey;
     const target = nodes.find(n => n.id === selected);
     if (target) {
@@ -221,12 +237,55 @@ export default function Graph({ nodes, links, selected, rotate, reduced, visible
     const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
     const distance = radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2);
     instance.cameraPosition({ x: center.x, y: center.y, z: center.z + distance }, center, reduced ? 0 : 650);
-  }, [ready, cameraKey, nodes, selected, reduced, size]);
+  }, [ready, cameraKey, nodes, selected, reduced, size, positions]);
   useEffect(() => {
     let second = 0;
     const first = requestAnimationFrame(() => { second = requestAnimationFrame(positionCamera); });
     return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
   }, [positionCamera]);
+  useEffect(() => {
+    const canvas = graph.current?.renderer().domElement;
+    const owner = canvas?.ownerDocument;
+    // 3d-force-graph 1.80 emits a document-only touch pointerup without a pointerId.
+    // OrbitControls r185 mistakes it for one finger leaving a multitouch gesture and
+    // dereferences an absent mouse position. The real pointerup still cleans up normally.
+    const ignoreLegacyRelease = (event: PointerEvent) => {
+      if (!event.isTrusted && event.target === owner && event.pointerType === "touch" && event.pointerId === 0) event.stopImmediatePropagation();
+    };
+    owner?.addEventListener("pointerup", ignoreLegacyRelease, true);
+    const cancel = () => {
+      allowDrag.current = false;
+      if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
+      positions.cancel();
+      // DragControls handles pointerup/leave but has no pointercancel listener.
+      if (pointer.current) canvas?.dispatchEvent(new PointerEvent("pointerup", { ...pointer.current, bubbles: true }));
+      pointer.current = null;
+    };
+    window.addEventListener("blur", cancel);
+    canvas?.addEventListener("pointercancel", cancel);
+    if (!visible || disabled) cancel();
+    return () => { window.removeEventListener("blur", cancel); canvas?.removeEventListener("pointercancel", cancel); cancel(); owner?.removeEventListener("pointerup", ignoreLegacyRelease, true); };
+  }, [ready, positions, snapshot, nodes, visible, disabled, fit]);
+  const dragNode = (node: PositionedNode) => {
+    const instance = graph.current;
+    if (!allowDrag.current || disabled || !instance) return;
+    if (!positions.dragging) {
+      const camera = instance.camera(), controls = instance.controls() as OrbitControls;
+      const origin = nodes.find(n => n.id === node.id)!;
+      const depth = -new Vector3(origin.x, origin.y, origin.z).applyMatrix4(camera.matrixWorldInverse).z;
+      const projectionY = camera.projectionMatrix.elements[5];
+      positions.begin(node.id, 2 * Math.max(.001, depth) / (size.height * projectionY), {
+        right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
+        up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1), spacingPixels: 24,
+      });
+      instance.cameraPosition({ ...camera.position }, { ...controls.target }, 0);
+      controls.autoRotate = false;
+      hoveredId.current = null; setHover(null);
+    }
+    // The callback already contains the new 3D position; its drag-end delta has the opposite sign.
+    positions.move(node.id, node);
+    suppressClickUntil.current = performance.now() + 350;
+  };
   useEffect(() => {
     const layer = labelLayer.current;
     if (!ready || !layer || !visible) return;
@@ -256,13 +315,24 @@ export default function Graph({ nodes, links, selected, rotate, reduced, visible
       dimensions.set(node.id, { width: measuring.offsetWidth, height: measuring.offsetHeight });
     }
     measuring.hidden = true; measuring.style.visibility = "";
-    let frame = 0, lastProjection = "";
+    let frame = 0, lastProjection = "", lastPositions = -1;
     const projected = new Vector3();
     const draw = () => {
-      const camera = graph.current?.camera();
+      const instance = graph.current;
+      positions.advance(performance.now(), reduced);
+      if (instance && lastPositions !== positions.revision) {
+        lastPositions = positions.revision;
+        const byId = new Map(nodes.map(node => [node.id, node]));
+        for (const node of data.nodes) fixPosition(node, byId.get(node.id)!);
+        // With cooldownTicks=0 this refreshes objects/edges without a simulation tick.
+        instance.d3ReheatSimulation();
+      }
+      const controls = instance?.controls() as OrbitControls | undefined;
+      if (controls) controls.autoRotate = rotate && !positions.dragging && controls.enabled;
+      const camera = instance?.camera();
       if (camera) {
         camera.updateMatrixWorld();
-        const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}`;
+        const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}|${positions.revision}`;
         if (key !== lastProjection) {
           lastProjection = key;
           const candidates = nodes.map(node => {
@@ -286,7 +356,7 @@ export default function Graph({ nodes, links, selected, rotate, reduced, visible
       frame = requestAnimationFrame(draw);
     };
     draw(); return () => cancelAnimationFrame(frame);
-  }, [ready, nodes, selected, size, visible]);
+  }, [ready, nodes, selected, size, visible, positions, data, reduced, rotate]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     const material = (kind: "ring" | "selection" | "change" | "hit", color: string, opacity: number) => {
@@ -310,7 +380,7 @@ export default function Graph({ nodes, links, selected, rotate, reduced, visible
     group.add(screenSprite(material("hit", "#ffffff", 0), node, "hit", isSelected));
     return group;
   }, [resources, selected]);
-  return <div className="graph-canvas" ref={container} aria-label="3D 지식 지도. 드래그로 회전하고 스크롤로 커서 위치를 중심으로 확대·축소합니다. 키보드는 목록 보기를 이용하세요.">
+  return <div className="graph-canvas" ref={container} onPointerDownCapture={event => { allowDrag.current = true; pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType }; }} aria-label="3D 지식 지도. 점을 끌어 배치하고 빈 공간을 드래그해 회전합니다. 스크롤로 커서 위치를 중심으로 확대·축소합니다. 키보드는 목록 보기를 이용하세요.">
     {ready && <ForceGraph3D<PositionedNode, RenderLink>
       ref={graph} width={size.width} height={size.height} graphData={data}
       backgroundColor="rgba(0,0,0,0)" controlType="orbit" showNavInfo={false}
@@ -318,14 +388,19 @@ export default function Graph({ nodes, links, selected, rotate, reduced, visible
       linkColor={link => selected && endpoint(link.source) !== selected && endpoint(link.target) !== selected ? "#35404b" : link.current ? linkColor[link.kind] : "#947867"}
       linkWidth={0}
       linkOpacity={.65} linkDirectionalArrowLength={link => link.kind === "evidence" ? 2 : 0} linkDirectionalArrowRelPos={.8}
-      enableNodeDrag={false} enablePointerInteraction={!disabled}
+      enableNodeDrag={!disabled}
+      onNodeDrag={dragNode}
+      onNodeDragEnd={() => {
+        if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
+        if (allowDrag.current) positions.release(performance.now(), reduced);
+      }} enablePointerInteraction={!disabled}
       cooldownTicks={0} warmupTicks={0} onEngineStop={positionCamera}
-      onNodeClick={node => { hoveredId.current = null; setHover(null); if (!disabled) onSelect(node.id); }}
+      onNodeClick={node => { hoveredId.current = null; setHover(null); if (!disabled && performance.now() >= suppressClickUntil.current) onSelect(node.id); }}
       onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
       onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
     />}
     <div className="node-labels" ref={labelLayer} aria-hidden="true">{Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /></div>)}</div>
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
-    <div className="graph-instructions" aria-hidden="true">드래그로 회전 · 스크롤로 커서 위치 중심 확대·축소</div>
+    <div className="graph-instructions" aria-hidden="true">점 끌어 놓으면 성단 정렬 · 빈 공간 회전 · 스크롤 확대·축소</div>
   </div>;
 }
