@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { Positions } from "./positions.ts";
 import { active, graphUrl, parseLocation, reconcile, sameGraphLocation, stateName, visibleGraph } from "./graph.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
@@ -475,4 +476,125 @@ test("current, stale, failed and missing Context documents retain their honest s
   assert.equal(stateName({ ...stale, status: "missing", present: false }), "원문 부재");
   const model = reconcile(snapshot([stale, doc("other")], [edge("context", "other")]));
   assert.equal(model.links.length, 1); assert.equal(model.clusters.length, 2);
+});
+
+test("only held node moves during small and large drags; release compacts around the drop", () => {
+  for (const distance of [8, 200]) {
+    const model = reconcile(snapshot([doc("a"), doc("b"), doc("other")], [edge("a", "b")]));
+    const positions = new Positions(); positions.install(model);
+    const [a, b, other] = model.nodes, baseline = model.nodes.map(n => ({ ...n }));
+    positions.begin(a.id, 1);
+    positions.move(a.id, { x: distance, y: 0, z: 0 }); positions.advance(1000, false);
+    assert.deepEqual(b, baseline[1], "no followers move while dragging");
+    positions.release(1000, false); assert.deepEqual(b, baseline[1], "release starts without teleporting");
+    positions.advance(1016, false); assert.notEqual(b.x, baseline[1].x);
+    positions.advance(2100, false); assert.equal(b.x, distance + 24); assert.equal(a.x, distance);
+    assert.deepEqual(other, baseline[2]);
+  }
+});
+test("clicks stay unchanged; a drag returning near its origin still rearranges on release", () => {
+  const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));
+  const positions = new Positions(); positions.install(model); const before = model.nodes.map(n => ({ ...n }));
+  positions.begin("a", 1); positions.release(0, false); positions.advance(1500, false); assert.deepEqual(model.nodes, before);
+  positions.begin("a", 1); positions.move("a", { x: 8, y: 0, z: 0 }); positions.move("a", { x: 1, y: 0, z: 0 });
+  positions.release(0, true); assert.equal(model.nodes[1].x, 25);
+});
+test("adjacency maps stars and chains to equal nearest-neighbor lattice edges", () => {
+  for (const shape of ["star", "chain"]) {
+    const nodes = Array.from({ length: shape === "star" ? 7 : 20 }, (_, i) => doc(`n${String(i).padStart(2, "0")}`));
+    const links = nodes.slice(1).map((n, i) => edge(shape === "star" ? nodes[0].id : nodes[i].id, n.id));
+    const model = reconcile(snapshot(nodes, links));
+    for (const node of model.nodes) node.cluster = "frozen-test-group";
+    const positions = new Positions(); positions.install(model); positions.begin(nodes[0].id, 1);
+    positions.move(nodes[0].id, { x: 200, y: 0, z: 0 }); positions.release(0, true);
+    const placed = new Map(model.nodes.map(n => [n.id, n]));
+    for (const link of links) {
+      const a = placed.get(link.source)!, b = placed.get(link.target)!;
+      assert.ok(Math.abs(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) - 24) < 1e-9, `${shape} edge has uniform spacing`);
+    }
+    assert.deepEqual(model.links, links, "semantic edges are unchanged");
+  }
+});
+test("followers visibly overshoot while held node stays fixed, then settle independently of frame rate", () => {
+  const make = () => {
+    const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));
+    const positions = new Positions(); positions.install(model); positions.begin("a", 1);
+    positions.move("a", { x: 200, y: 20, z: 30 }); positions.release(0, false);
+    return { positions, model };
+  };
+  const { positions, model } = make(), single = make();
+  const held = { ...model.nodes[0] };
+  for (let t = 16; t <= 160; t += 16) positions.advance(t, false);
+  single.positions.advance(160, false);
+  assert.ok(model.nodes[1].x > 224, "follower passes its compact target after release");
+  assert.ok(Math.abs(model.nodes[1].x - single.model.nodes[1].x) < 1e-9);
+  assert.deepEqual(model.nodes[0], held, "held node never participates in spring motion");
+  positions.advance(1100, false);
+  assert.deepEqual([model.nodes[1].x, model.nodes[1].y, model.nodes[1].z], [224, 20, 30]);
+  const stable = model.nodes.map(n => ({ ...n })); positions.advance(10000, false); assert.deepEqual(model.nodes, stable);
+});
+test("compact targets grow in screen-plane rings with minimum spacing at different zooms", () => {
+  for (const scale of [.25, 3]) {
+    const nodes = Array.from({ length: 40 }, (_, i) => doc(`n${String(i).padStart(2, "0")}`));
+    const model = reconcile(snapshot(nodes));
+    for (const node of model.nodes) node.cluster = "frozen-test-group";
+    const positions = new Positions(); positions.install(model);
+    positions.begin("n00", scale, { right: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24 });
+    positions.move("n00", { x: 1000, y: 0, z: 0 }); positions.release(0, true);
+    const held = model.nodes[0];
+    for (const [i, node] of model.nodes.entries()) {
+      assert.equal(node.x, held.x, "rotated camera plane is respected");
+      assert.ok(Math.hypot(node.y, node.z) <= 96 * scale + 1e-9, "40 nodes fit in four compact rings");
+      for (const other of model.nodes.slice(i + 1)) assert.ok(Math.hypot(node.y - other.y, node.z - other.z) >= 24 * scale - 1e-9);
+    }
+    const stable = model.nodes.map(n => ({ ...n }));
+    positions.release(0, true); positions.advance(100, false); assert.deepEqual(model.nodes, stable, "reduced motion has no tail");
+  }
+});
+test("cancellation freezes an active spring and invalid input cannot poison coordinates", () => {
+  const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));
+  const positions = new Positions(); positions.install(model); positions.begin("a", 1);
+  positions.move("a", { x: 200, y: 0, z: 0 }); positions.release(0, false); positions.advance(50, false);
+  const frozen = model.nodes.map(n => ({ ...n }));
+  positions.move("a", { x: Infinity, y: 0, z: 0 }); assert.deepEqual(model.nodes, frozen);
+  positions.cancel(); positions.advance(10000, false); positions.move("a", { x: 0, y: 0, z: 0 });
+  assert.deepEqual(model.nodes, frozen); assert.equal(positions.dragging, false);
+});
+test("display filtering retains hidden positions; reset and fresh query sessions restore automatic layout", () => {
+  const auto = reconcile(snapshot([doc("a"), memory("b")], [edge("a", "b")]));
+  const baseline = auto.nodes.map(n => ({ ...n }));
+  const positions = new Positions(); positions.install(auto);
+  const visible = visibleGraph(auto, { kind: "document", state: "all", cluster: null });
+  assert.equal(visible.nodes.length, 1);
+  positions.begin("a", 1); positions.move("a", { x: 200, y: 0, z: 0 }); positions.release(0, true);
+  assert.notEqual(auto.nodes[1].x, baseline[1].x, "hidden cluster member follows");
+  const refreshed = reconcile(snapshot([doc("a"), memory("b")], [edge("a", "b")])), newSession = new Positions();
+  positions.install(refreshed); assert.equal(refreshed.nodes[0].x, 200);
+  assert.equal(positions.dragging, false);
+  positions.reset(); assert.deepEqual(refreshed.nodes, baseline);
+  const otherQuery = reconcile(snapshot([doc("a"), memory("b")], [edge("a", "b")]));
+  newSession.install(otherQuery); assert.deepEqual(otherQuery.nodes, baseline);
+});
+
+test("overlapping hit targets prefer the nearest screen center across depth, zoom and aspect", async () => {
+  const { screenPickDistance, nodeScreenMetrics } = await import("./presentation.ts");
+  const { PerspectiveCamera, Vector3 } = await import("three");
+  for (const [width, height] of [[1000, 500], [400, 800]]) for (const zoom of [1, 3]) {
+    const camera = new PerspectiveCamera(60, width / height, .1, 2000); camera.zoom = zoom; camera.updateProjectionMatrix(); camera.updateMatrixWorld();
+    const centerAt = (pixels: number, depth: number) => new Vector3(pixels * 2 * depth / (width * camera.projectionMatrix.elements[0]), 0, -depth).project(camera);
+    const nearerCamera = centerAt(0, 50), fartherCamera = centerAt(24, 500);
+    for (const cursorPixels of [11, 12, 13]) {
+      const cursor = { x: cursorPixels * 2 / width, y: 0 };
+      const a = screenPickDistance(nearerCamera, cursor, width, height), b = screenPickDistance(fartherCamera, cursor, width, height);
+      assert.ok(a <= 18 && b <= 18, "both original 36px hit targets overlap");
+      if (cursorPixels < 12) assert.ok(a < b);
+      else if (cursorPixels > 12) assert.ok(b < a, "farther-depth node wins near its center");
+      else assert.ok(Math.abs(a - b) < 1e-9, "midpoint is an equal-distance boundary");
+    }
+    assert.equal(nodeScreenMetrics(26, false, false).hit, 36, "picking footprint is retained");
+    assert.equal(screenPickDistance({ x: 0, y: 24 / height, z: 0 }, { x: 0, y: 0 }, width, height), 12, "vertical distance uses viewport height");
+  }
+  assert.equal(screenPickDistance({ x: 0, y: 0, z: 2 }, { x: 0, y: 0 }, 100, 100), Infinity);
+  assert.equal(screenPickDistance({ x: NaN, y: 0, z: 0 }, { x: 0, y: 0 }, 100, 100), Infinity);
+  assert.equal(screenPickDistance({ x: 0, y: 0, z: 0 }, { x: 0, y: 0 }, 0, 100), Infinity);
 });

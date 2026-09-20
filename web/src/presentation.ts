@@ -134,3 +134,9 @@ export function starMotion(pixels: number, phase: number, seconds: number) {
     shimmer: 1 - .3 * (1 - detail) * (1 - pulse),
   };
 }
+
+/** Rank already-valid sprite hits in CSS pixels, independent of depth and viewport aspect. */
+export function screenPickDistance(center: { x: number; y: number; z: number }, cursor: { x: number; y: number }, width: number, height: number): number {
+  if (![center.x, center.y, center.z, cursor.x, cursor.y, width, height].every(Number.isFinite) || width <= 0 || height <= 0 || center.z < -1 || center.z > 1) return Infinity;
+  return Math.hypot((center.x - cursor.x) * width / 2, (center.y - cursor.y) * height / 2);
+}
