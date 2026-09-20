@@ -62,6 +62,33 @@ function random(seed: number): () => number {
 }
 const linkKey = (l: GraphLink) => `${l.kind}:${l.source}:${l.target}:${l.current}`;
 
+/** Visual proximity only: singletons may follow one directly linked host, never merge semantic clusters. */
+export function visualSatellites(model: Pick<Model, "nodes" | "links">): Map<string, string> {
+  const byId = new Map(model.nodes.map(node => [node.id, node]));
+  const sizes = new Map<string, number>();
+  for (const node of model.nodes) sizes.set(node.cluster, (sizes.get(node.cluster) ?? 0) + 1);
+  const rank = (node: PositionedNode) => [Number(node.kind === "document" && active(node)), Number(sizes.get(node.cluster)! > 1), Number(active(node)), Number(node.kind === "document")];
+  const order = (a: PositionedNode, b: PositionedNode) => {
+    const ar = rank(a), br = rank(b);
+    for (let i = 0; i < ar.length; i++) if (ar[i] !== br[i]) return br[i] - ar[i];
+    return compare(a.id, b.id);
+  };
+  const neighbors = new Map(model.nodes.map(node => [node.id, new Set<string>()]));
+  for (const link of model.links) {
+    if (link.source === link.target || !byId.has(link.source) || !byId.has(link.target)) continue;
+    neighbors.get(link.source)!.add(link.target); neighbors.get(link.target)!.add(link.source);
+  }
+  const satellites = new Map<string, string>();
+  for (const node of [...model.nodes].sort(order)) {
+    if (sizes.get(node.cluster)! > 1) continue;
+    const host = [...neighbors.get(node.id)!].map(id => byId.get(id)!)
+      .filter(other => !satellites.has(other.id) && (sizes.get(other.cluster)! > 1 || order(other, node) < 0))
+      .sort(order)[0];
+    if (host) satellites.set(node.id, host.id);
+  }
+  return satellites;
+}
+
 // This is the only owner of display memberships, initial positions and refresh reconciliation.
 // Louvain sees current relationships between usable knowledge and explicit classification markers.
 // No labels/text are interpreted as meaning and no membership is persisted.
@@ -117,7 +144,23 @@ export function reconcile(snapshot: Snapshot, previous?: Model): Model {
       positioned.set(id, { ...node, repositoryLabel: repositories.get(node.repository ?? ""), x, y, z, fx: x, fy: y, fz: z, cluster: cluster.id, color: cluster.color, signature, changed: !!prior && signature !== prior.signature });
     }
   }
-  return { scope: snapshot.scope, nodes: nodes.map(n => positioned.get(n.id)!), links, clusters };
+  const model = { scope: snapshot.scope, nodes: nodes.map(n => positioned.get(n.id)!), links, clusters };
+  const satellites = visualSatellites(model);
+  const priorSatellites = previous?.scope === snapshot.scope ? visualSatellites(previous) : new Map<string, string>();
+  const relocating = new Set([...satellites].filter(([id, host]) => !old.has(id) || priorSatellites.get(id) !== host).map(([id]) => id));
+  const reserved = model.nodes.filter(node => !relocating.has(node.id));
+  for (const node of model.nodes) {
+    if (!relocating.has(node.id)) continue;
+    const host = positioned.get(satellites.get(node.id)!)!;
+    let slot = 1, x: number, y: number;
+    do {
+      const angle = slot * 2.399963229728653, radius = 42 * Math.sqrt(slot++);
+      x = host.x + Math.cos(angle) * radius; y = host.y + Math.sin(angle) * radius;
+    } while (reserved.some(other => Math.hypot(other.x - x, other.y - y) < 40));
+    node.x = node.fx = x; node.y = node.fy = y; node.z = node.fz = host.z;
+    reserved.push(node);
+  }
+  return model;
 }
 export type Filters = { kind: "all" | "knowledge" | NodeKind; state: "all" | "active" | "proposed" | "withdrawn" | "attention"; cluster: string | null };
 export function visibleGraph(model: Model, filters: Filters): { nodes: PositionedNode[]; links: GraphLink[] } {

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Positions } from "./positions.ts";
-import { active, graphUrl, parseLocation, reconcile, sameGraphLocation, stateName, visibleGraph } from "./graph.ts";
+import { active, graphUrl, parseLocation, reconcile, sameGraphLocation, stateName, visibleGraph, visualSatellites } from "./graph.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
 const memory = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "memory", label: id, revision: "1", status: "accepted", temporal: "current", supported: true });
@@ -597,4 +597,64 @@ test("overlapping hit targets prefer the nearest screen center across depth, zoo
   assert.equal(screenPickDistance({ x: 0, y: 0, z: 2 }, { x: 0, y: 0 }, 100, 100), Infinity);
   assert.equal(screenPickDistance({ x: NaN, y: 0, z: 0 }, { x: 0, y: 0 }, 100, 100), Infinity);
   assert.equal(screenPickDistance({ x: 0, y: 0, z: 0 }, { x: 0, y: 0 }, 0, 100), Infinity);
+});
+
+function satelliteFixture() {
+  const orphan = { ...memory("z_record"), supported: false };
+  const nodes = [doc("a0"), doc("a1"), doc("a2"), doc("b0"), doc("b1"), doc("b2"), orphan, memory("zz_unlinked")];
+  const links: GraphLink[] = [edge("a0", "a1"), edge("a0", "a2"), edge("a1", "a2"), edge("b0", "b1"), edge("b0", "b2"), edge("b1", "b2"),
+    { source: orphan.id, target: "a0", kind: "evidence", current: false }, { source: orphan.id, target: "b0", kind: "evidence", current: false }];
+  return snapshot(nodes, links);
+}
+test("past-evidence singleton is initially near one host without changing semantic clusters or state", () => {
+  const source = satelliteFixture(), model = reconcile(source), byId = new Map(model.nodes.map(n => [n.id, n]));
+  const record = byId.get("z_record")!, host = byId.get("a0")!;
+  assert.equal(visualSatellites(model).get(record.id), host.id);
+  assert.ok(Math.hypot(record.x - host.x, record.y - host.y) <= 126);
+  for (const [index, node] of model.nodes.entries()) for (const other of model.nodes.slice(index + 1)) assert.ok(Math.hypot(node.x - other.x, node.y - other.y) >= 40 - 1e-9);
+  assert.notEqual(record.cluster, host.cluster); assert.notEqual(host.cluster, byId.get("b0")!.cluster);
+  assert.equal(model.clusters.find(c => c.id === record.cluster)!.members.length, 1);
+  assert.equal(record.supported, false); assert.equal(active(record), false); assert.match(stateName(record), /근거 재확인/);
+  assert.deepEqual(model.links.filter(l => l.kind === "evidence"), source.links.filter(l => l.kind === "evidence"));
+  assert.equal(visualSatellites(model).has("zz_unlinked"), false);
+  const reversed = reconcile(snapshot([...source.nodes].reverse(), [...source.links].reverse()));
+  assert.deepEqual(reversed, model, "anchor and layout ignore input order");
+  assert.deepEqual(reconcile(source, model), model, "unchanged refresh preserves every retained coordinate");
+});
+test("host and hidden satellite drags share one visual group without following a stale bridge", () => {
+  for (const picked of ["a0", "z_record"]) {
+    const model = reconcile(satelliteFixture()), before = model.nodes.map(n => ({ ...n }));
+    const positions = new Positions(); positions.install(model);
+    const shown = visibleGraph(model, { kind: "document", state: "all", cluster: null });
+    assert.equal(shown.nodes.some(n => n.id === "z_record"), false);
+    positions.begin(picked, 1); positions.move(picked, { x: 1500, y: 1500, z: 20 }); positions.release(0, true);
+    for (const node of model.nodes) {
+      if (node.id.startsWith("a") || node.id === "z_record") assert.ok(Math.hypot(node.x - 1500, node.y - 1500, node.z - 20) <= 24 + 1e-9);
+      else assert.deepEqual(node, before.find(n => n.id === node.id), "other host cluster and unlinked orphan stay fixed");
+    }
+    assert.deepEqual(model.nodes.map(n => n.cluster), before.map(n => n.cluster));
+    positions.reset(); assert.deepEqual(model.nodes, before);
+  }
+});
+test("singleton-only anchors do not form cycles and deleted anchors leave no visual membership", () => {
+  const source = snapshot([doc("a"), doc("b"), { ...memory("m"), supported: false }], [edge("a", "b", false), { source: "m", target: "a", kind: "evidence", current: false }]);
+  const model = reconcile(source), anchors = visualSatellites(model);
+  assert.equal(anchors.get("b"), "a"); assert.equal(anchors.get("m"), "a"); assert.equal(anchors.has("a"), false);
+  for (const host of anchors.values()) assert.equal(anchors.has(host), false);
+  const removed = reconcile(snapshot(source.nodes.filter(n => n.id !== "a"), source.links), model);
+  assert.equal(visualSatellites(removed).size, 0);
+});
+test("new and reanchored satellites follow retained temporary hosts while reset uses automatic coordinates", () => {
+  const source = satelliteFixture(), initial = reconcile(snapshot(source.nodes.filter(n => n.id !== "z_record"), source.links));
+  const positions = new Positions(); positions.install(initial); positions.begin("a0", 1); positions.move("a0", { x: 1000, y: 1000, z: 0 }); positions.release(0, true);
+  const automatic = reconcile(source), baseline = automatic.nodes.map(n => ({ ...n }));
+  positions.install(automatic);
+  const host = automatic.nodes.find(n => n.id === "a0")!, record = automatic.nodes.find(n => n.id === "z_record")!;
+  assert.ok(Math.hypot(record.x - host.x, record.y - host.y) <= 126);
+  positions.reset(); assert.deepEqual(automatic.nodes, baseline);
+  const movedSource = { ...source, links: source.links.filter(l => !(l.source === "z_record" && l.target === "a0")) };
+  const reanchored = reconcile(movedSource, automatic); positions.install(reanchored);
+  assert.equal(visualSatellites(reanchored).get("z_record"), "b0");
+  const b = reanchored.nodes.find(n => n.id === "b0")!, moved = reanchored.nodes.find(n => n.id === "z_record")!;
+  assert.ok(Math.hypot(moved.x - b.x, moved.y - b.y) <= 126);
 });
