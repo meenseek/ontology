@@ -22,7 +22,7 @@ summary { cursor: pointer; color: #b3c0d0; font-size: 13px; }
 summary:hover { color: #e6edf6; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .app { height: 100dvh; min-height: 560px; display: flex; flex-direction: column; }
-.app-header { flex-shrink: 0; min-height: 72px; padding: 14px 24px; border-bottom: 1px solid #28313d; display: grid; grid-template-columns: auto auto minmax(200px, 1fr) auto; align-items: center; gap: 20px; background: #101721; }
+.app-header { flex-shrink: 0; min-height: 72px; padding: 14px 24px; border-bottom: 1px solid #28313d; display: grid; grid-template-columns: auto auto minmax(140px, 1fr) auto auto; align-items: center; gap: 20px; background: #101721; }
 .wordmark { font-size: 18px; font-weight: 650; color: #eef2f7; text-decoration: none; white-space: nowrap; }
 .wordmark span { color: #8795a7; font-size: 12px; font-weight: 400; }
 .scope-switch { display: flex; gap: 2px; white-space: nowrap; }
@@ -31,7 +31,7 @@ summary:hover { color: #e6edf6; }
 .map-search { display: flex; gap: 6px; width: 100%; max-width: 480px; justify-self: center; min-width: 0; }
 .map-search input { width: 0; flex: 1 1 0; }
 .map-search button { flex: 0 0 auto; }
-.manage-button { white-space: nowrap; }
+.manage-button, .library-button { white-space: nowrap; }
 .map-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); position: relative; }
 .map-workspace.explorer-open { grid-template-columns: 230px minmax(0, 1fr); }
 .map-workspace.panel-open { grid-template-columns: minmax(0, 1fr) 440px; }
@@ -197,12 +197,15 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
   .map-workspace.panel-open { grid-template-columns: minmax(0, 1fr); }
   .map-workspace.panel-open.explorer-open { grid-template-columns: 220px minmax(0, 1fr); }
   .management-panel { position: fixed; inset: 0 0 0 auto; width: min(480px, 100%); box-shadow: -25px 0 60px #0008; }
-  .app-header { grid-template-columns: auto auto minmax(140px, 1fr) auto; gap: 10px; padding-inline: 16px; }
+  .app-header { grid-template-columns: auto auto minmax(100px, 1fr) auto auto; gap: 10px; padding-inline: 16px; }
 }
 @media (max-width: 700px) {
   .app { min-height: 620px; }
   .app-header { grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px 9px; padding: 12px 16px; }
   .wordmark { font-size: 17px; }
+  .scope-switch { grid-column: 1; grid-row: 3; }
+  .library-button { grid-column: 2; grid-row: 3; min-height: 40px; font-size: 12px; }
+  .manage-button { grid-column: 3; grid-row: 3; }
   .scope-switch button { padding: 8px; font-size: 12px; min-height: 40px; }
   .manage-button { padding: 8px 10px; font-size: 12px; min-height: 40px; }
   .map-search { grid-column: 1 / -1; grid-row: 2; max-width: none; justify-self: stretch; }
@@ -234,3 +237,16 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 
 .search-excerpt { display: block; margin-top: .6rem; color: var(--muted, #aebdcb); font-size: .9rem; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .evidence-preview { margin-top: 1rem; border-left: 1px solid #384653; padding-left: 1rem; }
+
+.management-panel[hidden] { display: none; }
+.context-panel .panel-heading h2 { margin: 0; font-size: 15px; }
+.context-panel > select { width: 100%; }
+.context-search { display: flex; gap: 7px; margin: 20px 0 12px; }
+.context-search input { flex: 1; width: 0; }
+.context-list { list-style: none; padding: 0; margin: 0; }
+.context-list button { display: block; width: 100%; text-align: left; padding: 12px 8px; border-width: 0 0 1px; border-radius: 0; background: transparent; }
+.context-list strong { display: block; font-weight: 500; font-size: 13px; overflow-wrap: anywhere; }
+.context-list small { color: #9aabbe; font-size: 11px; }
+.context-pagination { display: flex; gap: 8px; margin: 14px 0; }
+.context-detail h3 { overflow-wrap: anywhere; }
+.context-text { white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -6,7 +6,7 @@ import remarkFrontmatter from "remark-frontmatter";
 import remarkGfm from "remark-gfm";
 import { fileName } from "./presentation";
 
-type Props = { path: string; content: string | null; kind: "vault" | "git" | "record"; title?: string; generatedTitle?: boolean };
+type Props = { path: string; content: string | null; kind: "vault" | "context" | "git" | "record"; title?: string; generatedTitle?: boolean };
 type Tree = { type: string; tagName?: string; value?: string; properties?: Record<string, unknown>; children?: Tree[] };
 const text = (node: Tree): string => node.value ?? String(node.properties?.alt ?? (node.children ?? []).map(text).join(""));
 
@@ -27,7 +27,7 @@ function headingIds({ namespace }: { namespace: string }) {
   };
 }
 
-/** Only the Vault importer adds a title before the body. Preserve the body and all fragment IDs. */
+/** Only Context and Vault importers adds a title before the body. Preserve the body and all fragment IDs. */
 function documentHeading({ fallback, kind, generatedTitle }: { fallback: string; kind: Props["kind"]; generatedTitle?: boolean }) {
   return (tree: Tree) => {
     if (kind === "record" && generatedTitle) return;
@@ -35,7 +35,7 @@ function documentHeading({ fallback, kind, generatedTitle }: { fallback: string;
     const [first, second] = children.filter(node => node.type !== "text" || node.value?.trim());
     if (first?.tagName !== "h1" || !text(first).trim() || (kind === "record" && text(first).trim() !== fallback.trim())) {
       children.unshift({ type: "element", tagName: "h1", properties: {}, children: [{ type: "text", value: fallback }] });
-    } else if (kind === "vault" && second?.tagName === "h1"
+    } else if ((kind === "vault" || kind === "context") && second?.tagName === "h1"
       && first.children?.every(node => node.type === "text")
       && text(first).trim() === text(second).trim()) {
       // Keep the authored heading (including formatting/links). The synthetic title remains an anchor.

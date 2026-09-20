@@ -1,20 +1,6 @@
 {
   "interval_seconds": 60,
   "sources": [
-    {
-      "kind": "git",
-      "root": "/absolute/path/to/repository",
-      "scope": "meenseek",
-      "ref": "HEAD",
-      "paths": ["README.md"]
-    },
-    {
-      "kind": "vault",
-      "root": "/absolute/path/to/vault",
-      "scope": "personal",
-      "vault_scope": "personal",
-      "binary": "/absolute/path/to/llm-context-vault",
-      "paths": ["projects/example.md"]
-    }
+    {"kind":"context","store_id":"00000000-0000-0000-0000-000000000001","context_scope":"personal","scope":"personal","paths":["projects/note.md"]}
   ]
 }

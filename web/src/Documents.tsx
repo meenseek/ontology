@@ -3,7 +3,7 @@ import type { FormEvent } from "react";
 import type { Request, Scope } from "./graph";
 import { fileName } from "./presentation";
 import DocumentPreview from "./DocumentPreview";
-type SourceKind = "git" | "vault";
+type SourceKind = "git" | "vault" | "context";
 type Area = { id: string; label: string };
 type RecordItem = {
   id: string;
@@ -25,6 +25,7 @@ type Detail = {
   scope: Scope;
   id: string;
   revision: number;
+  current: boolean;
   areas: string[];
   topics: string[];
   source: {
@@ -43,6 +44,7 @@ type Detail = {
     id: number;
     kind: string;
     revision: number;
+  current: boolean;
     previous: unknown;
     confirmed: unknown;
     confirmed_at: string;
@@ -109,9 +111,10 @@ export default function Documents({ visible, managing, scope, id, csrf, allAreas
     {error && <p className="error" role="alert">{error}<button disabled={saving} onClick={reload}>다시 불러오기</button></p>}
     {notice && <p className="notice">{notice}</p>}
     {loading ? <p role="status">자료를 불러오는 중…</p> : detail && <>
-      <p className="source-identity">{detail.source.kind === "vault" ? "Vault" : "Git"} 문서</p>
+      <p className="source-identity">{detail.source.kind === "vault" ? "Vault" : detail.source.kind === "context" ? "Context" : "Git"} 문서</p>
       {detail.source.status === "failed" && <p className="error">최근 출처 확인에 실패했습니다. 아래 내용은 마지막으로 성공한 기록입니다.</p>}
       {!detail.projection.present && <p className="warning">등록한 경로의 부재를 확인했습니다. 마지막 원문과 사용자의 확인 기록은 보존되어 있습니다.</p>}
+      {detail.source.status === "ok" && detail.projection.present && !detail.current && <p className="warning">갱신 대기 · 아래 내용은 마지막으로 성공한 기록입니다.</p>}
       <DocumentPreview path={detail.source.path} content={detail.projection.content} kind={detail.source.kind} />
       {detail.related.length > 0 && <section className="section">
         <h3>관련 자료 <span>{detail.related.length}개 연결</span></h3>

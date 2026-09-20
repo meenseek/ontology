@@ -72,7 +72,7 @@ const GRAPH_SQL: &str = concat!(
  SELECT e.id,'document' AS kind,
  jsonb_build_object('id',e.id,'scope',e.scope,'kind','document','label',s.path,'repository',s.repository,
  'revision',e.revision::text,'content_digest',p.content_digest,'source_revision',p.source_revision,
- 'generation',s.generation::text,'status',s.status,'present',p.present,'source_kind',s.kind,
+ 'generation',s.generation::text,'status',s.status,'present',p.present,'current',(s.status='ok' AND p.present AND p.source_revision=s.verified_revision),'source_kind',s.kind,
  'last_success_at',s.last_success_at,'observed_at',p.observed_at,
  'excerpt',CASE WHEN $2<>'' AND strpos(lower(p.content),lower($2))>0 THEN '…' || substring(p.content FROM greatest(1,strpos(lower(p.content),lower($2))-80) FOR 400) || '…' END) AS value,
  ($2='' OR strpos(lower(concat(s.path,' ',p.content)),lower($2))>0 OR EXISTS(
@@ -155,18 +155,33 @@ SELECT jsonb_build_object('scope',$1,'query',$2,'purpose','discovery','instructi
 );
 impl Store {
     pub async fn graph(&self, query: GraphQuery) -> Result<Value, Error> {
-        query.validate()?;
-        self.count(1);
-        let value: Value = sqlx::query_scalar(GRAPH_SQL)
-            .bind(query.scope.as_str())
-            .bind(&query.q)
-            .bind(&query.focus)
-            .bind(query.limit as i64)
-            .bind(MAX_GRAPH_LINKS as i64)
-            .fetch_one(self.pool())
-            .await
-            .map_err(|_| Error::Storage)?;
-        bound_response(value, query.limit)
+        let observation = self.dependency_start(
+            "consumer-graph",
+            &(
+                query.scope,
+                &query.q,
+                &query.focus,
+                query.limit,
+                MAX_GRAPH_LINKS,
+            ),
+        )?;
+        let result = async {
+            query.validate()?;
+            self.count(1);
+            let value: Value = sqlx::query_scalar(GRAPH_SQL)
+                .bind(query.scope.as_str())
+                .bind(&query.q)
+                .bind(&query.focus)
+                .bind(query.limit as i64)
+                .bind(MAX_GRAPH_LINKS as i64)
+                .fetch_one(self.pool())
+                .await
+                .map_err(|_| Error::Storage)?;
+            bound_response(value, query.limit)
+        }
+        .await;
+        self.dependency_finish(observation, &result);
+        result
     }
 }
 

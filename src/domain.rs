@@ -36,18 +36,20 @@ impl FromStr for Scope {
 pub enum SourceKind {
     Git,
     Vault,
+    Context,
 }
 impl SourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Git => "git",
             Self::Vault => "vault",
+            Self::Context => "context",
         }
     }
     pub fn failure_code(self) -> &'static str {
         match self {
             Self::Git => "git-read-failed",
-            Self::Vault => "vault-read-failed",
+            Self::Vault | Self::Context => "context-read-failed",
         }
     }
 }
@@ -67,6 +69,8 @@ pub enum Error {
     NotFound,
     Gone,
     Conflict,
+    ContextPending,
+    ContextProjectionUnavailable,
     Forbidden,
     Storage,
     Baseline,
@@ -79,6 +83,10 @@ impl fmt::Display for Error {
             Self::Invalid => "Invalid request",
             Self::NotFound => "Record not found",
             Self::Gone => "Memory was forgotten; creation key cannot be reused",
+            Self::ContextPending => {
+                "자료 반영 또는 복구가 진행 중입니다. 완료 후 다시 시도해 주세요."
+            }
+            Self::ContextProjectionUnavailable => "선택한 자료의 검색 색인을 먼저 준비해 주세요.",
             Self::Conflict => "Revision conflict; refresh the record",
             Self::Forbidden => "Local session verification failed",
             Self::Storage => "Database operation failed",
