@@ -450,6 +450,19 @@ class DockerDiagnosticsTests(unittest.TestCase):
         elif code == "docker_unavailable":
             self.assertEqual(error.message, "Docker 엔진에 연결할 수 없습니다.")
 
+    def test_zero_exit_socket_denial_does_not_report_a_database_outage(self):
+        for denial in self.DENIALS:
+            with self.subTest(denial=denial), patch.object(c, "inspect_container") as inspect:
+                self.process.return_value = self.response(
+                    b"", denial + b" " + self.PRIVATE_STDERR, 0
+                )
+                result = c.check("database")
+                self.assertEqual((result["ok"], result["layer"], result["code"]),
+                                 (False, "docker", "docker_permission"))
+                self.assertIn("DB 중단 여부는 미확인", result["impact"])
+                self.assertNotIn(SECRET, json.dumps(result))
+                inspect.assert_not_called()
+
     @contextlib.contextmanager
     def repair_services(self):
         # Keep the real readiness, command, inspect and retry boundaries; isolate
@@ -586,7 +599,8 @@ class DockerDiagnosticsTests(unittest.TestCase):
 
     def test_readiness_accepts_nonempty_stdout_with_benign_stderr(self):
         for stdout, stderr in ((b"28.0.0\n", b""),
-                               (b"vendor-version\n", b"WARNING: fixture setting " + self.PRIVATE_STDERR)):
+                               (b"vendor-version\n", b"WARNING: fixture setting " + self.PRIVATE_STDERR),
+                               (b"28.0.0\n", b"WARNING: permission setting is ignored")):
             with self.subTest(stdout=stdout):
                 self.process.reset_mock()
                 self.process.return_value = self.response(stdout, stderr)
