@@ -31,7 +31,7 @@ Native 원문은 같은 material identity 아래 revision과 history를 남긴�
 3. 복원 확인이 성공한 뒤 다음 명령으로 운영 DB에 `init`을 실행한다. 적용된 baseline과 migration을 검사하고 아직 적용하지 않은 migration을 반영한다.
 
 ```bash
-cd /Users/meenseek/Desktop/meenseek-ontology
+cd /Users/meenseek/Desktop/ontology
 set -a
 source .env
 set +a
@@ -46,7 +46,7 @@ cargo run --locked -- init
 ### 앱 시작과 종료
 
 ```bash
-cd /Users/meenseek/Desktop/meenseek-ontology
+cd /Users/meenseek/Desktop/ontology
 chmod 600 .env
 set -a
 source .env
@@ -64,7 +64,7 @@ bash scripts/dev.sh
 )
 ```
 
-`scripts/dev.sh`는 PostgreSQL **18.4**를 `127.0.0.1:55432`에 시작하고, 웹 의존성 설치와 번들 생성 뒤 [로컬 앱](http://127.0.0.1:47831)을 실행한다. 터미널은 서버가 실행되는 동안 사용 중이다. DB 이름과 사용자는 `ontology`, 영구 볼륨 이름은 `meenseek-ontology-data`다.
+`scripts/dev.sh`는 PostgreSQL **18.4**를 `127.0.0.1:55432`에 시작하고, 웹 의존성 설치와 번들 생성 뒤 [로컬 앱](http://127.0.0.1:47831)을 실행한다. 터미널은 서버가 실행되는 동안 사용 중이다. DB 이름과 사용자는 `ontology`, 영구 볼륨 이름은 `meenseek-ontology-data`다. 폴더와 원격 저장소 이름은 `ontology`다. 기존 실행 파일명은 스크립트 호환성을 위해, Compose 프로젝트·볼륨 이름은 운영 DB 연결을 유지하기 위해 그대로 둔다.
 
 같은 볼륨을 다시 사용할 때는 **같은 비밀번호**가 필요하다. `.env`나 컨테이너 환경변수에 새 비밀번호를 넣어도 기존 DB 비밀번호는 바뀌지 않는다. 기존 볼륨이 있는데 `.env`를 잃었다면 새 비밀번호를 생성하지 말고 기존 값을 복구한다.
 
@@ -136,7 +136,7 @@ http://127.0.0.1:47831/?scope=meenseek&focus=실제_노드_ID
 아래 내용은 **바꿔 쓸 예시**다. 실행하면 지정된 DB에 실제로 저장된다. 작은따옴표를 붙인 heredoc으로 JSON을 전달해 본문에 셸 변수나 명령 치환이 적용되지 않게 한다.
 
 ```bash
-cd /Users/meenseek/Desktop/meenseek-ontology
+cd /Users/meenseek/Desktop/ontology
 bash scripts/brain.sh <<'JSON'
 {"op":"remember","scope":"personal","idempotency_key":"readme_example_001","memory":{"body":"답변은 핵심을 먼저 짧게 정리한다."}}
 JSON
@@ -246,7 +246,7 @@ JSON
 가져오기는 CLI에서 명시적으로 허용한 로컬 저장소와 파일에만 수행한다. 서버가 실행 중이면 다른 터미널에서 아래를 실행한다. `--repo`와 허용 목록은 저장소 루트의 **절대 경로**, `--file`은 그 저장소를 기준으로 한 **상대 경로**다. 예를 들어 실제 파일 `/Users/meenseek/Desktop/.github/docs/repository-model.md`는 `--file docs/repository-model.md`로 지정한다.
 
 ```bash
-cd /Users/meenseek/Desktop/meenseek-ontology
+cd /Users/meenseek/Desktop/ontology
 set -a
 source .env
 set +a
@@ -441,7 +441,7 @@ bash scripts/brain.sh context edit \
 기존 DB의 업그레이드를 완료하고 기존 서버를 종료한 상태에서 다음을 실행한다. 한 번 갱신이 성공하면 같은 환경에서 서버를 시작해 자동 갱신을 이어간다.
 
 ```bash
-cd /Users/meenseek/Desktop/meenseek-ontology
+cd /Users/meenseek/Desktop/ontology
 set -a
 source .env
 set +a
@@ -480,7 +480,7 @@ Pending native 효과는 대응하는 Core journals·attempts·heads와 함께 c
 건수 비교는 내용 동일성의 증명이 아니다. 복원 전후의 전체 table·row·column을 결정적 순서로 해시해 원문 bytes·history·근거·binding의 동일성을 확인한다. Schema 업그레이드 뒤에는 새로 생긴 column 때문에 전체 row 표현이 달라질 수 있으므로 **업그레이드 전부터 있던 column 전체**의 값과 hash를 비교하고 새 migration 결과는 별도로 확인한다. 반복 `init` 전후에는 현재 전체 상태가 같아야 한다. 아래 건수 예시만 통과한 결과를 이 세 가지 검증의 완료로 보고하지 않는다.
 
 ```bash
-cd /Users/meenseek/Desktop/meenseek-ontology
+cd /Users/meenseek/Desktop/ontology
 bash <<'BASH'
 set -euo pipefail
 set -a
@@ -544,7 +544,7 @@ docker compose exec -T postgres dropdb -U ontology "ontology_restore_출력된_�
 현재 Rust workspace와 native Core, native consumer, Web 검증은 기존 스크립트가 담당한다.
 
 ```bash
-cd /Users/meenseek/Desktop/meenseek-ontology
+cd /Users/meenseek/Desktop/ontology
 bash scripts/verify.sh
 ```
 
