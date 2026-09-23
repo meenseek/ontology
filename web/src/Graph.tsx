@@ -29,6 +29,7 @@ export function starMaterial() {
     uniforms: {
       uColor: { value: new Color() }, uOpacity: { value: 1 }, uPhase: { value: 0 },
       uRotation: { value: 0 }, uTilt: { value: 0 }, uDetail: { value: 0 }, uShimmer: { value: 1 }, uPixels: { value: 26 },
+      uNear: { value: 0 }, uWobble: { value: new Vector2() },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -43,7 +44,8 @@ export function starMaterial() {
     fragmentShader: `
       varying vec2 vUv;
       uniform vec3 uColor;
-      uniform float uOpacity, uPhase, uRotation, uTilt, uDetail, uShimmer, uPixels;
+      uniform float uOpacity, uPhase, uRotation, uTilt, uDetail, uShimmer, uPixels, uNear;
+      uniform vec2 uWobble;
       float hash(vec3 p) {
         p = fract(p * 0.1031);
         p += dot(p, p.yzx + 33.33);
@@ -58,7 +60,7 @@ export function starMaterial() {
                        mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
       }
       void main() {
-        vec2 p = vUv * 2.0 - 1.0;
+        vec2 p = vUv * 2.0 - 1.0 - uWobble;
         float distance = length(p), radius = mix(0.30, 0.54, uDetail);
         float r = distance / radius;
         if (distance >= 1.0) discard;
@@ -81,7 +83,7 @@ export function starMaterial() {
         float coreShimmer = mix(0.86, 1.0, pulse);
         float heat = exp(-r * r * 4.5);
         vec3 surface = mix(uColor, vec3(1.0), 0.35 + 0.55 * heat)
-          * (0.90 + 0.10 * normal.z + grain) * coreShimmer;
+          * (0.90 + 0.10 * normal.z + grain) * coreShimmer * (1.0 + 0.12 * uNear);
         float fade = 1.0 - smoothstep(0.72, 1.0, distance);
         float halo = mix(0.24, 0.28, uDetail) * exp(-mix(10.0, 8.0, uDetail)
           * max(0.0, distance - mix(radius * 0.7, 0.40, uDetail)));
@@ -89,15 +91,15 @@ export function starMaterial() {
         vec2 pixel = p * uPixels * 0.5;
         float primary = (exp(-pow(abs(pixel.x) / 0.55, 1.4)) * exp(-p.y * p.y * 2.0)
           + exp(-pow(abs(pixel.y) / 0.55, 1.4)) * exp(-p.x * p.x * 2.0))
-          * (0.08 + 0.82 * pulse);
+          * (0.08 + 0.82 * pulse + 0.65 * uNear);
         vec2 diagonal = vec2(pixel.x + pixel.y, pixel.x - pixel.y) * 0.70710678;
         float secondary = (exp(-pow(abs(diagonal.x) / 0.42, 1.4))
           + exp(-pow(abs(diagonal.y) / 0.42, 1.4))) * exp(-distance * distance * 3.5)
           * (0.02 + 0.22 * pulse);
         // A brighter crest stays inside the same footprint and fades out at close range.
-        halo *= 1.0 + 0.70 * pulse * (1.0 - uDetail);
+        halo *= 1.0 + 0.70 * pulse * (1.0 - uDetail) + 1.1 * uNear;
         halo = (halo + (primary + secondary) * (1.0 - uDetail)) * fade * uShimmer;
-        float alpha = disc + halo * (1.0 - disc);
+        float alpha = clamp(disc + halo * (1.0 - disc), 0.0, 1.0);
         vec3 color = mix(uColor, surface, disc / max(alpha, 0.0001));
         gl_FragColor = vec4(color, alpha * uOpacity);
         #include <colorspace_fragment>
@@ -105,8 +107,8 @@ export function starMaterial() {
     `,
   });
 }
-function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean) {
-  const mesh = new Mesh(geometry, material), viewport = new Vector2(), position = new Vector3();
+function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean, cursor: { current: { x: number; y: number } | null }) {
+  const mesh = new Mesh(geometry, material), viewport = new Vector2(), position = new Vector3(), projected = new Vector3();
   const color = new Color(node.kind === "document" ? "#bad3ee" : "#efd8ac");
   const phase = starPhase(node.id), opacity = active(node) ? 1 : .35;
   mesh.renderOrder = 1;
@@ -120,6 +122,13 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
     mesh.scale.setScalar(spriteScale(pixels, viewport.y, camera.projectionMatrix.elements[5]));
     mesh.updateMatrixWorld();
     const motion = starMotion(pixels, phase, advanceStarClock(clock, performance.now(), isReduced()));
+    let near = 0;
+    if (cursor.current && position.z < 0) {
+      projected.copy(position).applyMatrix4(camera.projectionMatrix);
+      const distance = Math.hypot((projected.x + 1) * viewport.x / 2 - cursor.current.x, (1 - projected.y) * viewport.y / 2 - cursor.current.y);
+      const reach = Math.max(0, 1 - distance / 52);
+      near = reach * reach * (3 - 2 * reach);
+    }
     // A shared material must upload every node's values, even between consecutive star draws.
     material.uniforms.uColor.value.copy(color);
     material.uniforms.uOpacity.value = opacity;
@@ -129,6 +138,9 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
     material.uniforms.uDetail.value = motion.detail;
     material.uniforms.uShimmer.value = motion.shimmer;
     material.uniforms.uPixels.value = pixels;
+    material.uniforms.uNear.value = near;
+    const wobble = isReduced() ? 0 : near * 0.13;
+    material.uniforms.uWobble.value.set(wobble * Math.sin(clock.seconds * 9 + phase), wobble * Math.cos(clock.seconds * 7 + phase));
     material.uniformsNeedUpdate = true;
   };
   return mesh;
@@ -174,6 +186,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const hoveredId = useRef<string | null>(null);
   const allowDrag = useRef(true), suppressClickUntil = useRef(0);
   const pointer = useRef<{ pointerId: number; pointerType: string } | null>(null);
+  const cursor = useRef<{ x: number; y: number } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [hover, setHover] = useState<{ title: string; detail: string } | null>(null);
   // Renderer endpoint mutation stays out of the reconciled model.
@@ -210,9 +223,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (!ready || !instance) return;
     // Keep the camera and elapsed surface time; only discard the suspended interval.
     motionClock.current.lastTime = null;
+    if (!visible || disabled) cursor.current = null;
     if (visible) instance.resumeAnimation(); else instance.pauseAnimation();
     return () => { motionClock.current.lastTime = null; instance.pauseAnimation(); };
-  }, [ready, visible]);
+  }, [ready, visible, disabled]);
   useEffect(() => {
     const controls = graph.current?.controls() as OrbitControls | undefined;
     if (controls) { controls.zoomToCursor = true; controls.autoRotate = rotate; controls.autoRotateSpeed = .2; controls.enableDamping = !reduced; }
@@ -372,7 +386,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const color = node.kind === "document" ? "#bad3ee" : node.kind === "memory" ? "#efd8ac" : node.color;
     const isSelected = node.id === selected;
     group.add(isKnowledge
-      ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current)
+      ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor)
       : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected));
     if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected));
     if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected));
@@ -380,7 +394,15 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     group.add(screenSprite(material("hit", "#ffffff", 0), node, "hit", isSelected));
     return group;
   }, [resources, selected]);
-  return <div className="graph-canvas" ref={container} onPointerDownCapture={event => { allowDrag.current = true; pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType }; }} aria-label="3D 지식 지도. 점을 끌어 배치하고 빈 공간을 드래그해 회전합니다. 스크롤로 커서 위치를 중심으로 확대·축소합니다. 키보드는 목록 보기를 이용하세요.">
+  return <div className="graph-canvas" ref={container}
+    onPointerMoveCapture={event => {
+      if (disabled || positions.dragging || (event.pointerType !== "mouse" && event.pointerType !== "pen")) { cursor.current = null; return; }
+      const rect = event.currentTarget.getBoundingClientRect();
+      cursor.current = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    }}
+    onPointerLeave={() => { cursor.current = null; }}
+    onPointerDownCapture={event => { cursor.current = null; allowDrag.current = true; pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType }; }}
+    aria-label="3D 지식 지도. 점을 끌어 배치하고 빈 공간을 드래그해 회전합니다. 스크롤로 커서 위치를 중심으로 확대·축소합니다. 키보드는 목록 보기를 이용하세요.">
     {ready && <ForceGraph3D<PositionedNode, RenderLink>
       ref={graph} width={size.width} height={size.height} graphData={data}
       backgroundColor="rgba(0,0,0,0)" controlType="orbit" showNavInfo={false}
