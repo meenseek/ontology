@@ -7,3 +7,4 @@
 *.dump
 /sync.local.json
 /.state/
+.DS_Store
