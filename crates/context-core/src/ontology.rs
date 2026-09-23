@@ -31,6 +31,8 @@ pub struct OntologyMetadata {
     related: Vec<String>,
     #[serde(default)]
     related_from_links: bool,
+    #[serde(default)]
+    related_link_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -97,6 +99,11 @@ impl OntologyMetadata {
     #[must_use]
     pub fn related_from_links(&self) -> bool {
         self.related_from_links
+    }
+
+    #[must_use]
+    pub fn related_link_prefix(&self) -> Option<&str> {
+        self.related_link_prefix.as_deref()
     }
 
     #[must_use]
@@ -192,6 +199,31 @@ impl OntologyMetadata {
         }
         for value in &self.related {
             validate_related_path(value)?;
+        }
+        match (self.related_from_links, self.related_link_prefix.as_deref()) {
+            (true, Some(prefix)) if prefix.ends_with('/') && !prefix.contains(['\\', '\0']) => {
+                validate_value("related_link_prefix", prefix)?;
+                let directory = prefix.trim_end_matches('/');
+                if directory.is_empty()
+                    || Path::new(directory).is_absolute()
+                    || Path::new(directory).components().any(|part| {
+                        matches!(
+                            part,
+                            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                        )
+                    })
+                {
+                    return Err(ContextVaultError::invalid_input(
+                        "ontology related_link_prefix must be a vault-relative directory",
+                    ));
+                }
+            }
+            (false, None) => {}
+            _ => {
+                return Err(ContextVaultError::invalid_input(
+                    "ontology related_from_links requires a vault-relative related_link_prefix",
+                ));
+            }
         }
         Ok(())
     }
@@ -311,9 +343,14 @@ mod tests {
     fn link_relations_require_an_explicit_opt_in() {
         assert!(!parse("ontology: true").unwrap().related_from_links());
         assert!(
-            parse("ontology: true\nrelated_from_links: true")
+            parse("ontology: true\nrelated_from_links: true\nrelated_link_prefix: personal/knowledge/notion/pages/")
                 .unwrap()
                 .related_from_links()
+        );
+        assert!(parse("ontology: true\nrelated_from_links: true").is_err());
+        assert!(
+            parse("ontology: true\nrelated_from_links: true\nrelated_link_prefix: ../other/")
+                .is_err()
         );
     }
 
