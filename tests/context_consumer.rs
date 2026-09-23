@@ -32,7 +32,7 @@ async fn store() -> Store {
     );
     let s = Store::connect(&url).await.expect("owned PostgreSQL");
     s.initialize().await.expect("append migrations");
-    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY").execute(s.pool()).await.expect("owned fixture reset");
+    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY").execute(s.pool()).await.expect("owned fixture reset");
     s
 }
 async fn store_id(s: &Store) -> String {
@@ -613,7 +613,7 @@ async fn context_consumer_identity_and_projection() {
         .fetch_one(s.pool())
         .await
         .expect("all existing app values");
-    sqlx::raw_sql("DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code IN ('vault-read-failed','context-read-failed'))); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; ").execute(s.pool()).await.expect("owned exact pre-008 shape");
+    sqlx::raw_sql("DELETE FROM ontology_migrations WHERE name='009-context-manual-edits.sql'; ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; ALTER TABLE context_material_versions DROP COLUMN manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code IN ('vault-read-failed','context-read-failed'))); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; ").execute(s.pool()).await.expect("owned exact pre-008 shape");
     let unmatched: (String, String) =
         sqlx::query_as("SELECT id,path FROM sources WHERE kind='vault' ORDER BY id LIMIT 1")
             .fetch_one(s.pool())

@@ -835,7 +835,7 @@ async fn migration_preserves_baseline_contract() {
 async fn vault_import_contract() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_materials,context_apply_batches").execute(store.pool()).await.expect("context reset");
+    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("context reset");
     let temp = tempfile::tempdir().expect("fixture");
     let root = temp.path().canonicalize().expect("root");
     std::fs::create_dir_all(root.join("personal")).expect("scope");
@@ -887,7 +887,7 @@ async fn context_http_read_download_scope_and_protection_contract() {
     use tower::ServiceExt;
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_materials, context_apply_batches")
+    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
         .execute(store.pool())
         .await
         .expect("isolated original fixtures");
@@ -995,7 +995,7 @@ async fn context_http_read_download_scope_and_protection_contract() {
     assert!(bytes.len() < 1024);
     // Cardinality affects only bounded metadata transfer; a page never prefetches its bodies.
     for size in [0usize, 1, 25] {
-        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_materials, context_apply_batches")
+        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
             .execute(store.pool())
             .await
             .expect("reset complete isolated context fixture");
@@ -1541,7 +1541,7 @@ async fn context_005_upgrade_preserves_exact_imports_and_backfills_one_version()
             .await
             .expect("complete old bytes and provenance");
     store.initialize().await.expect("006 additive migration");
-    let after: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) - ARRAY['material_id','revision','deleted','origin_kind','created_at','last_apply_id'] ORDER BY path) FROM context_materials m").fetch_one(store.pool()).await.expect("original columns");
+    let after: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) - ARRAY['material_id','revision','deleted','origin_kind','created_at','last_apply_id','last_manual_edit_id'] ORDER BY path) FROM context_materials m").fetch_one(store.pool()).await.expect("original columns");
     assert_eq!(before, after);
     let exact: bool = sqlx::query_scalar("SELECT bool_and(m.revision=1 AND NOT m.deleted AND m.origin_kind='imported-file' AND m.created_at=m.imported_at AND m.last_apply_id IS NULL AND ROW(m.content,m.content_digest,m.byte_len,m.restricted,m.search_text,m.deleted,m.last_apply_id,m.created_at) IS NOT DISTINCT FROM ROW(v.content,v.content_digest,v.byte_len,v.restricted,v.search_text,v.deleted,v.apply_id,v.recorded_at)) FROM context_materials m JOIN context_material_versions v USING(material_id,revision)").fetch_one(store.pool()).await.expect("backfilled bytes and original timestamps");
     assert!(exact);

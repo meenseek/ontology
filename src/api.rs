@@ -61,7 +61,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/context/scopes", get(context_scopes))
         .route("/api/context", get(context_search))
         .route("/api/context/read", get(context_read))
+        .route("/api/context/history", get(context_history))
+        .route("/api/context/version", get(context_version))
         .route("/api/context/download", get(context_download))
+        .route(
+            "/api/context/edit",
+            post(context_edit).layer(DefaultBodyLimit::max(6 * MAX_READ_BYTES + 16 * 1024)),
+        )
         .route("/api/records", get(list))
         .route("/api/records/{id}", get(detail))
         .route("/api/records/{id}/classification", post(classify))
@@ -344,6 +350,80 @@ async fn context_read(
         .await?;
     // One byte may require six JSON escape bytes. Other API response limits stay unchanged.
     bounded_context_json(&material, 6 * MAX_READ_BYTES + 16 * 1024)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextHistory {
+    scope: ContextScope,
+    path: String,
+    before: Option<i64>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextVersion {
+    scope: ContextScope,
+    path: String,
+    revision: i64,
+}
+async fn context_history(
+    State(state): State<AppState>,
+    query: Result<Query<ContextHistory>, QueryRejection>,
+) -> Result<Response, Error> {
+    let Query(query) = query.map_err(|_| Error::Invalid)?;
+    bounded_context_json(
+        &state
+            .store
+            .context_history(&query.scope, &query.path, query.before)
+            .await?,
+        MAX_RESPONSE_BYTES,
+    )
+}
+async fn context_version(
+    State(state): State<AppState>,
+    query: Result<Query<ContextVersion>, QueryRejection>,
+) -> Result<Response, Error> {
+    let Query(query) = query.map_err(|_| Error::Invalid)?;
+    bounded_context_json(
+        &state
+            .store
+            .read_context_revision(&query.scope, &query.path, query.revision)
+            .await?,
+        6 * MAX_READ_BYTES + 16 * 1024,
+    )
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextEdit {
+    scope: ContextScope,
+    path: String,
+    expected_revision: i64,
+    expected_digest: String,
+    content: String,
+}
+async fn context_edit(
+    State(state): State<AppState>,
+    payload: Result<Json<ContextEdit>, JsonRejection>,
+) -> Result<Response, Error> {
+    let Json(edit) = payload.map_err(|error| {
+        if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            Error::Limit
+        } else {
+            Error::Invalid
+        }
+    })?;
+    bounded_context_json(
+        &state
+            .store
+            .edit_context(
+                &edit.scope,
+                &edit.path,
+                edit.expected_revision,
+                &edit.expected_digest,
+                &edit.content,
+            )
+            .await?,
+        MAX_RESPONSE_BYTES,
+    )
 }
 async fn context_download(
     State(state): State<AppState>,

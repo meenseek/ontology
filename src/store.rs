@@ -291,6 +291,10 @@ impl Store {
                 "008-context-consumers.sql",
                 include_str!("../schema/migrations/008-context-consumers.sql"),
             ),
+            (
+                "009-context-manual-edits.sql",
+                include_str!("../schema/migrations/009-context-manual-edits.sql"),
+            ),
         ];
         if migrations.len() > expected.len() {
             return Err(Error::Baseline);

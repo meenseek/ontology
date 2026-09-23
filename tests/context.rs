@@ -15,6 +15,85 @@ static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 fn scope(value: &str) -> ContextScope {
     value.parse().expect("valid synthetic scope")
 }
+
+#[tokio::test]
+async fn manual_edit_preserves_original_and_records_a_separate_version() {
+    let _lock = TEST_LOCK.lock().await;
+    let store = store().await;
+    let (_temp, root) = source();
+    let personal = scope("personal");
+    let before = b"---\ntitle: Original\n---\n\nBefore\n";
+    let after = "---\ntitle: Changed\n---\n\nAfter\n";
+    write(&root, "personal/note.md", before);
+    let manifest = inventory(&root, std::slice::from_ref(&personal)).expect("synthetic inventory");
+    store
+        .import_context(
+            &root,
+            std::slice::from_ref(&personal),
+            &manifest.inventory_digest,
+        )
+        .await
+        .expect("synthetic import");
+    let result = store
+        .edit_context(&personal, "note.md", 1, &digest(before), after)
+        .await
+        .expect("manual edit");
+    assert!(result.changed);
+    assert_eq!(result.revision, 2);
+    assert_eq!(result.content_digest, digest(after.as_bytes()));
+    assert!(result.manual_edit_id.is_some());
+    assert_eq!(
+        store
+            .read_context(&personal, "note.md", false)
+            .await
+            .expect("latest original"),
+        after
+    );
+    assert_eq!(
+        store
+            .read_context_revision(&personal, "note.md", 1)
+            .await
+            .expect("prior version")["content"],
+        String::from_utf8_lossy(before).as_ref()
+    );
+    let history = store
+        .context_history(&personal, "note.md", None)
+        .await
+        .expect("history");
+    assert_eq!(history["items"].as_array().unwrap().len(), 2);
+    assert_eq!(history["items"][0]["change_kind"], "manual");
+    assert_eq!(history["items"][1]["change_kind"], "import");
+    let provenance: (String, String, i64) = sqlx::query_as("SELECT source_digest,source_path,revision FROM context_materials WHERE scope='personal' AND path='note.md'").fetch_one(store.pool()).await.expect("source provenance");
+    assert_eq!(
+        provenance,
+        (digest(before), "personal/note.md".to_owned(), 2)
+    );
+    let version: (Option<String>, Option<String>) = sqlx::query_as("SELECT apply_id::text,manual_edit_id::text FROM context_material_versions WHERE material_id=(SELECT material_id FROM context_materials WHERE scope='personal' AND path='note.md') AND revision=2").fetch_one(store.pool()).await.expect("manual version");
+    assert_eq!(version.0, None);
+    assert_eq!(version.1, result.manual_edit_id);
+    let projection: (String,) = sqlx::query_as("SELECT payload->>'source_digest' FROM context_projection_versions WHERE material_id=(SELECT material_id FROM context_materials WHERE scope='personal' AND path='note.md') AND revision=2").fetch_one(store.pool()).await.expect("matching projection");
+    assert_eq!(projection.0, result.content_digest);
+    assert_eq!(
+        store
+            .edit_context(&personal, "note.md", 1, &digest(before), "stale")
+            .await,
+        Err(Error::Conflict)
+    );
+    assert_eq!(
+        store
+            .edit_context(&personal, "note.md", 2, &result.content_digest, after)
+            .await
+            .expect("idempotent save")
+            .changed,
+        false
+    );
+    assert_eq!(
+        store
+            .edit_context(&scope("profile"), "note.md", 1, &digest(before), after)
+            .await,
+        Err(Error::Invalid)
+    );
+}
 fn source() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().expect("isolated source");
     let root = temp
@@ -38,7 +117,7 @@ async fn store() -> Store {
     );
     let store = Store::connect(&url).await.expect("isolated PostgreSQL");
     store.initialize().await.expect("additive migrations");
-    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_materials, context_apply_batches")
+    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
         .execute(store.pool())
         .await
         .expect("reset synthetic materials only");
@@ -467,7 +546,7 @@ async fn cardinality_limits_and_call_counts_are_explicit() {
     let store = store().await;
     let scopes = [scope("personal")];
     for size in [0usize, 1, 101] {
-        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_materials, context_apply_batches")
+        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
             .execute(store.pool())
             .await
             .expect("reset bounded fixture");
@@ -660,7 +739,7 @@ async fn context_discovery_and_selected_bytes_have_bounded_calls() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for size in [0usize, 1, 101] {
-        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_materials, context_apply_batches")
+        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
             .execute(store.pool())
             .await
             .expect("isolated fixture reset");
@@ -747,7 +826,7 @@ async fn context_discovery_and_selected_bytes_have_bounded_calls() {
             "three restricted selections each pass the gate without fetching bytes"
         );
     }
-    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_materials, context_apply_batches")
+    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
         .execute(store.pool())
         .await
         .expect("isolated discovery bound");
@@ -1213,7 +1292,7 @@ async fn current_context_call_budget_is_constant_for_one_and_two_thousand_materi
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for size in [1i64, 2000] {
-        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions,context_materials,context_apply_batches")
+        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions, context_material_versions,context_manual_edits,context_materials,context_apply_batches")
             .execute(store.pool())
             .await
             .expect("complete synthetic reset");

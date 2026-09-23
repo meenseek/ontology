@@ -2,6 +2,7 @@ pub mod api;
 pub mod config;
 pub mod context;
 mod context_commit;
+mod context_edit;
 mod context_history;
 pub mod context_importer;
 pub mod context_projection;

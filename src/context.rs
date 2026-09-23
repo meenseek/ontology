@@ -146,6 +146,17 @@ pub enum ContextCommand {
         #[serde(default)]
         archive: bool,
     },
+    History {
+        scope: ContextScope,
+        path: String,
+        #[serde(default)]
+        before: Option<i64>,
+    },
+    Version {
+        scope: ContextScope,
+        path: String,
+        revision: i64,
+    },
     Export {
         scope: ContextScope,
         paths: Vec<String>,
@@ -200,7 +211,7 @@ pub struct ContextText {
     pub content: String,
 }
 
-fn validate_path(path: &str) -> Result<(), Error> {
+pub(crate) fn validate_path(path: &str) -> Result<(), Error> {
     if path.is_empty()
         || path.len() > MAX_PATH_BYTES
         || path.split('/').count() > 32
@@ -234,7 +245,7 @@ pub(crate) fn restricted(path: &str) -> bool {
             || part.eq_ignore_ascii_case("raw")
     })
 }
-fn valid_digest(value: &str) -> bool {
+pub(crate) fn valid_digest(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -340,6 +351,16 @@ impl Store {
                     self.read_context(&scope, &path, archive).await?,
                 ));
             }
+            ContextCommand::History {
+                scope,
+                path,
+                before,
+            } => self.context_history(&scope, &path, before).await?,
+            ContextCommand::Version {
+                scope,
+                path,
+                revision,
+            } => self.read_context_revision(&scope, &path, revision).await?,
             ContextCommand::Export {
                 scope,
                 paths,
@@ -544,6 +565,58 @@ impl Store {
             metadata: material.metadata,
             content: String::from_utf8(material.bytes).map_err(|_| Error::Invalid)?,
         })
+    }
+
+    pub async fn context_history(
+        &self,
+        scope: &ContextScope,
+        path: &str,
+        before: Option<i64>,
+    ) -> Result<Value, Error> {
+        validate_path(path)?;
+        if restricted(path) || before.is_some_and(|value| value < 1) {
+            return Err(Error::Invalid);
+        }
+        let mut tx = self.lock_context(false).await?;
+        let result = async {
+            self.count(1);
+            let rows=sqlx::query("SELECT v.revision,v.content_digest,v.byte_len,extract(epoch FROM v.recorded_at)::bigint AS recorded_at,CASE WHEN v.manual_edit_id IS NOT NULL THEN 'manual' WHEN v.apply_id IS NOT NULL THEN 'core' ELSE 'import' END AS change_kind FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.scope=$1 AND m.path=$2 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted AND ($3::bigint IS NULL OR v.revision<$3) ORDER BY v.revision DESC LIMIT 21")
+                .bind(scope.as_str()).bind(path).bind(before).fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?;
+            if rows.is_empty() && before.is_none() {
+                self.count(1);
+                let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted AND NOT restricted)").bind(scope.as_str()).bind(path).fetch_one(&mut *tx).await.map_err(|_|Error::Storage)?;
+                if !exists { return Err(Error::NotFound); }
+            }
+            let more=rows.len()>20;
+            let items=rows.iter().take(20).map(|row|json!({"revision":row.get::<i64,_>("revision"),"content_digest":row.get::<String,_>("content_digest"),"byte_len":row.get::<i64,_>("byte_len"),"recorded_at":row.get::<i64,_>("recorded_at"),"change_kind":row.get::<String,_>("change_kind")})).collect::<Vec<_>>();
+            let next_before=if more { items.last().map(|item|item["revision"].clone()) } else { None };
+            Ok(json!({"items":items,"next_before":next_before}))
+        }.await;
+        self.finish_context(tx, result).await
+    }
+
+    pub async fn read_context_revision(
+        &self,
+        scope: &ContextScope,
+        path: &str,
+        revision: i64,
+    ) -> Result<Value, Error> {
+        validate_path(path)?;
+        if restricted(path) || revision < 1 {
+            return Err(Error::Invalid);
+        }
+        let mut tx = self.lock_context(false).await?;
+        let result = async {
+            self.count(1);
+            let row=sqlx::query("SELECT v.content_digest,v.byte_len,CASE WHEN v.byte_len BETWEEN 0 AND $4 AND octet_length(v.content)<=$4 THEN v.content END AS content FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.scope=$1 AND m.path=$2 AND v.revision=$3 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted")
+                .bind(scope.as_str()).bind(path).bind(revision).bind(MAX_READ_BYTES as i64).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?.ok_or(Error::NotFound)?;
+            let bytes=row.get::<Option<Vec<u8>>,_>("content").ok_or(Error::Limit)?;
+            let sha:String=row.get("content_digest");
+            if row.get::<i64,_>("byte_len") != bytes.len() as i64 || digest(&bytes)!=sha { return Err(Error::Storage); }
+            let content=String::from_utf8(bytes).map_err(|_|Error::Invalid)?;
+            Ok(json!({"scope":scope,"path":path,"revision":revision,"content_digest":sha,"content":content}))
+        }.await;
+        self.finish_context(tx, result).await
     }
 
     pub async fn download_context(

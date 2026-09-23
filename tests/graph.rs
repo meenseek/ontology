@@ -1,4 +1,6 @@
 use meenseek_ontology::{
+    context::{ContextScope, inventory},
+    context_importer::ContextReader,
     domain::{Error, ImportedRecord, MAX_RESPONSE_BYTES, Scope, SourceKind},
     graph::{GraphQuery, MAX_GRAPH_LINKS, MAX_GRAPH_NODES},
     memory::BrainCommand,
@@ -201,6 +203,164 @@ async fn graph_snapshot_contract() {
     let result = fetch(&store, query(Scope::Personal, "", None, 10)).await;
     assert_eq!(result["totals"]["documents"], 1);
     assert_eq!(result["totals"]["markers"], 0);
+    let fixture = tempfile::tempdir().expect("isolated originals");
+    let root = fixture
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let original_support = "---\ncustom: frontmatteronlytoken\n---\n# Support\n지원 현황 marker\n";
+    for (path, content) in [
+        (
+            "personal/decisions/support.md",
+            original_support.as_bytes(),
+        ),
+        (
+            "personal/ontology/index.md",
+            b"---\ntitle: Index\nontology: true\nrelated: [personal/ontology/schema.md]\n---\n# Index\n",
+        ),
+        ("personal/ontology/schema.md", b"# Schema\n"),
+        ("personal/attachments/image.bin", b"\0\xff"),
+        ("personal/raw/private.md", b"restricted marker"),
+        ("profile/rules/example.md", b"# Profile\n"),
+    ] {
+        let destination = root.join(path);
+        std::fs::create_dir_all(destination.parent().expect("parent")).expect("fixture directory");
+        std::fs::write(destination, content).expect("fixture original");
+    }
+    let scopes: Vec<ContextScope> = ["personal", "profile"]
+        .into_iter()
+        .map(|value| value.parse().expect("context scope"))
+        .collect();
+    let expected = inventory(&root, &scopes).expect("fixture inventory");
+    store
+        .import_context(&root, &scopes, &expected.inventory_digest)
+        .await
+        .expect("store exact originals");
+    let originals = fetch(&store, query(Scope::Personal, "", None, 20)).await;
+    assert_eq!(originals["totals"]["documents"], 6);
+    assert_eq!(originals["totals"]["links"], 1);
+    assert_eq!(
+        originals["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .filter(|n| n["source_kind"] == "original")
+            .count(),
+        5
+    );
+    assert!(
+        !originals["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .any(|n| n["context_path"] == "raw/private.md")
+    );
+    let found = fetch(&store, query(Scope::Personal, "지원 현황", None, 10)).await;
+    assert_eq!(found["matched"], 1);
+    let support = &found["nodes"][0];
+    assert_eq!(support["context_path"], "decisions/support.md");
+    assert_eq!(support["source_kind"], "original");
+    assert!(support.get("content").is_none());
+    let focused = fetch(
+        &store,
+        query(Scope::Personal, "", support["id"].as_str(), 1),
+    )
+    .await;
+    assert_eq!(focused["focus"]["found"], true);
+    let history = store
+        .context_history(&scopes[0], "decisions/support.md", None)
+        .await
+        .expect("original history");
+    assert_eq!(history["items"][0]["revision"], 1);
+    let version = store
+        .read_context_revision(&scopes[0], "decisions/support.md", 1)
+        .await
+        .expect("exact historical text");
+    assert_eq!(version["content"], original_support);
+    assert_eq!(
+        store
+            .read_context_revision(&scopes[0], "raw/private.md", 1)
+            .await,
+        Err(Error::Invalid)
+    );
+    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        .fetch_one(store.pool())
+        .await
+        .expect("canonical store identity");
+    ContextReader::new()
+        .import(
+            &store,
+            &store_id,
+            &scopes[0],
+            &["decisions/support.md".into()],
+            Scope::Personal,
+        )
+        .await
+        .expect("bind original to a document");
+    let metadata_match = fetch(
+        &store,
+        query(Scope::Personal, "frontmatteronlytoken", None, 10),
+    )
+    .await;
+    assert_eq!(metadata_match["matched"], 1);
+    assert_eq!(
+        metadata_match["nodes"][0]["context_path"],
+        "decisions/support.md"
+    );
+    let edited = store
+        .edit_context(
+            &scopes[0],
+            "decisions/support.md",
+            1,
+            &digest(original_support.as_bytes()),
+            "---\ncustom: newfrontmattertoken\n---\n# Support\nfreshlyboundmarker\n",
+        )
+        .await
+        .expect("human edit updates canonical original");
+    let fresh = fetch(
+        &store,
+        query(Scope::Personal, "freshlyboundmarker", None, 10),
+    )
+    .await;
+    assert_eq!(fresh["matched"], 1);
+    let bound = &fresh["nodes"][0];
+    assert_eq!(bound["context_path"], "decisions/support.md");
+    assert_eq!(bound["revision"], "2");
+    assert_eq!(bound["content_digest"], edited.content_digest);
+    assert_eq!(bound["status"], "ok");
+    assert_eq!(
+        bound["current"], true,
+        "the available original stays active while its consumer evidence refreshes"
+    );
+    assert!(
+        bound["excerpt"]
+            .as_str()
+            .expect("current excerpt")
+            .contains("freshlyboundmarker")
+    );
+    assert_eq!(
+        fetch(&store, query(Scope::Personal, "지원 현황", None, 10)).await["matched"],
+        0,
+        "retired original content must not remain searchable through its bound document"
+    );
+    assert_eq!(
+        fetch(
+            &store,
+            query(Scope::Personal, "frontmatteronlytoken", None, 10)
+        )
+        .await["matched"],
+        0,
+        "removed frontmatter must not remain searchable after a manual edit"
+    );
+    assert_eq!(
+        fetch(
+            &store,
+            query(Scope::Personal, "newfrontmattertoken", None, 10)
+        )
+        .await["matched"],
+        1,
+        "new frontmatter remains discoverable after a manual edit"
+    );
     let missing = format!("e_{}", "0".repeat(64));
     assert_eq!(
         fetch(&store, query(Scope::Meenseek, "", Some(&missing), 2)).await["focus"]["found"],

@@ -28,7 +28,7 @@ async fn store() -> Store {
     );
     let store = Store::connect(&url).await.expect("test PG");
     store.initialize().await.expect("007 migration");
-    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics").execute(store.pool()).await.expect("reset fixture");
+    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics").execute(store.pool()).await.expect("reset fixture");
     store
 }
 fn fixture(count: usize, body: &[u8]) -> (tempfile::TempDir, PathBuf) {
@@ -705,7 +705,7 @@ async fn native_provider_rejects_live_ancestors_before_direct_descendant_access(
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for count in [1, 2000] {
-        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_materials,context_apply_batches")
+        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches")
             .execute(store.pool()).await.expect("owned collision fixture reset");
         let (_fixture, root) = fixture(count, b"# Original");
         import(&store, &root).await;
@@ -756,7 +756,7 @@ async fn native_projection_status_and_rebuild_are_atomic_and_batched() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for count in [1, 101] {
-        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset");
+        sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset");
         let (_fixture, root) = fixture(
             count,
             b"---\nexport: false\naliases: [growth]\n---\n# Native\nGrowth",
@@ -858,8 +858,8 @@ async fn native_migration_007_preserves_006_rows_and_rolls_back_failed_upgrade()
     // Historical fixture metadata is deliberately not a Core commit/acceptance proof.
     sqlx::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'historical-fixture',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s").execute(store.pool()).await.expect("legacy batch fixture");
     sqlx::query("UPDATE context_apply_batches SET state='finalized',actual_batch_id=expected_batch_id,actual_journal_locator=expected_journal_locator,commit_receipt='{\"historical_fixture\":true}',final_core_receipt_digest=repeat('c',64)").execute(store.pool()).await.expect("historical terminal metadata fixture");
-    sqlx::raw_sql("DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code='vault-read-failed')); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; DROP TABLE context_projection_versions; DROP FUNCTION context_projection_validate(); DROP TRIGGER context_core_contract_immutable ON context_apply_batches; DROP FUNCTION context_core_contract_immutable(); ALTER TABLE context_apply_batches DROP COLUMN core_contract, DROP COLUMN core_contract_digest; DELETE FROM ontology_migrations WHERE name='007-context-native.sql';").execute(store.pool()).await.expect("owned pre-007 fixture");
-    let snapshot_sql = "SELECT jsonb_build_object('store',(SELECT to_jsonb(s) FROM context_store s),'materials',(SELECT jsonb_agg(to_jsonb(m) ORDER BY scope,path) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v),'batches',(SELECT jsonb_agg(to_jsonb(b)-ARRAY['core_contract','core_contract_digest'] ORDER BY apply_id) FROM context_apply_batches b))";
+    sqlx::raw_sql("DELETE FROM ontology_migrations WHERE name='009-context-manual-edits.sql'; ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; ALTER TABLE context_material_versions DROP COLUMN manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code='vault-read-failed')); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; DROP TABLE context_projection_versions; DROP FUNCTION context_projection_validate(); DROP TRIGGER context_core_contract_immutable ON context_apply_batches; DROP FUNCTION context_core_contract_immutable(); ALTER TABLE context_apply_batches DROP COLUMN core_contract, DROP COLUMN core_contract_digest; DELETE FROM ontology_migrations WHERE name='007-context-native.sql';").execute(store.pool()).await.expect("owned pre-007 fixture");
+    let snapshot_sql = "SELECT jsonb_build_object('store',(SELECT to_jsonb(s) FROM context_store s),'materials',(SELECT jsonb_agg(to_jsonb(m)-'last_manual_edit_id' ORDER BY scope,path) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v)-'manual_edit_id' ORDER BY material_id,revision) FROM context_material_versions v),'batches',(SELECT jsonb_agg(to_jsonb(b)-ARRAY['core_contract','core_contract_digest'] ORDER BY apply_id) FROM context_apply_batches b))";
     let before: Value = sqlx::query_scalar(snapshot_sql)
         .fetch_one(store.pool())
         .await

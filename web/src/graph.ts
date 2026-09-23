@@ -14,6 +14,7 @@ export type GraphNode = {
   support?: string; subject_id?: string | null; memory_kind?: string;
   excerpt?: string | null; historical_match?: boolean; matched_revision?: string; search_match?: boolean;
   last_success_at?: string | null; observed_at?: string | null;
+  context_scope?: string | null; context_path?: string | null;
 };
 export type GraphLink = { source: string; target: string; kind: LinkKind; current: boolean };
 export type Snapshot = {
@@ -43,6 +44,7 @@ export function active(n: GraphNode): boolean {
   return true;
 }
 export function stateName(n: GraphNode): string {
+  if (n.source_kind === "original") return "원문 보존";
   if (n.kind === "document") return n.status === "failed" ? "출처 확인 실패" : n.present ? n.current ? "출처 확인" : "갱신 대기" : "원문 부재";
   if (n.kind !== "memory") return "분류 표식";
   const parts = [{ accepted: "저장됨", proposed: "제안", withdrawn: "철회" }[n.status ?? ""] ?? "기록"];
@@ -162,9 +164,10 @@ export function reconcile(snapshot: Snapshot, previous?: Model): Model {
   }
   return model;
 }
-export type Filters = { kind: "all" | "knowledge" | NodeKind; state: "all" | "active" | "proposed" | "withdrawn" | "attention"; cluster: string | null };
+export type Filters = { kind: "all" | "knowledge" | NodeKind; state: "all" | "active" | "proposed" | "withdrawn" | "attention"; cluster: string | null; sourceScope?: string | null };
 export function visibleGraph(model: Model, filters: Filters): { nodes: PositionedNode[]; links: GraphLink[] } {
   const nodes = model.nodes.filter(n => (!filters.cluster || n.cluster === filters.cluster) &&
+    (!filters.sourceScope || n.context_scope === filters.sourceScope) &&
     (filters.kind === "all" || (filters.kind === "knowledge" ? knowledge(n) : n.kind === filters.kind)) &&
     (filters.state === "all" || (filters.state === "active" ? active(n) : filters.state === "attention" ? knowledge(n) && !active(n) : n.status === filters.state)));
   const ids = new Set(nodes.map(n => n.id));
@@ -174,7 +177,7 @@ export function parseLocation(search: string): { scope: Scope; q: string; focus:
   const params = new URLSearchParams(search);
   const q = params.get("q") ?? "";
   const focus = params.get("focus");
-  return { scope: params.get("scope") === "meenseek" ? "meenseek" : "personal", q: [...q.replaceAll("\0", "")].slice(0, 120).join(""), focus: focus && /^(e_[a-f\d]{64}|[mp]_[a-f\d-]{36}|t_[1-9]\d*|a_[a-z-]+)$/.test(focus) ? focus : null };
+  return { scope: params.get("scope") === "meenseek" ? "meenseek" : "personal", q: [...q.replaceAll("\0", "")].slice(0, 120).join(""), focus: focus && /^(e_[a-f\d]{64}|[mpc]_[a-f\d-]{36}|t_[1-9]\d*|a_[a-z-]+)$/.test(focus) ? focus : null };
 }
 export function sameGraphLocation(a: ReturnType<typeof parseLocation>, b: ReturnType<typeof parseLocation>): boolean {
   return a.scope === b.scope && a.q === b.q && a.focus === b.focus;

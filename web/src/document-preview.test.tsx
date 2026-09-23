@@ -49,6 +49,12 @@ test("shows one Markdown preview without duplicating source or front matter", ()
   assert.match(html, /aria-label="문서 미리보기"/);
 });
 
+test("original detail preview keeps authored heading without adding another title", () => {
+  const html = renderToStaticMarkup(<DocumentPreview path="notes.md" content="문단만 있는 원문" kind="context" suppressGeneratedTitle />);
+  assert.doesNotMatch(html, /<h1/);
+  assert.match(html, /<p>문단만 있는 원문<\/p>/);
+});
+
 test("keeps thematic breaks and fenced front matter examples visible", () => {
   const html = preview('문단\n\n---\n\n# 실제 제목\n\n```yaml\n---\ntitle: 코드\n---\n```');
   assert.match(html, /<hr\/>/);

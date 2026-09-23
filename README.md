@@ -2,7 +2,7 @@
 
 현재 구현은 사용자 한 명의 학습, 프로젝트, 개인 사업과 여러 조직의 맥락을 연결하는 개인 통합 온톨로지의 기반이다. meenseek은 그 안의 사업·활동 영역 하나다. 원문 자료와 직접 기록을 함께 찾고, 저장된 관계를 3D 지식 지도에서 탐색하는 단일 사용자용 로컬 앱이다. 내용만 저장할 수 있으며 종류·묶음·연결은 필수가 아니다. Git에 커밋된 문서와 명시적으로 허용한 native context 원문을 앱의 조회 사본으로 가져와 검색·분류·연결하고 기록의 근거로 선택할 수 있다.
 
-지식·규칙의 Markdown 원문 bytes와 frontmatter, 첨부 파일, material identity와 revision·history는 PostgreSQL의 native store가 소유한다. 새 기억, 범위별 기억 묶음, 분류·연결·이력도 같은 DB에 저장한다. [Native 원문 CLI](#native-원문-보존과-조회)로 범위를 지정해 읽고 내보내며, 원문 변경은 검토된 Core 작업으로 반영한다. 검색·ontology·앱 조회 사본은 파생 projection이다. 다른 대화를 자동으로 수집하거나 사실을 스스로 확정하지 않는다.
+지식·규칙의 Markdown 원문 bytes와 frontmatter, 첨부 파일, material identity와 revision·history는 PostgreSQL의 native store가 소유한다. 새 기억, 범위별 기억 묶음, 분류·연결·이력도 같은 DB에 저장한다. [Native 원문 CLI](#native-원문-보존과-조회)로 범위를 지정해 읽고 내보내며, 사용자가 직접 고치는 기존 원문은 별도 편집 이력으로 저장하고, 에이전트가 작성·수정한 원문은 검토된 Core 작업으로 반영한다. 검색·ontology·앱 조회 사본은 파생 projection이다. 다른 대화를 자동으로 수집하거나 사실을 스스로 확정하지 않는다.
 
 HTTP 서버와 PostgreSQL은 `127.0.0.1`에만 연결하며, 네트워크 배포나 OS 사용자 사이의 인증을 제공하지 않는다. 정제 작성과 독립 검토는 native Codex가 맡고, 앱은 근거 검증과 원자적 저장을 담당한다. 별도 유료 모델 API·벡터 DB·앱 내부 실행기는 사용하지 않는다. 제품 실험·측정·제작은 기존 도구가 소유하며, 실제 성과가 관측되기 전에는 개선이나 매출 달성을 주장하지 않는다.
 
@@ -117,17 +117,13 @@ http://127.0.0.1:47831/?scope=meenseek&focus=실제_노드_ID
 
 지도는 새로고침, 앱 내 변경 저장, 범위·검색 전환, 숨겼던 화면 복귀 때 다시 조회하며 상시 폴링하지 않는다. 변경 강조는 내용·출처·관계의 실제 변경을 기준으로 하고, 검색·초점으로 반환 대상만 바뀌거나 마지막 확인 시각만 바뀐 경우는 제외한다. 지정 원문을 서버에서 자동으로 가져오는 기능은 아래 [지정한 원문 자동 갱신](#지정한-원문-자동-갱신) 설정을 따른다. 지도는 외부 CDN·폰트·유료 모델 호출 없이 로컬 번들로 실행된다.
 
-## 자료 보관함에서 원문 찾기
+## 지도와 목록에서 원문 찾기
 
-상단 **자료 보관함**에서 보존된 원문 자료를 찾는다. 보관함의 범위 선택은 기존 지식 지도의 `meenseek`·`개인` 선택과 별개다.
+**내 지식**의 목록과 지도는 native 저장소의 열람 가능한 원문도 문서로 표시한다. 관계가 없는 원문은 독립 항목으로 남으며, 원문을 다시 가져오거나 별도의 보관함에 복제하지 않는다. 기존에 지도 문서와 결합된 원문은 한 항목으로 표시한다. 목록이 기본 보기이고 **3D 보기**로 바꿀 수 있다.
 
-1. 프로필(`profile`), 개인(`personal`), 업무 공통(`work/common`) 또는 목록에 표시된 저장된 회사 범위 하나(`work/<회사 slug>`)를 직접 고른다. 여러 범위를 한꺼번에 조회하지 않는다.
-2. 검색어로 자료의 메타데이터를 검색하고 다음 페이지로 결과를 이어 본다. 원문 본문 전체를 검색하는 기능은 아니다.
-3. 결과 한 개를 선택해 원문 텍스트를 읽거나 원본 파일을 다운로드한다. 읽기는 최대 1 MiB의 UTF-8 원문을 실행하지 않는 일반 텍스트로 표시한다. 첨부 파일과 읽기 한도를 넘는 원문은 파일당 최대 16 MiB까지 원래 바이트 그대로 다운로드한다.
+상단 검색은 기존 보관함과 같은 원문 경로·검색 텍스트를 찾으며, 검색 가능한 투영본의 제목·내용도 찾는다. 텍스트 검색이 없는 첨부 파일도 경로로 찾을 수 있다. 검색 결과에는 원문 일부가 안전하게 투영된 경우에만 발췌를 표시한다. 필터의 **원문 출처 범위**에서 `profile`, `personal`, `work/common`, `work/<회사 slug>`를 좁혀 볼 수 있다. 선택한 문서 상세에서는 현재 원문, 출처, SHA-256, 버전 이력을 확인한다. Markdown은 읽기 화면과 정확한 원문 보기를 전환할 수 있다. 사용자가 직접 작성한 기존 Markdown은 **원문 편집**에서 버튼이나 ⌘S/Ctrl+S로 저장한다. 줄바꿈 형식이 섞인 원문은 바이트 보존을 위해 CLI에서 편집한다. 원문 텍스트 열람·편집은 최대 1 MiB이며 더 큰 원문과 첨부 파일은 파일당 최대 16 MiB까지 원래 바이트로 다운로드한다.
 
-범위를 바꾸면 선택한 자료를 비우고 이전 요청을 취소한다. 보관함을 열고 닫아도 **기록 남기기**에서 작성 중인 초안은 유지한다. 보존·열람은 자료의 내용을 지식으로 검증·수락하거나 규칙을 활성화하는 동작이 아니다.
-
-숨김 경로와 `journal`·`raw` 경로의 제한된 보관 자료는 일반 보관함에서 제외한다. 웹에서는 이 제한을 해제하거나 서버 경로를 지정해 파일을 내보낼 수 없다. 제한된 보관 자료의 명시적 조회·내보내기는 기존 [Native 원문 CLI](#native-원문-보존과-조회) 절차를 따른다.
+보존·열람은 내용을 검증·수락하거나 규칙을 활성화하지 않는다. 숨김 경로와 `journal`·`raw` 경로의 제한된 자료는 일반 목록·지도에서 제외한다. 제한된 자료의 명시적 조회·내보내기는 [Native 원문 CLI](#native-원문-보존과-조회) 절차를 따른다.
 
 ## 기억 저장과 다시 찾기
 
@@ -332,6 +328,18 @@ native store에 보존한다. App consumer, 검색과 ontology projection은 이
 추가 newline이 없으며 종료 코드와 완전한 출력을 확인해야 한다. 실패·truncation은 policy를
 읽은 것이 아니다. Raw policy 읽기는 HTTP 서버나 파생 projection 초기화를 요구하지 않는다.
 
+`history`는 같은 scope/path의 revision·digest·크기·기록 시각을 최신순으로 반환한다.
+`version`은 지정 revision의 UTF-8 원문과 digest를 반환한다. 이력은 `before`로 페이지를
+넘길 수 있으며 제한 자료에는 기본 CLI 열람 범위를 넓히지 않는다.
+
+```json
+{"op":"history","scope":"personal","path":"projects/meenseek-ontology.md"}
+```
+
+```json
+{"op":"version","scope":"personal","path":"projects/meenseek-ontology.md","revision":1}
+```
+
 `read-documents`는 source identity·digest를 가진 parsed/redacted 문서 조회이고 raw read와
 다른 상한을 적용한다. 그 body를 원문 SHA 입력으로 쓰거나 raw policy 읽기의 선행 조건으로
 두지 않는다. Metadata `search`는 본문 전체 검색이 아니며 exact path를 찾는 데 사용한다.
@@ -390,6 +398,19 @@ revision을 수정하는 수단으로 쓰지 않는다. `inventory`는 DB 없이
 
 세부 역할·수락·적용·복구는 native `vault/profile/rules/agent-harness.md`가 단독 소유한다.
 Source view나 DB를 직접 고치거나 별도 protocol·version 축·호환 실행 경로를 만들지 않는다.
+
+### 사용자가 직접 작성한 원문 저장
+
+열람 가능한 기존 `personal`·`work/<slug>` Markdown에 한해 현재 revision·SHA를 함께 제출한다. 저장은 충돌 시 중단하고 새 버전·이력·조회 사본을 한 transaction에 기록한다. 최초 출처와 digest는 그대로 남으며 Core 검토·수락으로 표시하지 않는다. `profile`, 제한 자료, 새 원문 생성·삭제와 에이전트가 작성·수정한 내용은 이 경로가 아니라 위 Harness 경계를 따른다. CLI의 읽기·검색은 에이전트도 사용할 수 있지만, `context edit`은 사용자가 직접 작성한 내용을 저장할 때만 사용한다.
+
+```bash
+bash scripts/brain.sh context edit \
+  --scope personal --path 'projects/example.md' \
+  --expected-revision 2 --expected-digest '현재 원문 SHA-256' \
+  < /absolute/path/to/user-authored.md
+```
+
+본문은 파일에서 원래 UTF-8 bytes로 받고 JSON receipt를 출력한다. 예시의 scope·path는 대상 원문으로, revision·digest는 직전 `history` 결과의 최신 `revision`·`content_digest`로 바꾼다. 빈 원문도 저장할 수 있다.
 
 ## 지정한 원문 자동 갱신
 
@@ -542,7 +563,7 @@ consumer와 갱신, Git 커밋 가져오기와 실패·부재 처리, 사용자 
 build·테스트·restore를 다시 실행하거나 성공을 새로 주장하지 않는다. 웹 테스트와 빌드는
 브라우저 전체 동작 시험을 대신하지 않으며, 아래 미수행 화면 시나리오는 별도 검증으로 남는다.
 
-읽기·관리·저장 흐름의 호출 수나 자료 보관함 흐름을 바꿨다면 개발 서버에서 아래 브라우저 검증 페이지도 실행한다.
+읽기·관리·저장 흐름의 호출 수를 바꿨다면 개발 서버에서 아래 브라우저 검증 페이지도 실행한다. 원문 목록·지도·상세 흐름은 실제 앱 화면에서 확인한다.
 
 ```bash
 pnpm --dir web exec vite --host 127.0.0.1 --port 47832 --strictPort
@@ -550,6 +571,5 @@ pnpm --dir web exec vite --host 127.0.0.1 --port 47832 --strictPort
 
 - `http://127.0.0.1:47832/reading-check.html`: 실제 Memory·Documents 컴포넌트에서 0·1·20개 자료의 필요한 시점 조회, 관리·탭 전환 시 입력 보존, 이력 페이지, 실패·취소·명시 재시도를 검사한다.
 - `http://127.0.0.1:47832/app-reading-check.html`: 실제 App에서 기억 1·20개 조건의 초기 조회, 생성·정정 응답 재사용, 범위 이동, 명시 새로고침, 갱신 상태 조회를 검사한다.
-- `http://127.0.0.1:47832/context-check.html`: 실제 자료 보관함과 App 컴포넌트에서 범위 전환, 지연 응답·요청 취소, 명시적 재시도와 기록 초안 보존을 확인하도록 준비한 페이지다. 페이지 제공은 검증 통과를 뜻하지 않으며 실제 화면 시나리오 검증은 아직 남아 있다.
 
 `reading-check.html`과 `app-reading-check.html`은 합성 응답만 사용하며 API를 실제 서버로 전달하지 않는다. 호출 시도와 성공한 JSON 응답 바이트를 기록하고 상한을 검사한다. 측정 바이트는 HTTP 전송량이 아니다. DB 호출 수와 응답 크기는 `tests/second_brain.rs`의 `detail_and_subject_queries_stay_bounded_across_cardinalities`가 별도 임시 DB에서 검사한다. 브라우저 검증은 `verify.sh`에 자동 포함되지 않으며 각 페이지의 PASS와 실제 앱 화면을 함께 확인한다.

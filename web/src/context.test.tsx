@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import Context, { ContextProvenance, failure, OriginalText, contextUrl, originalFilename } from "./Context";
+import { ContextProvenance, editorContent, editorDraft, editorNewlines, failure, OriginalText, contextUrl, originalFilename } from "./Original";
+
+test("browser editing retains original newline convention", () => {
+  const crlf = "title\r\nbody\r\n";
+  assert.equal(editorNewlines(crlf), "crlf");
+  assert.equal(editorContent(editorDraft(crlf).replace("body", "changed"), "crlf"), "title\r\nchanged\r\n");
+  assert.equal(editorNewlines("title\nbody\n"), "lf");
+  assert.equal(editorNewlines("title\r\nbody\n"), null);
+  assert.equal(editorNewlines("title\rbody"), null);
+});
 
 test("context URLs retain exact scope, Unicode and query delimiters without changing endpoint", () => {
   const scope = "work/alpha", path = "attachments/한글 &?#%=+\".html";
@@ -33,19 +42,6 @@ test("original text is escaped, never executed or normalized into markup", () =>
   assert.equal(Buffer.from(JSON.parse(JSON.stringify({ content })).content, "utf8").compare(Buffer.from(content, "utf8")), 0);
   assert(renderToStaticMarkup(<OriginalText content="" />).includes('aria-label="원본 텍스트"'));
 });
-
-test("the actual initial library requires a scope and identifies original provenance", () => {
-  let calls = 0;
-  const request = async <T,>(): Promise<T> => { calls += 1; throw new Error("SSR must not request private content"); };
-  const output = renderToStaticMarkup(<Context request={request} onClose={() => {}} />);
-  assert(output.includes("자료 보관함"));
-  assert(output.includes("범위를 선택하세요"));
-  assert(output.includes("저장된 원본 자료입니다."));
-  assert(output.includes("검증된 지식이나 현재 적용할 정책을 뜻하지 않습니다."));
-  assert(!output.includes('aria-label="원본 텍스트"'));
-  assert.equal(calls, 0);
-});
-
 
 test("all context read helpers display the pending message for HTTP 409", () => {
   const pending = "자료 반영 또는 복구가 진행 중입니다. 완료 후 다시 시도해 주세요.";
