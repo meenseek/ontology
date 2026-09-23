@@ -59,8 +59,10 @@ class Failure(Exception):
         self.layer, self.code, self.message = layer, code, message
 
     def result(self, target="app"):
+        impact = ("이 실행 환경에서 Docker 상태를 확인할 수 없습니다. DB 중단 여부는 미확인입니다."
+                  if self.code == "docker_permission" else IMPACTS[self.layer])
         return dict(ok=False, target=target, layer=self.layer, code=self.code,
-                    message=self.message, impact=IMPACTS[self.layer])
+                    message=self.message, impact=impact)
 
 
 def command(args, layer, code, message, *, timeout=COMMAND_TIMEOUT, **kwargs):
@@ -69,17 +71,17 @@ def command(args, layer, code, message, *, timeout=COMMAND_TIMEOUT, **kwargs):
         result = subprocess.run(args, capture_output=True, timeout=timeout, **kwargs)
     except (OSError, subprocess.TimeoutExpired):
         raise Failure(layer, code, message) from None
+    stderr = result.stderr.lower()
+    # Docker may report a socket denial on stderr with exit status zero. DB-labelled
+    # calls share this transport, while SQL/table permission errors keep their code.
+    transport_denied = Path(args[0]).name == "docker" and (
+        b"permission denied while trying to connect to the docker daemon socket" in stderr
+        or re.search(rb"dial unix [^\r\n]+: connect: (?:permission denied|operation not permitted)", stderr)
+    )
+    if transport_denied or (result.returncode and Path(args[0]).name == "docker"
+                            and layer == "docker" and b"permission" in stderr):
+        raise Failure("docker", "docker_permission", "Docker 접근 권한을 확인해야 합니다.")
     if result.returncode:
-        stderr = result.stderr.lower()
-        # DB-labelled Docker calls still use the daemon transport. Require its
-        # connection signature so SQL/table permission failures keep their code.
-        transport_denied = (
-            b"permission denied while trying to connect to the docker daemon socket" in stderr
-            or re.search(rb"dial unix [^\r\n]+: connect: (?:permission denied|operation not permitted)", stderr)
-        )
-        if Path(args[0]).name == "docker" and (
-                (layer == "docker" and b"permission" in stderr) or transport_denied):
-            raise Failure("docker", "docker_permission", "Docker 접근 권한을 확인해야 합니다.")
         raise Failure(layer, code, message)
     return result.stdout
 
