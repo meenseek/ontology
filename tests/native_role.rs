@@ -18,7 +18,7 @@ async fn native_role_rejects_writer_frontier_before_launch() {
     );
     let store = Store::connect(&url).await.expect("owned PG");
     store.initialize().await.expect("migrations");
-    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_materials,context_apply_batches").execute(store.pool()).await.expect("isolated reset");
+    sqlx::query("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("isolated reset");
     let policy = fixtures::seed(&store).await;
     let view = fixtures::view();
     let root = view.path().canonicalize().expect("view");

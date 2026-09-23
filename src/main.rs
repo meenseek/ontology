@@ -214,7 +214,55 @@ async fn serve(store: Store) -> Result<(), Error> {
 // Context inventory is offline. Other context operations require an explicitly initialized
 // database; a read or inventory command must never apply an additive migration implicitly.
 async fn context(args: &[String]) -> Result<(), Error> {
-    use meenseek_ontology::context::{MAX_COMMAND_BYTES, MAX_OUTPUT_BYTES, inventory};
+    use meenseek_ontology::context::{
+        ContextScope, MAX_COMMAND_BYTES, MAX_OUTPUT_BYTES, MAX_READ_BYTES, inventory,
+    };
+    if args.get(1).map(String::as_str) == Some("edit") {
+        let (mut scope, mut path, mut revision, mut digest) = (None, None, None, None);
+        let mut arguments = args.iter().skip(2);
+        while let Some(key) = arguments.next() {
+            let value = arguments.next().ok_or(Error::Invalid)?;
+            match key.as_str() {
+                "--scope" if scope.is_none() => scope = Some(value.parse::<ContextScope>()?),
+                "--path" if path.is_none() => path = Some(value.as_str()),
+                "--expected-revision" if revision.is_none() => {
+                    revision = Some(value.parse::<i64>().map_err(|_| Error::Invalid)?)
+                }
+                "--expected-digest" if digest.is_none() => digest = Some(value.as_str()),
+                _ => return Err(Error::Invalid),
+            }
+        }
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take((MAX_READ_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::Invalid)?;
+        if bytes.len() > MAX_READ_BYTES {
+            return Err(Error::Limit);
+        }
+        let content = String::from_utf8(bytes).map_err(|_| Error::Invalid)?;
+        let url = std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?;
+        let store = Store::connect(&url).await?;
+        let receipt = store
+            .edit_context(
+                &scope.ok_or(Error::Invalid)?,
+                path.ok_or(Error::Invalid)?,
+                revision.ok_or(Error::Invalid)?,
+                digest.ok_or(Error::Invalid)?,
+                &content,
+            )
+            .await?;
+        let output = serde_json::to_vec(&receipt).map_err(|_| Error::Storage)?;
+        std::io::stdout()
+            .lock()
+            .write_all(&output)
+            .map_err(|_| Error::Storage)?;
+        std::io::stdout()
+            .lock()
+            .write_all(b"\n")
+            .map_err(|_| Error::Storage)?;
+        return Ok(());
+    }
     if args.len() != 1 {
         return Err(Error::Invalid);
     }

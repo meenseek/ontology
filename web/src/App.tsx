@@ -1,13 +1,13 @@
 import { Component, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Documents from "./Documents";
-import Context from "./Context";
+import OriginalDetail from "./OriginalDetail";
 import Memory from "./Memory";
 import type { Item as MemoryItem } from "./Memory";
 import { Positions } from "./positions";
 import { nodePresentation } from "./presentation";
 import { graphUrl, kindName, knowledge, linkName, parseLocation, reconcile, sameGraphLocation, stateName, visibleGraph } from "./graph";
-import type { Filters, Model, Scope, Snapshot } from "./graph";
+import type { Filters, GraphNode, Model, Scope, Snapshot } from "./graph";
 const Graph = lazy(() => import("./Graph.tsx"));
 type Session = { csrf: string; areas: { id: string; label: string }[] };
 class ApiError extends Error {
@@ -27,7 +27,7 @@ class GraphBoundary extends Component<{ children: ReactNode; onFailure: () => vo
   componentDidCatch() { this.props.onFailure(); }
   render() { return this.state.failed ? null : this.props.children; }
 }
-const initialFilters: Filters = { kind: "all", state: "all", cluster: null };
+const initialFilters: Filters = { kind: "all", state: "all", cluster: null, sourceScope: null };
 export default function App() {
   const [route, setRoute] = useState(() => parseLocation(window.location.search));
   const positions = useMemo(() => new Positions(), [route.scope, route.q]);
@@ -40,20 +40,14 @@ export default function App() {
   const [filters, setFilters] = useState<Filters>(initialFilters);
   const [panel, setPanel] = useState<"node" | "manage" | null>(route.focus ? "node" : null);
   const [managing, setManaging] = useState(false);
-  const [libraryOpen, setLibraryOpen] = useState(false);
-  const libraryOpener = useRef<HTMLElement | null>(null);
-  function openLibrary() {
-    libraryOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setLibraryOpen(true);
-  }
-  function closeLibrary() {
-    setLibraryOpen(false);
-    requestAnimationFrame(() => libraryOpener.current?.isConnected && libraryOpener.current.focus());
-  }
   // One write response is handed to its new detail view; this is not a cross-document cache.
   const [savedMemory, setSavedMemory] = useState<MemoryItem | null>(null);
   const [busy, setBusy] = useState(false), [loading, setLoading] = useState(true), [error, setError] = useState("");
-  const [notice, setNotice] = useState(""), [listMode, setListMode] = useState(!!route.q), [webglFailed, setWebglFailed] = useState(false);
+  const busyRef = useRef(false);
+  const updateBusy = useCallback((value: boolean) => { busyRef.current = value; setBusy(value); }, []);
+  const dirtyRef = useRef(false);
+  const updateDirty = useCallback((value: boolean) => { dirtyRef.current = value; }, []);
+  const [notice, setNotice] = useState(""), [listMode, setListMode] = useState(route.scope === "personal" || !!route.q), [webglFailed, setWebglFailed] = useState(false);
   const [visible, setVisible] = useState(document.visibilityState !== "hidden");
   const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   const [rotate, setRotate] = useState(false), [fit, setFit] = useState(0);
@@ -63,6 +57,11 @@ export default function App() {
   const opener = useRef<HTMLElement | null>(null), filterButton = useRef<HTMLButtonElement>(null);
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 900px)").matches);
   const selected = data?.model.nodes.find(n => n.id === route.focus) ?? null;
+  const relatedOriginals: GraphNode[] = selected ? data?.model.links.flatMap(link => {
+    const id = link.source === selected.id ? link.target : link.target === selected.id ? link.source : null;
+    const node = data.model.nodes.find(candidate => candidate.id === id);
+    return node ? [node] : [];
+  }) ?? [] : [];
   const memorySeed = savedMemory?.scope === route.scope && savedMemory.id === route.focus ? savedMemory : null;
   const shown = useMemo(() => data ? visibleGraph(data.model, filters) : { nodes: [], links: [] }, [data, filters]);
   const fallback = listMode || webglFailed;
@@ -78,9 +77,10 @@ export default function App() {
     const visibility = () => setVisible(document.visibilityState !== "hidden");
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
     const motion = () => setReduced(media.matches);
-    const pop = () => { const next = parseLocation(window.location.search); routeRef.current = next; setRoute(next); setInput(next.q); setListMode(!!next.q); setFilters(initialFilters); setPanel(next.focus ? "node" : null); setManaging(false); setSavedMemory(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); };
-    document.addEventListener("visibilitychange", visibility); media.addEventListener("change", motion); window.addEventListener("popstate", pop);
-    return () => { document.removeEventListener("visibilitychange", visibility); media.removeEventListener("change", motion); window.removeEventListener("popstate", pop); };
+    const pop = () => { if (busyRef.current || dirtyRef.current && !window.confirm("저장하지 않은 원문 초안을 버리고 이동할까요?")) { window.history.pushState(null, "", graphUrl(routeRef.current.scope, routeRef.current.q, routeRef.current.focus)); return; } updateDirty(false); const next = parseLocation(window.location.search); routeRef.current = next; setRoute(next); setInput(next.q); setListMode(next.scope === "personal" || !!next.q); setFilters(initialFilters); setPanel(next.focus ? "node" : null); setManaging(false); setSavedMemory(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); };
+    const beforeUnload = (event: BeforeUnloadEvent) => { if (dirtyRef.current || busyRef.current) event.preventDefault(); };
+    document.addEventListener("visibilitychange", visibility); media.addEventListener("change", motion); window.addEventListener("popstate", pop); window.addEventListener("beforeunload", beforeUnload);
+    return () => { document.removeEventListener("visibilitychange", visibility); media.removeEventListener("change", motion); window.removeEventListener("popstate", pop); window.removeEventListener("beforeunload", beforeUnload); };
   }, []);
   useEffect(() => {
     if (!visible || session) return;
@@ -109,21 +109,27 @@ export default function App() {
     }).catch(e => { if (!controller.signal.aborted && sameGraphLocation(current, routeRef.current)) setError(message(e)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [visible, session, route.scope, route.q, refresh, positions]);
-  const reload = () => { setSavedMemory(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); setNotice(""); };
+  function confirmDiscard() {
+    if (busyRef.current) return false;
+    if (!dirtyRef.current) return true;
+    if (!window.confirm("저장하지 않은 원문 초안을 버리고 이동할까요?")) return false;
+    updateDirty(false); return true;
+  }
+  const reload = () => { if (busy || !confirmDiscard()) return; setSavedMemory(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); setNotice(""); };
   function search(query: string) {
-    if (busy) return;
+    if (busy || !confirmDiscard()) return;
     const next = query.trim(), same = route.q === next;
     setInput(next); syncRoute({ scope: route.scope, q: next, focus: null });
-    setListMode(!!next); if (panel !== "manage") setPanel(null);
+    setListMode(route.scope === "personal" || !!next); if (panel !== "manage") setPanel(null);
     setFilters(initialFilters); setNotice(""); if (same) setRefresh(v => v + 1);
   }
   function changeScope(scope: Scope) {
-    if (busy || scope === route.scope) return;
-    previous.current = undefined; setStored(null); setInput(""); setFilters(initialFilters); setPanel(null); setManaging(false); setSavedMemory(null); setNotice(""); setError("");
+    if (busy || scope === route.scope || !confirmDiscard()) return;
+    previous.current = undefined; setStored(null); setInput(""); setListMode(scope === "personal"); setFilters(initialFilters); setPanel(null); setManaging(false); setSavedMemory(null); setNotice(""); setError("");
     syncRoute({ scope, q: "", focus: null });
   }
   function choose(id: string) {
-    if (busy) return;
+    if (busy || !confirmDiscard()) return;
     const node = data?.model.nodes.find(n => n.id === id);
     setNotice(""); setManaging(false); setSavedMemory(null); setFilters(f => ({ ...initialFilters, cluster: f.cluster === node?.cluster ? f.cluster : null }));
     syncRoute({ ...route, focus: id }); openPanel("node");
@@ -140,12 +146,12 @@ export default function App() {
     setPanel(next); setManaging(false);
   }
   function fitView(cluster = filters.cluster) {
-    if (busy) return;
+    if (busy || !confirmDiscard()) return;
     setFilters(f => ({ ...f, cluster }));
     closePanel(); setFit(v => v + 1);
   }
   function closePanel() {
-    if (busy) return;
+    if (busy || !confirmDiscard()) return;
     setPanel(null); setManaging(false); setSavedMemory(null); syncRoute({ ...routeRef.current, focus: null });
     requestAnimationFrame(() => (opener.current?.isConnected ? opener.current : manageButton.current)?.focus());
   }
@@ -163,7 +169,7 @@ export default function App() {
   }, []);
   useEffect(() => { if (panel) closeButton.current?.focus(); }, [!!panel, !!session]);
   useEffect(() => {
-    if (!panel || libraryOpen) return;
+    if (!panel) return;
     const keydown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !busy) { event.preventDefault(); closePanel(); }
       if (event.key !== "Tab" || !narrow) return;
@@ -183,10 +189,10 @@ export default function App() {
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     };
     document.addEventListener("keydown", keydown); return () => document.removeEventListener("keydown", keydown);
-  }, [panel, narrow, busy, libraryOpen]);
+  }, [panel, narrow, busy]);
   const cluster = data?.model.clusters.find(c => c.id === filters.cluster);
   return <div className="app">
-    <header className="app-header" inert={libraryOpen || !!panel && narrow}>
+    <header className="app-header" inert={!!panel && narrow}>
       <a className="wordmark" href="/">개인 온톨로지</a>
       <div className="scope-switch" role="group" aria-label="탐색 범위">
         <button aria-pressed={route.scope === "personal"} disabled={busy} onClick={() => changeScope("personal")}>내 지식</button>
@@ -197,25 +203,25 @@ export default function App() {
         <input id="graph-search" value={input} onChange={e => setInput(e.target.value)} maxLength={120} placeholder="지식 검색" />
         <button type="submit" disabled={busy || !session}>검색</button>
       </form>
-      <button className="library-button" disabled={!session || busy} onClick={openLibrary}>자료 보관함</button>
-      <button ref={manageButton} className="manage-button" disabled={!session || busy} onClick={() => { syncRoute({ ...route, focus: null }); openPanel("manage"); }}>기록 남기기</button>
+      <button ref={manageButton} className="manage-button" disabled={!session || busy} onClick={() => { if (!confirmDiscard()) return; syncRoute({ ...route, focus: null }); openPanel("manage"); }}>기록 남기기</button>
     </header>
-    <main className={`map-workspace ${panel || libraryOpen ? "panel-open" : ""} ${explore ? "explorer-open" : ""}`}>
-      {explore && <aside className="map-sidebar" aria-label="지식 탐색" inert={libraryOpen || !!panel && narrow}>
+    <main className={`map-workspace ${panel ? "panel-open" : ""} ${explore ? "explorer-open" : ""}`}>
+      {explore && <aside className="map-sidebar" aria-label="지식 탐색" inert={!!panel && narrow}>
         <div className="sidebar-heading"><h2>탐색 조건</h2><button className="quiet" aria-label="탐색 조건 닫기" onClick={() => { setExplore(false); filterButton.current?.focus(); }}>닫기</button></div>
         <div className="filter-row">
           <label>표시 종류<select value={filters.kind} disabled={busy} onChange={e => setFilters(f => ({ ...f, kind: e.target.value as Filters["kind"] }))}><option value="all">모두</option><option value="knowledge">문서와 기록</option>{Object.entries(kindName).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
           <label>표시 상태<select value={filters.state} disabled={busy} onChange={e => setFilters(f => ({ ...f, state: e.target.value as Filters["state"] }))}><option value="all">모든 상태</option><option value="active">현재 사용 가능</option><option value="proposed">제안</option><option value="withdrawn">철회</option><option value="attention">확인 필요·제외</option></select></label>
         </div>
+        {route.scope === "personal" && <label className="topic-label">원문 출처 범위<select value={filters.sourceScope ?? ""} onChange={event => setFilters(value => ({ ...value, sourceScope: event.target.value || null, cluster: null }))}><option value="">모든 출처</option>{[...new Set(data?.model.nodes.flatMap(node => node.context_scope ? [node.context_scope] : []) ?? [])].sort().map(value => <option key={value} value={value}>{value}</option>)}</select></label>}
         <section className="cluster-list"><h2>관계에서 찾은 군집</h2>
           <button className="cluster" aria-pressed={!filters.cluster} disabled={busy} onClick={() => fitView(null)}>전체 보기</button>
           <div className="compact-list">{data?.model.clusters.filter(c => c.members.length > 1).map(c => <button className="cluster" key={c.id} disabled={busy} aria-pressed={filters.cluster === c.id} onClick={() => fitView(c.id)}><i style={{ background: c.color }} /><strong>{c.label}</strong><small>문서·기록 {c.knowledge} · 분류 표식 {c.members.length - c.knowledge}</small></button>)}</div>
           <p className="hint">{data?.model.clusters.filter(c => c.members.length > 1).length ?? 0}개 군집 · 단독 항목 {data?.model.clusters.filter(c => c.members.length === 1).length ?? 0}개</p>
           <p className="hint">표시된 현재 관계로 계산합니다. 군집은 자동 분류가 아닙니다.</p>
         </section>
-        <details className="section"><summary>검색 방법</summary><p className="hint">현재 범위에서 제목·내용·경로·문서 태그의 문자열을 찾습니다. 표시 조건은 조회한 결과 안에서 적용합니다.</p></details>
+        <details className="section"><summary>검색 방법</summary><p className="hint">현재 범위에서 경로와 검색 가능한 원문 내용을 찾습니다. 텍스트를 검색할 수 없는 첨부 파일도 경로로 찾습니다. 관계 없는 원문은 독립 항목입니다.</p></details>
       </aside>}
-      <section className="galaxy" aria-label="지식 지도" aria-busy={loading} inert={libraryOpen || !!panel && narrow}>
+      <section className="galaxy" aria-label="지식 지도" aria-busy={loading} inert={!!panel && narrow}>
         <div className="map-toolbar"><div className="map-title"><h1>{cluster ? cluster.label : route.q ? `“${route.q}” 검색` : "지식 지도"}</h1><p className="count-breakdown">표시 중 · 문서 {data ? displayed.filter(n => n.kind === "document").length : "—"} · 기록 {data ? displayed.filter(n => n.kind === "memory").length : "—"} · 관계 {data ? shown.links.length : "—"}</p></div>
           <div className="map-actions">
             <button ref={filterButton} disabled={busy} aria-expanded={explore} onClick={() => setExplore(v => !v)}>필터·군집</button>
@@ -241,15 +247,14 @@ export default function App() {
         {data && !loading && !displayed.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{route.q || filters.kind !== "all" || filters.state !== "all" ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 저장한 기록이 이곳에 나타납니다."}</p><button disabled={!session || busy} onClick={() => openPanel("manage")}>기록 남기기</button></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{displayed.map(n => { const label = nodePresentation(n); return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} aria-hidden="true">{knowledge(n) ? "·" : "○"}</span><span><small>{kindName[n.kind]} · {stateName(n)}</small><strong>{label.title}</strong>{label.subtitle && <span className="node-location">{label.subtitle}</span>}{route.q && n.historical_match && <small className="warning">이전 내용에서 일치 · 현재 상태를 확인하세요</small>}{route.q && n.excerpt && <span className="search-excerpt">{n.excerpt}</span>}</span>{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph key={`${route.scope}:${route.q}`} positions={positions} snapshot={data.model} nodes={shown.nodes} links={shown.links} selected={route.focus} rotate={rotating} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onFailure={failed} /></Suspense></GraphBoundary>)}
         <div className="map-legend"><span><i className="legend-star document" />문서</span><span><i className="legend-star memory" />기록</span><span>○ 분류 표식</span><details><summary>관계·상태 읽기</summary><p>가는 원은 선택, 바깥 점선 원은 이전 조회 이후의 기록·관계 변경입니다. 흐린 점은 제안·철회·유효기간·출처 확인 상태를 살펴보세요. {Object.values(linkName).join(" · ")} 관계만 선으로 표시하며 선택하면 연결된 선을 강조합니다. 과거 출처 근거는 갈색의 가는 선이며 군집에서 제외합니다. 단독 항목은 연결된 자료 곁에 배치될 수 있습니다. ‘저장’은 사실 검증을 뜻하지 않습니다. 출처 확인 시각만 바뀌면 변경으로 표시하지 않습니다.</p></details></div>
       </section>
-      {panel && session && <aside ref={panelElement} hidden={libraryOpen} inert={libraryOpen} className="management-panel" role="dialog" aria-modal={narrow || undefined} aria-label={panel === "manage" ? "기록 남기기" : "선택한 자료 상세"}>
-        <div className="panel-heading"><span>{panel === "manage" ? "기록 남기기" : selected ? kindName[selected.kind] : memorySeed ? "기록" : "자료 상세"}</span><div className="panel-actions"><button disabled={busy} onClick={openLibrary}>자료 보관함</button>{panel === "node" && (memorySeed || selected && knowledge(selected)) && <button disabled={busy} aria-expanded={managing} onClick={toggleManagement}>{managing ? "읽기로 돌아가기" : "관리"}</button>}<button ref={closeButton} disabled={busy} aria-label="관리 패널 닫기" onClick={closePanel}>닫기 ×</button></div></div>
-        {panel === "manage" ? <><Memory visible={visible} managing key={`${route.scope}:manage:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={null} onBusy={setBusy} onChange={changed} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /><SyncPanel key={panelEpoch} visible={visible} /></> : !selected && !memorySeed ? <p className="empty">선택한 자료를 불러오는 중…</p> : <>
+      {panel && session && <aside ref={panelElement} className="management-panel" role="dialog" aria-modal={narrow || undefined} aria-label={panel === "manage" ? "기록 남기기" : "선택한 자료 상세"}>
+        <div className="panel-heading"><span>{panel === "manage" ? "기록 남기기" : selected ? kindName[selected.kind] : memorySeed ? "기록" : "자료 상세"}</span><div className="panel-actions">{panel === "node" && (memorySeed || selected && knowledge(selected) && selected.source_kind !== "original") && <button disabled={busy} aria-expanded={managing} onClick={toggleManagement}>{managing ? "읽기로 돌아가기" : "관리"}</button>}<button ref={closeButton} disabled={busy} aria-label="관리 패널 닫기" onClick={closePanel}>닫기 ×</button></div></div>
+        {panel === "manage" ? <><Memory visible={visible} managing key={`${route.scope}:manage:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={null} onBusy={updateBusy} onChange={changed} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /><SyncPanel key={panelEpoch} visible={visible} /></> : !selected && !memorySeed ? <p className="empty">선택한 자료를 불러오는 중…</p> : <>
           {selected?.changed && <p className="notice">이전 조회 이후 기록이나 관계가 변경되었습니다.</p>}
-          {selected?.kind === "document" ? <Documents visible={visible} managing={managing} key={`${route.scope}:${selected.id}:${panelEpoch}`} scope={route.scope} id={selected.id} csrf={session.csrf} allAreas={session.areas} request={request} onBusy={setBusy} onChange={reload} onNavigate={choose} /> : selected?.kind === "memory" || memorySeed ? <Memory latestNode={selected} visible={visible} managing={managing} initialItem={memorySeed} key={`${route.scope}:${route.focus}:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={route.focus} onBusy={setBusy} onChange={changed} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /> : selected && <><h2>{selected.label}</h2><p className="hint">{kindName[selected.kind]} 표식입니다.</p><button onClick={() => fitView(selected.cluster)}>이 군집 보기</button><div className="compact-list">{data?.model.links.filter(l => l.source === selected.id || l.target === selected.id).map(l => { const other = data.model.nodes.find(n => n.id === (l.source === selected.id ? l.target : l.source)); return other && <button key={`${l.kind}:${other.id}`} disabled={busy} onClick={() => choose(other.id)}><span>{linkName[l.kind]}</span><strong>{nodePresentation(other).title}</strong>{nodePresentation(other).subtitle && <small>{nodePresentation(other).subtitle}</small>}</button>; })}</div></>}
+          {selected?.kind === "document" ? selected.source_kind === "original" && selected.context_scope && selected.context_path ? <OriginalDetail key={selected.id} scope={selected.context_scope} path={selected.context_path} request={request} related={relatedOriginals} onNavigate={choose} csrf={session.csrf} onBusy={updateBusy} onChange={() => setRefresh(v => v + 1)} onDirtyChange={updateDirty} /> : <Documents visible={visible} managing={managing} key={`${route.scope}:${selected.id}:${panelEpoch}`} scope={route.scope} id={selected.id} csrf={session.csrf} allAreas={session.areas} request={request} onBusy={updateBusy} onChange={reload} onNavigate={choose} contextScope={selected.context_scope} contextPath={selected.context_path} onDirtyChange={updateDirty} /> : selected?.kind === "memory" || memorySeed ? <Memory latestNode={selected} visible={visible} managing={managing} initialItem={memorySeed} key={`${route.scope}:${route.focus}:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={route.focus} onBusy={updateBusy} onChange={changed} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /> : selected && <><h2>{selected.label}</h2><p className="hint">{kindName[selected.kind]} 표식입니다.</p><button onClick={() => fitView(selected.cluster)}>이 군집 보기</button><div className="compact-list">{data?.model.links.filter(l => l.source === selected.id || l.target === selected.id).map(l => { const other = data.model.nodes.find(n => n.id === (l.source === selected.id ? l.target : l.source)); return other && <button key={`${l.kind}:${other.id}`} disabled={busy} onClick={() => choose(other.id)}><span>{linkName[l.kind]}</span><strong>{nodePresentation(other).title}</strong>{nodePresentation(other).subtitle && <small>{nodePresentation(other).subtitle}</small>}</button>; })}</div></>}
           {managing && <p className="section node-permalink"><a href={graphUrl(route.scope, route.q, route.focus)}>이 자료 링크</a></p>}
         </>}
       </aside>}
-      {libraryOpen && <Context request={request} onClose={closeLibrary} />}
     </main>
   </div>;
 }

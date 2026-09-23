@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import type { Request, Scope } from "./graph";
 import { fileName } from "./presentation";
 import DocumentPreview from "./DocumentPreview";
+import OriginalDetail from "./OriginalDetail";
 type SourceKind = "git" | "vault" | "context";
 type Area = { id: string; label: string };
 type RecordItem = {
@@ -51,15 +52,16 @@ type Detail = {
   }[];
 };
 
-type Props = { visible: boolean; managing: boolean; scope: Scope; id: string; csrf: string; allAreas: Area[]; request: Request; onBusy: (busy: boolean) => void; onChange: () => void; onNavigate: (id: string) => void };
+type Props = { visible: boolean; managing: boolean; scope: Scope; id: string; csrf: string; allAreas: Area[]; request: Request; onBusy: (busy: boolean) => void; onChange: () => void; onNavigate: (id: string) => void; contextScope?: string | null; contextPath?: string | null; onDirtyChange?: (dirty: boolean) => void };
 const date = (value: string | null) => value ? new Date(value).toLocaleString("ko-KR") : "아직 확인되지 않음";
 const message = (error: unknown) => error instanceof Error ? error.message : "요청을 완료하지 못했습니다.";
-export default function Documents({ visible, managing, scope, id, csrf, allAreas, request, onBusy, onChange, onNavigate }: Props) {
+export default function Documents({ visible, managing, scope, id, csrf, allAreas, request, onBusy, onChange, onNavigate, contextScope, contextPath, onDirtyChange }: Props) {
   const [detail, setDetail] = useState<Detail | null>(null), [areas, setAreas] = useState<string[]>([]), [topics, setTopics] = useState("");
   const [relatedQuery, setRelatedQuery] = useState(""), [candidates, setCandidates] = useState<RecordItem[]>([]), [target, setTarget] = useState("");
   const [saving, setSaving] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true), [candidateTotal, setCandidateTotal] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
+  const hasOriginal = !!contextScope && !!contextPath;
   const mounted = useRef(true), pending = useRef(false), requests = useRef(new Set<AbortController>());
   useEffect(() => {
     mounted.current = true;
@@ -111,11 +113,13 @@ export default function Documents({ visible, managing, scope, id, csrf, allAreas
     {error && <p className="error" role="alert">{error}<button disabled={saving} onClick={reload}>다시 불러오기</button></p>}
     {notice && <p className="notice">{notice}</p>}
     {loading ? <p role="status">자료를 불러오는 중…</p> : detail && <>
-      <p className="source-identity">{detail.source.kind === "vault" ? "Vault" : detail.source.kind === "context" ? "Context" : "Git"} 문서</p>
-      {detail.source.status === "failed" && <p className="error">최근 출처 확인에 실패했습니다. 아래 내용은 마지막으로 성공한 기록입니다.</p>}
-      {!detail.projection.present && <p className="warning">등록한 경로의 부재를 확인했습니다. 마지막 원문과 사용자의 확인 기록은 보존되어 있습니다.</p>}
-      {detail.source.status === "ok" && detail.projection.present && !detail.current && <p className="warning">갱신 대기 · 아래 내용은 마지막으로 성공한 기록입니다.</p>}
-      <DocumentPreview path={detail.source.path} content={detail.projection.content} kind={detail.source.kind} />
+      {hasOriginal ? <OriginalDetail scope={contextScope!} path={contextPath!} request={request} csrf={csrf} onBusy={onBusy} onChange={onChange} onDirtyChange={onDirtyChange} /> : <>
+        <p className="source-identity">{detail.source.kind === "vault" ? "Vault" : detail.source.kind === "context" ? "Context" : "Git"} 문서</p>
+        {detail.source.status === "failed" && <p className="error">최근 출처 확인에 실패했습니다. 아래 내용은 마지막으로 성공한 기록입니다.</p>}
+        {!detail.projection.present && <p className="warning">등록한 경로의 부재를 확인했습니다. 마지막 원문과 사용자의 확인 기록은 보존되어 있습니다.</p>}
+        {detail.source.status === "ok" && detail.projection.present && !detail.current && <p className="warning">갱신 대기 · 아래 내용은 마지막으로 성공한 기록입니다.</p>}
+        <DocumentPreview path={detail.source.path} content={detail.projection.content} kind={detail.source.kind} />
+      </>}
       {detail.related.length > 0 && <section className="section">
         <h3>관련 자료 <span>{detail.related.length}개 연결</span></h3>
         <ul className="related">{detail.related.map(item => <li key={item.id}><button disabled={saving} onClick={() => choose(item.id)}><strong>{fileName(item.path)}</strong><span className="node-location">{item.path}</span></button></li>)}</ul>
