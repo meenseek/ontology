@@ -6,7 +6,7 @@ import remarkFrontmatter from "remark-frontmatter";
 import remarkGfm from "remark-gfm";
 import { fileName } from "./presentation";
 
-type Props = { path: string; content: string | null; kind: "vault" | "context" | "git" | "record"; title?: string; generatedTitle?: boolean; suppressGeneratedTitle?: boolean };
+type Props = { path: string; content: string | null; kind: "vault" | "context" | "git" | "record"; title?: string; generatedTitle?: boolean; suppressGeneratedTitle?: boolean; resolveInternalLink?: (href: string) => (() => void) | undefined };
 type Tree = { type: string; tagName?: string; value?: string; properties?: Record<string, unknown>; children?: Tree[] };
 const text = (node: Tree): string => node.value ?? String(node.properties?.alt ?? (node.children ?? []).map(text).join(""));
 
@@ -67,6 +67,21 @@ function externalHref(value: string): string | undefined {
   } catch { /* Keep invalid destinations as literal references. */ }
 }
 
+export function resolveRelativeContextPath(path: string, href: string): string | null {
+  if (!href || href.startsWith("#") || href.startsWith("/") || /^[a-z][a-z\d+.-]*:/i.test(href) || /[?#\\\u0000-\u001f]/.test(href)) return null;
+  let decoded: string;
+  try { decoded = decodeURIComponent(href); } catch { return null; }
+  if (decoded.startsWith("/") || /[?#:\\\u0000-\u001f]/.test(decoded)) return null;
+  const parts = path.split("/").slice(0, -1);
+  for (const part of decoded.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") { if (!parts.length) return null; parts.pop(); }
+    else parts.push(part);
+  }
+  const target = parts.join("/");
+  return /\.(md|markdown)$/i.test(target) ? target : null;
+}
+
 function hasInteractiveDescendant(node: Tree): boolean {
   return (node.children ?? []).some(child => child.tagName === "a" || child.tagName === "img" || hasInteractiveDescendant(child));
 }
@@ -76,7 +91,7 @@ function Reference({ value }: { value: string }) {
   return <span className="document-reference"> ({value || "주소 없음"} · {relative ? "이 원문 경로는 여기서 열 수 없습니다." : "열 수 없는 주소입니다."})</span>;
 }
 
-export default function DocumentPreview({ path, content, kind, title, generatedTitle, suppressGeneratedTitle }: Props) {
+export default function DocumentPreview({ path, content, kind, title, generatedTitle, suppressGeneratedTitle, resolveInternalLink }: Props) {
   const namespace = `document-${useId()}`;
   const fallback = title ?? fileName(path);
   const preview = useRef<HTMLDivElement>(null);
@@ -88,11 +103,14 @@ export default function DocumentPreview({ path, content, kind, title, generatedT
   const components: Components = {
     a({ node, href = "", children, ...props }) {
       const external = externalHref(href), fragment = href.startsWith("#");
-      if (!external && !fragment) return <span>{children}<Reference value={href} /></span>;
+      const internal = kind === "context" && !external && !fragment ? resolveInternalLink?.(href) : undefined;
+      if (!external && !fragment && !internal) return <span>{children}<Reference value={href} /></span>;
       // Formatted images and footnotes produce their own controls at any depth.
       // Keep the parent's destination beside those controls, never around them.
       const separate = node && hasInteractiveDescendant(node);
-      const link = <a {...props} href={href} rel={external ? "noreferrer" : undefined} target={external ? "_blank" : undefined} onClick={fragment ? followFragment : undefined}>{separate ? "연결된 문서 열기" : children}</a>;
+      const link = internal
+        ? <button type="button" className="document-internal-link" onClick={internal}>{separate ? "연결된 문서 열기" : children}</button>
+        : <a {...props} href={href} rel={external ? "noreferrer" : undefined} target={external ? "_blank" : undefined} onClick={fragment ? followFragment : undefined}>{separate ? "연결된 문서 열기" : children}</a>;
       return separate ? <span>{children} · {link}</span> : link;
     },
     img({ src, alt, title: imageTitle }) {

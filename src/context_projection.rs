@@ -1,6 +1,6 @@
 //! Immutable search projections and bounded, exact document reads from the canonical store.
 use crate::{
-    context::{ContextScope, MAX_FILES, MAX_TOTAL_BYTES},
+    context::{ContextScope, MAX_FILES, MAX_TOTAL_BYTES, restricted, validate_path},
     domain::{Error, MAX_DOCUMENT_BYTES, MAX_RESPONSE_BYTES},
     store::{Store, digest},
 };
@@ -11,12 +11,61 @@ use context_core::{
     search_text::{expanded_query_terms, expanded_search_text},
     vault::normalize_exact_read_paths,
 };
+use pulldown_cmark::{Event, Parser, Tag};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, Row, postgres::PgRow};
 use std::{
     collections::BTreeSet,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
+
+fn linked_markdown_paths(scope: &ContextScope, path: &str, body: &str) -> BTreeSet<String> {
+    let mut targets = BTreeSet::new();
+    let parent = Path::new(path).parent().unwrap_or_else(|| Path::new(""));
+    for event in Parser::new(body) {
+        let Event::Start(Tag::Link { dest_url, .. }) = event else {
+            continue;
+        };
+        let href = dest_url.as_ref();
+        if href.is_empty()
+            || href.starts_with(['/', '\\', '#'])
+            || href.contains(['?', '#', '\\', '\0', ':'])
+        {
+            continue;
+        }
+        let mut parts = Vec::new();
+        let mut valid = true;
+        for component in parent.join(href).components() {
+            match component {
+                Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if parts.pop().is_none() {
+                        valid = false;
+                        break;
+                    }
+                }
+                _ => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if !valid {
+            continue;
+        }
+        let target = parts.join("/");
+        if target == path
+            || !target.ends_with(".md")
+            || restricted(&target)
+            || validate_path(&target).is_err()
+        {
+            continue;
+        }
+        targets.insert(format!("{}/{}", scope.as_str(), target));
+    }
+    targets
+}
 
 pub(crate) fn normalize_paths(
     scope: &ContextScope,
@@ -113,7 +162,15 @@ pub(crate) fn projection(
     let title = redact_secrets(doc.title());
     let body = redact_secrets(doc.body());
     let aliases = redacted_list(doc.aliases());
-    let ont = json!({"type":redacted_optional(ontology.document_type()),"domain":redacted_optional(ontology.domain()),"status":redacted_optional(ontology.status()),"confidence":redacted_optional(ontology.confidence()),"entities":redacted_list(ontology.entities()),"applies_to":redacted_list(ontology.applies_to()),"related":redacted_list(ontology.related()),"relations":ontology.relations().iter().map(|r|json!({"from":redact_secrets(r.from()),"type":redact_secrets(r.relation_type()),"to":redact_secrets(r.to())})).collect::<Vec<_>>()});
+    let mut related: BTreeSet<String> = redacted_list(ontology.related()).into_iter().collect();
+    if ontology.related_from_links() {
+        related.extend(
+            linked_markdown_paths(scope, path, doc.body())
+                .into_iter()
+                .map(|target| redact_secrets(&target)),
+        );
+    }
+    let ont = json!({"type":redacted_optional(ontology.document_type()),"domain":redacted_optional(ontology.domain()),"status":redacted_optional(ontology.status()),"confidence":redacted_optional(ontology.confidence()),"entities":redacted_list(ontology.entities()),"applies_to":redacted_list(ontology.applies_to()),"related":related,"relations":ontology.relations().iter().map(|r|json!({"from":redact_secrets(r.from()),"type":redact_secrets(r.relation_type()),"to":redact_secrets(r.to())})).collect::<Vec<_>>()});
     let ontology_text = redact_secrets(&doc.ontology_search_text());
     let alias_text = aliases.join(" ");
     let text = expanded_search_text(&[&title, &body, &alias_text, &ontology_text]);
@@ -127,6 +184,50 @@ pub(crate) fn projection(
         return Err(Error::Limit);
     }
     Ok(payload)
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn opted_in_source_map_links_become_deduplicated_relations() {
+        let scope: ContextScope = "personal".parse().unwrap();
+        let content = "---\nontology: true\nrelated_from_links: true\nrelated: [personal/knowledge/notion/pages/a.md]\n---\n[one](<pages/a.md>) [two](<pages/b.md>) [포트폴리오](<pages/[SK 하이닉스] R&D 합격 포트폴리오.md>) [outside](../../../../profile/private.md) [web](https://example.com/page.md) [self](index.md)\n\n`[code](pages/c.md)`\n".as_bytes();
+        let result = projection(
+            &scope,
+            "knowledge/notion/index.md",
+            &digest(content),
+            false,
+            false,
+            Some(content),
+        )
+        .unwrap();
+        assert_eq!(
+            result["ontology"]["related"],
+            json!([
+                "personal/knowledge/notion/pages/[SK 하이닉스] R&D 합격 포트폴리오.md",
+                "personal/knowledge/notion/pages/a.md",
+                "personal/knowledge/notion/pages/b.md"
+            ])
+        );
+    }
+
+    #[test]
+    fn markdown_links_do_not_create_relations_without_opt_in() {
+        let scope: ContextScope = "personal".parse().unwrap();
+        let content = b"---\nontology: true\n---\n[one](pages/a.md)\n";
+        let result = projection(
+            &scope,
+            "knowledge/notion/index.md",
+            &digest(content),
+            false,
+            false,
+            Some(content),
+        )
+        .unwrap();
+        assert_eq!(result["ontology"]["related"], json!([]));
+    }
 }
 
 /// A bounded page shares one validation query and one append query. The caller holds

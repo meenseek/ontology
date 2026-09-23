@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ContextProvenance, OriginalText, contextUrl, editorContent, editorDraft, editorNewlines, failure, originalFilename } from "./Original";
-import DocumentPreview from "./DocumentPreview";
+import DocumentPreview, { resolveRelativeContextPath } from "./DocumentPreview";
 import type { GraphNode } from "./graph";
 import { nodePresentation } from "./presentation";
 
@@ -96,6 +96,11 @@ export default function OriginalDetail({ scope, path, request, related = [], onN
     return () => document.removeEventListener("keydown", keydown);
   }, [editing, draft, baseline, saving, csrf]);
   const showing = selected?.content ?? original?.content;
+  const resolveInternalLink = (href: string) => {
+    const target = resolveRelativeContextPath(path, href);
+    const match = target && related.find(item => item.context_scope === scope && item.context_path === target);
+    return match && onNavigate ? () => onNavigate(match.id) : undefined;
+  };
   return <section className="documents original-detail" aria-label="원문과 이력">
     <h2>{originalFilename(path)}</h2>
     <p className="source-identity">원문 · {scope}/{path}</p>
@@ -116,7 +121,7 @@ export default function OriginalDetail({ scope, path, request, related = [], onN
     {editing && <section className="section original-editor" aria-label="원문 편집"><label htmlFor="original-draft">원문 전체 편집</label><textarea id="original-draft" value={draft} disabled={saving} onChange={event => setDraft(event.target.value)} spellCheck={false} rows={20} aria-describedby="original-draft-hint" /><p id="original-draft-hint" className="hint">{draftBytes.toLocaleString("ko-KR")} / 1,048,576 바이트 · ⌘S 또는 Ctrl+S로 저장</p><div className="original-editor-actions"><button className="primary" disabled={!dirty || saving || draftBytes > 1024 * 1024} onClick={() => void save()}>{saving ? "저장 중…" : "원문 저장"}</button><button disabled={saving} onClick={() => { if (!dirty || window.confirm("저장하지 않은 초안을 버릴까요?")) { setEditing(false); setBaseline(null); setSaveError(""); } }}>편집 취소</button></div></section>}
     {!editing && showing !== undefined && <>
       {/(\.md|\.markdown)$/i.test(path) && <div className="original-view-switch" role="group" aria-label="원문 보기 방식"><button aria-pressed={!raw} onClick={() => setRaw(false)}>읽기</button><button aria-pressed={raw} onClick={() => setRaw(true)}>원문</button></div>}
-      {raw || !/(\.md|\.markdown)$/i.test(path) ? <OriginalText content={showing} /> : <DocumentPreview path={path} content={showing} kind="context" suppressGeneratedTitle />}
+      {raw || !/(\.md|\.markdown)$/i.test(path) ? <OriginalText content={showing} /> : <DocumentPreview path={path} content={showing} kind="context" suppressGeneratedTitle resolveInternalLink={resolveInternalLink} />}
     </>}
     {related.length > 0 && <section className="section" aria-label="연결된 자료"><h3>명시적으로 연결된 자료</h3><div className="compact-list">{related.map(item => <button key={item.id} onClick={() => onNavigate?.(item.id)}><strong>{nodePresentation(item).title}</strong><small>{nodePresentation(item).subtitle}</small></button>)}</div></section>}
   </section>;

@@ -154,6 +154,7 @@ legend, .topic-label, .facet-filter { display: block; color: #bdcadb; font-size:
 .document-preview th, .document-preview td { border: 1px solid #3b4b60; padding: 7px 10px; min-width: 100px; text-align: left; }
 .document-preview th { background: #1c2939; }
 .document-preview .document-reference { color: #9cacbf; font-size: 12px; }
+.document-preview .document-internal-link { display: inline; padding: 0; border: 0; background: transparent; color: #b7d0ea; font: inherit; text-decoration: underline; text-align: inherit; }
 .document-preview .document-image-reference { color: #bacadd; }
 .document-preview [data-footnotes] { border-top: 1px solid #303b4b; margin-top: 24px; font-size: 12px; }
 .document-preview [data-footnotes] li { scroll-margin-top: 72px; }

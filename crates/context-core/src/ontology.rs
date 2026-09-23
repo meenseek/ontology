@@ -29,6 +29,8 @@ pub struct OntologyMetadata {
     applies_to: Vec<String>,
     #[serde(default)]
     related: Vec<String>,
+    #[serde(default)]
+    related_from_links: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -90,6 +92,11 @@ impl OntologyMetadata {
     #[must_use]
     pub fn related(&self) -> &[String] {
         &self.related
+    }
+
+    #[must_use]
+    pub fn related_from_links(&self) -> bool {
+        self.related_from_links
     }
 
     #[must_use]
@@ -297,6 +304,16 @@ mod tests {
             metadata
                 .search_text()
                 .contains("knowledge:context-retrieval")
+        );
+    }
+
+    #[test]
+    fn link_relations_require_an_explicit_opt_in() {
+        assert!(!parse("ontology: true").unwrap().related_from_links());
+        assert!(
+            parse("ontology: true\nrelated_from_links: true")
+                .unwrap()
+                .related_from_links()
         );
     }
 

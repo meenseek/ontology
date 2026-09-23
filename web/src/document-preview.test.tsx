@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import DocumentPreview, { findDocumentFragment } from "./DocumentPreview";
+import DocumentPreview, { findDocumentFragment, resolveRelativeContextPath } from "./DocumentPreview";
 
 const render = (content: string | null, path = "notes.md", kind: "git" | "vault" = "git") => renderToStaticMarkup(<DocumentPreview path={path} content={content} kind={kind} />);
 const preview = (content: string, path?: string, kind?: "git" | "vault") => render(content, path, kind);
@@ -100,6 +100,19 @@ test("only explicit HTTP(S) and mailto destinations become external controls", (
   assert.match(html, /\.\.\/other.md · 이 원문 경로는 여기서 열 수 없습니다/);
   assert.match(html, /\/etc\/passwd · 이 원문 경로는 여기서 열 수 없습니다/);
   assert.doesNotMatch(html, /href="(?:javascript:|data:|file:|\/)/i);
+});
+
+test("linked context originals open through a verified local relationship", () => {
+  const path = "knowledge/notion/index.md";
+  const target = "knowledge/notion/originals/pages/[토스] 포트폴리오.md";
+  const href = "originals/pages/[토스] 포트폴리오.md";
+  assert.equal(resolveRelativeContextPath(path, href), target);
+  assert.equal(resolveRelativeContextPath(path, "../../../../profile/private.md"), null);
+  assert.equal(resolveRelativeContextPath(path, "javascript%3Aalert(1).md"), null);
+  const html = renderToStaticMarkup(<DocumentPreview path={path} kind="context" content={`[원문](<${href}>) [없는 문서](missing.md)`} resolveInternalLink={value => resolveRelativeContextPath(path, value) === target ? () => {} : undefined} />);
+  assert.match(html, /<button type="button" class="document-internal-link">원문<\/button>/);
+  assert.match(html, /없는 문서.*이 원문 경로는 여기서 열 수 없습니다/);
+  assert.doesNotMatch(html, /href="originals/);
 });
 
 for (const parent of ["https://example.com/parent", "#topics"]) {
