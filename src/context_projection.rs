@@ -19,7 +19,12 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-fn linked_markdown_paths(scope: &ContextScope, path: &str, body: &str) -> BTreeSet<String> {
+fn linked_markdown_paths(
+    scope: &ContextScope,
+    path: &str,
+    body: &str,
+    prefix: &str,
+) -> BTreeSet<String> {
     let mut targets = BTreeSet::new();
     let parent = Path::new(path).parent().unwrap_or_else(|| Path::new(""));
     for event in Parser::new(body) {
@@ -62,7 +67,10 @@ fn linked_markdown_paths(scope: &ContextScope, path: &str, body: &str) -> BTreeS
         {
             continue;
         }
-        targets.insert(format!("{}/{}", scope.as_str(), target));
+        let full_path = format!("{}/{}", scope.as_str(), target);
+        if full_path.starts_with(prefix) {
+            targets.insert(full_path);
+        }
     }
     targets
 }
@@ -163,9 +171,9 @@ pub(crate) fn projection(
     let body = redact_secrets(doc.body());
     let aliases = redacted_list(doc.aliases());
     let mut related: BTreeSet<String> = redacted_list(ontology.related()).into_iter().collect();
-    if ontology.related_from_links() {
+    if let Some(prefix) = ontology.related_link_prefix() {
         related.extend(
-            linked_markdown_paths(scope, path, doc.body())
+            linked_markdown_paths(scope, path, doc.body(), prefix)
                 .into_iter()
                 .map(|target| redact_secrets(&target)),
         );
@@ -193,7 +201,7 @@ mod link_tests {
     #[test]
     fn opted_in_source_map_links_become_deduplicated_relations() {
         let scope: ContextScope = "personal".parse().unwrap();
-        let content = "---\nontology: true\nrelated_from_links: true\nrelated: [personal/knowledge/notion/pages/a.md]\n---\n[one](<pages/a.md>) [two](<pages/b.md>) [포트폴리오](<pages/[SK 하이닉스] R&D 합격 포트폴리오.md>) [outside](../../../../profile/private.md) [web](https://example.com/page.md) [self](index.md)\n\n`[code](pages/c.md)`\n".as_bytes();
+        let content = "---\nontology: true\nrelated_from_links: true\nrelated_link_prefix: personal/knowledge/notion/pages/\nrelated: [personal/knowledge/notion/pages/a.md]\n---\n[one](<pages/a.md>) [two](<pages/b.md>) [포트폴리오](<pages/[SK 하이닉스] R&D 합격 포트폴리오.md>) [sort](notion-page-sort.md) [outside](../../../../profile/private.md) [web](https://example.com/page.md) [self](index.md)\n\n`[code](pages/c.md)`\n".as_bytes();
         let result = projection(
             &scope,
             "knowledge/notion/index.md",
