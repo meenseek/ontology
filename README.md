@@ -64,7 +64,11 @@ bash scripts/dev.sh
 )
 ```
 
-`scripts/dev.sh`는 PostgreSQL **18.4**를 `127.0.0.1:55432`에 시작하고, 웹 의존성 설치와 번들 생성 뒤 [로컬 앱](http://127.0.0.1:47831)을 실행한다. 터미널은 서버가 실행되는 동안 사용 중이다. DB 이름과 사용자는 `ontology`, 실행 파일·폴더·원격 저장소 이름도 `ontology`다. Compose 프로젝트와 영구 볼륨 이름은 기존 운영 DB 연결을 유지하기 위해 그대로 둔다.
+새 설치에서는 기존 온톨로지 데이터 볼륨이 없음을 확인한 뒤 `docker volume create ontology-data`를
+한 번 실행한다. Compose는 볼륨을 자동 생성하지 않는다. 이전 이름의 볼륨이나 기존 DB가
+있으면 빈 볼륨을 만들지 말고 [이전 설치 이름에서 데이터 옮기기](#이전-설치-이름에서-데이터-옮기기)에 따라 데이터를 먼저 옮긴다.
+
+`scripts/dev.sh`는 PostgreSQL **18.4**를 `127.0.0.1:55432`에 시작하고, 웹 의존성 설치와 번들 생성 뒤 [로컬 앱](http://127.0.0.1:47831)을 실행한다. 터미널은 서버가 실행되는 동안 사용 중이다. DB 이름과 사용자, 실행 파일·폴더·원격 저장소, Compose 프로젝트와 영구 볼륨 이름은 `ontology`를 사용한다. 영구 볼륨 이름은 `ontology-data`다.
 
 같은 볼륨을 다시 사용할 때는 **같은 비밀번호**가 필요하다. `.env`나 컨테이너 환경변수에 새 비밀번호를 넣어도 기존 DB 비밀번호는 바뀌지 않는다. 기존 볼륨이 있는데 `.env`를 잃었다면 새 비밀번호를 생성하지 말고 기존 값을 복구한다.
 
@@ -73,6 +77,54 @@ bash scripts/dev.sh
 ```bash
 docker compose stop postgres
 ```
+
+### 이전 설치 이름에서 데이터 옮기기
+
+기존 DB 볼륨이 다른 이름으로 남은 Mac에서는 새 앱을 시작하기 전에 이전 설치의
+PostgreSQL 컨테이너와 볼륨을 정확히 확인한다.
+`docker volume ls --filter label=com.docker.compose.volume=ontology-data`는 이전 Compose가 만든 볼륨을 찾는 데
+사용할 수 있다. 다른 제품의 볼륨을 선택하지 않는다.
+
+앱·자동 갱신·DB 쓰기와 이전 로그인 서비스를 멈춘 뒤 PostgreSQL을 정상 종료한다.
+`~/Library/LaunchAgents`에 이 앱의 다른 plist가 있으면 Label과 실행 경로를 확인해
+`launchctl bootout`으로 중지한다. 이전 컨테이너가 멈춘 상태에서 그 컨테이너에
+실제로 연결된 이전 볼륨을 읽기 전용으로 마운트하여 빈 `ontology-data`로 소유권과
+권한을 보존해 복사한다. 이전 컨테이너가 없거나 새 볼륨이 이미 있으면 이 명령을
+실행하지 않고 기존 데이터를 먼저 확인한다.
+
+```bash
+set -euo pipefail
+previous_container='<확인한 이전 PostgreSQL 컨테이너 이름>'
+test "$(docker inspect "$previous_container" --format '{{.State.Running}}')" = false
+test "$(docker inspect "$previous_container" --format '{{index .Config.Labels "com.docker.compose.service"}}')" = postgres
+previous_volume="$(docker inspect "$previous_container" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql"}}{{.Name}}{{end}}{{end}}')"
+test -n "$previous_volume" && test "$previous_volume" != ontology-data
+test "$(docker volume inspect "$previous_volume" --format '{{index .Labels "com.docker.compose.volume"}}')" = ontology-data
+if docker volume inspect ontology-data >/dev/null 2>&1; then
+  echo 'ontology-data가 이미 있습니다. 기존 데이터를 먼저 확인하세요.' >&2
+  exit 1
+fi
+docker volume create ontology-data
+docker run --rm --network none --user 0:0 \
+  --mount "type=volume,source=$previous_volume,target=/source,readonly" \
+  --mount type=volume,source=ontology-data,target=/dest \
+  --entrypoint sh postgres:18.4-alpine -c 'test -z "$(ls -A /dest)" && cp -a /source/. /dest/'
+docker run --rm --network none --user 0:0 \
+  --mount "type=volume,source=$previous_volume,target=/source,readonly" \
+  --mount type=volume,source=ontology-data,target=/dest,readonly \
+  --entrypoint sh postgres:18.4-alpine -c 'diff -qr /source /dest'
+```
+
+복사 비교가 성공하면 `docker compose up -d --wait postgres`로 새 컨테이너를 시작하고
+`python3 scripts/connection.py check --target database`와 native `identity`의 store ID,
+자료 건수를 이전 값과 대조한다. 새 로그인 서비스를 설치한 뒤 `check --target app`도
+확인한다. 새 서비스가 정상일 때 이전 plist를 제거한다. 이전 컨테이너·볼륨은 새 데이터와
+앱 조회가 확인될 때까지 보존하며, 확인 후에도 별도 삭제 승인을 거쳐 정리한다.
+이전 로그인 서비스가 중지된 뒤 `~/Library/Application Support`와 `~/Library/Logs`에
+남은 이 앱의 이전 실행 디렉터리·`.env` 복사본·로그도 확인해 정리한다. 이전 plist의
+`ProgramArguments`·`StandardOutPath`가 현행 경로와 같을 수 있다. 현행
+`~/Library/Application Support/ontology`와 `~/Library/Logs/ontology.log`는 보존한다.
+다른 경로가 심볼릭 링크이거나 이 앱의 파일인지 확실하지 않으면 삭제하지 않는다.
 
 ### 연결 상태와 복구
 
@@ -128,7 +180,7 @@ Codex Desktop 동작은 그 Mac에서 아래 확인을 마쳐야 검증된 것�
    Git이나 CI에 넣지 않는다.
 2. 새 Mac에 Docker Compose, Git, Rust와 `.env` 생성에 사용할 OpenSSL을 설치하고 ontology를
    `~/Desktop/ontology`에 같은 Git commit으로 checkout한다. 다른 위치를 쓰면 아래
-   Codex 지침의 경로도 그 위치로 바꾼다. **기존 `meenseek-ontology-data` 볼륨이
+   Codex 지침의 경로도 그 위치로 바꾼다. **기존 `ontology-data` 볼륨이
    있으면 여기서 멈추고 그 데이터를 확인한다.** 이 절차는 빈 볼륨에만 적용한다.
    새 Mac에서 [새 설치의 `.env` 생성 방법](#앱-시작과-종료)으로 새 DB 비밀번호를
    만들 수 있다. 기존 볼륨을 재사용할 때만 그 볼륨의 기존 비밀번호가 필요하다.
@@ -144,10 +196,12 @@ Codex Desktop 동작은 그 Mac에서 아래 확인을 마쳐야 검증된 것�
    set -eo pipefail
    cd "$HOME/Desktop/ontology"
    docker info >/dev/null
-   if docker volume inspect meenseek-ontology-data >/dev/null 2>&1; then
+   if docker volume inspect ontology-data >/dev/null 2>&1 ||
+      [[ -n "$(docker volume ls --filter label=com.docker.compose.volume=ontology-data --format '{{.Name}}')" ]]; then
      echo '기존 ontology 볼륨이 있습니다. 복원을 중단하세요.' >&2
      exit 1
    fi
+   docker volume create ontology-data >/dev/null
    chmod 600 .env /absolute/path/to/ontology.dump
    set -a
    source .env
@@ -334,7 +388,7 @@ JSON
 
 ### 실험과 제작 도구 연결
 
-온톨로지는 다른 도구의 측정 원장·실험 판정·제작 실행기를 복제하지 않는다. operations의 `meenseek-ontology / knowledge` 경로가 위 정리 계약을 실행하며, 반복 시각은 기존 native 작업 처리 예약이 소유한다. 기존 작업 처리 예약 `meenseek-2`에 이 절차를 연결하면 실행 가능한 기존 업무·관측을 먼저 처리하고 유휴 호출에서 변경 원문 한 건을 정리한다. 처리 결과·반영 확인·실제 별도 검토의 식별 정보는 Git에서 제외한 `.state/curation`에 처리 ID별 JSON 하나로 남겨 기존 업무 큐의 결과·검증·검토 참조로 쓴다. 원문 본문·인증정보를 그 파일에 복제하지 않는다. 개인 범위는 현재 회사 지식 자동 처리에 포함하지 않는다. 다른 대화나 등록되지 않은 폴더도 자동 수집하지 않는다.
+온톨로지는 다른 도구의 측정 원장·실험 판정·제작 실행기를 복제하지 않는다. operations의 지식 정리 경로가 위 정리 계약을 실행하며, 반복 시각은 기존 native 작업 처리 예약이 소유한다. 기존 작업 처리 예약 `meenseek-2`에 이 절차를 연결하면 실행 가능한 기존 업무·관측을 먼저 처리하고 유휴 호출에서 변경 원문 한 건을 정리한다. 처리 결과·반영 확인·실제 별도 검토의 식별 정보는 Git에서 제외한 `.state/curation`에 처리 ID별 JSON 하나로 남겨 기존 업무 큐의 결과·검증·검토 참조로 쓴다. 원문 본문·인증정보를 그 파일에 복제하지 않는다. 개인 범위는 현재 회사 지식 자동 처리에 포함하지 않는다. 다른 대화나 등록되지 않은 폴더도 자동 수집하지 않는다.
 
 - tarot-spark의 제품 목표·활성화 기준은 제품의 `docs/product/growth-playbook.md`가 소유한다. 현재 핵심 행동은 가입이 아닌 성공한 `prompt_copy`다. 기존 도달 자격 판정과 고유 귀속 확인을 건너뛰어 전환 실험을 시작하지 않는다.
 - YouTube 채널 성장·콘텐츠 성과와 제작 시간·품질의 관측 및 판정은 Channel Observatory가 소유한다. 제작·수집은 Factory의 기존 계약을 사용한다. 계획이나 성공한 수집을 매출·성장·개선의 증명으로 바꾸지 않는다.
@@ -375,17 +429,19 @@ cargo run --locked -- import \
 설정한 뒤 다음처럼 정확한 store와 source scope, 앱 scope, 파일을 지정한다.
 
 ```bash
+CONTEXT_SOURCE_PATH='<기존 목적 문서의 정확한 상대 경로>.md'
 cargo run --locked -- import-context \
   --store-id e85a39eb-9e6a-4460-9bdb-6030d7ef69d9 \
   --context-scope personal \
   --scope personal \
-  --file projects/meenseek-ontology.md
+  --file "$CONTEXT_SOURCE_PATH"
 ```
 
 `--context-scope personal`은 읽을 native 범위이고 `--scope personal`은 앱의
 검색·분류·연결 범위다. **원문 scope와 앱 scope는 별개**다. `--file`은 source scope 안의
 상대 Markdown 경로이므로 `personal/`을 붙이지 않는다. 위 예시는 개인 통합 온톨로지의
-목적 문서를 앱의 개인 범위에서 조회하도록 가져온다.
+목적 문서의 실제 native 상대 경로를 `CONTEXT_SOURCE_PATH`에 입력한 뒤 앱의 개인
+범위에서 조회하도록 가져온다. 과거 원장 Markdown은 이름만 바꾸기 위해 이동하지 않는다.
 
 기존 `personal` 원문인 `business/decisions/meenseek-business-objective.md`는
 `--context-scope personal --scope meenseek`로 가져와 앱의 사업 범위에서 조회할 수 있다.
@@ -430,16 +486,19 @@ native store에 보존한다. App consumer, 검색과 ontology projection은 이
 추가 newline이 없으며 종료 코드와 완전한 출력을 확인해야 한다. 실패·truncation은 policy를
 읽은 것이 아니다. Raw policy 읽기는 HTTP 서버나 파생 projection 초기화를 요구하지 않는다.
 
+아래 `<기존 목적 문서의 정확한 상대 경로>.md`는 예시 자리표시자다. `history`·`version`·
+`export`를 실행하기 전에 실제 native 원문의 상대 경로로 바꾼다.
+
 `history`는 같은 scope/path의 revision·digest·크기·기록 시각을 최신순으로 반환한다.
 `version`은 지정 revision의 UTF-8 원문과 digest를 반환한다. 이력은 `before`로 페이지를
 넘길 수 있으며 제한 자료에는 기본 CLI 열람 범위를 넓히지 않는다.
 
 ```json
-{"op":"history","scope":"personal","path":"projects/meenseek-ontology.md"}
+{"op":"history","scope":"personal","path":"<기존 목적 문서의 정확한 상대 경로>.md"}
 ```
 
 ```json
-{"op":"version","scope":"personal","path":"projects/meenseek-ontology.md","revision":1}
+{"op":"version","scope":"personal","path":"<기존 목적 문서의 정확한 상대 경로>.md","revision":1}
 ```
 
 `read-documents`는 source identity·digest를 가진 parsed/redacted 문서 조회이고 raw read와
@@ -457,7 +516,7 @@ native store에 보존한다. App consumer, 검색과 ontology projection은 이
 `vault/profile/preferences/context-vault-operating-model.md`가 소유한다.
 
 ```json
-{"op":"export","scope":"personal","paths":["projects/meenseek-ontology.md"],"destination":"/absolute/path/to/new-directory","archive":false}
+{"op":"export","scope":"personal","paths":["<기존 목적 문서의 정확한 상대 경로>.md"],"destination":"/absolute/path/to/new-directory","archive":false}
 ```
 
 `export`는 아직 없는 대상 디렉터리에 선택한 파일을 원래 bytes 그대로 내보낸다.
@@ -516,7 +575,7 @@ bash scripts/brain.sh context edit \
 
 ## 지정한 원문 자동 갱신
 
-자동 갱신은 `ONTOLOGY_SYNC_CONFIG`를 설정해야 켜진다. 추적되는 형식 예시는 `sync.example.json`이며 실제 설정 파일 `sync.local.json`은 Git에서 제외된다. 아래는 앱 조회용 **정확히 세 경로**만 갱신하는 설정이다. 설정된 native store identity를 확인한 뒤 앱 루트의 `sync.local.json`에서 사용한다.
+자동 갱신은 `ONTOLOGY_SYNC_CONFIG`를 설정해야 켜진다. 추적되는 형식 예시는 `sync.example.json`이며 실제 설정 파일 `sync.local.json`은 Git에서 제외된다. 아래 JSON은 앱 조회용 세 경로의 설정 예시다. `<기존 목적 문서의 정확한 상대 경로>.md`를 실제 native 원문의 상대 경로로 바꾸고, 설정된 native store identity를 확인한 뒤 앱 루트의 `sync.local.json`에 저장한다. 경로를 바꾼 뒤 정확히 세 경로만 갱신한다.
 
 로그인 서비스를 사용하는 Mac에서는 Desktop의 `온톨로지 자료 갱신.command`를 열면
 현재 `sync.local.json`에 지정된 원문을 한 번 갱신한다. 이 명령은 기존 DB와 현재
@@ -544,7 +603,7 @@ ln -s "$PWD/scripts/sync-local.command" "$HOME/Desktop/온톨로지 자료 갱�
       "store_id": "e85a39eb-9e6a-4460-9bdb-6030d7ef69d9",
       "context_scope": "personal",
       "scope": "meenseek",
-      "paths": ["projects/meenseek-ontology.md"]
+      "paths": ["<기존 목적 문서의 정확한 상대 경로>.md"]
     }
   ]
 }
@@ -661,7 +720,7 @@ bash scripts/verify.sh
 ```
 
 이 스크립트는 소유한 임시 PostgreSQL 컨테이너와 저장 공간을 만들고 종료 시 제거한다.
-앱 DB와 `meenseek-ontology-data` 볼륨을 사용하지 않는다. 현재 workspace의 Rust
+앱 DB와 `ontology-data` 볼륨을 사용하지 않는다. 현재 workspace의 Rust
 형식·컴파일·Clippy·테스트·의존성 보안 점검, pnpm 잠금 파일 기준 설치와 웹 테스트·타입
 검사·빌드·운영 의존성 보안 점검을 수행한다. 기존 audit와 install 정책을 유지한다.
 

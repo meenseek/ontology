@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -17,12 +18,10 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = Path.home() / "Library/Application Support/ontology"
-LEGACY_RUNTIME = Path.home() / "Library/Application Support/meenseek-ontology"
-LABEL = "com.meenseek.ontology"
+LABEL = "ontology"
 PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
 PROGRAM = RUNTIME / "scripts/serve-local.sh"
 LOG = Path.home() / "Library/Logs/ontology.log"
-LEGACY_LOG = Path.home() / "Library/Logs/meenseek-ontology.log"
 DOMAIN = f"gui/{os.getuid()}"
 
 
@@ -38,15 +37,6 @@ def bootout() -> None:
     launchctl("bootout", DOMAIN, str(PLIST), check=False)
     if launchctl("print", f"{DOMAIN}/{LABEL}", check=False).returncode == 0:
         raise RuntimeError("로그인 서비스를 중지하지 못했습니다. 설치 상태를 확인하세요.")
-
-
-def cleanup_legacy() -> None:
-    if LEGACY_RUNTIME.is_symlink() or LEGACY_LOG.is_symlink():
-        raise RuntimeError("이전 설치 경로가 심볼릭 링크입니다. 직접 확인하세요.")
-    if LEGACY_RUNTIME.is_dir():
-        shutil.rmtree(LEGACY_RUNTIME)
-    if LEGACY_LOG.is_file():
-        LEGACY_LOG.unlink()
 
 
 def wait_until_ready() -> None:
@@ -77,14 +67,22 @@ def install() -> None:
         raise RuntimeError("실행 파일이 없습니다. cargo build --locked --offline을 먼저 실행하세요.")
     if not (ROOT / "web/dist/index.html").is_file():
         raise RuntimeError("웹 번들이 없습니다. web에서 npm run build를 먼저 실행하세요.")
+    if not installed():
+        try:
+            with socket.create_connection(("127.0.0.1", 47831), timeout=1):
+                pass
+        except ConnectionRefusedError:
+            pass
+        except OSError as error:
+            raise RuntimeError("앱 포트 상태를 확인할 수 없습니다.") from error
+        else:
+            raise RuntimeError("앱 포트가 이미 사용 중입니다. 기존 서버를 종료한 뒤 설치하세요.")
     RUNTIME.parent.mkdir(parents=True, exist_ok=True)
     stage = RUNTIME.with_name(RUNTIME.name + ".new")
     previous = RUNTIME.with_name(RUNTIME.name + ".previous")
     target = PLIST.with_suffix(".plist.tmp")
     if RUNTIME.is_symlink():
         raise RuntimeError("실행 디렉터리가 심볼릭 링크입니다. 직접 확인하세요.")
-    if LEGACY_RUNTIME.is_symlink() or LEGACY_LOG.is_symlink():
-        raise RuntimeError("이전 설치 경로가 심볼릭 링크입니다. 직접 확인하세요.")
     if stage.exists() or previous.exists() or target.exists():
         raise RuntimeError("이전 설치의 임시 실행본이 남아 있습니다. 먼저 상태를 확인하세요.")
     try:
@@ -145,30 +143,26 @@ def install() -> None:
             os.replace(previous, RUNTIME)
         if old_plist is not None:
             PLIST.write_bytes(old_plist)
-            launchctl("bootstrap", DOMAIN, str(PLIST), check=False)
+            try:
+                launchctl("bootstrap", DOMAIN, str(PLIST))
+            except subprocess.CalledProcessError as error:
+                raise RuntimeError("새 서비스 설치 실패 후 이전 로그인 서비스도 복구하지 못했습니다.") from error
         elif PLIST.exists():
             PLIST.unlink()
         raise
     if previous.exists():
         shutil.rmtree(previous)
-    try:
-        cleanup_legacy()
-    except (OSError, RuntimeError) as error:
-        raise RuntimeError("새 서비스는 실행 중이지만 이전 설치본 정리에 실패했습니다.") from error
     print(f"설치 완료: {PLIST}")
 
 
 def remove() -> None:
     if RUNTIME.is_symlink():
         raise RuntimeError("실행 디렉터리가 심볼릭 링크입니다. 직접 확인하세요.")
-    if LEGACY_RUNTIME.is_symlink() or LEGACY_LOG.is_symlink():
-        raise RuntimeError("이전 설치 경로가 심볼릭 링크입니다. 직접 확인하세요.")
     if installed():
         bootout()
         PLIST.unlink()
     if RUNTIME.is_dir():
         shutil.rmtree(RUNTIME)
-    cleanup_legacy()
     print("로그인 서비스 제거 완료")
 
 

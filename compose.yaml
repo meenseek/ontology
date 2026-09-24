@@ -1,4 +1,4 @@
-name: meenseek-ontology
+name: ontology
 services:
   postgres:
     image: postgres:18.4-alpine
@@ -18,4 +18,5 @@ services:
     restart: unless-stopped
 volumes:
   ontology-data:
-    name: meenseek-ontology-data
+    name: ontology-data
+    external: true

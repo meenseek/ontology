@@ -43,10 +43,13 @@ impl TemporaryWorkspace {
             .expect("system clock must follow the Unix epoch")
             .as_nanos();
         let sequence = NEXT_WORKSPACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "llm-context-vault-harness-{}-{unique}-{sequence}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .expect("temporary root must resolve")
+            .join(format!(
+                "llm-context-vault-harness-{}-{unique}-{sequence}",
+                std::process::id()
+            ));
         fs::create_dir(&path).expect("temporary workspace must be created");
         Self(path)
     }
@@ -132,7 +135,7 @@ fn synthetic_repository() -> TemporaryWorkspace {
         "vault/personal/ontology/schema.md",
         "vault/personal/projects/coupler.md",
         "vault/personal/projects/gluesql/index.md",
-        "vault/personal/projects/meenseek-ontology.md",
+        "vault/personal/projects/ontology.md",
         "vault/personal/projects/ideas/idea-discovery-registry.md",
         "vault/personal/projects/ideas/solo-founder-validation-platform.md",
         "vault/work/cluml/index.md",

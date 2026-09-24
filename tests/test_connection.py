@@ -235,7 +235,7 @@ class TempTests(unittest.TestCase):
         c.run_server.assert_not_called()
 
     def test_restart_login_service_uses_only_installed_label(self):
-        plist = self.root / "com.meenseek.ontology.plist"
+        plist = self.root / "ontology.plist"
         cmd = self.mocked("command")
         with patch.object(c.subprocess, "run") as status, patch.object(c, "SERVICE_PLIST", plist):
             status.return_value.returncode = 0
@@ -248,7 +248,7 @@ class TempTests(unittest.TestCase):
             "설치된 로그인 서비스를 시작할 수 없습니다. 서비스 상태와 로그를 확인하세요.", timeout=15)
 
     def test_restart_login_service_bootstraps_unloaded_job(self):
-        plist = self.root / "com.meenseek.ontology.plist"
+        plist = self.root / "ontology.plist"
         plist.touch()
         cmd = self.mocked("command")
         with patch.object(c.subprocess, "run") as status, patch.object(c, "SERVICE_PLIST", plist):

@@ -447,19 +447,19 @@ async fn native_core_resolve_prepare_uses_only_canonical_store_source_versions()
                 source: RequestSource::UserLanguage {
                     statements: vec![UserStatement {
                         identifier: "statement-0000000000000001".into(),
-                        text: "Read my meenseek-ontology personal project context.".into(),
+                        text: "Read my ontology personal project context.".into(),
                     }],
                 },
                 draft: DraftTaskRequest::VaultRead(DraftVaultReadContract {
                     owner: decision(
                         DataOwner::PersonalProject {
-                            project: "meenseek-ontology".into(),
+                            project: "ontology".into(),
                         },
                         1,
                         &mut records,
                     ),
                     task_statement: decision(
-                        "Read my meenseek-ontology personal project context.".to_owned(),
+                        "Read my ontology personal project context.".to_owned(),
                         2,
                         &mut records,
                     ),

@@ -10,11 +10,11 @@ pub const SCOPES: [&str; 5] = [
     "work/tmaxcloud",
 ];
 pub const DOCUMENT_COUNT: usize = 55;
-pub const TOTAL_BYTES: u64 = 11346;
+pub const TOTAL_BYTES: u64 = 11337;
 // SHA-256 of the declared sorted path<TAB>byte length<TAB>content SHA-256<LF> records.
 // Deliberate fixture contract changes must update this constant and the byte count.
 pub const CONTRACT_DIGEST: &str =
-    "d3c85f869a98241ee057a474bb089db37a225b894485e6f8bbbbfdf0d129b49e";
+    "640c5ae4f7d9a2b059911ac4993c1ac9fb5ccacd02acc436993fd5e767ca3b83";
 
 const PATHS: [&str; DOCUMENT_COUNT] = [
     "personal/business/index.md",
@@ -34,7 +34,7 @@ const PATHS: [&str; DOCUMENT_COUNT] = [
     "personal/projects/gluesql/index.md",
     "personal/projects/ideas/idea-discovery-registry.md",
     "personal/projects/ideas/solo-founder-validation-platform.md",
-    "personal/projects/meenseek-ontology.md",
+    "personal/projects/ontology.md",
     "personal/writing/career-output-assembly.md",
     "personal/writing/career-technical-portfolio-strategy.md",
     "personal/writing/case-docs/index.md",

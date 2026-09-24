@@ -70,7 +70,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   trap cleanup EXIT INT TERM
   verify_password="$(openssl rand -hex 24)"
   verify_database="ontology_test_$(date +%s)_${RANDOM}"
-  verify_id="$(docker run -d --rm --name "$verify_database" --label meenseek-ontology.verify=temporary --tmpfs /var/lib/postgresql -p 127.0.0.1::5432 -e POSTGRES_USER=ontology -e POSTGRES_DB="$verify_database" -e POSTGRES_PASSWORD="$verify_password" postgres:18.4-alpine)"
+  verify_id="$(docker run -d --rm --name "$verify_database" --label ontology.verify=temporary --tmpfs /var/lib/postgresql -p 127.0.0.1::5432 -e POSTGRES_USER=ontology -e POSTGRES_DB="$verify_database" -e POSTGRES_PASSWORD="$verify_password" postgres:18.4-alpine)"
   ready=false
   for ((attempt=0; attempt<30; attempt++)); do
     if docker exec "$verify_id" pg_isready -U ontology -d "$verify_database" >/dev/null 2>&1; then ready=true; break; fi
