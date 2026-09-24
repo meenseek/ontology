@@ -140,6 +140,7 @@ class TempTests(unittest.TestCase):
         self.mocked("server_environment", return_value=ENV)
         self.mocked("verify_schema")
         self.mocked("existing_app", return_value=False)
+        self.mocked("restart_login_service", return_value=False)
         self.mocked("run_server")
         binary = self.root / "built-ontology"
         binary.touch()
@@ -212,6 +213,51 @@ class TempTests(unittest.TestCase):
         cmd.assert_not_called()
         c.run_server.assert_not_called()
         c.verify_schema.assert_called_once()
+
+    def test_repair_restarts_installed_service_without_building_terminal_server(self):
+        cmd = self.repair_dependencies()
+        c.restart_login_service.return_value = True
+        health = self.mocked("app_health")
+        c.repair(self.root)
+        cmd.assert_not_called()
+        c.run_server.assert_not_called()
+        health.assert_called_once()
+        c.verify_schema.assert_called_once()
+
+    def test_failed_login_service_stops_without_terminal_fallback(self):
+        cmd = self.repair_dependencies()
+        c.restart_login_service.return_value = True
+        self.mocked("app_health", side_effect=c.Failure("app", "startup", "fixture"))
+        with patch.object(c, "START_ATTEMPTS", 2), patch.object(c.time, "sleep"), self.assertRaises(c.Failure) as caught:
+            c.repair(self.root)
+        self.assertEqual(caught.exception.code, "service_unavailable")
+        cmd.assert_not_called()
+        c.run_server.assert_not_called()
+
+    def test_restart_login_service_uses_only_installed_label(self):
+        plist = self.root / "com.meenseek.ontology.plist"
+        cmd = self.mocked("command")
+        with patch.object(c.subprocess, "run") as status, patch.object(c, "SERVICE_PLIST", plist):
+            status.return_value.returncode = 0
+            self.assertFalse(c.restart_login_service())
+            cmd.assert_not_called()
+            plist.touch()
+            self.assertTrue(c.restart_login_service())
+        cmd.assert_called_once_with(
+            ["launchctl", "kickstart", "-k", c.SERVICE_TARGET], "app", "service_start_failed",
+            "설치된 로그인 서비스를 시작할 수 없습니다. 서비스 상태와 로그를 확인하세요.", timeout=15)
+
+    def test_restart_login_service_bootstraps_unloaded_job(self):
+        plist = self.root / "com.meenseek.ontology.plist"
+        plist.touch()
+        cmd = self.mocked("command")
+        with patch.object(c.subprocess, "run") as status, patch.object(c, "SERVICE_PLIST", plist):
+            status.return_value.returncode = 113
+            self.assertTrue(c.restart_login_service())
+        cmd.assert_called_once_with(
+            ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)], "app",
+            "service_start_failed", "설치된 로그인 서비스를 시작할 수 없습니다. 서비스 상태와 로그를 확인하세요.",
+            timeout=15)
 
     def test_existing_server_does_not_bypass_schema_failure(self):
         cmd = self.repair_dependencies()

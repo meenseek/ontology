@@ -81,9 +81,10 @@ docker compose stop postgres
 `alert`는 상태를 확인하고 연결 실패 시 설치된 Desktop launcher를 연다.
 
 Desktop의 `온톨로지 연결 복구.command`를 열면 macOS 상태 대화상자가 나온다. 연결 실패 시
-**연결 복구**를 선택할 수 있다. 기존 `repair`는 Docker·DB·schema를 확인하고 정상 앱이
-있으면 재사용한다. 필요하면 현재 실행 파일을 offline build한 뒤 그 Terminal에서 서버를
-실행한다. 앱 내부 지식 지도 버튼이 아니며, 이 안내가 실제 UI 클릭 검증을 뜻하지 않는다.
+**연결 복구**를 선택할 수 있다. `repair`는 Docker·DB·schema를 확인하고 정상 앱이
+있으면 재사용한다. 설치된 로그인 서비스가 있으면 이를 다시 시작하고, 없을 때만 현재
+실행 파일을 offline build한 뒤 그 Terminal에서 서버를 실행한다. 앱 내부 지식 지도
+버튼이 아니며, 이 안내가 실제 UI 클릭 검증을 뜻하지 않는다.
 
 Wrong store, missing source, pending apply와 아직 준비되지 않은 projection은 DB outage가
 아니다. 이런 오류를 연결 복구나 이전 자료 재import로 처리하지 않고 해당 source·작업

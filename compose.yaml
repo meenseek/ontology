@@ -15,7 +15,7 @@ services:
       interval: 2s
       timeout: 2s
       retries: 20
-    restart: "no"
+    restart: unless-stopped
 volumes:
   ontology-data:
     name: meenseek-ontology-data
