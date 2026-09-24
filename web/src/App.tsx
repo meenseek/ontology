@@ -108,7 +108,7 @@ export default function App() {
       }
     }).catch(e => { if (!controller.signal.aborted && sameGraphLocation(current, routeRef.current)) setError(message(e)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [visible, session, route.scope, route.q, refresh, positions]);
+  }, [visible, session, route.scope, route.q, route.focus, refresh, positions]);
   function confirmDiscard() {
     if (busyRef.current) return false;
     if (!dirtyRef.current) return true;
