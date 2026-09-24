@@ -24,7 +24,7 @@
 pub(crate) mod context_fixture;
 
 use context_core::harness::*;
-use meenseek_ontology::{
+use ontology::{
     context::{ContextScope, inventory},
     store::{Store, digest},
 };
@@ -507,7 +507,7 @@ pub async fn command(
         .fetch_one(store.pool())
         .await
         .expect("store identity");
-    tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env(
@@ -541,7 +541,7 @@ async fn native_harness_rejects_removed_and_duplicate_options_without_initializi
         "compose-career",
     ] {
         for flag in ["--vault-root", "--index-database", "--unknown"] {
-            let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
+            let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
                 .env_clear()
                 .args(["harness", verb, flag, "/never-opened"])
                 .output()
@@ -559,7 +559,7 @@ async fn native_harness_rejects_removed_and_duplicate_options_without_initializi
             );
         }
     }
-    let result = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
+    let result = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
         .env_clear()
         .args(["harness", "resolve", "--json", "--json"])
         .output()

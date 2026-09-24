@@ -64,7 +64,7 @@ bash scripts/dev.sh
 )
 ```
 
-`scripts/dev.sh`는 PostgreSQL **18.4**를 `127.0.0.1:55432`에 시작하고, 웹 의존성 설치와 번들 생성 뒤 [로컬 앱](http://127.0.0.1:47831)을 실행한다. 터미널은 서버가 실행되는 동안 사용 중이다. DB 이름과 사용자는 `ontology`, 영구 볼륨 이름은 `meenseek-ontology-data`다. 폴더와 원격 저장소 이름은 `ontology`다. 기존 실행 파일명은 스크립트 호환성을 위해, Compose 프로젝트·볼륨 이름은 운영 DB 연결을 유지하기 위해 그대로 둔다.
+`scripts/dev.sh`는 PostgreSQL **18.4**를 `127.0.0.1:55432`에 시작하고, 웹 의존성 설치와 번들 생성 뒤 [로컬 앱](http://127.0.0.1:47831)을 실행한다. 터미널은 서버가 실행되는 동안 사용 중이다. DB 이름과 사용자는 `ontology`, 실행 파일·폴더·원격 저장소 이름도 `ontology`다. Compose 프로젝트와 영구 볼륨 이름은 기존 운영 DB 연결을 유지하기 위해 그대로 둔다.
 
 같은 볼륨을 다시 사용할 때는 **같은 비밀번호**가 필요하다. `.env`나 컨테이너 환경변수에 새 비밀번호를 넣어도 기존 DB 비밀번호는 바뀌지 않는다. 기존 볼륨이 있는데 `.env`를 잃었다면 새 비밀번호를 생성하지 말고 기존 값을 복구한다.
 
@@ -95,7 +95,7 @@ Wrong store, missing source, pending apply와 아직 준비되지 않은 project
 한 번만 `cargo build --locked --offline`과 `npm --prefix web run build`를 실행한 뒤
 `python3 scripts/local_service.py install`로 macOS 로그인 서비스를 설치할 수 있다.
 설치기는 실행 파일·웹 번들과 기존 `.env`를 사용자 전용
-`~/Library/Application Support/meenseek-ontology`에 복사한다. `.env`는 0600으로
+`~/Library/Application Support/ontology`에 복사한다. `.env`는 0600으로
 보호하고 launchd 설정에는 비밀번호를 넣지 않는다. 서비스는 기존 로컬 DB를 사용하고
 앱을 127.0.0.1:47831에 실행한다. macOS의 Desktop 파일 접근 제한 때문에
 로그인 서비스에서는 지정 원문 자동 갱신을 실행하지 않는다. 원문은 Desktop의
@@ -105,7 +105,7 @@ Wrong store, missing source, pending apply와 아직 준비되지 않은 project
 `python3 scripts/local_service.py status`, 중지는
 `python3 scripts/local_service.py remove`로 확인·수행한다. 제거하면 Library의
 실행 복사본과 `.env` 복사본도 지운다. 로그는
-`~/Library/Logs/meenseek-ontology.log`에 기록한다.
+`~/Library/Logs/ontology.log`에 기록한다.
 
 소스·schema 업그레이드 전에는 서비스를 제거한다. 기존 백업·복원·migration 절차를
 마치고 새 실행 파일과 웹 번들을 빌드한 뒤 다시 설치한다. 서비스 재시작은
@@ -229,7 +229,7 @@ http://127.0.0.1:47831/?scope=meenseek&focus=실제_노드_ID
 
 `011-personal-memory-grouping.sql`의 소유자는 이 앱의 개인 기억 저장 경계다. 기존 운영 DB의 기억·이력을 보존하면서 개인 활성 기억에만 분류 작업 상태를 추가한다. 업그레이드 완료 조건은 별도 DB 복원에서 기존 열의 값 보존과 반복 초기화를 확인하고, 운영 DB에서 기존 수동 묶음이 유지되며 미분류 기억만 대기열에 들어간 것을 확인하는 것이다. 분류 실패 기록은 저장 상태를 바꾸지 않고 `grouping-retry`로 다시 처리한다.
 
-에이전트나 터미널에서는 `bash scripts/brain.sh`에 JSON 객체 하나를 표준 입력으로 보낸다. 실행 중인 DB가 필요하며 HTTP 서버는 없어도 된다. 스크립트는 앱 루트로 이동하고, 명시한 `DATABASE_URL`이 없으면 신뢰하는 기존 로컬 `.env`의 `ONTOLOGY_DB_PASSWORD`로 DB 주소를 만든다. 비밀번호를 출력하거나 공유하지 않는다. 현재 `meenseek-ontology` 실행 파일을 사용하며 기본 subcommand는 `brain`이다. `context`와 `harness`를 지정하면 그 argv·stdin·종료 코드를 그대로 전달한다. Brain 응답은 JSON이고 오류 시 종료 코드는 0이 아니다.
+에이전트나 터미널에서는 `bash scripts/brain.sh`에 JSON 객체 하나를 표준 입력으로 보낸다. 실행 중인 DB가 필요하며 HTTP 서버는 없어도 된다. 스크립트는 앱 루트로 이동하고, 명시한 `DATABASE_URL`이 없으면 신뢰하는 기존 로컬 `.env`의 `ONTOLOGY_DB_PASSWORD`로 DB 주소를 만든다. 비밀번호를 출력하거나 공유하지 않는다. `ontology` 실행 파일을 사용하며 기본 subcommand는 `brain`이다. `context`와 `harness`를 지정하면 그 argv·stdin·종료 코드를 그대로 전달한다. Brain 응답은 JSON이고 오류 시 종료 코드는 0이 아니다.
 
 아래 내용은 **바꿔 쓸 예시**다. 실행하면 지정된 DB에 실제로 저장된다. 작은따옴표를 붙인 heredoc으로 JSON을 전달해 본문에 셸 변수나 명령 치환이 적용되지 않게 한다.
 
@@ -492,7 +492,7 @@ revision을 수정하는 수단으로 쓰지 않는다. `inventory`는 DB 없이
 
 ### 검토된 원문 변경
 
-기존 `bash scripts/brain.sh harness`는 `meenseek-ontology harness`를 실행한다. 현재
+기존 `bash scripts/brain.sh harness`는 `ontology harness`를 실행한다. 현재
 명령은 `resolve`, `prepare`, `replay`, `begin`, `advance`, `revise`, `evaluate`,
 `validate`, `apply`, `recover`, `attest-career`, `compose-career`다. 실제 owned source view,
 설정된 store identity와 작업 workspace를 `--context-view`, `--store-id`,

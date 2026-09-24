@@ -1,4 +1,4 @@
-use meenseek_ontology::{
+use ontology::{
     domain::{Error, ImportedRecord, Scope, SourceKind},
     memory::BrainCommand,
     store::{Store, digest},
@@ -35,7 +35,7 @@ fn review(prepared: &Value, reviewer: &str, decision: &str) -> Value {
 async fn curation_lifecycle_and_call_bounds() {
     let url = std::env::var("TEST_DATABASE_URL").expect("isolated DB");
     assert!(
-        meenseek_ontology::config::database_options(&url)
+        ontology::config::database_options(&url)
             .unwrap()
             .get_database()
             .unwrap()

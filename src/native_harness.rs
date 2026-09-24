@@ -1256,7 +1256,7 @@ mod tests {
         write_test_json(&capabilities_path, &capabilities);
 
         run([
-            "meenseek-ontology".to_owned(),
+            "ontology".to_owned(),
             "harness".to_owned(),
             "resolve".to_owned(),
             "--context-view".to_owned(),
@@ -1275,7 +1275,7 @@ mod tests {
         let prepared_path = temp.path().join("prepared.json");
         write_test_json(&plan_path, &plan);
         run([
-            "meenseek-ontology".to_owned(),
+            "ontology".to_owned(),
             "harness".to_owned(),
             "prepare".to_owned(),
             "--context-view".to_owned(),
@@ -1663,7 +1663,7 @@ mod tests {
             "activate-v9",
         ] {
             let error = run([
-                "meenseek-ontology".to_owned(),
+                "ontology".to_owned(),
                 "harness".to_owned(),
                 command.to_owned(),
             ])
@@ -1675,7 +1675,7 @@ mod tests {
             "prepare", "begin", "advance", "validate", "apply", "recover",
         ] {
             let error = run([
-                "meenseek-ontology".to_owned(),
+                "ontology".to_owned(),
                 "harness".to_owned(),
                 command.to_owned(),
             ])
@@ -1986,7 +1986,7 @@ mod tests {
 
     fn assert_public_replay_succeeds(repository_root: &Path, prepared_path: &Path) {
         run([
-            "meenseek-ontology".to_owned(),
+            "ontology".to_owned(),
             "harness".to_owned(),
             "replay".to_owned(),
             "--context-view".to_owned(),
@@ -2042,7 +2042,7 @@ mod tests {
         prepared_path: &Path,
     ) {
         let error = run([
-            "meenseek-ontology".to_owned(),
+            "ontology".to_owned(),
             "harness".to_owned(),
             "replay".to_owned(),
             "--context-view".to_owned(),

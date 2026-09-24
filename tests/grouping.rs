@@ -1,4 +1,4 @@
-use meenseek_ontology::{
+use ontology::{
     domain::{ImportedRecord, Scope, SourceKind},
     memory::BrainCommand,
     store::{Store, digest},
@@ -48,7 +48,7 @@ fn curated_candidate(item: &Value, body: &str, target: Option<&Value>) -> Value 
 }
 
 async fn cli(url: &str, binary: &Path, command: Value) -> Value {
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
         .arg("brain")
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -79,7 +79,7 @@ async fn cli(url: &str, binary: &Path, command: Value) -> Value {
 async fn personal_grouping_is_durable_and_respects_manual_choice() {
     let url = std::env::var("TEST_DATABASE_URL").expect("explicit isolated DB");
     assert!(
-        meenseek_ontology::config::database_options(&url)
+        ontology::config::database_options(&url)
             .unwrap()
             .get_database()
             .is_some_and(|name| name.starts_with("ontology_test_"))

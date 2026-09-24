@@ -1,6 +1,6 @@
 //! Consumer proofs use real PostgreSQL and the retained actual Core fixture boundary.
 use context_core::harness::ContextSource;
-use meenseek_ontology::{
+use ontology::{
     context::{ContextScope, inventory},
     context_importer::{
         ContextReader, identity, revision_token, validate_paths, validate_store_id,
@@ -25,7 +25,7 @@ fn cs(s: &str) -> ContextScope {
 async fn store() -> Store {
     let url = std::env::var("TEST_DATABASE_URL").expect("isolated test DB");
     assert!(
-        meenseek_ontology::config::database_options(&url)
+        ontology::config::database_options(&url)
             .expect("loopback")
             .get_database()
             .is_some_and(|n| n.starts_with("ontology_test_"))
@@ -189,7 +189,7 @@ fn measured(
     max_calls: u64,
     max_input: usize,
     max_returned: usize,
-) -> meenseek_ontology::store::DependencyObservation {
+) -> ontology::store::DependencyObservation {
     let value = s
         .dependency_observations()
         .into_iter()
@@ -406,7 +406,7 @@ async fn context_consumer_identity_and_projection() {
         s.classify(
             Scope::Personal,
             &entity,
-            meenseek_ontology::domain::Classification {
+            ontology::domain::Classification {
                 revision: 0,
                 areas: vec![],
                 topics: vec![format!("Preserved {n}")],
@@ -424,7 +424,7 @@ async fn context_consumer_identity_and_projection() {
             s.link(
                 Scope::Personal,
                 &entity,
-                meenseek_ontology::domain::LinkChange {
+                ontology::domain::LinkChange {
                     revision: 1,
                     target_id: other,
                     remove: false,
@@ -1565,7 +1565,7 @@ async fn context_consumer_config_and_cli() {
         assert!(refresh(&s, &config).await.is_err());
         assert_eq!(s.calls(), before);
     }
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("DATABASE_URL", "invalid-before-connect")
@@ -1603,7 +1603,7 @@ async fn context_consumer_config_and_cli() {
         vec!["import-context", "--vault-root", "/not-probed"],
         vec!["import-context", "--store-id", "INVALID"],
     ] {
-        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("DATABASE_URL", "invalid-before-connect")
@@ -1614,7 +1614,7 @@ async fn context_consumer_config_and_cli() {
         assert!(!output.status.success());
         assert!(!String::from_utf8_lossy(&output.stderr).contains("Storage"));
     }
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env(
@@ -2010,9 +2010,8 @@ async fn mixed_sync_fixture(s: &Store, id: &str, config: &Path, base: &Path) {
         assert_eq!(failed.sources[1].provider_calls, 0);
         assert!(s.calls() - before <= 20);
         measured(s, "sync-refresh", true, 20, 8192, 4096);
-        let (_, git_entity) =
-            meenseek_ontology::importer::identity(&repo, "note.md", Scope::Personal)
-                .expect("unchanged Git identity");
+        let (_, git_entity) = ontology::importer::identity(&repo, "note.md", Scope::Personal)
+            .expect("unchanged Git identity");
         assert_eq!(
             s.detail(Scope::Personal, &git_entity)
                 .await
@@ -2042,7 +2041,7 @@ async fn mixed_sync_fixture(s: &Store, id: &str, config: &Path, base: &Path) {
             true
         );
         fs::write(config, serde_json::to_vec(&config_value).expect("config")).expect("config");
-        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env(
@@ -2113,7 +2112,7 @@ async fn consumer_apply(
 }
 
 fn report_failed_native_sql(
-    session: &meenseek_ontology::native_context::NativeContextSession,
+    session: &ontology::native_context::NativeContextSession,
     prepared: &context_core::harness::PreparedHarnessRun,
 ) {
     let calls = session

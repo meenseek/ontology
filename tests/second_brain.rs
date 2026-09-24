@@ -1,5 +1,5 @@
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-use meenseek_ontology::{
+use ontology::{
     domain::{Error, ImportedRecord, Scope, SourceKind},
     memory::BrainCommand,
     store::{Store, digest},
@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 async fn store() -> Store {
     let url = std::env::var("TEST_DATABASE_URL").expect("explicit isolated DB");
     assert!(
-        meenseek_ontology::config::database_options(&url)
+        ontology::config::database_options(&url)
             .expect("loopback")
             .get_database()
             .is_some_and(|v| v.starts_with("ontology_test_"))
@@ -319,7 +319,7 @@ async fn native_memory_contract() {
 
 #[tokio::test]
 async fn detail_and_subject_queries_stay_bounded_across_cardinalities() {
-    use meenseek_ontology::domain::{Classification, LinkChange, MAX_RESPONSE_BYTES};
+    use ontology::domain::{Classification, LinkChange, MAX_RESPONSE_BYTES};
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for size in [0, 1, 20] {
@@ -487,7 +487,7 @@ async fn brain_transport_contract() {
     let _guard = TEST_LOCK.lock().await;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
-    use meenseek_ontology::{
+    use ontology::{
         api::{AppState, router},
         config::Config,
     };
@@ -630,7 +630,7 @@ async fn brain_transport_contract() {
 async fn cli(body: &str) -> (bool, Value) {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env(
@@ -671,7 +671,7 @@ fn git(repo: &std::path::Path, args: &[&str]) -> String {
 #[tokio::test]
 async fn sync_contract() {
     let _guard = TEST_LOCK.lock().await;
-    use meenseek_ontology::{
+    use ontology::{
         importer::GitReader,
         sync::{SyncConfig, refresh},
     };
@@ -731,13 +731,12 @@ async fn sync_contract() {
         .await
         .expect("outside config imported manually");
     let (_, outside) =
-        meenseek_ontology::importer::identity(&repo, "outside.md", Scope::Personal).expect("id");
+        ontology::importer::identity(&repo, "outside.md", Scope::Personal).expect("id");
     let outside_before = store
         .detail(Scope::Personal, &outside)
         .await
         .expect("outside");
-    let (_, id) =
-        meenseek_ontology::importer::identity(&repo, "source-0.md", Scope::Personal).expect("id");
+    let (_, id) = ontology::importer::identity(&repo, "source-0.md", Scope::Personal).expect("id");
     let options = call(
         &store,
         json!({"op":"evidence","scope":"personal","query":"source-0.md"}),
@@ -846,7 +845,7 @@ async fn sync_contract() {
     )
     .expect("fixture");
     let scopes = vec!["personal".parse().expect("scope")];
-    let inventory = meenseek_ontology::context::inventory(&vault, &scopes).expect("inventory");
+    let inventory = ontology::context::inventory(&vault, &scopes).expect("inventory");
     store
         .import_context(&vault, &scopes, &inventory.inventory_digest)
         .await

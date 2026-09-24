@@ -144,7 +144,7 @@ class TempTests(unittest.TestCase):
         self.mocked("run_server")
         binary = self.root / "built-ontology"
         binary.touch()
-        build = json.dumps(dict(reason="compiler-artifact", target=dict(name="meenseek-ontology", kind=["bin"]), executable=str(binary))).encode()
+        build = json.dumps(dict(reason="compiler-artifact", target=dict(name="ontology", kind=["bin"]), executable=str(binary))).encode()
         cmd = self.mocked("command", return_value=build)
         return cmd
 

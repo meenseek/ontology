@@ -12,14 +12,17 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME = Path.home() / "Library/Application Support/meenseek-ontology"
+RUNTIME = Path.home() / "Library/Application Support/ontology"
+LEGACY_RUNTIME = Path.home() / "Library/Application Support/meenseek-ontology"
 LABEL = "com.meenseek.ontology"
 PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
 PROGRAM = RUNTIME / "scripts/serve-local.sh"
-LOG = Path.home() / "Library/Logs/meenseek-ontology.log"
+LOG = Path.home() / "Library/Logs/ontology.log"
+LEGACY_LOG = Path.home() / "Library/Logs/meenseek-ontology.log"
 DOMAIN = f"gui/{os.getuid()}"
 
 
@@ -33,58 +36,110 @@ def installed() -> bool:
 
 def bootout() -> None:
     launchctl("bootout", DOMAIN, str(PLIST), check=False)
+    if launchctl("print", f"{DOMAIN}/{LABEL}", check=False).returncode == 0:
+        raise RuntimeError("로그인 서비스를 중지하지 못했습니다. 설치 상태를 확인하세요.")
+
+
+def cleanup_legacy() -> None:
+    if LEGACY_RUNTIME.is_symlink() or LEGACY_LOG.is_symlink():
+        raise RuntimeError("이전 설치 경로가 심볼릭 링크입니다. 직접 확인하세요.")
+    if LEGACY_RUNTIME.is_dir():
+        shutil.rmtree(LEGACY_RUNTIME)
+    if LEGACY_LOG.is_file():
+        LEGACY_LOG.unlink()
+
+
+def wait_until_ready() -> None:
+    service = f"{DOMAIN}/{LABEL}"
+    for attempt in range(8):
+        state = launchctl("print", service, check=False)
+        if b"\n\tstate = running\n" in state.stdout and b"\n\tpid = " in state.stdout:
+            try:
+                health = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts/connection.py"), "check", "--target", "app"],
+                    capture_output=True, timeout=15,
+                )
+            except subprocess.TimeoutExpired:
+                health = None
+            if health is not None and health.returncode == 0:
+                state = launchctl("print", service, check=False)
+                if b"\n\tstate = running\n" in state.stdout and b"\n\tpid = " in state.stdout:
+                    return
+        if attempt < 7:
+            time.sleep(1)
+    raise RuntimeError("새 로그인 서비스가 앱 조회에 응답하지 않습니다. 이전 설치를 복구합니다.")
 
 
 def install() -> None:
     if not (ROOT / ".env").is_file():
         raise RuntimeError("기존 .env가 없습니다. DB 설정을 먼저 확인하세요.")
-    if not (ROOT / "target/debug/meenseek-ontology").is_file():
+    if not (ROOT / "target/debug/ontology").is_file():
         raise RuntimeError("실행 파일이 없습니다. cargo build --locked --offline을 먼저 실행하세요.")
     if not (ROOT / "web/dist/index.html").is_file():
         raise RuntimeError("웹 번들이 없습니다. web에서 npm run build를 먼저 실행하세요.")
     RUNTIME.parent.mkdir(parents=True, exist_ok=True)
     stage = RUNTIME.with_name(RUNTIME.name + ".new")
     previous = RUNTIME.with_name(RUNTIME.name + ".previous")
+    target = PLIST.with_suffix(".plist.tmp")
     if RUNTIME.is_symlink():
         raise RuntimeError("실행 디렉터리가 심볼릭 링크입니다. 직접 확인하세요.")
-    if stage.exists() or previous.exists():
+    if LEGACY_RUNTIME.is_symlink() or LEGACY_LOG.is_symlink():
+        raise RuntimeError("이전 설치 경로가 심볼릭 링크입니다. 직접 확인하세요.")
+    if stage.exists() or previous.exists() or target.exists():
         raise RuntimeError("이전 설치의 임시 실행본이 남아 있습니다. 먼저 상태를 확인하세요.")
-    stage.mkdir(mode=0o700)
-    (stage / "scripts").mkdir(mode=0o700)
-    (stage / "target/debug").mkdir(parents=True, mode=0o700)
-    shutil.copy2(ROOT / "scripts/serve-local.sh", stage / "scripts/serve-local.sh")
-    shutil.copy2(ROOT / "target/debug/meenseek-ontology", stage / "target/debug/meenseek-ontology")
-    shutil.copytree(ROOT / "web/dist", stage / "web/dist")
-    shutil.copyfile(ROOT / ".env", stage / ".env")
-    (stage / ".env").chmod(0o600)
-    PLIST.parent.mkdir(parents=True, exist_ok=True)
-    LOG.parent.mkdir(parents=True, exist_ok=True)
-    LOG.touch(mode=0o600, exist_ok=True)
-    LOG.chmod(0o600)
-    data = {
-        "Label": LABEL,
-        "ProgramArguments": ["/bin/bash", str(PROGRAM)],
-        "RunAtLoad": True,
-        "KeepAlive": True,
-        "ThrottleInterval": 30,
-        "StandardOutPath": str(LOG),
-        "StandardErrorPath": str(LOG),
-    }
-    target = PLIST.with_suffix(".plist.tmp")
-    with target.open("wb") as file:
-        plistlib.dump(data, file)
-    target.chmod(0o600)
-    old_plist = PLIST.read_bytes() if installed() else None
-    if installed():
-        bootout()
-    if RUNTIME.exists():
-        os.replace(RUNTIME, previous)
     try:
+        stage.mkdir(mode=0o700)
+        (stage / "scripts").mkdir(mode=0o700)
+        (stage / "target/debug").mkdir(parents=True, mode=0o700)
+        shutil.copy2(ROOT / "scripts/serve-local.sh", stage / "scripts/serve-local.sh")
+        shutil.copy2(ROOT / "target/debug/ontology", stage / "target/debug/ontology")
+        shutil.copytree(ROOT / "web/dist", stage / "web/dist")
+        shutil.copyfile(ROOT / ".env", stage / ".env")
+        (stage / ".env").chmod(0o600)
+        PLIST.parent.mkdir(parents=True, exist_ok=True)
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        LOG.touch(mode=0o600, exist_ok=True)
+        LOG.chmod(0o600)
+        data = {
+            "Label": LABEL,
+            "ProgramArguments": ["/bin/bash", str(PROGRAM)],
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "ThrottleInterval": 30,
+            "StandardOutPath": str(LOG),
+            "StandardErrorPath": str(LOG),
+        }
+        with target.open("wb") as file:
+            plistlib.dump(data, file)
+        target.chmod(0o600)
+        old_plist = PLIST.read_bytes() if installed() else None
+        if old_plist is not None:
+            bootout()
+    except (OSError, RuntimeError, subprocess.CalledProcessError):
+        if stage.exists():
+            shutil.rmtree(stage)
+        if target.exists():
+            target.unlink()
+        raise
+    new_runtime_placed = False
+    new_service_started = False
+    try:
+        if RUNTIME.exists():
+            os.replace(RUNTIME, previous)
         os.replace(stage, RUNTIME)
+        new_runtime_placed = True
         os.replace(target, PLIST)
         launchctl("bootstrap", DOMAIN, str(PLIST))
-    except (OSError, subprocess.CalledProcessError):
-        if RUNTIME.exists():
+        new_service_started = True
+        wait_until_ready()
+    except (OSError, RuntimeError, subprocess.CalledProcessError):
+        if new_service_started:
+            bootout()
+        if stage.exists():
+            shutil.rmtree(stage)
+        if target.exists():
+            target.unlink()
+        if new_runtime_placed and RUNTIME.exists():
             shutil.rmtree(RUNTIME)
         if previous.exists():
             os.replace(previous, RUNTIME)
@@ -96,17 +151,24 @@ def install() -> None:
         raise
     if previous.exists():
         shutil.rmtree(previous)
+    try:
+        cleanup_legacy()
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError("새 서비스는 실행 중이지만 이전 설치본 정리에 실패했습니다.") from error
     print(f"설치 완료: {PLIST}")
 
 
 def remove() -> None:
     if RUNTIME.is_symlink():
         raise RuntimeError("실행 디렉터리가 심볼릭 링크입니다. 직접 확인하세요.")
+    if LEGACY_RUNTIME.is_symlink() or LEGACY_LOG.is_symlink():
+        raise RuntimeError("이전 설치 경로가 심볼릭 링크입니다. 직접 확인하세요.")
     if installed():
         bootout()
         PLIST.unlink()
     if RUNTIME.is_dir():
         shutil.rmtree(RUNTIME)
+    cleanup_legacy()
     print("로그인 서비스 제거 완료")
 
 

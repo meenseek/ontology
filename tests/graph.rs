@@ -1,4 +1,4 @@
-use meenseek_ontology::{
+use ontology::{
     context::{ContextScope, inventory},
     context_importer::ContextReader,
     domain::{Error, ImportedRecord, MAX_RESPONSE_BYTES, Scope, SourceKind},
@@ -100,7 +100,7 @@ fn node<'a>(value: &'a Value, id: &str) -> &'a Value {
 async fn graph_snapshot_contract() {
     let url = std::env::var("TEST_DATABASE_URL").expect("explicit isolated PostgreSQL");
     assert!(
-        meenseek_ontology::config::database_options(&url)
+        ontology::config::database_options(&url)
             .expect("loopback test URL")
             .get_database()
             .is_some_and(|n| n.starts_with("ontology_test_"))
@@ -387,7 +387,7 @@ async fn graph_snapshot_contract() {
         .classify(
             Scope::Meenseek,
             &outside.entity_id,
-            meenseek_ontology::domain::Classification {
+            ontology::domain::Classification {
                 revision: 0,
                 topics: vec!["same label".into()],
                 areas: vec!["market-customer".into()],
@@ -612,7 +612,7 @@ async fn graph_snapshot_contract() {
 async fn api_contract(store: &Store) {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
-    use meenseek_ontology::{
+    use ontology::{
         api::{AppState, router},
         config::Config,
     };

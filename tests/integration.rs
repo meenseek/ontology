@@ -1,6 +1,6 @@
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-use meenseek_ontology::store::digest;
-use meenseek_ontology::{
+use ontology::store::digest;
+use ontology::{
     domain::{
         Classification, Error, ImportedRecord, LinkChange, MAX_RESPONSE_BYTES, Scope, SourceKind,
     },
@@ -26,8 +26,7 @@ async fn store() -> Store {
     let url = std::env::var("TEST_DATABASE_URL").expect(
         "TEST_DATABASE_URL must point to an explicitly created temporary PostgreSQL database",
     );
-    let options =
-        meenseek_ontology::config::database_options(&url).expect("test URL must be loopback");
+    let options = ontology::config::database_options(&url).expect("test URL must be loopback");
     assert!(
         options
             .get_database()
@@ -267,7 +266,7 @@ fn git(repo: &std::path::Path, args: &[&str]) -> String {
 #[tokio::test]
 async fn git_import_contract() {
     let _guard = TEST_LOCK.lock().await;
-    use meenseek_ontology::importer::{GitReader, identity};
+    use ontology::importer::{GitReader, identity};
     let store = store().await;
     let temp = tempfile::tempdir().expect("temporary repository");
     let repo = temp
@@ -442,7 +441,7 @@ async fn api_protection_contract() {
         http::{Request, StatusCode},
     };
     use http_body_util::BodyExt;
-    use meenseek_ontology::{
+    use ontology::{
         api::{AppState, router},
         config::Config,
     };
@@ -730,7 +729,7 @@ async fn schema_snapshot(store: &Store) -> Value {
 
 #[tokio::test]
 async fn migration_preserves_baseline_contract() {
-    use meenseek_ontology::store::{BASELINE, SOURCE_PROVIDERS_MIGRATION};
+    use ontology::store::{BASELINE, SOURCE_PROVIDERS_MIGRATION};
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     reset_schema(&store).await;
@@ -845,7 +844,7 @@ async fn vault_import_contract() {
     )
     .expect("body");
     let scopes = vec!["personal".parse().expect("scope")];
-    let inventory = meenseek_ontology::context::inventory(&root, &scopes).expect("inventory");
+    let inventory = ontology::context::inventory(&root, &scopes).expect("inventory");
     store
         .import_context(&root, &scopes, &inventory.inventory_digest)
         .await
@@ -855,7 +854,7 @@ async fn vault_import_contract() {
         .await
         .expect("store id");
     std::fs::remove_dir_all(&root).expect("no old transport");
-    let mut reader = meenseek_ontology::context_importer::ContextReader::new();
+    let mut reader = ontology::context_importer::ContextReader::new();
     assert_eq!(
         reader
             .import(
@@ -879,7 +878,7 @@ async fn context_http_read_download_scope_and_protection_contract() {
         http::{Request, StatusCode},
     };
     use http_body_util::BodyExt;
-    use meenseek_ontology::{
+    use ontology::{
         api::{AppState, router},
         config::Config,
         context::{ContextScope, MAX_FILE_BYTES, MAX_READ_BYTES, inventory},
@@ -1454,7 +1453,7 @@ async fn context_http_read_download_scope_and_protection_contract() {
 
 #[tokio::test]
 async fn context_005_upgrade_preserves_exact_imports_and_backfills_one_version() {
-    use meenseek_ontology::{
+    use ontology::{
         context::{ContextScope, inventory},
         store::BASELINE,
     };
@@ -1473,7 +1472,7 @@ async fn context_005_upgrade_preserves_exact_imports_and_backfills_one_version()
         .await
         .expect("historical baseline digest");
     let areas = serde_json::json!(
-        meenseek_ontology::domain::AREAS
+        ontology::domain::AREAS
             .iter()
             .map(|(id, label)| serde_json::json!({"id":id,"label":label}))
             .collect::<Vec<_>>()

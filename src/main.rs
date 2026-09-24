@@ -1,4 +1,4 @@
-use meenseek_ontology::{
+use ontology::{
     api::{AppState, router},
     config::Config,
     context::{ContextCommand, ContextOutput},
@@ -16,8 +16,7 @@ use std::{
 #[tokio::main]
 async fn main() {
     if std::env::args().nth(1).as_deref() == Some("harness") {
-        if let Err(error) =
-            meenseek_ontology::native_harness::run(std::env::args().skip(2).collect()).await
+        if let Err(error) = ontology::native_harness::run(std::env::args().skip(2).collect()).await
         {
             eprintln!("{}", serde_json::json!({"error":error.to_string()}));
             std::process::exit(1);
@@ -61,7 +60,7 @@ async fn run() -> Result<(), Error> {
                     store_id = Some(value.clone());
                 }
                 "--context-scope" if context_scope.is_none() => {
-                    context_scope = Some(value.parse::<meenseek_ontology::context::ContextScope>()?)
+                    context_scope = Some(value.parse::<ontology::context::ContextScope>()?)
                 }
                 "--scope" if scope.is_none() => scope = Some(Scope::from_str(value)?),
                 "--file" => paths.push(value.clone()),
@@ -102,7 +101,7 @@ async fn run() -> Result<(), Error> {
         let path = std::env::var_os("ONTOLOGY_SYNC_CONFIG")
             .map(PathBuf::from)
             .ok_or(Error::Invalid)?;
-        meenseek_ontology::sync::SyncConfig::load(&path).inspect_err(|_| {
+        ontology::sync::SyncConfig::load(&path).inspect_err(|_| {
             eprintln!("Use bounded Git/Context sync sources; Context requires store_id, context_scope, scope and paths; legacy Vault filesystem sources are retired");
         })?;
         Some(path)
@@ -124,7 +123,7 @@ async fn run() -> Result<(), Error> {
             &command,
             BrainCommand::Curation {
                 scope: Scope::Personal,
-                command: meenseek_ontology::curation::CurationCommand::Apply { .. },
+                command: ontology::curation::CurationCommand::Apply { .. },
             }
         );
         let wake_grouping = matches!(
@@ -151,7 +150,7 @@ async fn run() -> Result<(), Error> {
         );
         let value = store.brain(command).await?;
         let bytes = serde_json::to_vec(&value).map_err(|_| Error::Storage)?;
-        if bytes.len() > meenseek_ontology::domain::MAX_RESPONSE_BYTES {
+        if bytes.len() > ontology::domain::MAX_RESPONSE_BYTES {
             return Err(Error::Limit);
         }
         println!("{}", String::from_utf8(bytes).map_err(|_| Error::Storage)?);
@@ -173,7 +172,7 @@ async fn run() -> Result<(), Error> {
         return Ok(());
     }
     if let Some(path) = sync_path {
-        let report = meenseek_ontology::sync::refresh(&store, &path).await?;
+        let report = ontology::sync::refresh(&store, &path).await?;
         println!(
             "{}",
             serde_json::to_string(&report).map_err(|_| Error::Storage)?
@@ -235,9 +234,9 @@ async fn serve(store: Store) -> Result<(), Error> {
         .map_err(|_| Error::Invalid)?;
     println!("Open {}", config.origin());
     let state = AppState::new(store.clone(), config);
-    let grouping_task = tokio::spawn(meenseek_ontology::grouping::run_loop(store.clone()));
+    let grouping_task = tokio::spawn(ontology::grouping::run_loop(store.clone()));
     let sync_task = std::env::var_os("ONTOLOGY_SYNC_CONFIG").map(|path| {
-        tokio::spawn(meenseek_ontology::sync::run_loop(
+        tokio::spawn(ontology::sync::run_loop(
             store,
             PathBuf::from(path),
             state.sync_status.clone(),
@@ -261,7 +260,7 @@ async fn serve(store: Store) -> Result<(), Error> {
 // Context inventory is offline. Other context operations require an explicitly initialized
 // database; a read or inventory command must never apply an additive migration implicitly.
 async fn context(args: &[String]) -> Result<(), Error> {
-    use meenseek_ontology::context::{
+    use ontology::context::{
         ContextScope, MAX_COMMAND_BYTES, MAX_OUTPUT_BYTES, MAX_READ_BYTES, inventory,
     };
     if args.get(1).map(String::as_str) == Some("edit") {

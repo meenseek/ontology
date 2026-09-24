@@ -1,4 +1,4 @@
-use meenseek_ontology::{
+use ontology::{
     domain::{Error, ImportedRecord, Scope, SourceKind},
     memory::BrainCommand,
     store::{Store, digest},
@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 async fn store() -> Store {
     let url = std::env::var("TEST_DATABASE_URL").expect("explicit isolated PostgreSQL");
     assert!(
-        meenseek_ontology::config::database_options(&url)
+        ontology::config::database_options(&url)
             .expect("loopback test database")
             .get_database()
             .is_some_and(|name| name.starts_with("ontology_test_"))

@@ -1,4 +1,4 @@
-use meenseek_ontology::{
+use ontology::{
     context::{ContextCommand, ContextScope, MAX_FILE_BYTES, MAX_READ_BYTES, inventory},
     domain::Error,
     store::{Store, digest},
@@ -166,7 +166,7 @@ fn write(root: &Path, path: &str, bytes: &[u8]) {
 async fn store() -> Store {
     let url = std::env::var("TEST_DATABASE_URL").expect("explicit isolated DB");
     assert!(
-        meenseek_ontology::config::database_options(&url)
+        ontology::config::database_options(&url)
             .expect("loopback DB")
             .get_database()
             .is_some_and(|name| name.starts_with("ontology_test_"))
@@ -725,7 +725,7 @@ async fn cardinality_limits_and_call_counts_are_explicit() {
 
 async fn cli(body: &str, database: bool) -> std::process::Output {
     use tokio::io::AsyncWriteExt;
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"));
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"));
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -1041,7 +1041,7 @@ async fn native_identity_origins_and_continuous_history_are_enforced() {
         .expect("native material");
     assert_eq!(
         native.metadata.origin_kind,
-        meenseek_ontology::context::ContextOrigin::Native
+        ontology::context::ContextOrigin::Native
     );
     assert_eq!(native.metadata.source_digest, None);
     assert_eq!(native.metadata.source_path, "personal/native.md");

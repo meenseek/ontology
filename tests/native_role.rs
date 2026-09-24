@@ -5,13 +5,13 @@
 )]
 #[path = "native_harness.rs"]
 mod fixtures;
-use meenseek_ontology::store::Store;
+use ontology::store::Store;
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 #[tokio::test]
 async fn native_role_rejects_writer_frontier_before_launch() {
     let url = std::env::var("TEST_DATABASE_URL").expect("owned test database");
     assert!(
-        meenseek_ontology::config::database_options(&url)
+        ontology::config::database_options(&url)
             .expect("local URL")
             .get_database()
             .is_some_and(|name| name.starts_with("ontology_test_"))

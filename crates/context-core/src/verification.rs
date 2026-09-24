@@ -1709,7 +1709,9 @@ fn assert_native_harness_architecture(repo_root: &Path, failures: &mut Failures)
                 ));
             }
             if path == "src/main.rs" && audit.main_dispatches != 1 {
-                audit.failures.push("Native main must dispatch exactly once to meenseek_ontology::native_harness::run");
+                audit.failures.push(
+                    "Native main must dispatch exactly once to ontology::native_harness::run",
+                );
             }
             if matches!(path, "src/native_harness.rs" | "src/native_role.rs")
                 && audit.canonical_decoder_calls == 0
@@ -1739,7 +1741,7 @@ fn assert_native_harness_manifests(repo_root: &Path, failures: &mut Failures) {
         (
             "Cargo.toml",
             &[
-                "name=\"meenseek-ontology\"",
+                "name=\"ontology\"",
                 "members=[\"crates/context-core\"]",
                 "context-core={path=\"crates/context-core\"}",
             ][..],
@@ -2082,7 +2084,7 @@ impl<'ast> Visit<'ast> for NativeBoundaryAudit<'_> {
             {
                 self.canonical_decoder_calls += 1;
             }
-            if segments == ["meenseek_ontology", "native_harness", "run"] {
+            if segments == ["ontology", "native_harness", "run"] {
                 self.main_dispatches += 1;
             }
         }
@@ -3472,7 +3474,7 @@ mod tests {
             (
                 "src/main.rs",
                 "",
-                "meenseek_ontology::native_harness::run",
+                "ontology::native_harness::run",
                 "other::run",
             ),
         ];

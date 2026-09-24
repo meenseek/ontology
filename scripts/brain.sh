@@ -14,4 +14,4 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
   fi
 fi
 if [[ "$#" -eq 0 ]]; then set -- brain; fi
-exec target/debug/meenseek-ontology "$@"
+exec target/debug/ontology "$@"

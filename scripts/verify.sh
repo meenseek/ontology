@@ -9,7 +9,7 @@ verify_brain_wrapper() (
   trap 'exit 1' INT TERM
   mkdir -p "$wrapper_fixture/scripts" "$wrapper_fixture/target/debug" "$wrapper_fixture/capture"
   cp "$wrapper_source" "$wrapper_fixture/scripts/brain.sh"
-  cat > "$wrapper_fixture/target/debug/meenseek-ontology" <<'CHILD'
+  cat > "$wrapper_fixture/target/debug/ontology" <<'CHILD'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\0' "$@" > "$WRAPPER_CAPTURE/argv"
@@ -17,7 +17,7 @@ printf '%s' "$DATABASE_URL" > "$WRAPPER_CAPTURE/database"
 cat > "$WRAPPER_CAPTURE/stdin"
 exit "${WRAPPER_EXIT:-0}"
 CHILD
-  chmod +x "$wrapper_fixture/target/debug/meenseek-ontology"
+  chmod +x "$wrapper_fixture/target/debug/ontology"
   export WRAPPER_CAPTURE="$wrapper_fixture/capture"
   wrapper="$wrapper_fixture/scripts/brain.sh"
   printf 'binary input\0with spaces\nlast line' > "$wrapper_fixture/input"
@@ -61,6 +61,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   set -euo pipefail
   verify_brain_wrapper
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
+  python3 -m unittest discover -s tests -p 'test_*.py'
 
   verify_id=''
   cleanup() {

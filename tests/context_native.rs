@@ -2,7 +2,7 @@
 use harness_fixture::context_fixture;
 
 use context_core::harness::{ContextSource, SourcePathKind};
-use meenseek_ontology::{
+use ontology::{
     context::{ContextScope, inventory},
     domain::Error,
     store::Store,
@@ -21,7 +21,7 @@ fn scope() -> ContextScope {
 async fn store() -> Store {
     let url = std::env::var("TEST_DATABASE_URL").expect("owned test DB");
     assert!(
-        meenseek_ontology::config::database_options(&url)
+        ontology::config::database_options(&url)
             .expect("local DB")
             .get_database()
             .is_some_and(|s| s.starts_with("ontology_test_"))
@@ -49,7 +49,7 @@ async fn import(store: &Store, root: &Path) {
 }
 async fn cli(value: Value) -> std::process::Output {
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_meenseek-ontology"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env(
@@ -162,7 +162,7 @@ async fn native_unclosed_metadata_stays_unavailable_and_exact_cli_writes_nothing
         .expect("current unavailable projection");
         assert_eq!(
             payload,
-            json!({"status":"unavailable","source_digest":meenseek_ontology::store::digest(original.as_bytes()),"terms":[]})
+            json!({"status":"unavailable","source_digest":ontology::store::digest(original.as_bytes()),"terms":[]})
         );
         assert_eq!(
             store
@@ -366,7 +366,7 @@ async fn native_core_resolve_prepare_uses_only_canonical_store_source_versions()
         let identifier = format!("decision-{n:016x}");
         records.push(DecisionRecord::UserStatement {
             identifier: identifier.clone(),
-            value_digest: meenseek_ontology::store::digest(
+            value_digest: ontology::store::digest(
                 &serde_json::to_vec(&value).expect("serializable decision"),
             ),
             statement_identifiers: vec!["statement-0000000000000001".into()],
@@ -386,7 +386,7 @@ async fn native_core_resolve_prepare_uses_only_canonical_store_source_versions()
         let identifier = format!("decision-{n:016x}");
         records.push(DecisionRecord::PolicyDefault {
             identifier: identifier.clone(),
-            value_digest: meenseek_ontology::store::digest(
+            value_digest: ontology::store::digest(
                 &serde_json::to_vec(&value).expect("serializable default"),
             ),
             policy_identifier: "agent-harness".into(),
@@ -420,11 +420,11 @@ async fn native_core_resolve_prepare_uses_only_canonical_store_source_versions()
         bindings.push_str(&format!(
             "{path}\t{}\t{}\n",
             bytes.len(),
-            meenseek_ontology::store::digest(&bytes)
+            ontology::store::digest(&bytes)
         ));
     }
     assert_eq!(
-        meenseek_ontology::store::digest(bindings.as_bytes()),
+        ontology::store::digest(bindings.as_bytes()),
         context_fixture::CONTRACT_DIGEST,
         "declared fixture paths, lengths, and content digests"
     );
@@ -432,7 +432,7 @@ async fn native_core_resolve_prepare_uses_only_canonical_store_source_versions()
         .import_context(&fixture, &selected, &current.inventory_digest)
         .await
         .expect("canonical fixture import");
-    let policy_sha = meenseek_ontology::store::digest(
+    let policy_sha = ontology::store::digest(
         &fs::read(fixture.join("profile/rules/agent-harness.md"))
             .expect("selected policy original"),
     );
@@ -574,7 +574,7 @@ fn native_parser_retains_declared_scope_and_exact_normalization_boundaries() {
         assert_eq!(parsed.declared_scope(), expected);
         assert_eq!(
             parsed.original_content_digest(),
-            meenseek_ontology::store::digest(text.as_bytes())
+            ontology::store::digest(text.as_bytes())
         );
     }
     assert!(
@@ -683,7 +683,7 @@ async fn native_provider_rejects_foreign_views_links_and_file_descendant_collisi
             .is_err()
     );
     let bytes = b"nested";
-    sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('personal','0000.md/child.md','/synthetic','personal/0000.md/child.md',$1,$1,$2,6,false,'nested')").bind(meenseek_ontology::store::digest(bytes)).bind(bytes.as_slice()).execute(store.pool()).await.expect("stored namespace collision");
+    sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('personal','0000.md/child.md','/synthetic','personal/0000.md/child.md',$1,$1,$2,6,false,'nested')").bind(ontology::store::digest(bytes)).bind(bytes.as_slice()).execute(store.pool()).await.expect("stored namespace collision");
     let view = tempfile::tempdir().expect("collision view");
     fs::set_permissions(view.path(), fs::Permissions::from_mode(0o700)).expect("private root");
     store
@@ -711,7 +711,7 @@ async fn native_provider_rejects_live_ancestors_before_direct_descendant_access(
         import(&store, &root).await;
         let bytes = b"nested";
         sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('personal','0000.md/child.md','/synthetic','personal/0000.md/child.md',$1,$1,$2,6,false,'nested')")
-            .bind(meenseek_ontology::store::digest(bytes)).bind(bytes.as_slice())
+            .bind(ontology::store::digest(bytes)).bind(bytes.as_slice())
             .execute(store.pool()).await.expect("stored file and descendant collision");
         let view = tempfile::tempdir().expect("fresh collision view");
         fs::set_permissions(view.path(), fs::Permissions::from_mode(0o700)).expect("private root");
@@ -1151,7 +1151,7 @@ mod harness_fixture;
 // session. Observe each effect phase separately so a failed or repeated attempt
 // cannot consume the normal path's budget or conceal automatic retries.
 struct SqlMeasuredSession<'a> {
-    inner: &'a mut meenseek_ontology::native_context::NativeContextSession,
+    inner: &'a mut ontology::native_context::NativeContextSession,
     store: Store,
     body_bytes: usize,
     projection_failure: bool,
@@ -1165,7 +1165,7 @@ impl SqlMeasuredSession<'_> {
         direct: usize,
         helper: u64,
         operation: impl FnOnce(
-            &mut meenseek_ontology::native_context::NativeContextSession,
+            &mut ontology::native_context::NativeContextSession,
         ) -> context_core::harness::HarnessResult<T>,
     ) -> context_core::harness::HarnessResult<T> {
         self.phases.push(phase.to_owned());
@@ -1212,7 +1212,7 @@ impl SqlMeasuredSession<'_> {
     }
 }
 fn assert_sql_phase(
-    session: &meenseek_ontology::native_context::NativeContextSession,
+    session: &ontology::native_context::NativeContextSession,
     contract: &context_core::harness::ContextApplyContract,
     body_bytes: usize,
     start: usize,
@@ -1432,7 +1432,7 @@ async fn native_commit_revision_and_scope_integrity() {
         assert_eq!(row.3, deleted);
         assert_eq!(row.4, None);
         assert_eq!(row.5, None);
-        assert_eq!(row.6, meenseek_ontology::store::digest(content.as_bytes()));
+        assert_eq!(row.6, ontology::store::digest(content.as_bytes()));
         let states:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM context_material_versions WHERE material_id=$1::uuid),(SELECT count(*) FROM context_projection_versions WHERE material_id=$1::uuid)").bind(&row.0).fetch_one(store.pool()).await.expect("append history and projections");
         assert_eq!(states, (index, index));
         let state: String = sqlx::query_scalar(
@@ -1674,7 +1674,7 @@ async fn native_cli_exact_read_has_no_old_runtime() {
     assert!(output.stderr.is_empty());
 }
 struct InterruptedSession<'a> {
-    inner: &'a mut meenseek_ontology::native_context::NativeContextSession,
+    inner: &'a mut ontology::native_context::NativeContextSession,
     point: &'static str,
     directory: PathBuf,
     earlier_head: Vec<u8>,
@@ -2315,16 +2315,15 @@ async fn native_promotion_commit_search_and_next_read() {
     assert_eq!(evidence[0].relative_path, source_path);
     assert_eq!(
         evidence[0].content_digest,
-        meenseek_ontology::store::digest(b"# Synthetic source\nVerified synthetic observation")
+        ontology::store::digest(b"# Synthetic source\nVerified synthetic observation")
     );
     let target = "vault/personal/knowledge/promoted-native.md";
     let mut request = harness_fixture::envelope(&policy, vec![target.into()], vec![], true);
     let DraftTaskRequest::Curation(curation) = &mut request.draft else {
         panic!("separate curation")
     };
-    let handoff_sha = meenseek_ontology::store::digest(
-        &serde_json::to_vec(&handoff).expect("exact handoff value"),
-    );
+    let handoff_sha =
+        ontology::store::digest(&serde_json::to_vec(&handoff).expect("exact handoff value"));
     request
         .decision_trace
         .records
@@ -2427,7 +2426,7 @@ async fn native_rows_fingerprint(store: &Store) -> String {
         .fetch_one(store.pool()).await.expect("owned current/history/projection fingerprint")
 }
 struct NativeContractCapture<'a> {
-    inner: &'a mut meenseek_ontology::native_context::NativeContextSession,
+    inner: &'a mut ontology::native_context::NativeContextSession,
     captured: Option<context_core::harness::ContextApplyContract>,
     identity: context_core::harness::SourceStoreIdentity,
     recover_called: bool,
@@ -2770,7 +2769,7 @@ async fn native_revision_contract_boundaries_preserve_pending_and_rows() {
 }
 
 struct NativeCommitRejectionProbe<'a> {
-    inner: &'a mut meenseek_ontology::native_context::NativeContextSession,
+    inner: &'a mut ontology::native_context::NativeContextSession,
     store: Store,
     handle: tokio::runtime::Handle,
     checked: bool,
@@ -2816,7 +2815,7 @@ impl context_core::harness::ContextCommitSession for NativeCommitRejectionProbe<
                 .expect("both issued changes have exact bodies");
             assert_eq!(bytes, b"# Imported update\nExact native accepted bytes");
             assert_eq!(
-                Some(meenseek_ontology::store::digest(bytes).as_str()),
+                Some(ontology::store::digest(bytes).as_str()),
                 target.resulting_content_digest()
             );
         }
@@ -2903,7 +2902,7 @@ impl context_core::harness::ContextCommitSession for NativeCommitRejectionProbe<
         );
         self.handle.block_on(async {
             sqlx::query("ALTER TABLE context_apply_batches DISABLE TRIGGER USER").execute(self.store.pool()).await.expect("restore actual contract");
-            sqlx::query("UPDATE context_apply_batches SET core_contract=$1,core_contract_digest=$2").bind(&bytes).bind(meenseek_ontology::store::digest(&bytes)).execute(self.store.pool()).await.expect("restore exact issued bytes");
+            sqlx::query("UPDATE context_apply_batches SET core_contract=$1,core_contract_digest=$2").bind(&bytes).bind(ontology::store::digest(&bytes)).execute(self.store.pool()).await.expect("restore exact issued bytes");
             sqlx::query("ALTER TABLE context_apply_batches ENABLE TRIGGER USER").execute(self.store.pool()).await.expect("restore invariant triggers");
             sqlx::raw_sql("CREATE FUNCTION native_revision_skip_target() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$; CREATE TRIGGER native_revision_skip_target BEFORE INSERT ON context_materials FOR EACH ROW WHEN (NEW.path='knowledge/boundary-new.md') EXECUTE FUNCTION native_revision_skip_target();").execute(self.store.pool()).await.expect("owned missing-row fault");
         });
@@ -3273,7 +3272,7 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
         assert_eq!(receipt.evaluation.subject_status, SubjectStatus::Accepted);
         assert_eq!(
             receipt.artifact_set_digest,
-            meenseek_ontology::store::digest(
+            ontology::store::digest(
                 &serde_json::to_vec(&prepared.plan.resolved_request.plan.targets)
                     .expect("frozen artifact set")
             )
@@ -3283,7 +3282,7 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
         assert_eq!(
             target.state,
             TargetState::Existing {
-                content_digest: meenseek_ontology::store::digest(body)
+                content_digest: ontology::store::digest(body)
             }
         );
         assert_eq!(receipt.evidence_bundle_digest.is_some(), evidence);
@@ -3342,7 +3341,7 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
     );
     assert_eq!(
         composed.manifest_digest,
-        meenseek_ontology::store::digest(&serde_json::to_vec(&manifest).expect("exact manifest"))
+        ontology::store::digest(&serde_json::to_vec(&manifest).expect("exact manifest"))
     );
     assert_eq!(composed.declared_evidence_owners, vec![owner]);
     let text = harness_fixture::command(&store, &root, &workspace, "compose-career", &args).await;
