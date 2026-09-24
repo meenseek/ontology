@@ -5,7 +5,8 @@ Double-click the Desktop symlink 온톨로지 연결 복구.command to inspect a
 Use `check --target app` for the authenticated graph or `--target database` for
 DB-only callers. Both print JSON and return nonzero on failure. `alert` runs the
 same check and opens the installed launcher on failure. `repair` is the explicit
-Terminal equivalent of 연결 복구. Keep that Terminal open; Ctrl-C stops its server.
+Terminal equivalent of 연결 복구. An installed login service stays running;
+without one, keep this Terminal open and use Ctrl-C to stop its server.
 Recovery never creates a DB/container or applies a missing SQL migration. An
 upgrade mismatch requires the existing README backup/upgrade procedure first.
 """
@@ -33,6 +34,8 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = Path.home() / "Desktop/온톨로지 연결 복구.command"
+SERVICE_PLIST = Path.home() / "Library/LaunchAgents/com.meenseek.ontology.plist"
+SERVICE_TARGET = f"gui/{os.getuid()}/com.meenseek.ontology"
 CONTAINER = "meenseek-ontology-postgres-1"
 VOLUME = "meenseek-ontology-data"
 DATA_PATH = "/var/lib/postgresql"
@@ -349,6 +352,22 @@ def existing_app(session=None):
     return True
 
 
+def restart_login_service():
+    if not SERVICE_PLIST.is_file():
+        return False
+    try:
+        status = subprocess.run(["launchctl", "print", SERVICE_TARGET],
+                                capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        raise Failure("app", "service_status_failed",
+                      "로그인 서비스 상태를 확인할 수 없습니다.") from None
+    action = (["launchctl", "kickstart", "-k", SERVICE_TARGET] if status.returncode == 0
+              else ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(SERVICE_PLIST)])
+    command(action, "app", "service_start_failed",
+            "설치된 로그인 서비스를 시작할 수 없습니다. 서비스 상태와 로그를 확인하세요.", timeout=15)
+    return True
+
+
 def stop_child(child):
     if child.poll() is not None:
         return
@@ -427,6 +446,14 @@ def repair(root=ROOT):
         if existing_app(session):
             print("기존 앱의 DB 기반 지도 조회가 정상입니다. 실행 중인 서버를 그대로 사용합니다.")
             return
+        if restart_login_service():
+            try:
+                retry(lambda: app_health(session=session), START_ATTEMPTS)
+            except Failure:
+                raise Failure("app", "service_unavailable",
+                              "로그인 서비스를 다시 시작했지만 앱이 준비되지 않았습니다. 서비스 상태와 로그를 확인하세요.") from None
+            print("연결 복구 완료: 로그인 서비스의 DB 기반 지도 조회가 정상입니다.")
+            return
         print("기존 데이터 확인 완료. 현재 소스를 오프라인으로 빌드합니다.", flush=True)
         built = command(["cargo", "build", "--locked", "--offline", "--message-format=json"], "recovery", "build_failed",
                 "현재 소스의 오프라인 빌드가 실패했습니다. 로컬 Rust·의존성 설치 상태를 확인하세요.",
@@ -466,7 +493,8 @@ def dialog(result, recover=False):
               'end try\nend run')
     message = result["message"] + ("\n\n" + result["impact"] if result["impact"] else "")
     if recover:
-        message += "\n\n연결 복구를 선택하면 기존 Docker·DB를 확인하고 이 터미널에서 앱을 시작합니다."
+        message += ("\n\n연결 복구를 선택하면 기존 Docker·DB를 확인하고 "
+                    "설치된 로그인 서비스를 다시 시작합니다. 서비스가 없으면 이 터미널에서 앱을 시작합니다.")
     raw = command(["/usr/bin/osascript", "-e", script, message], "recovery",
                   "dialog_failed", "macOS 연결 상태 창을 열 수 없습니다.", timeout=125)
     return raw.decode("utf-8", errors="replace").strip() == "연결 복구"
