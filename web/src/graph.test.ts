@@ -163,6 +163,20 @@ test("multiword searches put filenames containing every term before path and bod
     assert.deepEqual(searchResults(nodes, query).map(node => node.id), ["name", "path", "body"]);
   }
 });
+test("dotfile names rank ahead of matches found only in a folder", () => {
+  const nodes = [
+    { ...doc("path"), label: "env/config.txt", search_match: true },
+    { ...doc("name"), label: "config/.env", search_match: true },
+  ];
+  assert.deepEqual(searchResults(nodes, "env").map(node => node.id), ["name", "path"]);
+});
+test("an exact dotfile name ranks ahead of a stem match", () => {
+  const nodes = [
+    { ...doc("suffix"), label: "config/.env.md", search_match: true },
+    { ...doc("exact"), label: "config/.env", search_match: true },
+  ];
+  assert.deepEqual(searchResults(nodes, ".env").map(node => node.id), ["exact", "suffix"]);
+});
 test("sprite projection keeps visual and picking sizes independent across viewport and camera changes", async () => {
   const { spriteScale } = await import("./presentation.ts");
   for (const height of [230, 844, 1200]) for (const projection of [1, 2.1445, 3]) {

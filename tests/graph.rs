@@ -112,7 +112,7 @@ async fn graph_snapshot_contract() {
         .initialize()
         .await
         .expect("initialize isolated schema");
-    sqlx::raw_sql("TRUNCATE memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
+    sqlx::raw_sql("TRUNCATE context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
         .execute(store.pool()).await.expect("reset only test rows");
     for size in [0, 1, 120, MAX_GRAPH_NODES + 21] {
         for batch in (0..size)
@@ -182,6 +182,27 @@ async fn graph_snapshot_contract() {
     assert_eq!(result["focus"]["found"], true);
     let result = fetch(&store, query(Scope::Meenseek, "body only needle", None, 5)).await;
     assert_eq!(result["matched"], MAX_GRAPH_NODES + 21);
+    for words in [
+        "document-3.md needle",
+        "needle   document-3.md",
+        "DOCUMENT-3.MD\tNEEDLE",
+    ] {
+        let result = fetch(&store, query(Scope::Meenseek, words, None, 10)).await;
+        assert_eq!(result["matched"], 1, "words match across path and body");
+        assert_eq!(
+            node(&result, &record(3, Scope::Meenseek).entity_id)["search_match"],
+            true
+        );
+    }
+    assert_eq!(
+        fetch(
+            &store,
+            query(Scope::Meenseek, "document-3.md absent", None, 10)
+        )
+        .await["matched"],
+        0,
+        "every search word must match"
+    );
     let personal = record(0, Scope::Personal);
     store
         .apply_import(std::slice::from_ref(&personal))
@@ -261,6 +282,14 @@ async fn graph_snapshot_contract() {
     assert_eq!(support["context_path"], "decisions/support.md");
     assert_eq!(support["source_kind"], "original");
     assert!(support.get("content").is_none());
+    let separated = fetch(&store, query(Scope::Personal, "support 지원", None, 10)).await;
+    assert_eq!(separated["matched"], 1, "path and body words combine");
+    assert!(
+        separated["nodes"][0]["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("지원")
+    );
     let focused = fetch(
         &store,
         query(Scope::Personal, "", support["id"].as_str(), 1),
@@ -412,6 +441,11 @@ async fn graph_snapshot_contract() {
                 .any(|n| n["kind"] == kind)
         );
     }
+    let topic_and_body = fetch(&store, query(Scope::Meenseek, "same needle", None, 10)).await;
+    assert_eq!(
+        node(&topic_and_body, &outside.entity_id)["search_match"],
+        true
+    );
     for kind in ["evidence", "topic", "subject"] {
         assert!(
             result["links"]

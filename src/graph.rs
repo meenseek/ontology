@@ -61,7 +61,10 @@ impl GraphQuery {
 }
 
 const GRAPH_SQL: &str = concat!(
-    r#"WITH evidence AS MATERIALIZED (
+    r#"WITH terms AS MATERIALIZED (
+ SELECT lower(word) AS term,ordinality FROM regexp_split_to_table(btrim($2),'[[:space:]]+') WITH ORDINALITY AS words(word,ordinality)
+ WHERE word<>''
+), evidence AS MATERIALIZED (
  SELECT m.id AS memory_id,x->>'entity_id' AS entity_id,"#,
     evidence_current!(),
     r#" AS current
@@ -87,25 +90,27 @@ const GRAPH_SQL: &str = concat!(
  'current',CASE WHEN cm.material_id IS NULL THEN (s.status='ok' AND p.present AND p.source_revision=s.verified_revision) ELSE true END,'source_kind',s.kind,
  'last_success_at',s.last_success_at,'observed_at',p.observed_at,
  'context_scope',cm.scope,'context_path',cm.path,
- 'excerpt',CASE WHEN $2<>'' AND strpos(lower(current_body.body),lower($2))>0 THEN '…' || substring(current_body.body FROM greatest(1,strpos(lower(current_body.body),lower($2))-80) FOR 400) || '…' END) AS value,
- ($2='' OR strpos(lower(concat(s.path,' ',cm.path,' ',cm.search_text,' ',CASE WHEN cm.material_id IS NULL THEN p.content ELSE concat(cp.payload->>'title',' ',cp.payload->>'body',' ',cp.payload->>'aliases') END)),lower($2))>0 OR EXISTS(
- SELECT 1 FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id
- WHERE et.scope=e.scope AND et.entity_id=e.id AND strpos(lower(t.name),lower($2))>0)) AS matched
+ 'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(current_body.body FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END) AS value,
+ NOT EXISTS(SELECT 1 FROM terms WHERE strpos(search_text.text,term)=0) AS matched
  FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id
  JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id
  LEFT JOIN context_source_bindings cb ON cb.source_id=s.id
  LEFT JOIN context_materials cm ON cm.material_id=cb.material_id AND NOT cm.deleted AND NOT cm.restricted
  LEFT JOIN context_projection_versions cp ON cp.material_id=cm.material_id AND cp.revision=cm.revision
  CROSS JOIN LATERAL (SELECT CASE WHEN cm.material_id IS NULL THEN p.content ELSE cp.payload->>'body' END AS body) current_body
+ CROSS JOIN LATERAL (SELECT lower(concat(s.path,' ',cm.path,' ',cm.search_text,' ',CASE WHEN cm.material_id IS NULL THEN p.content ELSE concat(cp.payload->>'title',' ',cp.payload->>'body',' ',cp.payload->>'aliases') END,' ',
+   (SELECT string_agg(t.name,' ') FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id WHERE et.scope=e.scope AND et.entity_id=e.id))) AS text) search_text
+ LEFT JOIN LATERAL (SELECT strpos(lower(current_body.body),term) AS at FROM terms WHERE strpos(lower(current_body.body),term)>0 ORDER BY ordinality LIMIT 1) excerpt_hit ON true
  WHERE e.scope=$1
  UNION ALL
  SELECT 'c_'||m.material_id::text,'document',
  jsonb_build_object('id','c_'||m.material_id::text,'scope',$1,'kind','document',
  'label',m.path,'repository',m.scope,'source_kind','original','context_scope',m.scope,'context_path',m.path,
  'revision',m.revision::text,'content_digest',m.content_digest,'status','ok','present',true,'current',true,
- 'excerpt',CASE WHEN $2<>'' AND strpos(lower(p.payload->>'body'),lower($2))>0 THEN '…' || substring(p.payload->>'body' FROM greatest(1,strpos(lower(p.payload->>'body'),lower($2))-80) FOR 400) || '…' END),
- ($2='' OR strpos(lower(m.path),lower($2))>0 OR strpos(lower(m.search_text),lower($2))>0 OR strpos(lower(p.payload->>'title'),lower($2))>0 OR strpos(lower(p.payload->>'body'),lower($2))>0)
+ 'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(p.payload->>'body' FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END),
+ NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(concat(m.path,' ',m.search_text,' ',p.payload->>'title',' ',p.payload->>'body')),term)=0)
  FROM context_materials m LEFT JOIN context_projection_versions p USING(material_id,revision)
+ LEFT JOIN LATERAL (SELECT strpos(lower(p.payload->>'body'),term) AS at FROM terms WHERE strpos(lower(p.payload->>'body'),term)>0 ORDER BY ordinality LIMIT 1) excerpt_hit ON true
  WHERE $1='personal' AND NOT m.deleted AND NOT m.restricted
  AND NOT EXISTS (SELECT 1 FROM bound_materials b WHERE b.material_id=m.material_id)
  UNION ALL
@@ -118,26 +123,28 @@ const GRAPH_SQL: &str = concat!(
  'support',CASE WHEN jsonb_array_length(m.document->'evidence')=0 THEN 'user-recorded' ELSE 'source-linked' END,
  'matched_revision',CASE WHEN old.revision IS NOT NULL THEN old.revision::text ELSE m.revision::text END,
  'historical_match',old.revision IS NOT NULL,
- 'excerpt',CASE WHEN $2<>'' AND strpos(lower(COALESCE(old.document,m.document)->>'body'),lower($2))>0 THEN '…' || substring(COALESCE(old.document,m.document)->>'body' FROM greatest(1,strpos(lower(COALESCE(old.document,m.document)->>'body'),lower($2))-80) FOR 400) || '…' END),
- ($2='' OR strpos(lower(concat(m.document->>'title',' ',m.document->>'body')),lower($2))>0 OR old.revision IS NOT NULL)
+ 'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(COALESCE(old.document,m.document)->>'body' FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END),
+ (NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(concat(m.document->>'title',' ',m.document->>'body')),term)=0) OR old.revision IS NOT NULL)
  FROM memories m LEFT JOIN stale_memories stale ON stale.memory_id=m.id
  LEFT JOIN LATERAL (
    SELECT h.revision,h.document FROM memory_history h
-   WHERE $2<>'' AND strpos(lower(concat(m.document->>'title',' ',m.document->>'body')),lower($2))=0
+   WHERE EXISTS(SELECT 1 FROM terms WHERE strpos(lower(concat(m.document->>'title',' ',m.document->>'body')),term)=0)
      AND h.scope=m.scope AND h.memory_id=m.id AND h.revision<m.revision
-     AND strpos(lower(concat(h.document->>'title',' ',h.document->>'body')),lower($2))>0
+     AND NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(concat(h.document->>'title',' ',h.document->>'body')),term)=0)
    ORDER BY h.revision DESC LIMIT 1
- ) old ON true WHERE m.scope=$1
+ ) old ON true
+ LEFT JOIN LATERAL (SELECT strpos(lower(COALESCE(old.document,m.document)->>'body'),term) AS at FROM terms WHERE strpos(lower(COALESCE(old.document,m.document)->>'body'),term)>0 ORDER BY ordinality LIMIT 1) excerpt_hit ON true
+ WHERE m.scope=$1
  UNION ALL
  SELECT 't_'||t.id,'topic',jsonb_build_object('id','t_'||t.id,'scope',t.scope,'kind','topic','label',t.name),
- ($2='' OR strpos(lower(t.name),lower($2))>0)
+ NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(t.name),term)=0)
  FROM topics t WHERE t.scope=$1 AND EXISTS(SELECT 1 FROM entity_topics et WHERE et.scope=t.scope AND et.topic_id=t.id)
  UNION ALL
  SELECT p.id,'subject',jsonb_build_object('id',p.id,'scope',p.scope,'kind','subject','label',p.name),
- ($2='' OR strpos(lower(p.name),lower($2))>0) FROM subjects p WHERE p.scope=$1
+ NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(p.name),term)=0) FROM subjects p WHERE p.scope=$1
  UNION ALL
  SELECT 'a_'||a.id,'area',jsonb_build_object('id','a_'||a.id,'scope',$1,'kind','area','label',a.label),
- ($2='' OR strpos(lower(a.label),lower($2))>0) FROM areas a
+ NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(a.label),term)=0) FROM areas a
  WHERE $1='meenseek' AND EXISTS(SELECT 1 FROM entity_areas ea WHERE ea.scope=$1 AND ea.area=a.id)
 ), links AS MATERIALIZED (
  SELECT left_id AS source,right_id AS target,'related' AS kind,true AS current

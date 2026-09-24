@@ -181,9 +181,10 @@ export function searchResults<T extends GraphNode>(nodes: T[], query: string): T
   const includesAll = (text: string) => terms.every(term => text.includes(term));
   const score = (node: GraphNode) => {
     const name = node.kind === "document" ? fileName(node.label) : node.label;
-    const stem = name.replace(/\.[^.]+$/, "").toLocaleLowerCase();
+    const filename = name.toLocaleLowerCase();
+    const stem = filename.replace(/\.[^.]+$/, "");
     const path = node.label.toLocaleLowerCase();
-    const match = stem === phrase ? 0 : stem.startsWith(phrase) ? 1 : includesAll(stem) ? 2 : includesAll(path) ? 3 : 4;
+    const match = filename === phrase ? 0 : stem === phrase ? 1 : stem.startsWith(phrase) ? 2 : includesAll(filename) ? 3 : includesAll(path) ? 4 : 5;
     const depth = node.kind === "document" ? node.label.split(/[\\/]/).length : 0;
     return [match, node.kind === "document" || node.kind === "memory" ? 0 : 1, depth, stem.length] as const;
   };
