@@ -107,7 +107,7 @@ export function starMaterial() {
     `,
   });
 }
-function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean, cursor: { current: { x: number; y: number } | null }) {
+function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean, cursor: { current: { x: number; y: number } | null }, dragged: { current: string | null }) {
   const mesh = new Mesh(geometry, material), viewport = new Vector2(), position = new Vector3(), projected = new Vector3();
   const color = new Color(node.kind === "document" ? "#bad3ee" : "#efd8ac");
   const phase = starPhase(node.id), opacity = active(node) ? 1 : .35;
@@ -138,6 +138,7 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
     material.uniforms.uDetail.value = motion.detail;
     material.uniforms.uShimmer.value = motion.shimmer;
     material.uniforms.uPixels.value = pixels;
+    near = Math.max(near, dragged.current === node.id ? .8 : 0);
     material.uniforms.uNear.value = near;
     const wobble = isReduced() ? 0 : near * 0.13;
     material.uniforms.uWobble.value.set(wobble * Math.sin(clock.seconds * 9 + phase), wobble * Math.cos(clock.seconds * 7 + phase));
@@ -145,12 +146,13 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
   };
   return mesh;
 }
-function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean) {
+function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, dragged?: { current: string | null }) {
   const sprite = new Sprite(material), viewport = new Vector2(), position = new Vector3(), cursor = new Vector3();
   const resize = (camera: Camera) => {
     sprite.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
     const pixels = nodeScreenSize(node.kind, -position.z, viewport.y, camera.projectionMatrix.elements[5]);
-    sprite.scale.setScalar(spriteScale(nodeScreenMetrics(pixels, selected, node.changed)[part], viewport.y, camera.projectionMatrix.elements[5]));
+    const emphasis = part === "body" && dragged?.current === node.id ? 1.4 : 1;
+    sprite.scale.setScalar(spriteScale(nodeScreenMetrics(pixels, selected, node.changed)[part] * emphasis, viewport.y, camera.projectionMatrix.elements[5]));
     sprite.updateMatrixWorld();
   };
   sprite.onBeforeRender = (renderer, _scene, camera) => { renderer.getSize(viewport); resize(camera); };
@@ -184,6 +186,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
   const labelLayer = useRef<HTMLDivElement>(null);
   const hoveredId = useRef<string | null>(null);
+  const dragged = useRef<string | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
   const allowDrag = useRef(true), suppressClickUntil = useRef(0);
   const pointer = useRef<{ pointerId: number; pointerType: string } | null>(null);
   const cursor = useRef<{ x: number; y: number } | null>(null);
@@ -271,6 +275,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       allowDrag.current = false;
       if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
       positions.cancel();
+      dragged.current = null; setDraggingId(null);
       // DragControls handles pointerup/leave but has no pointercancel listener.
       if (pointer.current) canvas?.dispatchEvent(new PointerEvent("pointerup", { ...pointer.current, bubbles: true }));
       pointer.current = null;
@@ -292,6 +297,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
         up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1), spacingPixels: 24,
       });
+      if (positions.dragging) { dragged.current = node.id; setDraggingId(node.id); }
       instance.cameraPosition({ ...camera.position }, { ...controls.target }, 0);
       controls.autoRotate = false;
       hoveredId.current = null; setHover(null);
@@ -346,7 +352,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const camera = instance?.camera();
       if (camera) {
         camera.updateMatrixWorld();
-        const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}|${positions.revision}`;
+        const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}|${dragged.current}|${positions.revision}`;
         if (key !== lastProjection) {
           lastProjection = key;
           const candidates = nodes.map(node => {
@@ -356,7 +362,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             projected.applyMatrix4(camera.projectionMatrix);
             return { id: node.id, kind: node.kind, active: active(node), x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)! };
           });
-          const visible = visibleLabels(candidates, size.width, size.height, selected, hoveredId.current);
+          const visible = visibleLabels(candidates, size.width, size.height, dragged.current ?? selected, hoveredId.current);
           for (const [index, element] of elements.entries()) {
             const box = visible[index];
             element.hidden = !box;
@@ -386,8 +392,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const color = node.kind === "document" ? "#bad3ee" : node.kind === "memory" ? "#efd8ac" : node.color;
     const isSelected = node.id === selected;
     group.add(isKnowledge
-      ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor)
-      : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected));
+      ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged)
+      : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected, dragged));
     if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected));
     if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected));
     // The invisible plane follows the star and status rings, with a 36px minimum.
@@ -407,7 +413,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       ref={graph} width={size.width} height={size.height} graphData={data}
       backgroundColor="rgba(0,0,0,0)" controlType="orbit" showNavInfo={false}
       nodeLabel={() => ""} linkLabel={() => ""} nodeThreeObject={object}
-      linkColor={link => selected && endpoint(link.source) !== selected && endpoint(link.target) !== selected ? "#35404b" : link.current ? linkColor[link.kind] : "#947867"}
+      linkColor={link => {
+        const focus = draggingId ?? selected;
+        return focus && endpoint(link.source) !== focus && endpoint(link.target) !== focus ? "#35404b" : link.current ? linkColor[link.kind] : "#947867";
+      }}
       linkWidth={0}
       linkOpacity={.65} linkDirectionalArrowLength={link => link.kind === "evidence" ? 2 : 0} linkDirectionalArrowRelPos={.8}
       enableNodeDrag={!disabled}
@@ -415,6 +424,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       onNodeDragEnd={() => {
         if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
         if (allowDrag.current) positions.release(performance.now(), reduced);
+        dragged.current = null; setDraggingId(null);
       }} enablePointerInteraction={!disabled}
       cooldownTicks={0} warmupTicks={0} onEngineStop={positionCamera}
       onNodeClick={node => { hoveredId.current = null; setHover(null); if (!disabled && performance.now() >= suppressClickUntil.current) onSelect(node.id); }}

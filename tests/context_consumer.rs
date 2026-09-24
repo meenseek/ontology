@@ -613,7 +613,7 @@ async fn context_consumer_identity_and_projection() {
         .fetch_one(s.pool())
         .await
         .expect("all existing app values");
-    sqlx::raw_sql("DELETE FROM ontology_migrations WHERE name='009-context-manual-edits.sql'; ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; ALTER TABLE context_material_versions DROP COLUMN manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code IN ('vault-read-failed','context-read-failed'))); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; ").execute(s.pool()).await.expect("owned exact pre-008 shape");
+    sqlx::raw_sql("DELETE FROM ontology_migrations WHERE name IN ('009-context-manual-edits.sql','010-profile-manual-edits.sql'); ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; ALTER TABLE context_material_versions DROP COLUMN manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code IN ('vault-read-failed','context-read-failed'))); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; ").execute(s.pool()).await.expect("owned exact pre-008 shape");
     let unmatched: (String, String) =
         sqlx::query_as("SELECT id,path FROM sources WHERE kind='vault' ORDER BY id LIMIT 1")
             .fetch_one(s.pool())
@@ -1355,12 +1355,13 @@ async fn context_consumer_commit_invalidation() {
         json!({"op":"search","scope":"personal","query":"invalidation.md"}),
     )
     .await;
+    // The graph shows the available original while consumer evidence stays stale.
     assert!(
         graph["nodes"]
             .as_array()
             .expect("nodes")
             .iter()
-            .any(|n| n["id"] == entity && n["current"] == false)
+            .any(|n| n["id"] == entity && n["current"] == true)
     );
     // Replaying the exact accepted apply returns the original Core attempt and does not invalidate twice.
     consumer_apply(

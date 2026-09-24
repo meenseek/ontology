@@ -1,6 +1,8 @@
 //! Immutable search projections and bounded, exact document reads from the canonical store.
 use crate::{
-    context::{ContextScope, MAX_FILES, MAX_TOTAL_BYTES, restricted, validate_path},
+    context::{
+        ContextScope, MAX_FILES, MAX_READ_BYTES, MAX_TOTAL_BYTES, restricted, validate_path,
+    },
     domain::{Error, MAX_DOCUMENT_BYTES, MAX_RESPONSE_BYTES},
     store::{Store, digest},
 };
@@ -149,11 +151,15 @@ pub(crate) fn projection(
         return Ok(payload);
     }
     payload["status"] = json!("unavailable");
+    let unavailable = payload.clone();
     let Some(bytes) = bytes else {
         return Ok(payload);
     };
     if digest(bytes) != sha {
         return Err(Error::Storage);
+    }
+    if bytes.len() > MAX_READ_BYTES {
+        return Ok(unavailable);
     }
     let Ok(parsed) = parse_markdown_bytes(Path::new(&format!("{}/{path}", scope.as_str())), bytes)
     else {
@@ -184,12 +190,15 @@ pub(crate) fn projection(
     let text = expanded_search_text(&[&title, &body, &alias_text, &ontology_text]);
     let terms: BTreeSet<String> = text.split_whitespace().map(str::to_owned).collect();
     payload = json!({"source_digest":sha,"status":"searchable","title":title,"body":body,"language":redacted_optional(doc.language()),"aliases":aliases,"exportable":doc.exportable(),"ontology":ont,"terms":terms});
+    // The database also limits its jsonb rendering to 32 MiB. Leave headroom
+    // for that representation so a large searchable preview never blocks saving
+    // the original or its version history.
     if serde_json::to_vec(&payload)
         .map_err(|_| Error::Storage)?
         .len()
-        > 32 * 1024 * 1024
+        > 16 * 1024 * 1024
     {
-        return Err(Error::Limit);
+        return Ok(unavailable);
     }
     Ok(payload)
 }

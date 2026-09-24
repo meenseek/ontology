@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    context::{ContextScope, MAX_READ_BYTES},
+    context::{ContextScope, MAX_FILE_BYTES},
     domain::{AREAS, Classification, Error, LinkChange, MAX_RESPONSE_BYTES, Scope},
     graph::GraphQuery,
     memory::BrainCommand,
@@ -66,7 +66,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/context/download", get(context_download))
         .route(
             "/api/context/edit",
-            post(context_edit).layer(DefaultBodyLimit::max(6 * MAX_READ_BYTES + 16 * 1024)),
+            post(context_edit).layer(DefaultBodyLimit::max(
+                6 * crate::context::MAX_READ_BYTES + 16 * 1024,
+            )),
         )
         .route("/api/records", get(list))
         .route("/api/records/{id}", get(detail))
@@ -349,7 +351,7 @@ async fn context_read(
         .read_context_material(&query.scope, &query.path)
         .await?;
     // One byte may require six JSON escape bytes. Other API response limits stay unchanged.
-    bounded_context_json(&material, 6 * MAX_READ_BYTES + 16 * 1024)
+    bounded_context_json(&material, 6 * MAX_FILE_BYTES + 16 * 1024)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -388,7 +390,7 @@ async fn context_version(
             .store
             .read_context_revision(&query.scope, &query.path, query.revision)
             .await?,
-        6 * MAX_READ_BYTES + 16 * 1024,
+        6 * MAX_FILE_BYTES + 16 * 1024,
     )
 }
 #[derive(Deserialize)]

@@ -79,17 +79,73 @@ async fn manual_edit_preserves_original_and_records_a_separate_version() {
             .await,
         Err(Error::Conflict)
     );
-    assert_eq!(
-        store
+    assert!(
+        !store
             .edit_context(&personal, "note.md", 2, &result.content_digest, after)
             .await
             .expect("idempotent save")
-            .changed,
-        false
+            .changed
+    );
+    let profile = scope("profile");
+    write(&root, "profile/rule.md", before);
+    let large_before = "a".repeat(MAX_READ_BYTES + 1);
+    write(&root, "profile/large.md", large_before.as_bytes());
+    let manifest = inventory(&root, std::slice::from_ref(&profile)).expect("profile inventory");
+    store
+        .import_context(
+            &root,
+            std::slice::from_ref(&profile),
+            &manifest.inventory_digest,
+        )
+        .await
+        .expect("profile import");
+    assert_eq!(
+        store
+            .edit_context(&profile, "rule.md", 1, &digest(before), after)
+            .await,
+        Err(Error::Invalid)
     );
     assert_eq!(
         store
-            .edit_context(&scope("profile"), "note.md", 1, &digest(before), after)
+            .read_context(&profile, "rule.md", false)
+            .await
+            .expect("current profile"),
+        std::str::from_utf8(before).expect("fixture UTF-8")
+    );
+    let large_after = format!("{large_before}b");
+    assert_eq!(
+        store
+            .edit_context(
+                &personal,
+                "note.md",
+                2,
+                &result.content_digest,
+                &large_after
+            )
+            .await,
+        Err(Error::Invalid)
+    );
+    assert_eq!(
+        store
+            .read_context_material(&profile, "large.md")
+            .await
+            .expect("large Markdown read")
+            .content,
+        large_before
+    );
+    assert_eq!(
+        store
+            .read_context_revision(&profile, "large.md", 1)
+            .await
+            .expect("large Markdown history")["content"],
+        large_before
+    );
+    let large_projection: (String,) = sqlx::query_as("SELECT payload->>'status' FROM context_projection_versions WHERE material_id=(SELECT material_id FROM context_materials WHERE scope='profile' AND path='large.md') AND revision=1")
+        .fetch_one(store.pool()).await.expect("large Markdown projection");
+    assert_eq!(large_projection.0, "unavailable");
+    assert_eq!(
+        store
+            .edit_context(&profile, "raw/rule.md", 1, &digest(before), after)
             .await,
         Err(Error::Invalid)
     );

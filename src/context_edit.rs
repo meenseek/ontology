@@ -1,6 +1,8 @@
 //! Explicit human edits of existing public Markdown originals; Core apply remains separate.
 use crate::{
-    context::{ContextScope, MAX_READ_BYTES, restricted, valid_digest, validate_path},
+    context::{
+        ContextScope, MAX_READ_BYTES, markdown_path, restricted, valid_digest, validate_path,
+    },
     context_projection::{append_projections, projection},
     domain::Error,
     store::{Store, digest},
@@ -32,11 +34,7 @@ impl Store {
         validate_path(path)?;
         if scope.as_str() != "personal" && !scope.as_str().starts_with("work/")
             || restricted(path)
-            || !["md", "markdown"].iter().any(|extension| {
-                path.rsplit('.')
-                    .next()
-                    .is_some_and(|part| part.eq_ignore_ascii_case(extension))
-            })
+            || !markdown_path(path)
             || expected_revision < 1
             || !valid_digest(expected_digest)
             || content.len() > MAX_READ_BYTES

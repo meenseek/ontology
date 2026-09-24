@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import DocumentPreview, { findDocumentFragment, resolveRelativeContextPath } from "./DocumentPreview";
+import DocumentPreview, { findDocumentFragment, resolveRelativeContextFilePath, resolveRelativeContextPath } from "./DocumentPreview";
 
 const render = (content: string | null, path = "notes.md", kind: "git" | "vault" = "git") => renderToStaticMarkup(<DocumentPreview path={path} content={content} kind={kind} />);
 const preview = (content: string, path?: string, kind?: "git" | "vault") => render(content, path, kind);
@@ -113,6 +113,21 @@ test("linked context originals open through a verified local relationship", () =
   assert.match(html, /<button type="button" class="document-internal-link">원문<\/button>/);
   assert.match(html, /없는 문서.*이 원문 경로는 여기서 열 수 없습니다/);
   assert.doesNotMatch(html, /href="originals/);
+});
+
+test("referenced context attachments can be downloaded without loading them automatically", () => {
+  const path = "knowledge/notion/originals/pages/portfolio.md";
+  const href = "../assets/image.png";
+  const target = "knowledge/notion/originals/assets/image.png";
+  assert.equal(resolveRelativeContextFilePath(path, href), target);
+  assert.equal(resolveRelativeContextFilePath(path, "../../../../../../private.png"), null);
+  assert.equal(resolveRelativeContextFilePath(path, "javascript%3Aalert(1).png"), null);
+  const local = `/api/context/download?${new URLSearchParams({ scope: "personal", path: target })}`;
+  const html = renderToStaticMarkup(<DocumentPreview path={path} kind="context" content={`![그림](${href}) [표](${href})`} resolveInternalDownload={value => value === href ? local : undefined} />);
+  assert.equal(anchors(html).length, 2);
+  assert(anchors(html).every(link => link.href === local));
+  assert.match(html, /이미지 다운로드/);
+  assert.doesNotMatch(html, /<img|src=/);
 });
 
 for (const parent of ["https://example.com/parent", "#topics"]) {
