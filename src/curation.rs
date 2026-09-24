@@ -161,6 +161,7 @@ impl Candidate {
                 title: title.clone(),
                 body: body.clone(),
                 subject_id: None,
+                grouping_preference: None,
                 effective_from: *effective_from,
                 effective_until: *effective_until,
                 evidence: self.basis.clone(),
@@ -170,6 +171,7 @@ impl Candidate {
                 title: String::new(),
                 body: self.reason.clone(),
                 subject_id: None,
+                grouping_preference: None,
                 effective_from: None,
                 effective_until: None,
                 evidence: Vec::new(),
@@ -568,9 +570,16 @@ impl Store {
                     Finding::NoChange => json!({"outcome":"no-change","review_id":id}),
                     Finding::Knowledge { target, .. } => {
                         let (memory_id, outcome) = if let Some(target) = target {
+                            let automatic = crate::grouping::on_curation_update(
+                                &mut tx,
+                                scope,
+                                &target.id,
+                                target.revision + 1,
+                            )
+                            .await?;
                             self.count(1);
-                            sqlx::query("UPDATE memories SET revision=revision+1,document=$3,updated_at=now() WHERE scope=$1 AND id=$2")
-                                .bind(scope.as_str()).bind(&target.id).bind(document).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+                            sqlx::query("UPDATE memories SET revision=revision+1,document=$3,subject_id=CASE WHEN $4 THEN NULL ELSE subject_id END,updated_at=now() WHERE scope=$1 AND id=$2")
+                                .bind(scope.as_str()).bind(&target.id).bind(document).bind(automatic).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
                             (target.id.clone(), "updated")
                         } else {
                             let memory_id = format!("m_{}", Uuid::new_v4());
@@ -580,6 +589,7 @@ impl Store {
                             self.count(1);
                             sqlx::query("INSERT INTO memories(id,scope,revision,status,document) VALUES($1,$2,1,'accepted',$3)")
                                 .bind(&memory_id).bind(scope.as_str()).bind(document).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+                            crate::grouping::on_capture(&mut tx, scope, &memory_id, &input).await?;
                             (memory_id, "created")
                         };
                         self.append_history(&mut tx, scope, &memory_id).await?;

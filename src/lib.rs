@@ -9,6 +9,7 @@ pub mod context_projection;
 pub mod curation;
 pub mod domain;
 pub mod graph;
+pub mod grouping;
 pub mod importer;
 pub mod memory;
 pub mod native_context;

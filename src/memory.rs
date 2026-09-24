@@ -9,7 +9,7 @@ pub(crate) use evidence_current;
 macro_rules! memory_query { ($tail:literal) => { concat!(r#"WITH visible AS (
  SELECT m.*, ((document->>'effective_from' IS NULL OR (document->>'effective_from')::bigint<=extract(epoch FROM now())) AND (document->>'effective_until' IS NULL OR (document->>'effective_until')::bigint>extract(epoch FROM now()))) AS effective,
  NOT EXISTS(SELECT 1 FROM jsonb_array_elements(document->'evidence') x LEFT JOIN entities e ON e.scope=m.scope AND e.id=x->>'entity_id' LEFT JOIN sources s ON s.scope=e.scope AND s.id=e.source_id LEFT JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE NOT "#, evidence_current!(), r#") AS supported,
- (to_jsonb(m)-'document') || document || jsonb_build_object('subject_name',(SELECT name FROM subjects WHERE scope=m.scope AND id=m.subject_id),'evidence',COALESCE((SELECT jsonb_agg(x || jsonb_build_object('current',"#, evidence_current!(), r#")) FROM jsonb_array_elements(document->'evidence') x LEFT JOIN entities e ON e.scope=m.scope AND e.id=x->>'entity_id' LEFT JOIN sources s ON s.scope=e.scope AND s.id=e.source_id LEFT JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id),'[]'::jsonb),'support',CASE WHEN jsonb_array_length(document->'evidence')=0 THEN 'user-recorded' ELSE 'source-linked' END) AS value
+ (to_jsonb(m)-'document') || document || jsonb_build_object('subject_name',(SELECT name FROM subjects WHERE scope=m.scope AND id=m.subject_id),'grouping',(SELECT jsonb_build_object('mode',g.mode,'state',g.state,'suggestions',g.suggestions,'reason',g.reason) FROM memory_grouping g WHERE g.memory_id=m.id),'evidence',COALESCE((SELECT jsonb_agg(x || jsonb_build_object('current',"#, evidence_current!(), r#")) FROM jsonb_array_elements(document->'evidence') x LEFT JOIN entities e ON e.scope=m.scope AND e.id=x->>'entity_id' LEFT JOIN sources s ON s.scope=e.scope AND s.id=e.source_id LEFT JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id),'[]'::jsonb),'support',CASE WHEN jsonb_array_length(document->'evidence')=0 THEN 'user-recorded' ELSE 'source-linked' END) AS value
  FROM memories m WHERE m.scope=$1
 )"#, $tail) }; }
 use crate::{
@@ -89,10 +89,19 @@ pub struct MemoryInput {
     pub title: String,
     pub body: String,
     pub subject_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grouping_preference: Option<GroupingPreference>,
     pub effective_from: Option<i64>,
     pub effective_until: Option<i64>,
     #[serde(default)]
     pub evidence: Vec<EvidenceRef>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupingPreference {
+    Auto,
+    Off,
+    Manual,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -205,6 +214,17 @@ pub enum BrainCommand {
         #[serde(default = "default_limit")]
         limit: usize,
     },
+    GroupingRetry {
+        scope: Scope,
+        id: String,
+    },
+    GroupingSet {
+        scope: Scope,
+        id: String,
+        revision: i64,
+        subject_id: Option<String>,
+        mode: GroupingPreference,
+    },
 }
 pub(crate) fn text_valid(text: &str, bytes: usize, multiline: bool) -> bool {
     !text.trim().is_empty()
@@ -305,6 +325,12 @@ impl MemoryInput {
         }
         if let Some(id) = &self.subject_id {
             native_id(id, "p_")?;
+        }
+        if (self.subject_id.is_some() && self.grouping_preference == Some(GroupingPreference::Off))
+            || (self.subject_id.is_none()
+                && self.grouping_preference == Some(GroupingPreference::Manual))
+        {
+            return Err(Error::Invalid);
         }
         if [self.effective_from, self.effective_until]
             .into_iter()
@@ -445,6 +471,17 @@ impl Store {
                 query,
                 limit,
             } => self.evidence_options(scope, &query, limit).await,
+            BrainCommand::GroupingRetry { scope, id } => self.grouping_retry(scope, &id).await,
+            BrainCommand::GroupingSet {
+                scope,
+                id,
+                revision,
+                subject_id,
+                mode,
+            } => {
+                self.grouping_set(scope, &id, revision, subject_id.as_deref(), mode)
+                    .await
+            }
         }
     }
     async fn subject_create(&self, scope: Scope, key: &str, name: &str) -> Result<Value, Error> {
@@ -707,6 +744,7 @@ impl Store {
         sqlx::query("INSERT INTO memory_creations(scope,key_digest,payload_digest,memory_id) VALUES($1,$2,$3,$4)").bind(scope.as_str()).bind(key_hash).bind(payload_hash).bind(&id).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         self.count(1);
         sqlx::query("INSERT INTO memories(id,scope,subject_id,revision,status,document) VALUES($1,$2,$3,1,$4,$5)").bind(&id).bind(scope.as_str()).bind(&input.subject_id).bind(if proposal {"proposed"} else {"accepted"}).bind(document).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+        crate::grouping::on_capture(&mut tx, scope, &id, &input).await?;
         self.append_history(&mut tx, scope, &id).await?;
         self.pin_evidence(&mut tx, scope, &id, None).await?;
         self.count(1);
@@ -863,7 +901,14 @@ impl Store {
                     },
                 )
                 .await?;
-            subject_id = input.subject_id;
+            subject_id = crate::grouping::on_correct(
+                &mut tx, scope, id, revision + 1, &input, subject_id.as_deref(),
+            ).await?;
+        }
+        if action == "withdraw" {
+            crate::grouping::on_withdraw(&mut tx, scope, id).await?;
+        } else if action == "accept" {
+            crate::grouping::on_accept(&mut tx, scope, id, revision + 1).await?;
         }
         self.count(1);
         sqlx::query("UPDATE memories SET revision=revision+1,status=$3,subject_id=$4,document=$5,updated_at=now() WHERE scope=$1 AND id=$2").bind(scope.as_str()).bind(id).bind(status).bind(subject_id).bind(document).execute(&mut *tx).await.map_err(|_|Error::Storage)?;

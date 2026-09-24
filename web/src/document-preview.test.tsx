@@ -285,3 +285,14 @@ test("seeded Memory renders Context, Vault, Git and record provenance through it
   for (const label of ["Context", "Vault", "Git", "기록"]) assert.match(html, new RegExp(`<dt>출처<\/dt><dd>${label}<\/dd>`));
   assert.match(html, /ontology-context:/);
 });
+
+test("personal Memory shows pending classification, suggestions, and retry without creating a subject", async () => {
+  const { default: Memory, draftFromItem } = await import("./Memory");
+  const base = { id: "m_seed", scope: "personal" as const, revision: 1, status: "accepted", origin: "user", subject_name: null, updated_at: "2026-01-01", support: "user-recorded", kind: "record" as const, title: "진학 메모", body: "연구실 탐색", subject_id: null, effective_from: null, effective_until: null, evidence: [] };
+  const view = (grouping: { mode: "auto"; state: "pending" | "suggested" | "error"; suggestions: { candidate_ids?: string[]; new_subject?: string | null }; reason: string | null }) => renderToStaticMarkup(<Memory initialItem={{ ...base, grouping }} selectedId={base.id} visible scope="personal" csrf="fixture" request={async () => { throw new Error("Static seeded render needs no request"); }} onBusy={() => {}} onChange={() => {}} onNavigate={() => {}} onMetadataChange={() => {}} />);
+  assert.match(view({ mode: "auto", state: "pending", suggestions: {}, reason: null }), /묶음 분류 중/);
+  assert.match(view({ mode: "auto", state: "suggested", suggestions: { new_subject: "대학원 진학" }, reason: "주된 문제를 확인" }), /새 묶음.*만들고 연결/);
+  assert.match(view({ mode: "auto", state: "error", suggestions: {}, reason: "실패" }), /다시 시도/);
+  assert.equal(draftFromItem({ ...base, grouping: { mode: "off", state: "off", suggestions: {}, reason: null } }).grouping_preference, "off");
+  assert.equal(draftFromItem({ ...base, grouping: { mode: "auto", state: "pending", suggestions: {}, reason: null } }).grouping_preference, "auto");
+});

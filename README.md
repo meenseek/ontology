@@ -225,6 +225,10 @@ http://127.0.0.1:47831/?scope=meenseek&focus=실제_노드_ID
 
 문서 태그(`topics`)는 문서마다 선택적으로 최대 10개 붙일 수 있다. 기억은 같은 범위의 기억 묶음(`subjects`) 하나를 `subject_id`로 선택하거나 소속 없이 둘 수 있다. 문서 태그와 기억 묶음은 서로 별도의 분류다.
 
+개인 기억은 저장 직후 [개인 기억 묶음 판단 정책](docs/personal-memory-grouping.md)에 따라 Codex가 기존 묶음과의 의미상 적합성을 검토한다. 저장은 분류를 기다리지 않으며 `read`의 `grouping` 상태가 갱신된다. 명확한 묶음 하나만 자동으로 선택하고, 애매하면 후보를 제안한다. 새 묶음은 사용자가 확인해야 생성된다. 수동 선택과 명시적 미분류는 자동 판단보다 우선한다. 이 분류는 기억의 수락이나 사실 검증이 아니다.
+
+`011-personal-memory-grouping.sql`의 소유자는 이 앱의 개인 기억 저장 경계다. 기존 운영 DB의 기억·이력을 보존하면서 개인 활성 기억에만 분류 작업 상태를 추가한다. 업그레이드 완료 조건은 별도 DB 복원에서 기존 열의 값 보존과 반복 초기화를 확인하고, 운영 DB에서 기존 수동 묶음이 유지되며 미분류 기억만 대기열에 들어간 것을 확인하는 것이다. 분류 실패 기록은 저장 상태를 바꾸지 않고 `grouping-retry`로 다시 처리한다.
+
 에이전트나 터미널에서는 `bash scripts/brain.sh`에 JSON 객체 하나를 표준 입력으로 보낸다. 실행 중인 DB가 필요하며 HTTP 서버는 없어도 된다. 스크립트는 앱 루트로 이동하고, 명시한 `DATABASE_URL`이 없으면 신뢰하는 기존 로컬 `.env`의 `ONTOLOGY_DB_PASSWORD`로 DB 주소를 만든다. 비밀번호를 출력하거나 공유하지 않는다. 현재 `meenseek-ontology` 실행 파일을 사용하며 기본 subcommand는 `brain`이다. `context`와 `harness`를 지정하면 그 argv·stdin·종료 코드를 그대로 전달한다. Brain 응답은 JSON이고 오류 시 종료 코드는 0이 아니다.
 
 아래 내용은 **바꿔 쓸 예시**다. 실행하면 지정된 DB에 실제로 저장된다. 작은따옴표를 붙인 heredoc으로 JSON을 전달해 본문에 셸 변수나 명령 치환이 적용되지 않게 한다.
@@ -240,7 +244,7 @@ bash scripts/brain.sh <<'JSON'
 JSON
 ```
 
-`scope`는 `meenseek` 또는 `personal`이다. 기록의 `kind`는 기본 `record`, 선택적으로 `fact`, `decision`, `preference`, `idea`다. `remember`는 저장된 기록(`accepted`/`user`), `propose`는 미확정 제안(`proposed`/`assistant`)을 만든다. **저장은 사실 검증이 아니다.** `origin`은 입력 경로이며 원저자를 증명하지 않는다. 붙여 넣은 글도 원저자는 별도 확인 전까지 미상이다. 기본 저장 요청 자체는 본문을 자동 분석하거나 지식·규칙으로 승격하지 않는다. 뒤의 자동 정리 절차가 별도로 근거와 적용 조건을 검토한다.
+`scope`는 `meenseek` 또는 `personal`이다. 기록의 `kind`는 기본 `record`, 선택적으로 `fact`, `decision`, `preference`, `idea`다. `remember`는 저장된 기록(`accepted`/`user`), `propose`는 미확정 제안(`proposed`/`assistant`)을 만든다. **저장은 사실 검증이 아니다.** `origin`은 입력 경로이며 원저자를 증명하지 않는다. 붙여 넣은 글도 원저자는 별도 확인 전까지 미상이다. 개인 기억의 자동 묶음 판단은 본문을 분석하지만 지식·규칙으로 승격하지 않는다. 뒤의 자동 정리 절차가 별도로 근거와 적용 조건을 검토한다.
 
 생성 키 `idempotency_key`는 영문·숫자·`_`·`-` 8~128자다. 같은 키와 같은 내용으로 재시도하면 기억과 이력이 중복되지 않는다. 다른 내용을 보내면 충돌하고, 잊은 기억의 키를 재사용하면 `gone` 오류가 난다. 새 기억에는 새 키를 쓴다.
 
@@ -258,8 +262,12 @@ JSON
 | `search` | `query`, `limit`(1~20). 상단 검색과 같은 그래프 조회를 사용한다. 문서·직접 기록·분류 표식을 함께 반환하며 `nodes`에서 종류와 상태를 확인한다. |
 | `evidence-read` | `id`, `revision`, `entity_id`. 해당 기록 시점에 보존한 근거 원문을 읽는다. `available=false`면 당시 본문을 복원할 수 없는 상태다. |
 | `evidence` | 선택적으로 `query`, `limit`을 보내 같은 범위의 현재 근거 후보를 찾는다. |
+| `grouping-retry` | `personal`에서 분류 실패·제안·미분류 상태인 기록의 `id`를 보내 재검토한다. |
+| `grouping-set` | `personal`의 `id`, 현재 `revision`, `mode`(`manual`, `off`, `auto`)와 `subject_id`를 보낸다. `manual`은 기존 개인 묶음 ID가 필수이고 다른 모드는 `null`만 허용한다. 본문과 정리 근거는 유지하며 묶음 선택 이력을 남긴다. |
 
 `memory`에는 필수 `body`와 선택적으로 `kind`, `title`, `subject_id`, `effective_from`, `effective_until`, `evidence`를 넣는다. 유효 시각은 UTC Unix 초이며 시작은 포함하고 끝은 제외한다. 생략할 선택 필드는 빼고, 응답 객체를 통째로 요청에 복사하지 않는다. 알 수 없는 필드는 거부한다. 입력 JSON은 16 KiB, 제목은 160자·640 UTF-8 바이트, 본문은 8,192 UTF-8 바이트, 근거는 10개까지다. 근거의 원래 적용 조건과 정리 정보를 포함한 최종 기록은 PostgreSQL JSON 표현으로 24 KiB 이하여야 하며, 저장 전에 합산 크기를 확인해 초과하면 `limit` 오류로 반환한다. 내용을 잘라 저장하지 않는다. 목록·이력·검색은 한 번에 1~20개이며 목록·이력·기억 묶음 목록의 다음 페이지에는 응답의 커서를 쓴다.
+
+개인 기억에는 선택적으로 `grouping_preference`를 보낼 수 있다. 값은 `auto`(기본), `manual`(선택한 `subject_id` 고정), `off`(명시적 미분류)다. `off`와 `subject_id`는 함께 보낼 수 없다. 앱 서버는 분류 대기열을 재시작 후에도 처리하고, CLI 저장은 별도 백그라운드 처리를 시작한다. Codex 실행 파일은 `ONTOLOGY_CODEX_BINARY` 절대 경로 또는 사용자 홈의 `.local/bin/codex`에서 찾는다. 사용할 수 없으면 기록은 유지되고 `grouping.state=error`로 표시된다. 회사 범위의 기억은 자동 분류하지 않는다.
 
 근거를 붙일 때는 `evidence` 후보에서 **`entity_id`, `source_revision`, `content_digest`, `generation` 네 필드만** 골라 `memory.evidence` 배열에 넣는다. `source_id`, `kind`, `repository`, `path`, `current` 등 조회용 정보는 입력에서 뺀다. 앱은 출처·리비전·내용 해시·갱신 세대와 원문 위치를 함께 추적한다. 원문 변경·확인 실패·부재·범위 불일치가 생긴 근거는 현재 근거로 쓰지 않는다. 나중에 원문이 복구되거나 같은 내용으로 돌아와도 새 후보를 확인해 `correct`로 다시 연결해야 한다. 원문 재가져오기는 기억 본문과 이력을 자동 수정하지 않는다.
 

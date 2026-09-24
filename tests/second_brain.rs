@@ -33,7 +33,7 @@ async fn call(store: &Store, v: Value) -> Value {
 async fn native_memory_contract() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects")
+    sqlx::query("TRUNCATE memory_grouping,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects")
         .execute(store.pool())
         .await
         .expect("reset synthetic memories only");
@@ -586,8 +586,10 @@ async fn brain_transport_contract() {
         assert!(!String::from_utf8_lossy(&bytes).contains("sensitive-marker"));
     }
     let key = format!("cli-{}", uuid::Uuid::new_v4());
+    let mut cli_input = input();
+    cli_input["grouping_preference"] = json!("off");
     let creation =
-        json!({"op":"remember","scope":"personal","idempotency_key":key,"memory":input()});
+        json!({"op":"remember","scope":"personal","idempotency_key":key,"memory":cli_input});
     let (ok, first) = cli(&creation.to_string()).await;
     assert!(ok);
     let (ok, repeat) = cli(&creation.to_string()).await;
@@ -1154,7 +1156,7 @@ async fn evidence_migration_preserves_existing_records() {
     }
     let before = existing(&store).await;
     // Recreate the actual pre-upgrade schema, retaining every existing row, timestamp and digest.
-    sqlx::raw_sql("DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code='vault-read-failed')); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name IN ('008-context-consumers.sql','009-context-manual-edits.sql','010-profile-manual-edits.sql'); DROP TABLE context_projection_versions; DROP FUNCTION context_projection_validate(); DROP TABLE context_material_versions; ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TABLE context_materials; DROP TABLE context_apply_batches; DROP FUNCTION context_core_contract_immutable(); DROP TABLE context_store; DROP FUNCTION context_record_version(); DROP FUNCTION context_material_revision(); DROP FUNCTION context_immutable_record(); DROP FUNCTION context_exclusive_gate(); DROP TABLE curation_reviews; DROP TABLE evidence_snapshots; DROP TABLE evidence_contents; DELETE FROM ontology_migrations WHERE name IN ('003-evidence-snapshots.sql','004-curation-reviews.sql','005-context-materials.sql','006-context-history.sql','007-context-native.sql');").execute(store.pool()).await.unwrap();
+    sqlx::raw_sql("DROP TABLE memory_grouping; DELETE FROM ontology_migrations WHERE name='011-personal-memory-grouping.sql'; DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code='vault-read-failed')); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name IN ('008-context-consumers.sql','009-context-manual-edits.sql','010-profile-manual-edits.sql'); DROP TABLE context_projection_versions; DROP FUNCTION context_projection_validate(); DROP TABLE context_material_versions; ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TABLE context_materials; DROP TABLE context_apply_batches; DROP FUNCTION context_core_contract_immutable(); DROP TABLE context_store; DROP FUNCTION context_record_version(); DROP FUNCTION context_material_revision(); DROP FUNCTION context_immutable_record(); DROP FUNCTION context_exclusive_gate(); DROP TABLE curation_reviews; DROP TABLE evidence_snapshots; DROP TABLE evidence_contents; DELETE FROM ontology_migrations WHERE name IN ('003-evidence-snapshots.sql','004-curation-reviews.sql','005-context-materials.sql','006-context-history.sql','007-context-native.sql');").execute(store.pool()).await.unwrap();
     sqlx::query("CREATE TABLE evidence_snapshots (failure_fixture boolean)")
         .execute(store.pool())
         .await
