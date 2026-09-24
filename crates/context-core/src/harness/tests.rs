@@ -13493,6 +13493,55 @@ fn public_and_internal_plans_accept_the_same_runtime_support_capabilities() {
 }
 
 #[test]
+fn prepared_run_rejects_raw_inputs_that_differ_from_bound_plans() {
+    let (workspace, engine) = external_engine();
+    let mut request = personal_project_code_request();
+    request.action = HarnessAction::CodeReview;
+    let resolved = engine
+        .resolve(&request)
+        .expect("review request must resolve");
+    let plan = HarnessPlan::from_resolved(resolved, &workspace.0, harness_lifecycle_limits())
+        .expect("review plan must freeze");
+    let capabilities = harness_capabilities(&plan);
+    let tool_plan = harness_tool_plan(&plan).expect("review requires a tool plan");
+    let raw_plan = serde_json::to_vec(&plan).expect("plan must serialize");
+    let raw_tool_plan = serde_json::to_vec(&tool_plan).expect("tool plan must serialize");
+
+    let mut different_plan = plan.clone();
+    different_plan.version = 0;
+    let mismatched_plan = serde_json::to_vec(&different_plan).expect("plan must serialize");
+    assert!(matches!(
+        PreparedHarnessRun::prepare(
+            &engine,
+            &mismatched_plan,
+            plan.clone(),
+            capabilities.clone(),
+            Some(&raw_tool_plan),
+            Some(tool_plan.clone()),
+        ),
+        Err(HarnessError::InvalidPlan(message))
+            if message == "decoded current Harness plan does not match the bound artifact"
+    ));
+
+    let mut different_tool_plan = tool_plan.clone();
+    different_tool_plan.version = 0;
+    let mismatched_tool_plan =
+        serde_json::to_vec(&different_tool_plan).expect("tool plan must serialize");
+    assert!(matches!(
+        PreparedHarnessRun::prepare(
+            &engine,
+            &raw_plan,
+            plan,
+            capabilities,
+            Some(&mismatched_tool_plan),
+            Some(tool_plan),
+        ),
+        Err(HarnessError::InvalidPlan(message))
+            if message == "decoded current Harness tool plan does not match the bound artifact"
+    ));
+}
+
+#[test]
 fn public_and_internal_non_tool_plans_accept_extra_tool_support() {
     let (workspace, engine) = external_engine();
     let request = HarnessRequest {
