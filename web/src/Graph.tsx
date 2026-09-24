@@ -8,7 +8,7 @@ import { active, kindName, linkColor, linkName, stateName } from "./graph";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
-import { MAX_VISIBLE_LABELS, advanceStarClock, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, screenPickDistance, starMotion, starPhase, visibleLabels, type StarClock } from "./presentation";
+import { MAX_VISIBLE_LABELS, advanceStarClock, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, visibleLabels, type StarClock } from "./presentation";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
 type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onFailure: () => void };
@@ -28,7 +28,7 @@ export function starMaterial() {
     transparent: true, depthWrite: false, depthTest: false, toneMapped: false,
     uniforms: {
       uColor: { value: new Color() }, uOpacity: { value: 1 }, uPhase: { value: 0 },
-      uRotation: { value: 0 }, uTilt: { value: 0 }, uDetail: { value: 0 }, uShimmer: { value: 1 }, uPixels: { value: 26 },
+      uRotation: { value: 0 }, uTilt: { value: 0 }, uDetail: { value: 0 }, uShimmer: { value: 1 }, uPixels: { value: 26 }, uShape: { value: 0 },
       uNear: { value: 0 }, uWobble: { value: new Vector2() },
     },
     vertexShader: `
@@ -44,7 +44,7 @@ export function starMaterial() {
     fragmentShader: `
       varying vec2 vUv;
       uniform vec3 uColor;
-      uniform float uOpacity, uPhase, uRotation, uTilt, uDetail, uShimmer, uPixels, uNear;
+      uniform float uOpacity, uPhase, uRotation, uTilt, uDetail, uShimmer, uPixels, uNear, uShape;
       uniform vec2 uWobble;
       float hash(vec3 p) {
         p = fract(p * 0.1031);
@@ -61,7 +61,10 @@ export function starMaterial() {
       }
       void main() {
         vec2 p = vUv * 2.0 - 1.0 - uWobble;
-        float distance = length(p), radius = mix(0.30, 0.54, uDetail);
+        float distance = length(p);
+        float spokes = uShape < 1.5 ? 4.0 : uShape < 2.5 ? 5.0 : 6.0;
+        float silhouette = uShape < 0.5 ? 1.0 : 1.0 + 0.12 * cos(spokes * atan(p.y, p.x) + uPhase);
+        float radius = mix(0.30, 0.54, uDetail) * silhouette;
         float r = distance / radius;
         if (distance >= 1.0) discard;
         float edge = fwidth(r);
@@ -109,7 +112,7 @@ export function starMaterial() {
 }
 function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean, cursor: { current: { x: number; y: number } | null }, dragged: { current: string | null }) {
   const mesh = new Mesh(geometry, material), viewport = new Vector2(), position = new Vector3(), projected = new Vector3();
-  const color = new Color(node.kind === "document" ? "#bad3ee" : "#efd8ac");
+  const color = new Color(starColor(node));
   const phase = starPhase(node.id), opacity = active(node) ? 1 : .35;
   mesh.renderOrder = 1;
   // Its screen-sized quad is not a world-space culling or picking boundary.
@@ -138,6 +141,7 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
     material.uniforms.uDetail.value = motion.detail;
     material.uniforms.uShimmer.value = motion.shimmer;
     material.uniforms.uPixels.value = pixels;
+    material.uniforms.uShape.value = starShape(node.id);
     near = Math.max(near, dragged.current === node.id ? .8 : 0);
     material.uniforms.uNear.value = near;
     const wobble = isReduced() ? 0 : near * 0.13;
@@ -297,7 +301,16 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       positions.begin(node.id, 2 * Math.max(.001, depth) / (size.height * projectionY), {
         right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
         up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1), spacingPixels: 24,
+        visible: nodes.map(value => value.id),
+        worldPerPixel: atDepth => 2 * atDepth / (size.height * projectionY),
+        isVisible: (at, radius) => Math.abs(at.x) <= size.width / 2 + radius && Math.abs(at.y) <= size.height / 2 + radius,
+        radius: (value, atDepth) => {
+          const pixels = nodeScreenSize(value.kind, atDepth, size.height, projectionY);
+          const metrics = nodeScreenMetrics(pixels, value.id === selected, value.changed);
+          return Math.max(metrics.radius, metrics.hit / 2);
+        },
         project: value => {
+          camera.updateMatrixWorld();
           dragProjection.set(value.x, value.y, value.z).applyMatrix4(camera.matrixWorldInverse);
           const depth = camera.projectionMatrix.elements[11] === -1 ? -dragProjection.z : 1;
           dragProjection.applyMatrix4(camera.projectionMatrix);
@@ -311,6 +324,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     }
     // The callback already contains the new 3D position; its drag-end delta has the opposite sign.
     positions.move(node.id, node);
+    const current = new Map(nodes.map(value => [value.id, value]));
+    for (const rendered of data.nodes) fixPosition(rendered, current.get(rendered.id)!);
+    instance.d3ReheatSimulation();
     suppressClickUntil.current = performance.now() + 350;
   };
   useEffect(() => {
@@ -346,6 +362,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const projected = new Vector3();
     const draw = () => {
       const instance = graph.current;
+      instance?.camera().updateMatrixWorld();
       positions.advance(performance.now(), reduced);
       if (instance && lastPositions !== positions.revision) {
         lastPositions = positions.revision;
@@ -355,7 +372,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         instance.d3ReheatSimulation();
       }
       const controls = instance?.controls() as OrbitControls | undefined;
-      if (controls) controls.autoRotate = rotate && !positions.dragging && controls.enabled;
+      if (controls) controls.autoRotate = rotate && !positions.dragging && !positions.settling && controls.enabled;
       const camera = instance?.camera();
       if (camera) {
         camera.updateMatrixWorld();
@@ -396,7 +413,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       return value;
     };
     const isKnowledge = node.kind === "document" || node.kind === "memory";
-    const color = node.kind === "document" ? "#bad3ee" : node.kind === "memory" ? "#efd8ac" : node.color;
+    const color = node.kind === "document" || node.kind === "memory" ? starColor(node) : node.taxonomyColor ?? node.color;
     const isSelected = node.id === selected;
     group.add(isKnowledge
       ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged)
@@ -431,6 +448,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       onNodeDragEnd={() => {
         if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
         if (allowDrag.current) positions.release(performance.now(), reduced);
+        const current = new Map(nodes.map(value => [value.id, value]));
+        for (const rendered of data.nodes) fixPosition(rendered, current.get(rendered.id)!);
+        graph.current?.d3ReheatSimulation();
         dragged.current = null; setDraggingId(null);
       }} enablePointerInteraction={!disabled}
       cooldownTicks={0} warmupTicks={0} onEngineStop={positionCamera}
