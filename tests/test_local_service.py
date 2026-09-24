@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -29,22 +30,18 @@ class InstallTests(unittest.TestCase):
         (root / "scripts/serve-local.sh").write_text("exec ontology")
         (root / ".env").write_text("ONTOLOGY_DB_PASSWORD=fixture")
         self.runtime = base / "support/ontology"
-        self.legacy = base / "support/meenseek-ontology"
-        self.legacy.mkdir(parents=True)
-        (self.legacy / ".env").write_text("old")
-        self.plist = base / "agents/com.meenseek.ontology.plist"
+        self.runtime.mkdir(parents=True)
+        (self.runtime / "previous-install").write_text("previous")
+        self.plist = base / "agents/ontology.plist"
         self.plist.parent.mkdir()
         self.plist.write_bytes(b"old plist")
         self.log = base / "logs/ontology.log"
-        self.old_log = base / "logs/meenseek-ontology.log"
-        self.old_log.parent.mkdir()
-        self.old_log.write_text("old log")
         self.active = True
         self.actions = []
         self.paths = patch.multiple(
-            service, ROOT=root, RUNTIME=self.runtime, LEGACY_RUNTIME=self.legacy,
+            service, ROOT=root, RUNTIME=self.runtime,
             PLIST=self.plist, PROGRAM=self.runtime / "scripts/serve-local.sh",
-            LOG=self.log, LEGACY_LOG=self.old_log,
+            LOG=self.log,
         )
         self.paths.start()
         self.addCleanup(self.paths.stop)
@@ -69,24 +66,49 @@ class InstallTests(unittest.TestCase):
                 service.install()
         self.assertTrue(self.active)
         self.assertEqual(self.plist.read_bytes(), b"old plist")
-        self.assertEqual((self.legacy / ".env").read_text(), "old")
-        self.assertTrue(self.old_log.is_file())
-        self.assertFalse(self.runtime.exists())
+        self.assertEqual((self.runtime / "previous-install").read_text(), "previous")
         self.assertFalse(self.runtime.with_name("ontology.new").exists())
+        self.assertFalse(self.runtime.with_name("ontology.previous").exists())
         self.assertEqual(self.actions, ["bootout", "bootstrap", "bootout", "bootstrap"])
 
     def test_old_install_is_removed_only_after_health(self):
         def ready():
-            self.assertTrue(self.legacy.is_dir())
-            self.assertTrue(self.old_log.is_file())
+            self.assertTrue(self.runtime.with_name("ontology.previous").is_dir())
 
         with patch.object(service, "wait_until_ready", side_effect=ready):
             service.install()
         self.assertTrue(self.active)
         self.assertTrue((self.runtime / "target/debug/ontology").is_file())
-        self.assertFalse(self.legacy.exists())
-        self.assertFalse(self.old_log.exists())
+        self.assertFalse((self.runtime / "previous-install").exists())
+        self.assertFalse(self.runtime.with_name("ontology.previous").exists())
         self.assertEqual(self.actions, ["bootout", "bootstrap"])
+
+    def test_failed_restore_reports_old_service_failure(self):
+        def fail_restore(action, *args, check=True):
+            if action == "bootstrap" and self.actions.count("bootstrap") == 1:
+                self.actions.append(action)
+                raise subprocess.CalledProcessError(1, [action, *args])
+            return self.launchctl(action, *args, check=check)
+
+        with patch.object(service, "wait_until_ready", side_effect=RuntimeError("not ready")):
+            with patch.object(service, "launchctl", side_effect=fail_restore):
+                with self.assertRaisesRegex(RuntimeError, "이전 로그인 서비스도 복구하지 못했습니다"):
+                    service.install()
+        self.assertEqual(self.plist.read_bytes(), b"old plist")
+        self.assertEqual((self.runtime / "previous-install").read_text(), "previous")
+
+    def test_new_install_rejects_an_existing_app_listener(self):
+        self.plist.unlink()
+        with patch.object(service.socket, "create_connection"):
+            with self.assertRaisesRegex(RuntimeError, "앱 포트가 이미 사용 중입니다"):
+                service.install()
+        self.assertFalse(self.runtime.with_name("ontology.new").exists())
+
+    def test_new_install_checks_an_unavailable_port(self):
+        self.plist.unlink()
+        with patch.object(service.socket, "create_connection", side_effect=socket.timeout()):
+            with self.assertRaisesRegex(RuntimeError, "앱 포트 상태를 확인할 수 없습니다"):
+                service.install()
 
 
 if __name__ == "__main__":

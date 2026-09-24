@@ -34,10 +34,11 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = Path.home() / "Desktop/온톨로지 연결 복구.command"
-SERVICE_PLIST = Path.home() / "Library/LaunchAgents/com.meenseek.ontology.plist"
-SERVICE_TARGET = f"gui/{os.getuid()}/com.meenseek.ontology"
-CONTAINER = "meenseek-ontology-postgres-1"
-VOLUME = "meenseek-ontology-data"
+SERVICE_LABEL = "ontology"
+SERVICE_PLIST = Path.home() / "Library/LaunchAgents" / f"{SERVICE_LABEL}.plist"
+SERVICE_TARGET = f"gui/{os.getuid()}/{SERVICE_LABEL}"
+CONTAINER = "ontology-postgres-1"
+VOLUME = "ontology-data"
 DATA_PATH = "/var/lib/postgresql"
 PORTS = {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "55432"}]}
 APP_URL = "http://127.0.0.1:47831"
