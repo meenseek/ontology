@@ -6,7 +6,7 @@ import Memory from "./Memory";
 import type { Item as MemoryItem } from "./Memory";
 import { Positions } from "./positions";
 import { nodePresentation } from "./presentation";
-import { graphUrl, kindName, knowledge, linkName, parseLocation, reconcile, sameGraphLocation, stateName, visibleGraph } from "./graph";
+import { graphUrl, kindName, knowledge, linkName, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph } from "./graph";
 import type { Filters, GraphNode, Model, Scope, Snapshot } from "./graph";
 const Graph = lazy(() => import("./Graph.tsx"));
 type Session = { csrf: string; areas: { id: string; label: string }[] };
@@ -65,7 +65,7 @@ export default function App() {
   const memorySeed = savedMemory?.scope === route.scope && savedMemory.id === route.focus ? savedMemory : null;
   const shown = useMemo(() => data ? visibleGraph(data.model, filters) : { nodes: [], links: [] }, [data, filters]);
   const fallback = listMode || webglFailed;
-  const displayed = fallback && route.q ? shown.nodes.filter(n => n.search_match !== false) : shown.nodes;
+  const displayed = fallback && route.q ? searchResults(shown.nodes, route.q) : shown.nodes;
   const failed = useCallback(() => { setWebglFailed(true); }, []);
   const syncRoute = (next: typeof route, replace = false) => {
     const current = routeRef.current;
