@@ -12,7 +12,7 @@ Native 원문은 같은 material identity 아래 revision과 history를 남긴�
 
 공통 정책의 단일 기준은 기존 논리 경로 `vault/profile/preferences/context-vault-operating-model.md`와 `vault/profile/rules/agent-harness.md`다. 전자는 저장·직접 읽기·projection·개인정보 경계를, 후자는 검토된 쓰기·실행·복구를 소유한다. 논리 `vault/...`는 native scoped material을 가리키며 이전 checkout의 파일 읽기를 요구하지 않는다. 이 README는 설치된 runtime과 로컬 연결을 설명하는 adapter다.
 
-현재 로컬 store는 `e85a39eb-9e6a-4460-9bdb-6030d7ef69d9`다. 실제 연결의 `identity` 응답과 대조해 사용한다. Source 읽기는 아래 native CLI로 수행하며 HTTP 서버가 필요하지 않다. 저장·열람만으로 내용의 검증·수락, 사업 성장 또는 자율 학습 효과를 주장하지 않는다.
+현재 native store의 ID는 `e85a39eb-9e6a-4460-9bdb-6030d7ef69d9`다. 실제 연결의 `identity` 응답과 대조해 사용한다. Source 읽기는 아래 native CLI로 수행하며 HTTP 서버가 필요하지 않다. 저장·열람만으로 내용의 검증·수락, 사업 성장 또는 자율 학습 효과를 주장하지 않는다.
 
 이전 checkout은 Git history, 고유 로컬 작업과 미해결 복구 근거를 확인하는 역사 자료다. 현재 원문의 두 번째 소유자가 아니다. 원본 삭제·Git 정리·미수행 브라우저 시나리오의 완료는 각각의 실제 검증 근거가 있어야 하며, 이 문서 전환만으로 전체 정리가 끝났다고 보지 않는다.
 
@@ -31,7 +31,7 @@ Native 원문은 같은 material identity 아래 revision과 history를 남긴�
 3. 복원 확인이 성공한 뒤 다음 명령으로 운영 DB에 `init`을 실행한다. 적용된 baseline과 migration을 검사하고 아직 적용하지 않은 migration을 반영한다.
 
 ```bash
-cd /Users/meenseek/Desktop/ontology
+cd "$HOME/Desktop/ontology"
 set -a
 source .env
 set +a
@@ -46,7 +46,7 @@ cargo run --locked -- init
 ### 앱 시작과 종료
 
 ```bash
-cd /Users/meenseek/Desktop/ontology
+cd "$HOME/Desktop/ontology"
 chmod 600 .env
 set -a
 source .env
@@ -111,6 +111,76 @@ Wrong store, missing source, pending apply와 아직 준비되지 않은 project
 마치고 새 실행 파일과 웹 번들을 빌드한 뒤 다시 설치한다. 서비스 재시작은
 DB migration이나 의존성 설치를 대신하지 않는다.
 
+### 다른 Mac에서 같은 맥락 사용
+
+이 절차는 한 Mac에서 다른 Mac으로 옮기는 단방향 인계다. 두 Mac의 DB를 자동 동기화하지
+않는다. 이전 Mac에서 계속 기록하면 새 Mac의 복원본과 갈라지므로, 인계 중에는 한쪽만
+기록하고 다시 옮길 때는 새 전체 백업으로 반대 방향을 반복한다. 다른 Mac에서의 실제
+Codex Desktop 동작은 그 Mac에서 아래 확인을 마쳐야 검증된 것이다.
+
+1. 기존 Mac에서 `cd "$HOME/Desktop/ontology"`를 실행한 뒤 앱·자동 갱신·importer·기억
+   CLI·Harness 등 DB 쓰기를 멈춘다.
+   로그인 서비스가 설치돼 있으면 `python3 scripts/local_service.py remove`로 앱의
+   자동 재시작도 멈춘다. Pending native 작업을 [복구 절차](#백업과-복원-확인)에
+   따라 정리한 뒤 같은 절차의 전체
+   `pg_dump`를 만들고 별도 DB 복원으로 확인한다. 현재 `git rev-parse HEAD`와 dump의
+   `shasum -a 256` 값을 기록한다. 원문과 이력이 들어 있는 dump는 비공개로 옮기고
+   Git이나 CI에 넣지 않는다.
+2. 새 Mac에 Docker Compose, Git, Rust와 `.env` 생성에 사용할 OpenSSL을 설치하고 ontology를
+   `~/Desktop/ontology`에 같은 Git commit으로 checkout한다. 다른 위치를 쓰면 아래
+   Codex 지침의 경로도 그 위치로 바꾼다. **기존 `meenseek-ontology-data` 볼륨이
+   있으면 여기서 멈추고 그 데이터를 확인한다.** 이 절차는 빈 볼륨에만 적용한다.
+   새 Mac에서 [새 설치의 `.env` 생성 방법](#앱-시작과-종료)으로 새 DB 비밀번호를
+   만들 수 있다. 기존 볼륨을 재사용할 때만 그 볼륨의 기존 비밀번호가 필요하다.
+3. 앱, `init`, 로그인 서비스를 시작하기 전에 받은 dump의 SHA-256을 기존 Mac에서
+   기록한 값과 비교한다. 일치할 때만 PostgreSQL을 시작하고 빈 운영 DB에 복원한다.
+
+   ```bash
+   shasum -a 256 /absolute/path/to/ontology.dump
+   ```
+
+   ```bash
+   bash <<'BASH'
+   set -eo pipefail
+   cd "$HOME/Desktop/ontology"
+   docker info >/dev/null
+   if docker volume inspect meenseek-ontology-data >/dev/null 2>&1; then
+     echo '기존 ontology 볼륨이 있습니다. 복원을 중단하세요.' >&2
+     exit 1
+   fi
+   chmod 600 .env /absolute/path/to/ontology.dump
+   set -a
+   source .env
+   set +a
+   docker compose up -d --wait postgres
+   docker compose exec -T postgres pg_restore -U ontology -d ontology \
+     --exit-on-error --single-transaction < /absolute/path/to/ontology.dump
+   python3 scripts/connection.py check --target database
+   cargo build --locked
+   printf '%s\n' '{"op":"identity"}' | bash scripts/brain.sh context
+   printf '%s\n' '{"op":"read","scope":"profile","path":"preferences/agent-operating-preferences.md"}' | bash scripts/brain.sh context
+   BASH
+   ```
+
+   복원이나 schema 확인이 실패하면 앱을 시작하지 않고 원인을 확인한다. 기존 데이터가
+   든 DB에 이 명령을 재실행하지 않는다. 받은 dump 사본은 복원 확인과 새 백업 보존
+   여부를 확인한 뒤 정리하며 유일한 복구용 백업은 지우지 않는다.
+4. 새 Mac의 `~/.codex/AGENTS.md`에 기존 내용을 보존하며 다음 한 줄을 추가한다.
+   Codex는 글로벌 지침과 현재 Git 저장소의 지침만 자동으로 읽으므로, 다른 저장소의
+   새 작업에서도 이 저장소의 [AGENTS.md](AGENTS.md)를 읽게 하는 연결이다.
+
+   ```text
+   At the start of each task, read ~/Desktop/ontology/AGENTS.md unless it is already active, and use its native context bootstrap.
+   ```
+
+5. 새 Codex Desktop 작업에서 `{"op":"identity"}`의 `store_id`가 위 ID와 일치하는지,
+   이어서 `profile` 범위의 `preferences/agent-operating-preferences.md` 원문 전체가 읽히는지
+   확인한다. 코드 작성·코드 리뷰·문서 작성·문서 리뷰를 각각 새 작업에서 대표 입력으로
+   실행해 필요한 해당 `profile` 규칙을 실제 읽고 행동에 반영하는지 확인한다. 네 작업
+   모두 끝나기 전에는 다른 Mac의 새 세션 동작을 완료로 판정하지 않는다. 웹 화면을
+   사용할 때만 Node·pnpm과 웹 빌드가 필요하며, 로그인 서비스는 native 읽기의
+   선행 조건이 아니다.
+
 ## 3D 지식 지도에서 탐색하기
 
 첫 화면에서 `meenseek` 또는 `개인` 범위를 고르고 군집 전체나 선택한 군집 내부를 본다. 화면을 드래그해 회전하고 스크롤로 확대하며, 점을 선택하면 같은 화면의 상세 패널이 열린다. 카메라 자동 회전은 기본으로 꺼져 있으며 필요할 때 켜거나 멈출 수 있다. `전체 맞춤`과 `새로고침`도 이용할 수 있다. 목록에서는 같은 조회 자료를 키보드로 탐색하고 3D 지도로 돌아갈 수 있다. WebGL을 사용할 수 없을 때도 목록을 제공한다.
@@ -160,7 +230,7 @@ http://127.0.0.1:47831/?scope=meenseek&focus=실제_노드_ID
 아래 내용은 **바꿔 쓸 예시**다. 실행하면 지정된 DB에 실제로 저장된다. 작은따옴표를 붙인 heredoc으로 JSON을 전달해 본문에 셸 변수나 명령 치환이 적용되지 않게 한다.
 
 ```bash
-cd /Users/meenseek/Desktop/ontology
+cd "$HOME/Desktop/ontology"
 bash scripts/brain.sh <<'JSON'
 {"op":"remember","scope":"personal","idempotency_key":"readme_example_001","memory":{"body":"답변은 핵심을 먼저 짧게 정리한다."}}
 JSON
@@ -270,7 +340,7 @@ JSON
 가져오기는 CLI에서 명시적으로 허용한 로컬 저장소와 파일에만 수행한다. 서버가 실행 중이면 다른 터미널에서 아래를 실행한다. `--repo`와 허용 목록은 저장소 루트의 **절대 경로**, `--file`은 그 저장소를 기준으로 한 **상대 경로**다. 예를 들어 실제 파일 `/Users/meenseek/Desktop/.github/docs/repository-model.md`는 `--file docs/repository-model.md`로 지정한다.
 
 ```bash
-cd /Users/meenseek/Desktop/ontology
+cd "$HOME/Desktop/ontology"
 set -a
 source .env
 set +a
@@ -425,7 +495,7 @@ Source view나 DB를 직접 고치거나 별도 protocol·version 축·호환 �
 
 ### 사용자가 직접 작성한 원문 저장
 
-열람 가능한 기존 `profile`·`personal`·`work/<slug>` Markdown은 현재 revision·SHA를 함께 제출해 직접 저장할 수 있다. 저장은 충돌 시 중단하고 새 버전·이력·조회 사본을 한 transaction에 기록한다. 최초 출처와 digest는 그대로 남으며 Core 검토·수락으로 표시하지 않는다. 제한 자료, 새 원문 생성·삭제와 에이전트가 작성·수정한 내용은 이 경로가 아니라 위 Harness 경계를 따른다. CLI의 읽기·검색은 에이전트도 사용할 수 있지만, `context edit`은 사용자가 직접 작성한 내용을 저장할 때만 사용한다.
+열람 가능한 기존 `personal`·`work/<slug>` Markdown은 현재 revision·SHA를 함께 제출해 직접 저장할 수 있다. 저장은 충돌 시 중단하고 새 버전·이력·조회 사본을 한 transaction에 기록한다. 최초 출처와 digest는 그대로 남으며 Core 검토·수락으로 표시하지 않는다. `profile`, 제한 자료, 새 원문 생성·삭제와 에이전트가 작성·수정한 내용은 이 경로가 아니라 위 Harness 경계를 따른다. CLI의 읽기·검색은 에이전트도 사용할 수 있지만, `context edit`은 사용자가 직접 작성한 내용을 저장할 때만 사용한다.
 
 ```bash
 bash scripts/brain.sh context edit \
@@ -446,7 +516,7 @@ schema를 먼저 확인하고 Rust 실행 파일을 오프라인으로 빌드한
 실행된다. 바로 가기가 없다면 저장소에서 다음을 한 번 실행한다.
 
 ```bash
-cd /Users/meenseek/Desktop/ontology
+cd "$HOME/Desktop/ontology"
 ln -s "$PWD/scripts/sync-local.command" "$HOME/Desktop/온톨로지 자료 갱신.command"
 ```
 
@@ -475,7 +545,7 @@ ln -s "$PWD/scripts/sync-local.command" "$HOME/Desktop/온톨로지 자료 갱�
 기존 DB의 업그레이드를 완료하고 기존 서버를 종료한 상태에서 다음을 실행한다. 한 번 갱신이 성공하면 같은 환경에서 서버를 시작해 자동 갱신을 이어간다.
 
 ```bash
-cd /Users/meenseek/Desktop/ontology
+cd "$HOME/Desktop/ontology"
 set -a
 source .env
 set +a
@@ -514,7 +584,7 @@ Pending native 효과는 대응하는 Core journals·attempts·heads와 함께 c
 건수 비교는 내용 동일성의 증명이 아니다. 복원 전후의 전체 table·row·column을 결정적 순서로 해시해 원문 bytes·history·근거·binding의 동일성을 확인한다. Schema 업그레이드 뒤에는 새로 생긴 column 때문에 전체 row 표현이 달라질 수 있으므로 **업그레이드 전부터 있던 column 전체**의 값과 hash를 비교하고 새 migration 결과는 별도로 확인한다. 반복 `init` 전후에는 현재 전체 상태가 같아야 한다. 아래 건수 예시만 통과한 결과를 이 세 가지 검증의 완료로 보고하지 않는다.
 
 ```bash
-cd /Users/meenseek/Desktop/ontology
+cd "$HOME/Desktop/ontology"
 bash <<'BASH'
 set -euo pipefail
 set -a
@@ -578,7 +648,7 @@ docker compose exec -T postgres dropdb -U ontology "ontology_restore_출력된_�
 현재 Rust workspace와 native Core, native consumer, Web 검증은 기존 스크립트가 담당한다.
 
 ```bash
-cd /Users/meenseek/Desktop/ontology
+cd "$HOME/Desktop/ontology"
 bash scripts/verify.sh
 ```
 
