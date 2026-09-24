@@ -106,6 +106,17 @@ export function starPhase(id: string): number {
   hash = Math.imul(hash ^ (hash >>> 15), 0x846ca68b);
   return ((hash ^ (hash >>> 16)) >>> 0) / 4294967296 * Math.PI * 2;
 }
+const documentStars = ["#bad3ee", "#adcbed", "#c4c7ee", "#b5d9df"];
+const memoryStars = ["#efd8ac", "#eac9ae", "#e7d6bd", "#efd0c0"];
+/** Stable variation; an explicit single taxonomy marker gives its members one color. */
+export function starColor(node: { id: string; kind: string; taxonomyColor?: string }): string {
+  if (node.taxonomyColor) return node.taxonomyColor;
+  const palette = node.kind === "memory" ? memoryStars : documentStars;
+  return palette[Math.floor(starPhase(node.id) / (Math.PI * 2) * palette.length)];
+}
+export function starShape(id: string): number {
+  return Math.floor(starPhase(`${id}|shape`) / (Math.PI * 2) * 4);
+}
 export type StarClock = { seconds: number; lastTime: number | null };
 /** Use the renderer's clock; discard suspension gaps and freeze at the current surface. */
 export function advanceStarClock(clock: StarClock, now: number, reduced: boolean): number {

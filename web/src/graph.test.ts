@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Positions, compactSlots } from "./positions.ts";
+import { separateDiscs } from "./clearance.ts";
 import { active, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
@@ -23,6 +24,33 @@ test("Louvain separates two dense groups across a single bridge and is permutati
   assert.equal(a.nodes.find(n => n.id === "d0")?.cluster, a.nodes.find(n => n.id === "d7")?.cluster);
   assert.notEqual(a.nodes.find(n => n.id === "d7")?.cluster, a.nodes.find(n => n.id === "d8")?.cluster);
   assert.equal(links[0].source, "d0", "input links remain metadata, not renderer objects");
+});
+test("one explicit taxonomy marker shares its star color without recoloring ambiguous members", async () => {
+  const topicA: GraphNode = { id: "topic-a", scope: "meenseek", kind: "topic", label: "A" };
+  const topicB: GraphNode = { id: "topic-b", scope: "meenseek", kind: "topic", label: "B" };
+  const links: GraphLink[] = [
+    { source: "a", target: "topic-a", kind: "topic", current: true },
+    { source: "b", target: "topic-a", kind: "topic", current: true },
+    { source: "c", target: "topic-a", kind: "topic", current: true },
+    { source: "c", target: "topic-b", kind: "topic", current: true },
+  ];
+  const model = reconcile(snapshot([doc("a"), doc("b"), doc("c"), topicA, topicB], links));
+  const byId = new Map(model.nodes.map(node => [node.id, node]));
+  const { starColor } = await import("./presentation.ts");
+  assert.equal(byId.get("a")!.taxonomyColor, byId.get("topic-a")!.taxonomyColor);
+  assert.equal(starColor(byId.get("a")!), starColor(byId.get("b")!));
+  assert.equal(byId.get("c")!.taxonomyColor, undefined, "multiple taxonomy memberships keep a neutral star color");
+  assert.deepEqual(model, reconcile(snapshot([topicB, topicA, doc("c"), doc("b"), doc("a")], [...links].reverse())));
+});
+test("unclassified stars have stable but varied colors and silhouettes", async () => {
+  const { starColor, starShape } = await import("./presentation.ts");
+  const ids = Array.from({ length: 24 }, (_, index) => `star-${index}`);
+  const colors = ids.map(id => starColor({ id, kind: "document" }));
+  const shapes = ids.map(starShape);
+  assert.ok(new Set(colors).size >= 3);
+  assert.deepEqual(new Set(shapes), new Set([0, 1, 2, 3]));
+  assert.deepEqual(ids.map(id => starColor({ id, kind: "document" })), colors);
+  assert.deepEqual(ids.map(starShape), shapes);
 });
 test("empty, isolated and larger disconnected inputs have finite deterministic positions", () => {
   for (const size of [0, 1, 400]) {
@@ -531,6 +559,89 @@ test("each stretched link waits for its own slack before drawing a neighbor, inc
     positions.advance(2100, false); assert.equal(b.x, 224); assert.equal(a.x, 200);
     assert.deepEqual(other, baseline[2]);
   }
+});
+test("screen clearance keeps a dragged node fixed and separates coincident neighbors deterministically", () => {
+  const discs = [{ id: "held", x: 0, y: 0, radius: 30 }, { id: "a", x: 0, y: 0, radius: 18 }, { id: "b", x: 0, y: 0, radius: 18 }, { id: "c", x: 10, y: 0, radius: 48 }];
+  const run = (values: typeof discs) => separateDiscs(values, "held", new Set(["a"]));
+  const placed = run(discs);
+  assert.deepEqual(placed, run([...discs].reverse()));
+  assert.deepEqual(placed.get("held"), { x: 0, y: 0 });
+  for (const [index, a] of discs.entries()) for (const b of discs.slice(index + 1)) {
+    const first = placed.get(a.id)!, second = placed.get(b.id)!;
+    assert.ok(Math.hypot(first.x - second.x, first.y - second.y) >= a.radius + b.radius + 10 - 1e-4);
+  }
+});
+test("a neighboring node starts yielding before its visible footprints touch", () => {
+  const model = reconcile(snapshot([doc("held"), doc("other")], []));
+  for (const node of model.nodes) {
+    const x = node.id === "held" ? 0 : 75;
+    Object.assign(node, { x, y: 0, z: 0, fx: x, fy: 0, fz: 0 });
+  }
+  const positions = new Positions(); positions.install(model);
+  positions.begin("held", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    visible: model.nodes.map(node => node.id), radius: () => 20,
+    project: value => ({ x: value.x, y: value.y, depth: 1 }) });
+  positions.move("held", { x: 15, y: 0, z: 0 });
+  const other = model.nodes.find(node => node.id === "other")!;
+  assert.equal(other.x, 75, "the hard collision boundary has not been reached");
+  positions.advance(0, false); positions.advance(16, false);
+  assert.ok(other.x > 75 && other.x < 81, "the early clearance is eased over frames");
+  assert.ok(other.x - 15 >= 50, "the hard non-overlap boundary remains in force");
+});
+test("visible linked and unlinked nodes move aside throughout drag and release", () => {
+  for (const reduced of [false, true]) {
+    const model = reconcile(snapshot([doc("held"), doc("linked"), doc("other")], [edge("held", "linked")]));
+    for (const node of model.nodes) {
+      const x = node.id === "held" ? 0 : node.id === "linked" ? 160 : 80;
+      Object.assign(node, { x, y: 0, z: 0, fx: x, fy: 0, fz: 0 });
+    }
+    const positions = new Positions(); positions.install(model);
+    const plane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+      visible: model.nodes.map(node => node.id), radius: () => 20,
+      project: (value: { x: number; y: number; z: number }) => ({ x: value.x, y: value.y, depth: 1 }) };
+    const clear = () => {
+      for (const [index, a] of model.nodes.entries()) for (const b of model.nodes.slice(index + 1)) {
+        assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= 50 - 1e-4, `${a.id} and ${b.id} remain distinct`);
+      }
+    };
+    positions.begin("held", 1, plane);
+    positions.move("held", { x: 80, y: 0, z: 0 }); clear();
+    assert.equal(model.nodes.find(node => node.id === "held")!.x, 80);
+    assert.notEqual(model.nodes.find(node => node.id === "other")!.x, 80, "unlinked neighbor yields during the drag");
+    for (const time of [0, 16, 32]) { positions.advance(time, reduced); clear(); }
+    positions.release(32, reduced); clear();
+    for (const time of [48, 80, 160, 500, 1000, 2100]) { positions.advance(time, reduced); clear(); }
+    const frozen = model.nodes.map(node => ({ ...node }));
+    positions.cancel(); positions.advance(3000, reduced); assert.deepEqual(model.nodes, frozen);
+  }
+});
+test("clearance follows perspective, zoom, and different visible footprints", () => {
+  const model = reconcile(snapshot([doc("held"), doc("near"), doc("far")], []));
+  const initial = new Map([["held", { x: 0, z: 0 }], ["near", { x: 5000, z: 50 }], ["far", { x: 7200, z: 20 }]]);
+  for (const node of model.nodes) {
+    const value = initial.get(node.id)!;
+    Object.assign(node, { x: value.x, y: 0, z: value.z, fx: value.x, fy: 0, fz: value.z });
+  }
+  const positions = new Positions(); positions.install(model);
+  const radii = new Map([["held", 42], ["near", 30], ["far", 18]]);
+  let zoom = 1;
+  const project = (value: { x: number; y: number; z: number }) => {
+    const depth = 100 - value.z;
+    return { x: value.x / depth * zoom, y: value.y / depth * zoom, depth };
+  };
+  const separated = () => {
+    for (const [index, a] of model.nodes.entries()) for (const b of model.nodes.slice(index + 1)) {
+      const left = project(a), right = project(b);
+      assert.ok(Math.hypot(left.x - right.x, left.y - right.y) >= radii.get(a.id)! + radii.get(b.id)! + 10 - 1e-4);
+    }
+  };
+  positions.begin("held", 100, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    visible: model.nodes.map(node => node.id), radius: node => radii.get(node.id)!, worldPerPixel: depth => depth / zoom, project });
+  positions.move("held", { x: 7000, y: 0, z: 0 }); separated();
+  zoom = .5;
+  positions.move("held", { x: 7000, y: 0, z: 0 }); separated();
+  positions.release(0, false);
+  for (const time of [16, 32, 80, 240, 1000, 2100]) { positions.advance(time, false); separated(); }
 });
 test("clicks stay unchanged; a drag returning near its origin still rearranges on release", () => {
   const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));

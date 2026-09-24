@@ -28,7 +28,7 @@ export type Snapshot = {
 };
 export type PositionedNode = GraphNode & {
   x: number; y: number; z: number; fx: number; fy: number; fz: number;
-  cluster: string; color: string; changed: boolean; signature: string; repositoryLabel?: string;
+  cluster: string; color: string; taxonomyColor?: string; changed: boolean; signature: string; repositoryLabel?: string;
 };
 export type Cluster = { id: string; label: string; color: string; members: string[]; knowledge: number };
 export type Model = { scope: Scope; nodes: PositionedNode[]; links: GraphLink[]; clusters: Cluster[] };
@@ -119,6 +119,18 @@ export function reconcile(snapshot: Snapshot, previous?: Model): Model {
     return { id, label, color: colors[hash(id) % colors.length], members: group.map(n => n.id), knowledge: group.filter(knowledge).length };
   }).sort((a, b) => compare(a.id, b.id));
   const old = new Map((previous?.scope === snapshot.scope ? previous.nodes : []).map(n => [n.id, n]));
+  const taxonomyColors = new Map(nodes.filter(n => !knowledge(n)).map(n => [n.id, colors[hash(`${snapshot.scope}|taxonomy|${n.kind}|${n.id}`) % colors.length]]));
+  const taxonomyMembership = new Map<string, Set<string>>();
+  for (const link of links) {
+    if (!link.current || !["topic", "subject", "area"].includes(link.kind)) continue;
+    const from = byId.get(link.source)!, to = byId.get(link.target)!;
+    const marker = from.kind === link.kind && knowledge(to) ? from : to.kind === link.kind && knowledge(from) ? to : null;
+    const member = marker === from ? to : marker === to ? from : null;
+    if (marker && member) {
+      const groups = taxonomyMembership.get(member.id) ?? new Set<string>();
+      groups.add(marker.id); taxonomyMembership.set(member.id, groups);
+    }
+  }
   const positioned = new Map<string, PositionedNode>();
   // Reserve every retained point before placing a lower-sorting addition or a reintroduced node.
   const occupied: { x: number; y: number }[] = nodes.flatMap(n => old.has(n.id) ? [old.get(n.id)!] : []);
@@ -143,7 +155,9 @@ export function reconcile(snapshot: Snapshot, previous?: Model): Model {
         occupied.push({ x, y });
       }
       const signature = JSON.stringify([node.revision, node.content_digest, node.source_revision, node.generation, node.relation_digest]);
-      positioned.set(id, { ...node, repositoryLabel: repositories.get(node.repository ?? ""), x, y, z, fx: x, fy: y, fz: z, cluster: cluster.id, color: cluster.color, signature, changed: !!prior && signature !== prior.signature });
+      const groups = taxonomyMembership.get(id);
+      const taxonomyColor = knowledge(node) ? groups?.size === 1 ? taxonomyColors.get([...groups][0]) : undefined : taxonomyColors.get(id);
+      positioned.set(id, { ...node, repositoryLabel: repositories.get(node.repository ?? ""), x, y, z, fx: x, fy: y, fz: z, cluster: cluster.id, color: cluster.color, taxonomyColor, signature, changed: !!prior && signature !== prior.signature });
     }
   }
   const model = { scope: snapshot.scope, nodes: nodes.map(n => positioned.get(n.id)!), links, clusters };

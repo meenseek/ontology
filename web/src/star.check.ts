@@ -1,6 +1,6 @@
 import { Color, Mesh, PerspectiveCamera, PlaneGeometry, Scene, WebGLRenderer } from "three";
 import { starMaterial } from "./Graph.tsx";
-import { advanceStarClock, spriteScale, starMotion, starPhase } from "./presentation";
+import { advanceStarClock, spriteScale, starMotion, starPhase, starShape } from "./presentation";
 
 // Development-only GPU regression: import the shipped shader, never a CPU copy of its math.
 const output = document.querySelector<HTMLPreElement>("#results")!;
@@ -9,7 +9,7 @@ const record = (name: string, passed: boolean, measured: number, expected: strin
 const width = 160;
 const colors = ["#bad3ee", "#efd8ac"];
 const sizes = [26, 56, 140];
-const variants = ["stellar-2", "stellar-16", "stellar-7"].map(id => ({ id, phase: starPhase(id) }));
+const variants = ["stellar-2", "stellar-16", "stellar-7"].map(id => ({ id, phase: starPhase(id), shape: starShape(id) }));
 try {
   const renderer = new WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
   renderer.setClearColor("#0b1420", 1);
@@ -19,7 +19,7 @@ try {
   mesh.frustumCulled = false;
   scene.add(mesh);
   let dpr = 1;
-  function draw(size: number, color: string, time: number, phase = 0, opacity = 1) {
+  function draw(size: number, color: string, time: number, phase = 0, opacity = 1, shape = 0) {
     const motion = starMotion(size, phase, time);
     mesh.scale.setScalar(spriteScale(size, width, camera.projectionMatrix.elements[5]));
     material.uniforms.uColor.value.copy(new Color(color));
@@ -30,6 +30,7 @@ try {
     material.uniforms.uDetail.value = motion.detail;
     material.uniforms.uShimmer.value = motion.shimmer;
     material.uniforms.uPixels.value = size;
+    material.uniforms.uShape.value = shape;
     renderer.render(scene, camera);
   }
   function pixels() {
@@ -136,6 +137,11 @@ try {
       const spill = Math.max(Math.abs(outside.mean - background), Math.abs(outside.peak - background));
       record(`${label}: fixed footprint`, spill < .01, spill, "unchanged background outside quad");
     }
+    const outlines = [0, 1, 2, 3].map(shape => { draw(140, colors[0], 1, 0, 1, shape); return pixels(); });
+    for (let shape = 1; shape < outlines.length; shape++) {
+      const delta = difference(outlines[0], outlines[shape]);
+      record(`shape ${shape} / DPR ${dpr}: distinct outline`, delta > .1, delta, ">0.1 mean RGB difference from round star");
+    }
   }
   output.dataset.passed = String(results.every(r => r.passed));
   output.textContent = `${results.every(r => r.passed) ? "PASS" : "FAIL"} · ${results.filter(r => r.passed).length}/${results.length}\n${JSON.stringify(results, null, 2)}`;
@@ -144,9 +150,9 @@ try {
   renderer.setPixelRatio(dpr); renderer.setSize(width * 3, width * 3);
   renderer.setScissorTest(true);
   document.querySelector("#gallery")!.append(renderer.domElement);
-  document.querySelector("#variants")!.textContent = variants.map(({ id, phase }) => {
+  document.querySelector("#variants")!.textContent = variants.map(({ id, phase, shape }) => {
     const { period, tilt } = starMotion(140, phase, 0);
-    return `${id}: 위상 ${phase.toFixed(3)}, 주기 ${period.toFixed(1)}초, 기울기 ${(tilt * 180 / Math.PI).toFixed(1)}°`;
+    return `${id}: 모양 ${shape + 1}, 위상 ${phase.toFixed(3)}, 주기 ${period.toFixed(1)}초, 기울기 ${(tilt * 180 / Math.PI).toFixed(1)}°`;
   }).join("\n");
   const media = matchMedia("(prefers-reduced-motion: reduce)");
   const clock = { seconds: 0, lastTime: null as number | null };
@@ -164,10 +170,10 @@ try {
         renderer.setScissor(col * width, (2 - row) * width, width, width);
         draw(size, color, time, starPhase(`${row}-${col}`));
       }
-      for (const [col, { phase }] of variants.entries()) {
+      for (const [col, { phase, shape }] of variants.entries()) {
         renderer.setViewport(col * width, 0, width, width);
         renderer.setScissor(col * width, 0, width, width);
-        draw(140, colors[0], time, phase);
+        draw(140, colors[0], time, phase, 1, shape);
       }
     }
     frame = requestAnimationFrame(animate);
