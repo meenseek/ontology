@@ -223,7 +223,7 @@ export default function App() {
           <p className="hint">{data?.model.clusters.filter(c => c.members.length > 1).length ?? 0}개 군집 · 단독 항목 {data?.model.clusters.filter(c => c.members.length === 1).length ?? 0}개</p>
           <p className="hint">표시된 현재 관계로 계산합니다. 군집은 자동 분류가 아닙니다.</p>
         </section>
-        <details className="section"><summary>검색 방법</summary><p className="hint">현재 범위에서 경로와 검색 가능한 원문 내용을 찾습니다. 텍스트를 검색할 수 없는 첨부 파일도 경로로 찾습니다. 관계 없는 원문은 독립 항목입니다.</p></details>
+        <details className="section"><summary>검색 방법</summary><p className="hint">단어를 띄어 쓰면 순서와 관계없이 모든 단어가 포함된 항목을 찾습니다. 경로와 검색 가능한 원문 내용도 함께 찾습니다. 텍스트를 검색할 수 없는 첨부 파일은 경로로 찾습니다. 관계 없는 원문은 독립 항목입니다.</p></details>
       </aside>}
       <section className="galaxy" aria-label="지식 지도" aria-busy={loading} inert={!!panel && narrow}>
         <div className="map-toolbar"><div className="map-title"><h1>{cluster ? cluster.label : route.q ? `“${route.q}” 검색` : "지식 지도"}</h1><p className="count-breakdown">표시 중 · 문서 {data ? displayed.filter(n => n.kind === "document").length : "—"} · 기록 {data ? displayed.filter(n => n.kind === "memory").length : "—"} · 관계 {data ? shown.links.length : "—"}</p></div>
