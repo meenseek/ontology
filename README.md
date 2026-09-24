@@ -102,7 +102,8 @@ Wrong store, missing source, pending apply와 아직 준비되지 않은 project
 터미널을 닫거나 앱 프로세스가 종료돼도 launchd가 다시 시작한다. Docker가 아직
 준비되지 않았다면 DB 연결이 가능해질 때까지 재시도한다. 상태는
 `python3 scripts/local_service.py status`, 중지는
-`python3 scripts/local_service.py remove`로 확인·수행한다. 로그는
+`python3 scripts/local_service.py remove`로 확인·수행한다. 제거하면 Library의
+실행 복사본과 `.env` 복사본도 지운다. 로그는
 `~/Library/Logs/meenseek-ontology.log`에 기록한다.
 
 소스·schema 업그레이드 전에는 서비스를 제거한다. 기존 백업·복원·migration 절차를

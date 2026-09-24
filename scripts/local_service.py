@@ -45,6 +45,8 @@ def install() -> None:
     RUNTIME.parent.mkdir(parents=True, exist_ok=True)
     stage = RUNTIME.with_name(RUNTIME.name + ".new")
     previous = RUNTIME.with_name(RUNTIME.name + ".previous")
+    if RUNTIME.is_symlink():
+        raise RuntimeError("실행 디렉터리가 심볼릭 링크입니다. 직접 확인하세요.")
     if stage.exists() or previous.exists():
         raise RuntimeError("이전 설치의 임시 실행본이 남아 있습니다. 먼저 상태를 확인하세요.")
     stage.mkdir(mode=0o700)
@@ -98,9 +100,13 @@ def install() -> None:
 
 
 def remove() -> None:
+    if RUNTIME.is_symlink():
+        raise RuntimeError("실행 디렉터리가 심볼릭 링크입니다. 직접 확인하세요.")
     if installed():
         bootout()
         PLIST.unlink()
+    if RUNTIME.is_dir():
+        shutil.rmtree(RUNTIME)
     print("로그인 서비스 제거 완료")
 
 
