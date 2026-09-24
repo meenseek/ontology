@@ -1,6 +1,6 @@
 import { UndirectedGraph } from "graphology";
 import louvain from "graphology-communities-louvain";
-import { nodePresentation, repositoryNames } from "./presentation.ts";
+import { fileName, nodePresentation, repositoryNames } from "./presentation.ts";
 
 export type Scope = "meenseek" | "personal";
 export type NodeKind = "document" | "memory" | "topic" | "subject" | "area";
@@ -172,6 +172,26 @@ export function visibleGraph(model: Model, filters: Filters): { nodes: Positione
     (filters.state === "all" || (filters.state === "active" ? active(n) : filters.state === "attention" ? knowledge(n) && !active(n) : n.status === filters.state)));
   const ids = new Set(nodes.map(n => n.id));
   return { nodes, links: model.links.filter(l => ids.has(l.source) && ids.has(l.target)) };
+}
+/** Put filename matches ahead of broad body/path matches in the searchable list. */
+export function searchResults<T extends GraphNode>(nodes: T[], query: string): T[] {
+  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return nodes.filter(node => node.search_match !== false);
+  const phrase = terms.join(" ");
+  const includesAll = (text: string) => terms.every(term => text.includes(term));
+  const score = (node: GraphNode) => {
+    const name = node.kind === "document" ? fileName(node.label) : node.label;
+    const stem = name.replace(/\.[^.]+$/, "").toLocaleLowerCase();
+    const path = node.label.toLocaleLowerCase();
+    const match = stem === phrase ? 0 : stem.startsWith(phrase) ? 1 : includesAll(stem) ? 2 : includesAll(path) ? 3 : 4;
+    const depth = node.kind === "document" ? node.label.split(/[\\/]/).length : 0;
+    return [match, node.kind === "document" || node.kind === "memory" ? 0 : 1, depth, stem.length] as const;
+  };
+  return nodes.filter(node => node.search_match !== false).sort((a, b) => {
+    const left = score(a), right = score(b);
+    for (let i = 0; i < left.length; i++) if (left[i] !== right[i]) return left[i] - right[i];
+    return compare(a.id, b.id);
+  });
 }
 export function parseLocation(search: string): { scope: Scope; q: string; focus: string | null } {
   const params = new URLSearchParams(search);

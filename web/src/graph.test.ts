@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Positions, compactSlots } from "./positions.ts";
-import { active, graphUrl, parseLocation, reconcile, sameGraphLocation, stateName, visibleGraph, visualSatellites } from "./graph.ts";
+import { active, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
 const memory = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "memory", label: id, revision: "1", status: "accepted", temporal: "current", supported: true });
@@ -140,6 +140,28 @@ test("presentation retains disambiguating paths and never treats a folder as own
   assert.deepEqual(nodePresentation({ kind: "memory", label: "a/b is my literal title" }), { title: "a/b is my literal title", subtitle: "" });
   assert.equal(fileName("C:\\local\\note.md"), "note.md");
   assert.deepEqual(nodePresentation({ kind: "document", label: "meenseek/private/notes.md" }), { title: "notes.md", subtitle: "meenseek/private/notes.md" });
+});
+test("broad year searches surface a matching filename before deep path and body matches", () => {
+  const nodes = [
+    { ...doc("a"), label: "writing/applications/2026/company/jd.md", search_match: true },
+    { ...doc("b"), label: "decisions/2026-job-search.md", search_match: true },
+    { ...doc("c"), label: "knowledge/2026-market.md", search_match: true },
+    { ...doc("d"), label: "decisions/other.md", excerpt: "2026 activity", search_match: true },
+    { ...doc("e"), label: "decisions/2026-hidden.md", search_match: false },
+  ];
+  assert.deepEqual(searchResults(nodes, "2026").map(node => node.id), ["c", "b", "a", "d"]);
+  assert.deepEqual(nodes.map(node => node.id), ["a", "b", "c", "d", "e"], "input order is untouched");
+});
+test("multiword searches put filenames containing every term before path and body matches", () => {
+  const nodes = [
+    { ...doc("body"), label: "a.md", excerpt: "2026 지원", search_match: true },
+    { ...doc("path"), label: "2026/notes/지원.md", search_match: true },
+    { ...doc("name"), label: "2026-지원.md", search_match: true },
+    { ...doc("hidden"), label: "2026-지원-hidden.md", search_match: false },
+  ];
+  for (const query of ["2026 지원", "지원   2026"]) {
+    assert.deepEqual(searchResults(nodes, query).map(node => node.id), ["name", "path", "body"]);
+  }
 });
 test("sprite projection keeps visual and picking sizes independent across viewport and camera changes", async () => {
   const { spriteScale } = await import("./presentation.ts");
