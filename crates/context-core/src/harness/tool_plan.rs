@@ -332,21 +332,6 @@ impl PreparedHarnessRun {
                 "raw tool-plan bytes and decoded tool plan must be supplied together".to_owned(),
             ));
         }
-        let decoded_plan: HarnessPlan = super::decode_current_json(raw_plan_bytes, "Harness plan")?;
-        if decoded_plan != plan {
-            return Err(HarnessError::InvalidPlan(
-                "decoded current plan does not match the exact raw plan bytes".to_owned(),
-            ));
-        }
-        if let (Some(bytes), Some(expected)) = (raw_tool_plan_bytes, tool_plan.as_ref()) {
-            let decoded: ToolExecutionPlan =
-                super::decode_current_json(bytes, "Harness tool plan")?;
-            if &decoded != expected {
-                return Err(HarnessError::InvalidPlan(
-                    "decoded tool plan does not match the exact raw tool-plan bytes".to_owned(),
-                ));
-            }
-        }
         let plan_identity =
             RawNormalizedInputIdentity::from_current_json(raw_plan_bytes, "Harness plan", &plan)?;
         let tool_plan_identity = raw_tool_plan_bytes
