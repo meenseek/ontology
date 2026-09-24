@@ -93,7 +93,12 @@ Wrong store, missing source, pending apply와 아직 준비되지 않은 project
 
 한 번만 `cargo build --locked --offline`과 `npm --prefix web run build`를 실행한 뒤
 `python3 scripts/local_service.py install`로 macOS 로그인 서비스를 설치할 수 있다.
-서비스는 기존 `.env`와 로컬 DB를 사용하고 앱을 127.0.0.1:47831에 실행한다.
+설치기는 실행 파일·웹 번들과 기존 `.env`를 사용자 전용
+`~/Library/Application Support/meenseek-ontology`에 복사한다. `.env`는 0600으로
+보호하고 launchd 설정에는 비밀번호를 넣지 않는다. 서비스는 기존 로컬 DB를 사용하고
+앱을 127.0.0.1:47831에 실행한다. macOS의 Desktop 파일 접근 제한 때문에
+로그인 서비스에서는 지정 원문 자동 갱신을 실행하지 않는다. 원문 갱신은 Desktop의
+기존 `sync-once` 절차에서 수행한다.
 터미널을 닫거나 앱 프로세스가 종료돼도 launchd가 다시 시작한다. Docker가 아직
 준비되지 않았다면 DB 연결이 가능해질 때까지 재시도한다. 상태는
 `python3 scripts/local_service.py status`, 중지는

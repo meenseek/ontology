@@ -10,6 +10,9 @@ set -a
 source "$root/.env"
 set +a
 : "${ONTOLOGY_DB_PASSWORD:?Existing database password is required}"
+# A login agent cannot read Desktop Git sources under macOS file privacy.
+# Source sync remains an explicit Terminal operation; serving uses the native DB.
+unset ONTOLOGY_SYNC_CONFIG
 export DATABASE_URL="postgresql://ontology:${ONTOLOGY_DB_PASSWORD}@127.0.0.1:55432/ontology"
 export ONTOLOGY_PORT=47831
 cd "$root"

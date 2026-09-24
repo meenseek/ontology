@@ -9,14 +9,16 @@ import argparse
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import subprocess
 import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME = Path.home() / "Library/Application Support/meenseek-ontology"
 LABEL = "com.meenseek.ontology"
 PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
-PROGRAM = ROOT / "scripts/serve-local.sh"
+PROGRAM = RUNTIME / "scripts/serve-local.sh"
 LOG = Path.home() / "Library/Logs/meenseek-ontology.log"
 DOMAIN = f"gui/{os.getuid()}"
 
@@ -40,6 +42,19 @@ def install() -> None:
         raise RuntimeError("실행 파일이 없습니다. cargo build --locked --offline을 먼저 실행하세요.")
     if not (ROOT / "web/dist/index.html").is_file():
         raise RuntimeError("웹 번들이 없습니다. web에서 npm run build를 먼저 실행하세요.")
+    RUNTIME.parent.mkdir(parents=True, exist_ok=True)
+    stage = RUNTIME.with_name(RUNTIME.name + ".new")
+    previous = RUNTIME.with_name(RUNTIME.name + ".previous")
+    if stage.exists() or previous.exists():
+        raise RuntimeError("이전 설치의 임시 실행본이 남아 있습니다. 먼저 상태를 확인하세요.")
+    stage.mkdir(mode=0o700)
+    (stage / "scripts").mkdir(mode=0o700)
+    (stage / "target/debug").mkdir(parents=True, mode=0o700)
+    shutil.copy2(ROOT / "scripts/serve-local.sh", stage / "scripts/serve-local.sh")
+    shutil.copy2(ROOT / "target/debug/meenseek-ontology", stage / "target/debug/meenseek-ontology")
+    shutil.copytree(ROOT / "web/dist", stage / "web/dist")
+    shutil.copyfile(ROOT / ".env", stage / ".env")
+    (stage / ".env").chmod(0o600)
     PLIST.parent.mkdir(parents=True, exist_ok=True)
     LOG.parent.mkdir(parents=True, exist_ok=True)
     LOG.touch(mode=0o600, exist_ok=True)
@@ -57,10 +72,28 @@ def install() -> None:
     with target.open("wb") as file:
         plistlib.dump(data, file)
     target.chmod(0o600)
+    old_plist = PLIST.read_bytes() if installed() else None
     if installed():
         bootout()
-    os.replace(target, PLIST)
-    launchctl("bootstrap", DOMAIN, str(PLIST))
+    if RUNTIME.exists():
+        os.replace(RUNTIME, previous)
+    try:
+        os.replace(stage, RUNTIME)
+        os.replace(target, PLIST)
+        launchctl("bootstrap", DOMAIN, str(PLIST))
+    except (OSError, subprocess.CalledProcessError):
+        if RUNTIME.exists():
+            shutil.rmtree(RUNTIME)
+        if previous.exists():
+            os.replace(previous, RUNTIME)
+        if old_plist is not None:
+            PLIST.write_bytes(old_plist)
+            launchctl("bootstrap", DOMAIN, str(PLIST), check=False)
+        elif PLIST.exists():
+            PLIST.unlink()
+        raise
+    if previous.exists():
+        shutil.rmtree(previous)
     print(f"설치 완료: {PLIST}")
 
 
