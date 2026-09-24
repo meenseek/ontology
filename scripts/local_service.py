@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LABEL = "com.meenseek.ontology"
 PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
 PROGRAM = ROOT / "scripts/serve-local.sh"
+LOG = Path.home() / "Library/Logs/meenseek-ontology.log"
 DOMAIN = f"gui/{os.getuid()}"
 
 
@@ -40,13 +41,17 @@ def install() -> None:
     if not (ROOT / "web/dist/index.html").is_file():
         raise RuntimeError("웹 번들이 없습니다. web에서 npm run build를 먼저 실행하세요.")
     PLIST.parent.mkdir(parents=True, exist_ok=True)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    LOG.touch(mode=0o600, exist_ok=True)
+    LOG.chmod(0o600)
     data = {
         "Label": LABEL,
         "ProgramArguments": ["/bin/bash", str(PROGRAM)],
-        "WorkingDirectory": str(ROOT),
         "RunAtLoad": True,
         "KeepAlive": True,
         "ThrottleInterval": 30,
+        "StandardOutPath": str(LOG),
+        "StandardErrorPath": str(LOG),
     }
     target = PLIST.with_suffix(".plist.tmp")
     with target.open("wb") as file:
