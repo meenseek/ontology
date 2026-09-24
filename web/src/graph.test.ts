@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Positions } from "./positions.ts";
+import { Positions, compactSlots } from "./positions.ts";
 import { active, graphUrl, parseLocation, reconcile, sameGraphLocation, stateName, visibleGraph, visualSatellites } from "./graph.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
@@ -478,17 +478,21 @@ test("current, stale, failed and missing Context documents retain their honest s
   assert.equal(model.links.length, 1); assert.equal(model.clusters.length, 2);
 });
 
-test("only held node moves during small and large drags; release compacts around the drop", () => {
-  for (const distance of [8, 200]) {
-    const model = reconcile(snapshot([doc("a"), doc("b"), doc("other")], [edge("a", "b")]));
+test("each stretched link waits for its own slack before drawing a neighbor, including past evidence", () => {
+  for (const current of [true, false]) {
+    const model = reconcile(snapshot([doc("a"), doc("b"), doc("other")], [edge("a", "b", current)]));
     const positions = new Positions(); positions.install(model);
     const [a, b, other] = model.nodes, baseline = model.nodes.map(n => ({ ...n }));
     positions.begin(a.id, 1);
-    positions.move(a.id, { x: distance, y: 0, z: 0 }); positions.advance(1000, false);
-    assert.deepEqual(b, baseline[1], "no followers move while dragging");
-    positions.release(1000, false); assert.deepEqual(b, baseline[1], "release starts without teleporting");
-    positions.advance(1016, false); assert.notEqual(b.x, baseline[1].x);
-    positions.advance(2100, false); assert.equal(b.x, distance + 24); assert.equal(a.x, distance);
+    positions.move(a.id, { x: 8, y: 0, z: 0 }); positions.advance(0, false); positions.advance(16, false);
+    assert.deepEqual(b, baseline[1], "a short pull leaves the linked endpoint in place");
+    positions.move(a.id, { x: 200, y: 0, z: 0 }); positions.advance(32, false);
+    assert.ok(b.x > baseline[1].x, "a stretched link draws its endpoint while held");
+    const duringDrag = b.x;
+    positions.release(32, false); assert.equal(b.x, duringDrag, "release does not teleport");
+    positions.advance(160, false);
+    assert.ok(b.x > duringDrag, "follower heads toward the compact slot after release");
+    positions.advance(2100, false); assert.equal(b.x, 224); assert.equal(a.x, 200);
     assert.deepEqual(other, baseline[2]);
   }
 });
@@ -515,23 +519,121 @@ test("adjacency maps stars and chains to equal nearest-neighbor lattice edges", 
     assert.deepEqual(model.links, links, "semantic edges are unchanged");
   }
 });
-test("followers visibly overshoot while held node stays fixed, then settle independently of frame rate", () => {
+test("seven historical spokes compact without overlap even though seven exact 24px spokes are impossible", () => {
+  for (const picked of ["center", "record0"]) {
+    const records = Array.from({ length: 7 }, (_, index) => ({ ...memory(`record${index}`), supported: false }));
+    const links: GraphLink[] = records.map(record => ({ ...edge("center", record.id, false), kind: "evidence" }));
+    const model = reconcile(snapshot([doc("center"), ...records], links));
+    const positions = new Positions(); positions.install(model);
+    const center = model.nodes.find(node => node.id === "center")!;
+    const before = Math.max(...model.nodes.filter(node => node !== center).map(node => Math.hypot(node.x - center.x, node.y - center.y)));
+    assert.ok(before > 48, "automatic layout starts wider than a two-ring constellation");
+    positions.begin(picked, 1); positions.move(picked, { x: 1000, y: 0, z: 0 }); positions.release(0, true);
+    const after = Math.max(...model.nodes.filter(node => node !== center).map(node => Math.hypot(node.x - center.x, node.y - center.y)));
+    assert.ok(after <= 48 + 1e-9, "every brown edge shrinks into two 24px rings");
+    for (const [index, node] of model.nodes.entries()) for (const other of model.nodes.slice(index + 1)) {
+      assert.ok(Math.hypot(node.x - other.x, node.y - other.y) >= 24 - 1e-9, "nodes stay distinct");
+    }
+  }
+});
+test("tension travels through a chain only after each successive edge stretches", () => {
+  const ids = ["a", "b", "c"];
+  const model = reconcile(snapshot(ids.map(doc), [edge("a", "b"), edge("b", "c")]));
+  for (const [index, node] of model.nodes.entries()) Object.assign(node, { x: index * 24, y: 0, z: 0, fx: index * 24, fy: 0, fz: 0 });
+  const positions = new Positions(); positions.install(model); positions.begin("a", 1);
+  positions.move("a", { x: -70, y: 0, z: 0 }); positions.advance(0, false); positions.advance(16, false);
+  assert.ok(model.nodes[1].x < 24, "direct neighbor follows after its edge exceeds 48px");
+  assert.equal(model.nodes[2].x, 48, "second neighbor still waits for its own edge");
+  positions.advance(300, false);
+  assert.ok(model.nodes[2].x < 48, "second neighbor follows once that edge stretches");
+  positions.release(300, true);
+  for (const link of model.links) {
+    const a = model.nodes.find(node => node.id === link.source)!, b = model.nodes.find(node => node.id === link.target)!;
+    assert.ok(Math.abs(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) - 24) < 1e-9);
+  }
+});
+test("tension uses each edge's visible starting length, including short and depth-tilted edges", () => {
+  for (const baseline of [{ x: 12, z: 0 }, { x: 0, z: 100 }]) {
+    const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));
+    Object.assign(model.nodes[0], { x: 0, y: 0, z: 0 });
+    Object.assign(model.nodes[1], { x: baseline.x, y: 0, z: baseline.z });
+    const positions = new Positions(); positions.install(model); positions.begin("a", 1);
+    positions.move("a", { x: -20, y: 0, z: 0 }); positions.advance(0, false); positions.advance(16, false);
+    assert.equal(model.nodes[1].x, baseline.x, "edge remains slack before its visible length gains 24px");
+    positions.move("a", { x: -30, y: 0, z: 0 }); positions.advance(32, false);
+    assert.ok(model.nodes[1].x < baseline.x, "edge follows after its visible length gains 24px");
+  }
+  const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));
+  Object.assign(model.nodes[0], { x: 0, y: 0, z: 0 });
+  Object.assign(model.nodes[1], { x: 12, y: 0, z: 0 });
+  const positions = new Positions(); positions.install(model);
+  positions.begin("a", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    project: value => ({ x: value.x * 2, y: value.y, depth: 1 }) });
+  positions.move("a", { x: -20, y: 0, z: 0 }); positions.advance(0, false); positions.advance(16, false);
+  assert.ok(model.nodes[1].x < 12, "the camera's projected pixel scale determines the threshold");
+});
+test("perspective drag reaches the screen-space edge limit across unequal depths", () => {
+  const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));
+  Object.assign(model.nodes[0], { x: 0, y: 0, z: 10 });
+  Object.assign(model.nodes[1], { x: 100, y: 0, z: 100 });
+  const positions = new Positions(); positions.install(model);
+  const project = (value: { x: number; y: number; z: number }) => ({ x: 100 * value.x / value.z, y: 100 * value.y / value.z, depth: value.z });
+  positions.begin("a", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24, project });
+  positions.move("a", { x: -50, y: 0, z: 10 }); positions.advance(0, true);
+  const a = project(model.nodes[0]), b = project(model.nodes[1]);
+  assert.ok(Math.abs(Math.hypot(a.x - b.x, a.y - b.y) - 124) < 1e-9);
+});
+test("release ripples into 24px slots without a jump and remains frame-rate independent", () => {
   const make = () => {
     const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));
     const positions = new Positions(); positions.install(model); positions.begin("a", 1);
-    positions.move("a", { x: 200, y: 20, z: 30 }); positions.release(0, false);
+    positions.move("a", { x: 200, y: 20, z: 30 }); positions.advance(0, false);
     return { positions, model };
   };
   const { positions, model } = make(), single = make();
   const held = { ...model.nodes[0] };
   for (let t = 16; t <= 160; t += 16) positions.advance(t, false);
   single.positions.advance(160, false);
-  assert.ok(model.nodes[1].x > 224, "follower passes its compact target after release");
+  assert.ok(model.nodes[1].x < 224, "held neighbor remains outside its final slot");
   assert.ok(Math.abs(model.nodes[1].x - single.model.nodes[1].x) < 1e-9);
-  assert.deepEqual(model.nodes[0], held, "held node never participates in spring motion");
-  positions.advance(1100, false);
+  assert.deepEqual(model.nodes[0], held, "held node never participates in follower motion");
+  const atRelease = model.nodes[1].x;
+  positions.release(160, false); assert.equal(model.nodes[1].x, atRelease);
+  single.positions.release(160, false);
+  const samples: number[] = [];
+  for (let t = 176; t <= 1000; t += 16) { positions.advance(t, false); samples.push(model.nodes[1].x); }
+  single.positions.advance(1000, false);
+  assert.ok(Math.abs(model.nodes[1].x - single.model.nodes[1].x) < 1e-8);
+  assert.ok(samples.some(x => x > 224), "small damped overshoot gives the release its ripple");
+  assert.ok(Math.max(...samples) < 224 + (224 - atRelease) * .08, "ripple remains restrained");
+  positions.advance(2160, false);
   assert.deepEqual([model.nodes[1].x, model.nodes[1].y, model.nodes[1].z], [224, 20, 30]);
   const stable = model.nodes.map(n => ({ ...n })); positions.advance(10000, false); assert.deepEqual(model.nodes, stable);
+});
+test("an 800-node path closes into a compact constellation with 24px links", () => {
+  const ids = Array.from({ length: 800 }, (_, index) => `n${String(index).padStart(3, "0")}`);
+  const adjacency = new Map(ids.map((id, index) => [id, new Set([...(index ? [ids[index - 1]] : []), ...(index < ids.length - 1 ? [ids[index + 1]] : [])])]));
+  for (const root of [ids[0], ids[400]]) {
+    const slots = compactSlots(root, ids.filter(id => id !== root), adjacency);
+    assert.equal(slots?.size, 799);
+    const placed = new Map([[root, { x: 0, y: 0 }], ...slots!]);
+    const values = [...placed.values()];
+    assert.ok((Math.max(...values.map(p => p.x)) - Math.min(...values.map(p => p.x))) * 24 < 1000);
+    assert.ok((Math.max(...values.map(p => p.y)) - Math.min(...values.map(p => p.y))) * 24 < 1000);
+    for (let index = 1; index < ids.length; index++) {
+      const a = placed.get(ids[index - 1])!, b = placed.get(ids[index])!;
+      assert.ok(Math.abs(Math.hypot(a.x - b.x, a.y - b.y) - 1) < 1e-9);
+    }
+  }
+});
+test("new drag recalculates 24 screen pixels after zoom while normal zoom scales placed nodes", () => {
+  const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));
+  const positions = new Positions(); positions.install(model);
+  positions.begin("a", .25); positions.move("a", { x: 200, y: 0, z: 0 }); positions.release(0, true);
+  assert.equal(Math.abs(model.nodes[1].x - model.nodes[0].x) / .25, 24);
+  assert.equal(Math.abs(model.nodes[1].x - model.nodes[0].x) / .5, 12, "subsequent zoom changes graph spacing normally");
+  positions.begin("a", .5); positions.move("a", { x: 220, y: 0, z: 0 }); positions.release(0, true);
+  assert.equal(Math.abs(model.nodes[1].x - model.nodes[0].x) / .5, 24);
 });
 test("compact targets grow in screen-plane rings with minimum spacing at different zooms", () => {
   for (const scale of [.25, 3]) {
@@ -551,7 +653,7 @@ test("compact targets grow in screen-plane rings with minimum spacing at differe
     positions.release(0, true); positions.advance(100, false); assert.deepEqual(model.nodes, stable, "reduced motion has no tail");
   }
 });
-test("cancellation freezes an active spring and invalid input cannot poison coordinates", () => {
+test("cancellation freezes an active flow and invalid input cannot poison coordinates", () => {
   const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));
   const positions = new Positions(); positions.install(model); positions.begin("a", 1);
   positions.move("a", { x: 200, y: 0, z: 0 }); positions.release(0, false); positions.advance(50, false);
@@ -621,19 +723,266 @@ test("past-evidence singleton is initially near one host without changing semant
   assert.deepEqual(reversed, model, "anchor and layout ignore input order");
   assert.deepEqual(reconcile(source, model), model, "unchanged refresh preserves every retained coordinate");
 });
-test("host and hidden satellite drags share one visual group without following a stale bridge", () => {
+test("past evidence bridges move both clusters and a hidden satellite into one visual constellation", () => {
   for (const picked of ["a0", "z_record"]) {
     const model = reconcile(satelliteFixture()), before = model.nodes.map(n => ({ ...n }));
     const positions = new Positions(); positions.install(model);
     const shown = visibleGraph(model, { kind: "document", state: "all", cluster: null });
     assert.equal(shown.nodes.some(n => n.id === "z_record"), false);
-    positions.begin(picked, 1); positions.move(picked, { x: 1500, y: 1500, z: 20 }); positions.release(0, true);
+    positions.begin(picked, 1); positions.move(picked, { x: 1500, y: 1500, z: 20 }); positions.advance(0, true);
+    assert.notDeepEqual(model.nodes.find(n => n.id === "b0"), before.find(n => n.id === "b0"), "far end of the brown edge follows during drag");
+    positions.release(0, true);
     for (const node of model.nodes) {
-      if (node.id.startsWith("a") || node.id === "z_record") assert.ok(Math.hypot(node.x - 1500, node.y - 1500, node.z - 20) <= 24 + 1e-9);
-      else assert.deepEqual(node, before.find(n => n.id === node.id), "other host cluster and unlinked orphan stay fixed");
+      if (node.id.startsWith("a") || node.id.startsWith("b") || node.id === "z_record") assert.ok(Math.hypot(node.x - 1500, node.y - 1500, node.z - 20) <= 48 + 1e-9);
+      else assert.deepEqual(node, before.find(n => n.id === node.id), "unlinked orphan stays fixed");
+    }
+    for (const link of model.links.filter(link => link.kind === "evidence")) {
+      const source = model.nodes.find(node => node.id === link.source)!, target = model.nodes.find(node => node.id === link.target)!;
+      assert.ok(Math.hypot(source.x - target.x, source.y - target.y, source.z - target.z) <= 24 + 1e-9, "brown edge is compact");
     }
     assert.deepEqual(model.nodes.map(n => n.cluster), before.map(n => n.cluster));
+    assert.deepEqual(visibleGraph(model, { kind: "document", state: "all", cluster: null }).links, shown.links, "display filtering stays unchanged");
     positions.reset(); assert.deepEqual(model.nodes, before);
+  }
+});
+test("a past record with several cross-cluster links keeps every brown edge at 24 pixels", () => {
+  const source = satelliteFixture();
+  source.links.push(
+    { source: "z_record", target: "a1", kind: "evidence", current: false },
+    { source: "z_record", target: "b1", kind: "evidence", current: false },
+  );
+  const model = reconcile(source), positions = new Positions(); positions.install(model);
+  positions.begin("a0", 1); positions.move("a0", { x: 1500, y: 1500, z: 0 }); positions.release(0, true);
+  for (const link of model.links.filter(link => link.kind === "evidence")) {
+    const a = model.nodes.find(node => node.id === link.source)!, b = model.nodes.find(node => node.id === link.target)!;
+    assert.ok(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) <= 24 + 1e-9, `${link.source} → ${link.target} remains 24px or closer`);
+  }
+});
+test("two past records bridging different documents keep both constellations compact", () => {
+  const nodes = [doc("a0"), doc("a1"), doc("a2"), doc("b0"), doc("b1"), doc("b2"), { ...memory("z0"), supported: false }, { ...memory("z1"), supported: false }];
+  const links: GraphLink[] = [edge("a0", "a1"), edge("a0", "a2"), edge("a1", "a2"), edge("b0", "b1"), edge("b0", "b2"), edge("b1", "b2"),
+    { source: "z0", target: "a0", kind: "evidence", current: false }, { source: "z0", target: "b0", kind: "evidence", current: false },
+    { source: "z1", target: "a2", kind: "evidence", current: false }, { source: "z1", target: "b2", kind: "evidence", current: false }];
+  const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model);
+  positions.begin("a0", 1); positions.move("a0", { x: 1000, y: 0, z: 0 }); positions.release(0, true);
+  for (const link of model.links) {
+    const a = model.nodes.find(node => node.id === link.source)!, b = model.nodes.find(node => node.id === link.target)!;
+    assert.ok(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) <= 24 + 1e-9, `${link.source} → ${link.target} is one lattice step`);
+  }
+});
+test("brown evidence cycles keep 24px edges in a compact constellation at small and capped sizes", () => {
+  for (const count of [10, 100, 400]) {
+    const documents = Array.from({ length: count }, (_, index) => doc(`d${String(index).padStart(3, "0")}`));
+    const records = Array.from({ length: count }, (_, index) => ({ ...memory(`m${String(index).padStart(3, "0")}`), supported: false }));
+    const links: GraphLink[] = records.flatMap((record, index) => [index, (index + 1) % count].map(target => ({ source: record.id, target: documents[target].id, kind: "evidence", current: false })));
+    const model = reconcile(snapshot([...documents, ...records], links)), positions = new Positions(); positions.install(model);
+    positions.begin(documents[0].id, 1); positions.move(documents[0].id, { x: 1000, y: 0, z: 0 }); positions.release(0, true);
+    const byId = new Map(model.nodes.map(node => [node.id, node]));
+    for (const link of model.links) {
+      const a = byId.get(link.source)!, b = byId.get(link.target)!;
+      assert.ok(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) <= 24 + 1e-9, `${link.source} → ${link.target} is 24px`);
+    }
+    const xs = model.nodes.map(node => node.x), ys = model.nodes.map(node => node.y);
+    const bound = 24 * (Math.ceil(Math.sqrt(model.nodes.length)) + 3);
+    assert.ok(Math.max(...xs) - Math.min(...xs) <= bound, `${model.nodes.length} nodes stay compact horizontally`);
+    assert.ok(Math.max(...ys) - Math.min(...ys) <= bound, `${model.nodes.length} nodes stay compact vertically`);
+  }
+});
+test("odd cycles also keep distinct nodes and equal 24px edges", () => {
+  for (const count of [3, 5, 7]) {
+    const nodes = Array.from({ length: count }, (_, index) => doc(`cycle-${index}`));
+    const links = nodes.map((node, index) => edge(node.id, nodes[(index + 1) % count].id));
+    const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model);
+    positions.begin(nodes[0].id, 1); positions.move(nodes[0].id, { x: 1000, y: 0, z: 0 }); positions.release(0, true);
+    const byId = new Map(model.nodes.map(node => [node.id, node]));
+    assert.equal(new Set(model.nodes.map(node => `${node.x},${node.y}`)).size, count);
+    for (const link of model.links) {
+      const a = byId.get(link.source)!, b = byId.get(link.target)!;
+      assert.ok(Math.abs(Math.hypot(a.x - b.x, a.y - b.y) - 24) < 1e-9);
+    }
+  }
+});
+test("a cycle with a leaf keeps every kind of edge at 24px", () => {
+  const verify = (count: number, kind: GraphLink["kind"], picked: string) => {
+    const nodes = [...Array.from({ length: count }, (_, index) => doc(`n${index}`)), doc("leaf")];
+    const links: GraphLink[] = Array.from({ length: count }, (_, index) => ({ ...edge(`n${index}`, `n${(index + 1) % count}`, kind === "related"), kind }));
+    links.push({ ...edge("n0", "leaf", kind === "related"), kind });
+    const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model);
+    positions.begin(picked, 1); positions.move(picked, { x: 10000, y: 0, z: 0 }); positions.release(0, true);
+    const byId = new Map(model.nodes.map(node => [node.id, node]));
+    assert.equal(new Set(model.nodes.map(node => `${node.x},${node.y}`)).size, nodes.length, "nodes do not overlap");
+    for (const link of model.links) {
+      const a = byId.get(link.source)!, b = byId.get(link.target)!;
+      assert.ok(Math.abs(Math.hypot(a.x - b.x, a.y - b.y) - 24) < 1e-9, `${kind}: ${link.source} → ${link.target} is 24px`);
+    }
+    const xs = model.nodes.map(node => node.x), ys = model.nodes.map(node => node.y);
+    const bound = 24 * (Math.ceil(Math.sqrt(nodes.length)) + 3);
+    assert.ok(Math.max(...xs) - Math.min(...xs) <= bound && Math.max(...ys) - Math.min(...ys) <= bound, "leaf stays in a compact constellation");
+  };
+  for (const kind of ["related", "evidence", "topic", "subject", "area"] as const) for (const picked of ["n0", "n10", "leaf"]) verify(20, kind, picked);
+  for (const count of [100, 400]) verify(count, "evidence", "leaf");
+});
+test("cycle branches and two bridged cycles share the same 24px edge layout", () => {
+  const check = (nodes: GraphNode[], links: GraphLink[], picked: string) => {
+    const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model);
+    positions.begin(picked, 1); positions.move(picked, { x: 10000, y: 0, z: 0 }); positions.release(0, true);
+    const byId = new Map(model.nodes.map(node => [node.id, node]));
+    assert.equal(new Set(model.nodes.map(node => `${node.x},${node.y}`)).size, nodes.length, "all nodes occupy distinct slots");
+    for (const link of model.links) {
+      const a = byId.get(link.source)!, b = byId.get(link.target)!;
+      assert.ok(Math.abs(Math.hypot(a.x - b.x, a.y - b.y) - 24) < 1e-9, `${link.source} → ${link.target} is 24px`);
+    }
+  };
+  const first = Array.from({ length: 20 }, (_, index) => doc(`a${index}`));
+  const second = Array.from({ length: 20 }, (_, index) => doc(`b${index}`));
+  const cycle = (prefix: string) => Array.from({ length: 20 }, (_, index) => ({ ...edge(`${prefix}${index}`, `${prefix}${(index + 1) % 20}`, false), kind: "evidence" as const }));
+  const leaves = [doc("leaf0"), doc("leaf10"), doc("tip0"), doc("tip10")];
+  const branched = [...cycle("a"), { ...edge("a0", "leaf0", false), kind: "evidence" as const }, { ...edge("a10", "leaf10", false), kind: "evidence" as const }, edge("leaf0", "tip0"), edge("leaf10", "tip10")];
+  for (const picked of ["a0", "a10", "leaf0", "tip10"]) check([...first, ...leaves], branched, picked);
+  const bridged = [...cycle("a"), ...cycle("b"), { ...edge("a0", "b0", false), kind: "evidence" as const }];
+  for (const picked of ["a0", "b10"]) check([...first, ...second], bridged, picked);
+});
+test("an impossible planar unit-edge graph follows a drag without stretching existing edges", () => {
+  const nodes = [doc("a"), doc("b"), doc("c"), doc("d")];
+  const links = nodes.flatMap((node, index) => nodes.slice(index + 1).map(other => edge(node.id, other.id)));
+  const model = reconcile(snapshot(nodes, links)), before = new Map(model.nodes.map(node => [node.id, { ...node }]));
+  const positions = new Positions(); positions.install(model);
+  model.nodes.find(node => node.id === "a")!.x = 1000; // DragControls moves the held node before the first callback.
+  positions.begin("a", 1); positions.move("a", { x: 1000, y: 0, z: 0 }); positions.release(0, true);
+  const shift = model.nodes.find(node => node.id === "a")!.x - before.get("a")!.x;
+  for (const node of model.nodes) {
+    assert.equal(node.x, before.get(node.id)!.x + shift);
+    assert.equal(node.y, before.get(node.id)!.y);
+    assert.equal(node.z, before.get(node.id)!.z);
+  }
+});
+test("feasible multi-cycle lattices keep every link at 24px", () => {
+  for (const [width, seed] of [[4, 28], [4, 35], [6, 28], [6, 35], [8, 25]]) {
+    const coordinates = Array.from({ length: width }, (_, q) => Array.from({ length: 5 }, (_, r) => ({ id: `${q},${r}`, q, r }))).flat();
+    const nodes = coordinates.map(({ id }) => doc(id));
+    let state = seed;
+    const random = () => ((state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296);
+    const links: GraphLink[] = [];
+    for (const { id, q, r } of coordinates) for (const [dq, dr] of [[1, 0], [0, 1], [1, -1]]) {
+      const other = `${q + dq},${r + dr}`;
+      if (q + dq >= width || r + dr < 0 || r + dr >= 5) continue;
+      if ((dq === 0 && dr === 1) || (r === 0 && dr === 0) || random() < .45) links.push(edge(id, other));
+    }
+    const model = reconcile(snapshot(nodes, links));
+    for (const node of model.nodes) {
+      const [q, r] = node.id.split(",").map(Number);
+      node.x = 100 * (q + r / 2); node.y = 100 * r * Math.sqrt(3) / 2; node.z = 0;
+    }
+    const positions = new Positions(); positions.install(model);
+    model.nodes.find(node => node.id === "0,0")!.x = 10000;
+    positions.begin("0,0", 1); positions.move("0,0", { x: 10000, y: 0, z: 0 }); positions.release(0, true);
+    const byId = new Map(model.nodes.map(node => [node.id, node]));
+    assert.equal(new Set(model.nodes.map(node => `${node.x},${node.y}`)).size, nodes.length);
+    for (const link of links) {
+      const a = byId.get(link.source)!, b = byId.get(link.target)!;
+      assert.ok(Math.abs(Math.hypot(a.x - b.x, a.y - b.y) - 24) < 1e-9, `${width}×5 seed ${seed}: ${link.source} → ${link.target} is 24px`);
+    }
+  }
+});
+test("a background layout preserves linked geometry until exact slots arrive", async () => {
+  const width = 8, height = 5, coordinates = Array.from({ length: width }, (_, q) => Array.from({ length: height }, (_, r) => ({ id: `${q},${r}`, q, r }))).flat();
+  let state = 25;
+  const random = () => ((state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296);
+  const links: GraphLink[] = [];
+  for (const { id, q, r } of coordinates) for (const [dq, dr] of [[1, 0], [0, 1], [1, -1]]) {
+    if (q + dq >= width || r + dr < 0 || r + dr >= height) continue;
+    if ((dq === 0 && dr === 1) || (r === 0 && dr === 0) || random() < .45) links.push(edge(id, `${q + dq},${r + dr}`));
+  }
+  const model = reconcile(snapshot(coordinates.map(({ id }) => doc(id)), links));
+  const originalWorker = globalThis.Worker;
+  let requested = 0;
+  class LayoutWorker {
+    onmessage: ((event: MessageEvent<{ token: number; slots: [string, { x: number; y: number }][] | null }>) => void) | null = null;
+    onerror: (() => void) | null = null;
+    stopped = false;
+    postMessage(request: { token: number; root: string; members: string[]; edges: [string, string][] }) {
+      requested++;
+      queueMicrotask(() => {
+        if (this.stopped) {
+          this.onmessage?.({ data: { token: request.token, slots: [] } } as MessageEvent<{ token: number; slots: [] }>);
+          return;
+        }
+        const adjacency = new Map([request.root, ...request.members].map(id => [id, new Set<string>()]));
+        for (const [a, b] of request.edges) { adjacency.get(a)!.add(b); adjacency.get(b)!.add(a); }
+        const solved = compactSlots(request.root, request.members, adjacency, 1000, 100000);
+        this.onmessage?.({ data: { token: request.token, slots: solved ? [...solved] : null } } as MessageEvent<{ token: number; slots: [string, { x: number; y: number }][] | null }>);
+      });
+    }
+    terminate() { this.stopped = true; }
+  }
+  globalThis.Worker = LayoutWorker as unknown as typeof Worker;
+  try {
+    const positions = new Positions(); positions.install(model);
+    const held = model.nodes.find(node => node.id === "0,0")!;
+    const before = new Map(model.nodes.map(node => [node.id, { ...node }]));
+    held.x = 10000;
+    positions.begin(held.id, 1); positions.move(held.id, { x: 10000, y: 0, z: 0 }); positions.release(0, true);
+    assert.equal(requested, 1, "expensive layout is delegated after the first movement");
+    const origin = before.get(held.id)!;
+    const shift = { x: held.x - origin.x, y: held.y - origin.y, z: held.z - origin.z };
+    for (const node of model.nodes) {
+      const original = before.get(node.id)!;
+      assert.ok(Math.abs(node.x - original.x - shift.x) < 1e-8 && Math.abs(node.y - original.y - shift.y) < 1e-8 && Math.abs(node.z - original.z - shift.z) < 1e-8,
+        "pending work preserves every edge's original geometry");
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    const byId = new Map(model.nodes.map(node => [node.id, node]));
+    for (const link of links) {
+      const a = byId.get(link.source)!, b = byId.get(link.target)!;
+      assert.ok(Math.abs(Math.hypot(a.x - b.x, a.y - b.y) - 24) < 1e-9, `${link.source} → ${link.target} settles at 24px`);
+    }
+    const next = reconcile(snapshot(coordinates.map(({ id }) => doc(id)), links));
+    const second = new Positions(); second.install(next);
+    const nextHeld = next.nodes.find(node => node.id === "0,0")!;
+    nextHeld.x = 10000;
+    second.begin(nextHeld.id, 1); second.move(nextHeld.id, { x: 10000, y: 0, z: 0 }); second.release(0, true);
+    assert.equal(requested, 2);
+    second.reset();
+    const restored = next.nodes.map(node => ({ ...node }));
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    assert.deepEqual(next.nodes, restored, "a result queued before reset cannot move the new graph");
+  } finally {
+    globalThis.Worker = originalWorker;
+  }
+});
+test("a failed background layout preserves a large impossible component", async () => {
+  const cycle = Array.from({ length: 40 }, (_, index) => `ring${index}`), clique = ["k0", "k1", "k2", "k3"];
+  const links = [...cycle.map((id, index) => edge(id, cycle[(index + 1) % cycle.length])),
+    ...clique.flatMap((id, index) => clique.slice(index + 1).map(other => edge(id, other))), edge(cycle[0], clique[0])];
+  const model = reconcile(snapshot([...cycle, ...clique].map(doc), links));
+  const originalWorker = globalThis.Worker;
+  let requested = 0;
+  class NoLayoutWorker {
+    onmessage: ((event: MessageEvent<{ token: number; slots: null }>) => void) | null = null;
+    onerror: (() => void) | null = null;
+    postMessage(request: { token: number }) {
+      requested++;
+      queueMicrotask(() => this.onmessage?.({ data: { token: request.token, slots: null } } as MessageEvent<{ token: number; slots: null }>));
+    }
+    terminate() {}
+  }
+  globalThis.Worker = NoLayoutWorker as unknown as typeof Worker;
+  try {
+    const positions = new Positions(); positions.install(model);
+    const before = new Map(model.nodes.map(node => [node.id, { ...node }]));
+    const held = model.nodes.find(node => node.id === cycle[0])!;
+    const drop = { x: held.x + 600, y: held.y, z: held.z };
+    positions.begin(held.id, 1); positions.move(held.id, drop); positions.release(0, true);
+    assert.equal(requested, 1, "the large cyclic graph takes the worker path");
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    positions.advance(10000, false);
+    for (const node of model.nodes) {
+      const original = before.get(node.id)!;
+      assert.ok(Math.abs(node.x - original.x - 600) < 1e-8 && Math.abs(node.y - original.y) < 1e-8 && Math.abs(node.z - original.z) < 1e-8,
+        "an unsatisfiable worker result keeps the existing edge lengths");
+    }
+  } finally {
+    globalThis.Worker = originalWorker;
   }
 });
 test("singleton-only anchors do not form cycles and deleted anchors leave no visual membership", () => {

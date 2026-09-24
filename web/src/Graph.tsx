@@ -293,9 +293,16 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const origin = nodes.find(n => n.id === node.id)!;
       const depth = -new Vector3(origin.x, origin.y, origin.z).applyMatrix4(camera.matrixWorldInverse).z;
       const projectionY = camera.projectionMatrix.elements[5];
+      const dragProjection = new Vector3();
       positions.begin(node.id, 2 * Math.max(.001, depth) / (size.height * projectionY), {
         right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
         up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1), spacingPixels: 24,
+        project: value => {
+          dragProjection.set(value.x, value.y, value.z).applyMatrix4(camera.matrixWorldInverse);
+          const depth = camera.projectionMatrix.elements[11] === -1 ? -dragProjection.z : 1;
+          dragProjection.applyMatrix4(camera.projectionMatrix);
+          return { x: dragProjection.x * size.width / 2, y: dragProjection.y * size.height / 2, depth };
+        },
       });
       if (positions.dragging) { dragged.current = node.id; setDraggingId(node.id); }
       instance.cameraPosition({ ...camera.position }, { ...controls.target }, 0);
