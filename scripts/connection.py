@@ -390,7 +390,7 @@ def run_server(env, root=ROOT, session=None, binary=None):
     previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGHUP, signal.SIGTERM)}
     try:
         try:
-            child = subprocess.Popen([str(binary or root / "target/debug/meenseek-ontology"), "serve"],
+            child = subprocess.Popen([str(binary or root / "target/debug/ontology"), "serve"],
                                      cwd=root, env=env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                      start_new_session=True)
@@ -461,7 +461,7 @@ def repair(root=ROOT):
         try:
             artifacts = [json.loads(line) for line in built.splitlines()]
             binaries = [a["executable"] for a in artifacts if a.get("reason") == "compiler-artifact"
-                        and a.get("target", {}).get("name") == "meenseek-ontology"
+                        and a.get("target", {}).get("name") == "ontology"
                         and "bin" in a["target"].get("kind", []) and a.get("executable")]
             if len(binaries) != 1:
                 raise ValueError()

@@ -39,4 +39,4 @@ if [[ ! "${ONTOLOGY_DB_PASSWORD:-}" =~ ^[A-Za-z0-9_-]{16,128}$ ]]; then
 fi
 export DATABASE_URL="postgresql://ontology:${ONTOLOGY_DB_PASSWORD}@127.0.0.1:55432/ontology"
 export ONTOLOGY_SYNC_CONFIG="$root/sync.local.json"
-target/debug/meenseek-ontology sync-once
+target/debug/ontology sync-once
