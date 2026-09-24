@@ -98,8 +98,8 @@ Wrong store, missing source, pending apply와 아직 준비되지 않은 project
 `~/Library/Application Support/meenseek-ontology`에 복사한다. `.env`는 0600으로
 보호하고 launchd 설정에는 비밀번호를 넣지 않는다. 서비스는 기존 로컬 DB를 사용하고
 앱을 127.0.0.1:47831에 실행한다. macOS의 Desktop 파일 접근 제한 때문에
-로그인 서비스에서는 지정 원문 자동 갱신을 실행하지 않는다. 원문 갱신은 Desktop의
-기존 `sync-once` 절차에서 수행한다.
+로그인 서비스에서는 지정 원문 자동 갱신을 실행하지 않는다. 원문은 Desktop의
+`온톨로지 자료 갱신.command`를 열어 명시적으로 갱신한다.
 터미널을 닫거나 앱 프로세스가 종료돼도 launchd가 다시 시작한다. Docker가 아직
 준비되지 않았다면 DB 연결이 가능해질 때까지 재시도한다. 상태는
 `python3 scripts/local_service.py status`, 중지는
@@ -439,6 +439,16 @@ bash scripts/brain.sh context edit \
 ## 지정한 원문 자동 갱신
 
 자동 갱신은 `ONTOLOGY_SYNC_CONFIG`를 설정해야 켜진다. 추적되는 형식 예시는 `sync.example.json`이며 실제 설정 파일 `sync.local.json`은 Git에서 제외된다. 아래는 앱 조회용 **정확히 세 경로**만 갱신하는 설정이다. 설정된 native store identity를 확인한 뒤 앱 루트의 `sync.local.json`에서 사용한다.
+
+로그인 서비스를 사용하는 Mac에서는 Desktop의 `온톨로지 자료 갱신.command`를 열면
+현재 `sync.local.json`에 지정된 원문을 한 번 갱신한다. 이 명령은 기존 DB와 현재
+schema를 먼저 확인하고 Rust 실행 파일을 오프라인으로 빌드한다. 앱 서비스는 계속
+실행된다. 바로 가기가 없다면 저장소에서 다음을 한 번 실행한다.
+
+```bash
+cd /Users/meenseek/Desktop/ontology
+ln -s "$PWD/scripts/sync-local.command" "$HOME/Desktop/온톨로지 자료 갱신.command"
+```
 
 ```json
 {
