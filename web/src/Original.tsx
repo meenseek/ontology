@@ -15,7 +15,7 @@ export function editorNewlines(content: string): "lf" | "crlf" | null {
   if (hasCrLf && content.replace(/\r\n/g, "").includes("\n")) return null;
   return hasCrLf ? "crlf" : "lf";
 }
-export function editorDraft(content: string): string { return content.replace(/\r\n/g, "\n"); }
+export function editorDraft(content: string): string { return content.replace(/\r\n?|\n/g, "\n"); }
 export function editorContent(draft: string, newlines: "lf" | "crlf"): string { return newlines === "crlf" ? draft.replace(/\n/g, "\r\n") : draft; }
 export function OriginalText({ content }: { content: string }) {
   return <pre className="source-text context-text" aria-label="원본 텍스트">{content}</pre>;
@@ -25,7 +25,7 @@ export function failure(error: unknown, reading = false): string {
   if (status === 403) return "세션을 확인할 수 없습니다. 페이지를 새로고침해 주세요.";
   if (status === 409) return "자료 반영 또는 복구가 진행 중입니다. 완료 후 다시 시도해 주세요.";
   if (status === 404) return "자료가 없거나 이 범위에서 열 수 없습니다.";
-  if (status === 413) return reading ? "텍스트 보기 한도(1 MiB)를 넘었습니다. 원본 다운로드를 이용해 주세요." : "조회 또는 다운로드 한도를 넘었습니다.";
+  if (status === 413) return reading ? "열람 가능한 크기를 넘었습니다. 원본 다운로드를 이용해 주세요." : "조회 또는 다운로드 한도를 넘었습니다.";
   if (status === 400 && reading) return "UTF-8 텍스트로 열 수 없는 자료입니다. 원본 다운로드를 이용해 주세요.";
   return "요청을 완료하지 못했습니다. 다시 시도해 주세요.";
 }

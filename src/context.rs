@@ -245,6 +245,11 @@ pub(crate) fn restricted(path: &str) -> bool {
             || part.eq_ignore_ascii_case("raw")
     })
 }
+pub(crate) fn markdown_path(path: &str) -> bool {
+    path.rsplit('.').next().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+    })
+}
 pub(crate) fn valid_digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -558,9 +563,12 @@ impl Store {
         scope: &ContextScope,
         path: &str,
     ) -> Result<ContextText, Error> {
-        let material = self
-            .context_material(scope, path, false, MAX_READ_BYTES)
-            .await?;
+        let limit = if markdown_path(path) {
+            MAX_FILE_BYTES
+        } else {
+            MAX_READ_BYTES
+        };
+        let material = self.context_material(scope, path, false, limit).await?;
         Ok(ContextText {
             metadata: material.metadata,
             content: String::from_utf8(material.bytes).map_err(|_| Error::Invalid)?,
@@ -608,8 +616,9 @@ impl Store {
         let mut tx = self.lock_context(false).await?;
         let result = async {
             self.count(1);
+            let limit = if markdown_path(path) { MAX_FILE_BYTES } else { MAX_READ_BYTES };
             let row=sqlx::query("SELECT v.content_digest,v.byte_len,CASE WHEN v.byte_len BETWEEN 0 AND $4 AND octet_length(v.content)<=$4 THEN v.content END AS content FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.scope=$1 AND m.path=$2 AND v.revision=$3 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted")
-                .bind(scope.as_str()).bind(path).bind(revision).bind(MAX_READ_BYTES as i64).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?.ok_or(Error::NotFound)?;
+                .bind(scope.as_str()).bind(path).bind(revision).bind(limit as i64).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?.ok_or(Error::NotFound)?;
             let bytes=row.get::<Option<Vec<u8>>,_>("content").ok_or(Error::Limit)?;
             let sha:String=row.get("content_digest");
             if row.get::<i64,_>("byte_len") != bytes.len() as i64 || digest(&bytes)!=sha { return Err(Error::Storage); }

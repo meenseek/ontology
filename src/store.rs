@@ -295,6 +295,10 @@ impl Store {
                 "009-context-manual-edits.sql",
                 include_str!("../schema/migrations/009-context-manual-edits.sql"),
             ),
+            (
+                "010-profile-manual-edits.sql",
+                include_str!("../schema/migrations/010-profile-manual-edits.sql"),
+            ),
         ];
         if migrations.len() > expected.len() {
             return Err(Error::Baseline);
