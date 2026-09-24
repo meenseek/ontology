@@ -120,12 +120,56 @@ async fn run() -> Result<(), Error> {
         return Ok(());
     }
     if let Some(command) = brain {
+        let curation_apply = matches!(
+            &command,
+            BrainCommand::Curation {
+                scope: Scope::Personal,
+                command: meenseek_ontology::curation::CurationCommand::Apply { .. },
+            }
+        );
+        let wake_grouping = matches!(
+            &command,
+            BrainCommand::Remember {
+                scope: Scope::Personal,
+                ..
+            } | BrainCommand::Propose {
+                scope: Scope::Personal,
+                ..
+            } | BrainCommand::Correct {
+                scope: Scope::Personal,
+                ..
+            } | BrainCommand::Accept {
+                scope: Scope::Personal,
+                ..
+            } | BrainCommand::GroupingRetry {
+                scope: Scope::Personal,
+                ..
+            } | BrainCommand::GroupingSet {
+                scope: Scope::Personal,
+                ..
+            }
+        );
         let value = store.brain(command).await?;
         let bytes = serde_json::to_vec(&value).map_err(|_| Error::Storage)?;
         if bytes.len() > meenseek_ontology::domain::MAX_RESPONSE_BYTES {
             return Err(Error::Limit);
         }
         println!("{}", String::from_utf8(bytes).map_err(|_| Error::Storage)?);
+        if ((wake_grouping && value["grouping"]["state"] == "pending")
+            || (curation_apply && matches!(value["outcome"].as_str(), Some("created" | "updated"))))
+            && let Ok(binary) = std::env::current_exe()
+        {
+            let _ = std::process::Command::new(binary)
+                .arg("grouping-drain")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("grouping-drain") && args.len() == 1 {
+        while store.grouping_once().await? {}
         return Ok(());
     }
     if let Some(path) = sync_path {
@@ -191,6 +235,7 @@ async fn serve(store: Store) -> Result<(), Error> {
         .map_err(|_| Error::Invalid)?;
     println!("Open {}", config.origin());
     let state = AppState::new(store.clone(), config);
+    let grouping_task = tokio::spawn(meenseek_ontology::grouping::run_loop(store.clone()));
     let sync_task = std::env::var_os("ONTOLOGY_SYNC_CONFIG").map(|path| {
         tokio::spawn(meenseek_ontology::sync::run_loop(
             store,
@@ -208,6 +253,8 @@ async fn serve(store: Store) -> Result<(), Error> {
         task.abort();
         let _ = task.await;
     }
+    grouping_task.abort();
+    let _ = grouping_task.await;
     result
 }
 

@@ -299,6 +299,10 @@ impl Store {
                 "010-profile-manual-edits.sql",
                 include_str!("../schema/migrations/010-profile-manual-edits.sql"),
             ),
+            (
+                "011-personal-memory-grouping.sql",
+                include_str!("../schema/migrations/011-personal-memory-grouping.sql"),
+            ),
         ];
         if migrations.len() > expected.len() {
             return Err(Error::Baseline);
