@@ -497,6 +497,17 @@ test("renderer motion clock freezes both effects and resumes without a suspensio
   assert.ok(Math.abs(before.shimmer - after.shimmer) < .025);
   assert.ok(Math.abs(before.rotation - after.rotation) < .02);
 });
+test("summary halo moves only with its held group and settles after release", async () => {
+  const { summaryHaloScale } = await import("./presentation.ts");
+  const halo = { id: "group", startedAt: 100, releasedAt: null as number | null, releaseScale: 1 };
+  assert.equal(summaryHaloScale(halo, "other", 300, false), 1);
+  assert.equal(summaryHaloScale(halo, "group", 300, true), 1);
+  assert.ok(summaryHaloScale(halo, "group", 300, false) > 1);
+  halo.releaseScale = summaryHaloScale(halo, "group", 300, false);
+  halo.releasedAt = 300;
+  assert.equal(summaryHaloScale(halo, "group", 300, false), halo.releaseScale);
+  assert.equal(summaryHaloScale(halo, "group", 750, false), 1);
+});
 
 test("each ID retains a varied bounded rotation period and visible axial tilt across refresh and reorder", async () => {
   const { starPhase, starMotion } = await import("./presentation.ts");
