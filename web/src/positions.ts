@@ -1,7 +1,6 @@
 import { visualSatellites } from "./graph";
 import type { Model, PositionedNode } from "./graph";
 import { COLLISION_GAP, separateDiscs } from "./clearance";
-import { MIN_KNOWLEDGE_STAR_PIXELS } from "./presentation";
 
 export type Point = { x: number; y: number; z: number };
 const point = ({ x, y, z }: Point): Point => ({ x, y, z });
@@ -13,13 +12,18 @@ export function fixPosition(node: PositionedNode, value: Point) {
 type Follower = { offset: Point };
 type TensionEdge = { from: string; to: string; limit: number };
 type Slot = { x: number; y: number };
+/** A shallow curved volume retains the front-view slots without an edge-on line. */
+function constellationDepth(x: number, y: number, spacing: number): number {
+  const radius = Math.hypot(x, y);
+  return .5 * radius * Math.sin(3 * Math.atan2(y, x) + radius / (spacing * 4));
+}
 type ScreenPoint = Slot & { depth: number };
 type DragPlane = { right: Point; up: Point; spacingPixels: number; project?: (value: Point) => ScreenPoint;
   visible?: readonly string[]; radius?: (node: PositionedNode, depth: number) => number; worldPerPixel?: (depth: number) => number;
   isVisible?: (at: ScreenPoint, radius: number) => boolean };
 type Clearance = { held: string; visible: string[]; right: Point; up: Point; project: (value: Point) => ScreenPoint;
   radius: (node: PositionedNode, depth: number) => number; worldPerPixel: (depth: number) => number;
-  isVisible: (at: ScreenPoint, radius: number) => boolean };
+  isVisible: (at: ScreenPoint, radius: number) => boolean; fixed?: ReadonlySet<string> };
 type Pull = { id: string; start: Point; initial: Map<string, Point>; threshold: number; tolerance: number; followers: Map<string, Follower>; edges: TensionEdge[]; project: (value: Point) => ScreenPoint; clearance: Clearance | null; moved: boolean; last: number | null };
 type Axial = { q: number; r: number };
 const directions: Axial[] = [{ q: 1, r: 0 }, { q: 0, r: -1 }, { q: -1, r: 1 }, { q: -1, r: 0 }, { q: 0, r: 1 }, { q: 1, r: -1 }];
@@ -464,7 +468,8 @@ export class Positions {
   private compactInitialLayout() {
     // The first overview may zoom out to fit the whole graph. Reserve a little
     // world-space room here; live collision and release still use the 1px gap.
-    const spacing = MIN_KNOWLEDGE_STAR_PIXELS + 5;
+    // World-space geometry stays stable when the distant screen footprint changes.
+    const spacing = 31;
     const visited = new Set<string>();
     const components: { root: string; coordinates: Map<string, Slot>; radius: number; center?: Slot }[] = [];
     for (const root of [...this.nodes.keys()].sort()) {
@@ -507,7 +512,8 @@ export class Positions {
       }
     }
     for (const component of components) for (const [id, value] of component.coordinates) {
-      fixPosition(this.nodes.get(id)!, { x: value.x + component.center!.x, y: value.y + component.center!.y, z: 0 });
+      const x = value.x + component.center!.x, y = value.y + component.center!.y;
+      fixPosition(this.nodes.get(id)!, { x, y, z: constellationDepth(x, y, spacing) });
     }
   }
   private clearedPositions(clearance: Clearance, desired: Map<string, Point>, linked: ReadonlySet<string>, gap = COLLISION_GAP): Map<string, Point> {
@@ -517,10 +523,10 @@ export class Positions {
       const at = clearance.project(value), radius = clearance.radius(node, at.depth);
       return at.depth > 0 && [at.x, at.y, radius].every(Number.isFinite) && radius > 0 && clearance.isVisible(at, radius) ? [{ id, x: at.x, y: at.y, radius }] : [];
     });
-    const separated = separateDiscs(discs, clearance.held, linked, gap);
+    const separated = separateDiscs(discs, clearance.held, linked, gap, clearance.fixed);
     const next = new Map(desired);
     for (const disc of discs) {
-      if (disc.id === clearance.held) continue;
+      if (disc.id === clearance.held || clearance.fixed?.has(disc.id)) continue;
       const at = separated.get(disc.id)!;
       const scale = clearance.worldPerPixel(clearance.project(desired.get(disc.id)!).depth);
       if (!Number.isFinite(scale) || scale <= 0) continue;
@@ -568,7 +574,7 @@ export class Positions {
     for (const link of model.links) {
       this.adjacency.get(link.source)?.add(link.target); this.adjacency.get(link.target)?.add(link.source);
     }
-    if (compactInitial && !retained.size && model.links.length) {
+    if (compactInitial && !retained.size) {
       this.compactInitialLayout();
       this.packedInitial = true;
     }
@@ -704,10 +710,10 @@ export class Positions {
       edges.push({ from, to, limit: Math.hypot(a.x - b.x, a.y - b.y) + slackPixels });
     }
     edges.sort((a, b) => depth.get(a.to)! - depth.get(b.to)! || depth.get(a.from)! - depth.get(b.from)! || a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
-    // A dense component may overlap within itself, but the held star still
-    // moves an unrelated star aside at the normal one-pixel boundary.
+    // Preserve a dense constellation as one moving shape. All its visible
+    // members remain blockers, so unrelated stars yield without spraying spokes.
     const activeClearance = dense && clearance ? {
-      ...clearance, visible: clearance.visible.filter(member => member === id || !included.has(member)),
+      ...clearance, fixed: included,
     } : clearance;
     const initial = new Map([...new Set([...included, ...(activeClearance?.visible ?? [])])].map(member => [member, point(this.nodes.get(member)!)] as const));
     this.gesture = { id, start, initial, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance: activeClearance, moved: false, last: null };
