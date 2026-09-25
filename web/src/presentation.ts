@@ -20,7 +20,7 @@ export function nodePresentation(node: { kind: string; label: string; repository
   return { title, subtitle: repository ? `${repository} · ${node.label}` : title !== node.label ? node.label : "" };
 }
 export const MAX_VISIBLE_LABELS = 24;
-export type ProjectedLabel = { id: string; kind: string; active: boolean; summary?: boolean; x: number; y: number; depth: number; radius: number; width: number; height: number };
+export type ProjectedLabel = { id: string; kind: string; active: boolean; summary?: boolean; importance?: number; x: number; y: number; depth: number; radius: number; width: number; height: number };
 type LabelBox = { id: string; left: number; top: number; right: number; bottom: number };
 /** Rank the current projection before bounding the visible set. No ID window excludes later nodes. */
 export function visibleLabels(candidates: ProjectedLabel[], width: number, height: number, selected: string | null, hovered: string | null): LabelBox[] {
@@ -29,7 +29,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   const nearby = (a: ProjectedLabel, b: ProjectedLabel) => distance(a) - distance(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const priority = visible.filter(n => n.id === selected);
   const ordinary = visible.filter(n => n.id !== selected && !n.summary);
-  const ordered = [...priority, ...visible.filter(n => n.id !== selected && n.summary).sort(nearby)];
+  const ordered = [...priority, ...visible.filter(n => n.id !== selected && n.summary).sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0) || nearby(a, b))];
   const readable = (a: ProjectedLabel, b: ProjectedLabel) => Number(b.active) - Number(a.active) || nearby(a, b);
   const documents = ordinary.filter(n => n.kind === "document").sort(readable);
   const memories = ordinary.filter(n => n.kind === "memory").sort(readable);
