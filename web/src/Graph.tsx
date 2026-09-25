@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph3D from "react-force-graph-3d";
 import type { ForceGraphMethods } from "react-force-graph-3d";
-import { CanvasTexture, Color, Group, Mesh, PlaneGeometry, ShaderMaterial, Sprite, SpriteMaterial, Vector2, Vector3 } from "three";
+import { CanvasTexture, Color, Group, Mesh, PlaneGeometry, Raycaster, ShaderMaterial, Sprite, SpriteMaterial, Vector2, Vector3 } from "three";
 import type { Camera, PerspectiveCamera } from "three";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { active, constellationView, expandedCoreCameraFrame, kindName, knowledge, linkColor, linkName, stateName } from "./graph";
@@ -217,6 +217,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const spatialCloseTimer = useRef<number | null>(null);
   const allowDrag = useRef(true), suppressClickUntil = useRef(0);
   const pointer = useRef<{ pointerId: number; pointerType: string } | null>(null);
+  const pressedNode = useRef<{ id: string; pointerId: number; x: number; y: number } | null>(null);
   const cursor = useRef<{ x: number; y: number } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [hover, setHover] = useState<{ title: string; detail: string } | null>(null);
@@ -226,8 +227,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const spatialLevel = Math.max(lodLevel, spatialReveal?.level ?? 0);
   const spatialLocks = useMemo(() => new Map([...movedGroups].filter(([, group]) => group.level === spatialLevel && group.epoch === positions.groupEpoch).map(([id, group]) => [id, group.members])), [movedGroups, spatialLevel, positions.groupEpoch]);
   const spatial = useMemo(() => frozenSpatial.current ?? nucleusView(semanticNodes, snapshot.links,
-    draggingId && !draggedSummary.current && !spatialReveal?.members.size ? 0 : spatialLevel,
-    selected, spatialReveal?.members, spatialLocks), [semanticNodes, snapshot.links, draggingId, spatialLevel, selected, settledRevision, spatialReveal, spatialLocks]);
+    spatialLevel, selected, spatialReveal?.members, spatialLocks), [semanticNodes, snapshot.links, spatialLevel, selected, settledRevision, spatialReveal, spatialLocks]);
   const { nodes: displayNodes, counts: spatialCounts, groups: spatialGroups } = spatial;
   const collapsibleCore = useMemo(() => !selected && expandedCore && constellationView(nodes, links, null, null).counts.has(expandedCore), [nodes, links, selected, expandedCore]);
   const activeExpandedCore = collapsibleCore ? expandedCore : null;
@@ -308,6 +308,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const positionCamera = useCallback(() => {
     const instance = graph.current;
     if (!ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
+    const hadCamera = Boolean(appliedCamera.current);
     appliedCamera.current = cameraKey;
     const fitChanged = appliedFit.current !== fit;
     appliedFit.current = fit;
@@ -371,7 +372,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     // Larger graphs still fit in the initial overview.
     const firstOverview = positions.hasCompactInitialLayout && fit === 0 && nodes.length === snapshot.nodes.length;
     const distance = firstOverview ? Math.max(fitDistance, size.height * camera.projectionMatrix.elements[5] / 2) : fitDistance;
-    instance.cameraPosition({ x: lookAt.x, y: lookAt.y, z: lookAt.z + distance }, lookAt, reduced ? 0 : 650);
+    const offset = hadCamera && !fitChanged ? camera.position.clone().sub((instance.controls() as OrbitControls).target) : new Vector3(0, 0, 1);
+    if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
+    offset.normalize().multiplyScalar(distance);
+    instance.cameraPosition({ x: lookAt.x + offset.x, y: lookAt.y + offset.y, z: lookAt.z + offset.z }, lookAt, reduced ? 0 : 650);
   }, [ready, cameraKey, nodes, semanticNodes, links, selected, activeExpandedCore, cores, reduced, size, positions, fit, snapshot.nodes.length, spatialReveal, exposesHiddenMembers]);
   useEffect(() => {
     let second = 0;
@@ -399,6 +403,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       }
       if (individual && moved) setMovedGroups(current => new Map([...current].filter(([, group]) => !group.members.includes(individual))));
       dragged.current = null; draggedSummary.current = null; frozenSpatial.current = null; setDraggingId(null);
+      pressedNode.current = null;
       // DragControls handles pointerup/leave but has no pointercancel listener.
       if (pointer.current) canvas?.dispatchEvent(new PointerEvent("pointerup", { ...pointer.current, bubbles: true }));
       pointer.current = null;
@@ -422,7 +427,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const plane = {
         right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
         up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1), spacingPixels: 24,
-        visible: (group || spatialReveal?.members.size ? displayNodes : semanticNodes).map(value => value.id),
+        visible: displayNodes.map(value => value.id),
         worldPerPixel: (atDepth: number) => 2 * atDepth / (size.height * projectionY),
         isVisible: (at: { x: number; y: number }, radius: number) => Math.abs(at.x) <= size.width / 2 + radius && Math.abs(at.y) <= size.height / 2 + radius,
         radius: (value: PositionedNode, atDepth: number) => {
@@ -567,6 +572,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   }, [ready, nodes, displayNodes, collapsedCounts, spatialCounts, selected, size, visible, positions, data, reduced, rotate, positionCamera]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
+    group.userData.nodeId = node.id;
     const material = (kind: "ring" | "selection" | "change" | "hit", color: string, opacity: number) => {
       const key = `${kind}:${color}:${opacity}`;
       let value = resources.materials.get(key);
@@ -641,6 +647,26 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       allowDrag.current = !positions.layoutMoving;
       if (!allowDrag.current) suppressClickUntil.current = performance.now() + 350;
       pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType };
+      pressedNode.current = null;
+      const instance = graph.current, canvas = instance?.renderer().domElement;
+      if (event.button === 0 && allowDrag.current && canvas && event.target === canvas) {
+        const rect = canvas.getBoundingClientRect(), camera = instance!.camera();
+        camera.updateMatrixWorld();
+        const ray = new Raycaster();
+        ray.setFromCamera(new Vector2(2 * (event.clientX - rect.left) / rect.width - 1, 1 - 2 * (event.clientY - rect.top) / rect.height), camera);
+        const objects = data.nodes.flatMap(node => (node as PositionedNode & { __threeObj?: Group }).__threeObj ?? []);
+        const id = ray.intersectObjects(objects, true)[0]?.object.parent?.userData.nodeId as string | undefined;
+        if (id) pressedNode.current = { id, pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      }
+    }}
+    onPointerUpCapture={event => {
+      const press = pressedNode.current;
+      pressedNode.current = null; pointer.current = null;
+      if (!press || event.button !== 0 || press.pointerId !== event.pointerId || positions.dragging || Math.hypot(event.clientX - press.x, event.clientY - press.y) >= 6) return;
+      // The renderer clicks its previous hover frame, which can miss a first tap.
+      suppressClickUntil.current = 0;
+      chooseNode(press.id);
+      suppressClickUntil.current = performance.now() + 350;
     }}
     aria-label="3D 지식 지도. 묶음 별을 끌면 함께 이동하고 누르면 펼쳐 개별 별을 끌 수 있습니다. 빈 공간을 드래그해 회전하고 스크롤로 확대·축소합니다. Tab과 Enter로 묶음을 펼칠 수 있으며 전체 항목은 목록 보기에서 탐색할 수 있습니다.">
     {ready && <ForceGraph3D<PositionedNode, RenderLink>
@@ -668,9 +694,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         dragged.current = null; setDraggingId(null);
         if (individual && moved) setMovedGroups(current => new Map([...current].filter(([, group]) => !group.members.includes(individual))));
         if (summary && moved && summary.epoch === positions.groupEpoch) setMovedGroups(current => new Map(current).set(summary.id, { members: summary.members, level: summary.level, epoch: summary.epoch }));
-        if (summary && !moved && summary.epoch === positions.groupEpoch) {
+        const clicked = !moved ? individual ?? (summary?.epoch === positions.groupEpoch ? summary.id : null) : null;
+        if (clicked) {
           suppressClickUntil.current = 0;
-          chooseNode(summary.id);
+          chooseNode(clicked);
           suppressClickUntil.current = performance.now() + 350;
         }
       }} enablePointerInteraction={!disabled}
