@@ -568,7 +568,7 @@ test("screen clearance keeps a dragged node fixed and separates coincident neigh
   assert.deepEqual(placed.get("held"), { x: 0, y: 0 });
   for (const [index, a] of discs.entries()) for (const b of discs.slice(index + 1)) {
     const first = placed.get(a.id)!, second = placed.get(b.id)!;
-    assert.ok(Math.hypot(first.x - second.x, first.y - second.y) >= a.radius + b.radius + 10 - 1e-4);
+    assert.ok(Math.hypot(first.x - second.x, first.y - second.y) >= a.radius + b.radius + 1 - 1e-4);
   }
 });
 test("a neighboring node starts yielding before its visible footprints touch", () => {
@@ -581,15 +581,81 @@ test("a neighboring node starts yielding before its visible footprints touch", (
   positions.begin("held", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
     visible: model.nodes.map(node => node.id), radius: () => 20,
     project: value => ({ x: value.x, y: value.y, depth: 1 }) });
-  positions.move("held", { x: 20.5, y: 0, z: 0 });
+  positions.move("held", { x: 29.5, y: 0, z: 0 });
   const other = model.nodes.find(node => node.id === "other")!;
   assert.equal(other.x, 75, "the hard collision boundary has not been reached");
   positions.advance(0, false); positions.advance(16, false);
   assert.equal(other.x, 75, "the neighboring node waits outside the compact clearance range");
-  positions.move("held", { x: 22, y: 0, z: 0 });
+  positions.move("held", { x: 31, y: 0, z: 0 });
   positions.advance(32, false);
   assert.ok(other.x > 75 && other.x < 77, "the early clearance is eased over frames");
-  assert.ok(other.x - 22 >= 50, "the hard non-overlap boundary remains in force");
+  assert.ok(other.x - 31 >= 41, "visible footprints retain a 1px collision gap");
+  positions.move("held", { x: 35, y: 0, z: 0 });
+  assert.ok(other.x - 35 >= 41, "the 1px hard boundary applies during a drag");
+});
+test("an ordinary star yields 4px before its visible 1px collision boundary, regardless of its hit target", async () => {
+  const { nodeScreenMetrics } = await import("./presentation.ts");
+  const metrics = nodeScreenMetrics(26, false, false);
+  assert.equal(metrics.radius, 13);
+  assert.equal(metrics.hit, 36);
+  const model = reconcile(snapshot([doc("held"), doc("other")], []));
+  for (const node of model.nodes) {
+    const x = node.id === "held" ? 0 : 45;
+    Object.assign(node, { x, y: 0, z: 0, fx: x, fy: 0, fz: 0 });
+  }
+  const positions = new Positions(); positions.install(model);
+  positions.begin("held", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    visible: model.nodes.map(node => node.id), radius: () => metrics.radius,
+    project: value => ({ x: value.x, y: value.y, depth: 1 }) });
+  const other = model.nodes.find(node => node.id === "other")!;
+  positions.move("held", { x: 13.5, y: 0, z: 0 });
+  positions.advance(0, false); positions.advance(16, false);
+  assert.equal(other.x, 45, "a 31.5px center distance is beyond the 4px yield lead");
+  positions.move("held", { x: 15, y: 0, z: 0 });
+  positions.advance(32, false);
+  assert.ok(other.x > 45 && other.x < 46, "a 30px center distance starts easing");
+  positions.move("held", { x: 19, y: 0, z: 0 });
+  assert.ok(other.x - 19 >= 27, "the visible 26px stars retain a 1px hard gap");
+});
+test("the four-pixel yield lead works during the first few pixels of a drag", async () => {
+  const { nodeScreenMetrics } = await import("./presentation.ts");
+  const radius = nodeScreenMetrics(26, false, false).radius;
+  const model = reconcile(snapshot([doc("held"), doc("other")], []));
+  for (const node of model.nodes) {
+    const x = node.id === "held" ? 0 : 31;
+    Object.assign(node, { x, y: 0, z: 0, fx: x, fy: 0, fz: 0 });
+  }
+  const positions = new Positions(); positions.install(model);
+  positions.begin("held", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    visible: model.nodes.map(node => node.id), radius: () => radius,
+    project: value => ({ x: value.x, y: value.y, depth: 1 }) });
+  positions.move("held", { x: 1, y: 0, z: 0 });
+  const other = model.nodes.find(node => node.id === "other")!;
+  assert.equal(other.x, 31, "the one-pixel drag does not yet reach hard contact");
+  positions.advance(0, false); positions.advance(16, false);
+  assert.ok(other.x > 31 && other.x < 32, "soft motion starts before the six-pixel drag threshold");
+  positions.release(16, false);
+  assert.equal(model.nodes.find(node => node.id === "held")!.x, 0, "a sub-threshold gesture remains a click");
+  assert.equal(other.x, 31, "click jitter does not leave the neighbor displaced");
+  positions.begin("held", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    visible: model.nodes.map(node => node.id), radius: () => radius,
+    project: value => ({ x: value.x, y: value.y, depth: 1 }) });
+  positions.move("held", { x: 1, y: 0, z: 0 }); positions.advance(0, false); positions.advance(16, false);
+  positions.cancel();
+  assert.equal(model.nodes.find(node => node.id === "held")!.x, 0);
+  assert.equal(other.x, 31, "pointer cancellation also restores click jitter");
+});
+test("released linked stars retain room for the next four-pixel yield", async () => {
+  const { nodeScreenMetrics } = await import("./presentation.ts");
+  const radius = nodeScreenMetrics(26, false, false).radius;
+  const model = reconcile(snapshot([doc("held"), doc("other")], [edge("held", "other")]));
+  const positions = new Positions(); positions.install(model);
+  positions.begin("held", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    visible: model.nodes.map(node => node.id), radius: () => radius,
+    project: value => ({ x: value.x, y: value.y, depth: 1 }) });
+  positions.move("held", { x: 100, y: 0, z: 0 }); positions.release(0, true);
+  const held = model.nodes.find(node => node.id === "held")!, other = model.nodes.find(node => node.id === "other")!;
+  assert.ok(Math.abs(Math.hypot(held.x - other.x, held.y - other.y) - 31) < 1e-6);
 });
 test("visible linked and unlinked nodes move aside throughout drag and release", () => {
   for (const reduced of [false, true]) {
@@ -604,7 +670,7 @@ test("visible linked and unlinked nodes move aside throughout drag and release",
       project: (value: { x: number; y: number; z: number }) => ({ x: value.x, y: value.y, depth: 1 }) };
     const clear = () => {
       for (const [index, a] of model.nodes.entries()) for (const b of model.nodes.slice(index + 1)) {
-        assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= 50 - 1e-4, `${a.id} and ${b.id} remain distinct`);
+        assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= 41 - 1e-4, `${a.id} and ${b.id} remain distinct`);
       }
     };
     positions.begin("held", 1, plane);
@@ -635,7 +701,7 @@ test("clearance follows perspective, zoom, and different visible footprints", ()
   const separated = () => {
     for (const [index, a] of model.nodes.entries()) for (const b of model.nodes.slice(index + 1)) {
       const left = project(a), right = project(b);
-      assert.ok(Math.hypot(left.x - right.x, left.y - right.y) >= radii.get(a.id)! + radii.get(b.id)! + 10 - 1e-4);
+      assert.ok(Math.hypot(left.x - right.x, left.y - right.y) >= radii.get(a.id)! + radii.get(b.id)! + 1 - 1e-4);
     }
   };
   positions.begin("held", 100, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,

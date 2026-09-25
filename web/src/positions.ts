@@ -1,6 +1,6 @@
 import { visualSatellites } from "./graph";
 import type { Model, PositionedNode } from "./graph";
-import { separateDiscs } from "./clearance";
+import { COLLISION_GAP, EARLY_YIELD_GAP, separateDiscs } from "./clearance";
 
 export type Point = { x: number; y: number; z: number };
 const point = ({ x, y, z }: Point): Point => ({ x, y, z });
@@ -19,7 +19,7 @@ type DragPlane = { right: Point; up: Point; spacingPixels: number; project?: (va
 type Clearance = { held: string; visible: string[]; right: Point; up: Point; project: (value: Point) => ScreenPoint;
   radius: (node: PositionedNode, depth: number) => number; worldPerPixel: (depth: number) => number;
   isVisible: (at: ScreenPoint, radius: number) => boolean };
-type Pull = { id: string; start: Point; threshold: number; tolerance: number; followers: Map<string, Follower>; edges: TensionEdge[]; project: (value: Point) => ScreenPoint; clearance: Clearance | null; moved: boolean; last: number | null };
+type Pull = { id: string; start: Point; initial: Map<string, Point>; threshold: number; tolerance: number; followers: Map<string, Follower>; edges: TensionEdge[]; project: (value: Point) => ScreenPoint; clearance: Clearance | null; moved: boolean; last: number | null };
 type Axial = { q: number; r: number };
 const directions: Axial[] = [{ q: 1, r: 0 }, { q: 0, r: -1 }, { q: -1, r: 1 }, { q: -1, r: 0 }, { q: 0, r: 1 }, { q: 1, r: -1 }];
 const axialKey = ({ q, r }: Axial) => `${q},${r}`;
@@ -457,7 +457,7 @@ export class Positions {
   private token = 0;
   get dragging() { return this.gesture !== null; }
   get settling() { return this.settle !== null; }
-  private clearedPositions(clearance: Clearance, desired: Map<string, Point>, linked: ReadonlySet<string>, gap = 10): Map<string, Point> {
+  private clearedPositions(clearance: Clearance, desired: Map<string, Point>, linked: ReadonlySet<string>, gap = COLLISION_GAP): Map<string, Point> {
     const discs = clearance.visible.flatMap(id => {
       const node = this.nodes.get(id), value = desired.get(id);
       if (!node || !value) return [];
@@ -485,7 +485,7 @@ export class Positions {
     }));
     let desired = current;
     if (softFraction > 0) {
-      const soft = this.clearedPositions(clearance, current, linked, 14);
+      const soft = this.clearedPositions(clearance, current, linked, EARLY_YIELD_GAP);
       desired = new Map([...current].map(([id, value]) => [id, id === clearance.held ? value : add(value, add(soft.get(id) ?? value, value, -1), softFraction)]));
     }
     for (const [id, value] of this.clearedPositions(clearance, desired, linked)) {
@@ -577,7 +577,7 @@ export class Positions {
       const at = project(node), radius = plane.radius!(node, at.depth);
       return at.depth > 0 && Number.isFinite(radius) && radius > 0 && (!plane.isVisible || plane.isVisible(at, radius)) ? [radius] : [];
     }) : [];
-    const spacingPixels = Math.max(slackPixels, 2 * Math.max(0, ...radii) + (radii.length ? 10 : 0));
+    const spacingPixels = Math.max(slackPixels, 2 * Math.max(0, ...radii) + (radii.length ? EARLY_YIELD_GAP : 0));
     const spacing = spacingPixels * unitsPerPixel;
     const clearance = plane.visible && plane.radius ? {
       held: id, visible: [...new Set(plane.visible)].filter(member => this.nodes.has(member)).sort(),
@@ -647,7 +647,8 @@ export class Positions {
       edges.push({ from, to, limit: Math.hypot(a.x - b.x, a.y - b.y) + slackPixels });
     }
     edges.sort((a, b) => depth.get(a.to)! - depth.get(b.to)! || depth.get(a.from)! - depth.get(b.from)! || a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
-    this.gesture = { id, start, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance, moved: false, last: null };
+    const initial = new Map([...new Set([...included, ...(clearance?.visible ?? [])])].map(member => [member, point(this.nodes.get(member)!)] as const));
+    this.gesture = { id, start, initial, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance, moved: false, last: null };
     if (!exact && !overfull && members.length) this.searchLater(id, members, included, plane, spacing, unitsPerPixel * .05);
   }
   private searchLater(root: string, members: string[], included: Set<string>, plane: { right: Point; up: Point }, spacing: number, tolerance: number) {
@@ -699,16 +700,19 @@ export class Positions {
   }
   release(now: number, reduced: boolean) {
     const drag = this.gesture;
+    if (!drag?.moved) { this.cancel(); return; }
     this.gesture = null;
-    if (!drag?.moved || !Number.isFinite(now)) { this.cancel(); return; }
+    if (!Number.isFinite(now)) { this.cancel(); return; }
     if (this.pending?.root === drag.id) this.pending.reduced = reduced;
     this.startSettle(drag.id, drag.followers, drag.clearance, drag.tolerance, now);
     if (reduced) this.advance(now, true);
   }
   advance(now: number, reduced: boolean) {
     if (!Number.isFinite(now)) return;
-    const drag = this.gesture?.moved ? this.gesture : null;
+    const drag = this.gesture;
     if (drag) {
+      const held = this.nodes.get(drag.id)!;
+      if (!drag.moved && Math.hypot(held.x - drag.start.x, held.y - drag.start.y, held.z - drag.start.z) <= drag.tolerance) return;
       const dt = drag.last === null ? 0 : Math.max(0, (now - drag.last) / 1000);
       drag.last = Math.max(drag.last ?? now, now);
       const fraction = reduced ? 1 : 1 - Math.exp(-18 * dt);
@@ -765,7 +769,16 @@ export class Positions {
     if (complete) this.settle = null;
   }
   cancel() {
-    // Freeze current coordinates on cancellation; do not teleport to a target.
+    // A canceled click restores its tiny drag; an engaged drag freezes in place.
+    if (this.gesture && !this.gesture.moved) {
+      let restored = false;
+      for (const [id, value] of this.gesture.initial) {
+        const node = this.nodes.get(id)!;
+        if (node.x === value.x && node.y === value.y && node.z === value.z) continue;
+        fixPosition(node, value); this.observed.set(id, point(value)); restored = true;
+      }
+      if (restored) this.revision++;
+    }
     this.worker?.terminate(); this.worker = null; this.pending = null; this.token++;
     this.gesture = null; this.settle = null;
   }

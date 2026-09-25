@@ -1,8 +1,10 @@
 export type Disc = { id: string; x: number; y: number; radius: number };
 export type ScreenPosition = { x: number; y: number };
+export const COLLISION_GAP = 1;
+export const EARLY_YIELD_GAP = COLLISION_GAP + 4;
 
 /** Place the held node first, then linked nodes, without moving a placed node again. */
-export function separateDiscs(discs: Disc[], held: string, linked: ReadonlySet<string>, gap = 10): Map<string, ScreenPosition> {
+export function separateDiscs(discs: Disc[], held: string, linked: ReadonlySet<string>, gap = COLLISION_GAP): Map<string, ScreenPosition> {
   const anchor = discs.find(disc => disc.id === held);
   const ordered = [...discs].sort((a, b) => {
     if (a.id === held) return -1;

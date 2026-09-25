@@ -150,13 +150,12 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
   };
   return mesh;
 }
-function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, dragged?: { current: string | null }) {
+function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean) {
   const sprite = new Sprite(material), viewport = new Vector2(), position = new Vector3(), cursor = new Vector3();
   const resize = (camera: Camera) => {
     sprite.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
     const pixels = nodeScreenSize(node.kind, -position.z, viewport.y, camera.projectionMatrix.elements[5]);
-    const emphasis = part === "body" && dragged?.current === node.id ? 1.4 : 1;
-    sprite.scale.setScalar(spriteScale(nodeScreenMetrics(pixels, selected, node.changed)[part] * emphasis, viewport.y, camera.projectionMatrix.elements[5]));
+    sprite.scale.setScalar(spriteScale(nodeScreenMetrics(pixels, selected, node.changed)[part], viewport.y, camera.projectionMatrix.elements[5]));
     sprite.updateMatrixWorld();
   };
   sprite.onBeforeRender = (renderer, _scene, camera) => { renderer.getSize(viewport); resize(camera); };
@@ -307,7 +306,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         radius: (value, atDepth) => {
           const pixels = nodeScreenSize(value.kind, atDepth, size.height, projectionY);
           const metrics = nodeScreenMetrics(pixels, value.id === selected, value.changed);
-          return Math.max(metrics.radius, metrics.hit / 2);
+          return metrics.radius;
         },
         project: value => {
           camera.updateMatrixWorld();
@@ -417,7 +416,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const isSelected = node.id === selected;
     group.add(isKnowledge
       ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged)
-      : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected, dragged));
+      : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected));
     if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected));
     if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected));
     // The invisible plane follows the star and status rings, with a 36px minimum.
