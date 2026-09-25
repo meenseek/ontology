@@ -492,18 +492,22 @@ export class Positions {
       components.push({ root, coordinates, radius });
     }
     components.sort((a, b) => b.radius - a.radius || a.root.localeCompare(b.root));
-    const gap = 24, width = Math.max(0, ...components.map(component => 2 * component.radius + gap),
-      Math.sqrt(components.reduce((sum, component) => sum + (2 * component.radius + gap) ** 2, 0)));
-    let x = 0, y = 0, rowHeight = 0, usedWidth = 0;
-    for (const component of components) {
-      const side = 2 * component.radius + gap;
-      if (x && x + side > width) { x = 0; y += rowHeight; rowHeight = 0; }
-      component.center = { x: x + side / 2, y: y + side / 2 };
-      x += side; rowHeight = Math.max(rowHeight, side); usedWidth = Math.max(usedWidth, x);
+    // A row pack makes the many independent personal documents look like a
+    // rectangular table. Place whole components on a deterministic sunflower
+    // spiral, checking their actual bounding discs before accepting a center.
+    const gap = 12, step = (spacing + gap) * .55, goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    let candidate = 1;
+    for (const [index, component] of components.entries()) {
+      if (index === 0) { component.center = { x: 0, y: 0 }; continue; }
+      for (;; candidate++) {
+        const distance = step * Math.sqrt(candidate), angle = candidate * goldenAngle;
+        const center = { x: Math.cos(angle) * distance, y: Math.sin(angle) * distance };
+        if (components.some(other => other.center && Math.hypot(center.x - other.center.x, center.y - other.center.y) < component.radius + other.radius + gap)) continue;
+        component.center = center; candidate++; break;
+      }
     }
-    const offset = { x: usedWidth / 2, y: (y + rowHeight) / 2 };
     for (const component of components) for (const [id, value] of component.coordinates) {
-      fixPosition(this.nodes.get(id)!, { x: value.x + component.center!.x - offset.x, y: value.y + component.center!.y - offset.y, z: 0 });
+      fixPosition(this.nodes.get(id)!, { x: value.x + component.center!.x, y: value.y + component.center!.y, z: 0 });
     }
   }
   private clearedPositions(clearance: Clearance, desired: Map<string, Point>, linked: ReadonlySet<string>, gap = COLLISION_GAP): Map<string, Point> {
