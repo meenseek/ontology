@@ -399,7 +399,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const label = labels.get(id)!;
       element.dataset.nodeId = id;
       element.className = `node-label ${active(label.node) ? "" : "inactive"}`;
-      element.children[0].textContent = collapsedCounts.has(id) ? `성단 핵 · ${collapsedCounts.get(id)}개` : label.title;
+      element.children[0].textContent = collapsedCounts.has(id) ? `연결된 항목 · ${collapsedCounts.get(id)}개` : label.title;
       const subtitle = element.children[1] as HTMLElement;
       subtitle.textContent = collapsedCounts.has(id) ? "눌러 펼치기" : label.subtitle; subtitle.hidden = !subtitle.textContent;
       element.children[2].textContent = label.status;
@@ -439,7 +439,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             const pixels = Math.max(collapsedCounts.has(node.id) ? 22 : 0, nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]));
             const { radius } = nodeScreenMetrics(pixels, node.id === selected, node.changed);
             projected.applyMatrix4(camera.projectionMatrix);
-            return { id: node.id, kind: node.kind, active: active(node), x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)! };
+            return { id: node.id, kind: node.kind, active: active(node), summary: collapsedCounts.has(node.id), x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)! };
           });
           const visible = visibleLabels(candidates, size.width, size.height, dragged.current ?? selected, hoveredId.current);
           for (const [index, element] of elements.entries()) {
@@ -492,7 +492,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       if (!allowDrag.current) suppressClickUntil.current = performance.now() + 350;
       pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType };
     }}
-    aria-label="3D 지식 지도. 성단 핵을 누르면 연결된 항목이 펼쳐집니다. 점을 끌어 배치하고 빈 공간을 드래그해 회전합니다. 스크롤로 커서 위치를 중심으로 확대·축소합니다. 키보드는 목록 보기를 이용하세요.">
+    aria-label="3D 지식 지도. 연결된 항목 묶음을 누르면 항목이 펼쳐집니다. 점을 끌어 배치하고 빈 공간을 드래그해 회전합니다. 스크롤로 커서 위치를 중심으로 확대·축소합니다. 키보드는 목록 보기를 이용하세요.">
     {ready && <ForceGraph3D<PositionedNode, RenderLink>
       ref={graph} width={size.width} height={size.height} graphData={data}
       backgroundColor="rgba(0,0,0,0)" controlType="orbit" showNavInfo={false}
@@ -523,12 +523,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         }
         else onSelect(node.id);
       }}
-      onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: `성단 핵 · ${collapsedCounts.get(node.id)}개`, detail: "눌러 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
+      onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: `연결된 항목 · ${collapsedCounts.get(node.id)}개`, detail: "눌러 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
       onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
     />}
     <div className="node-labels" ref={labelLayer} aria-hidden="true">{Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /></div>)}</div>
-    {activeExpandedCore && !selected && <button type="button" className="graph-core-close" onClick={() => { hoveredId.current = null; setHover(null); setExpandedCore(null); }}>성단 접기</button>}
+    {activeExpandedCore && !selected && <button type="button" className="graph-core-close" onClick={() => { hoveredId.current = null; setHover(null); setExpandedCore(null); }}>묶음 접기</button>}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
-    <div className="graph-instructions" aria-hidden="true">성단 핵을 눌러 펼치기 · 점 끌어 놓으면 성단 정렬 · 빈 공간 회전 · 스크롤 확대·축소</div>
+    <div className="graph-instructions" aria-hidden="true">연결된 묶음을 눌러 펼치기 · 점 끌어 놓으면 성단 정렬 · 빈 공간 회전 · 스크롤 확대·축소</div>
   </div>;
 }
