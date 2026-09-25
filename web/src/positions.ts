@@ -1,6 +1,6 @@
 import { visualSatellites } from "./graph";
 import type { Model, PositionedNode } from "./graph";
-import { COLLISION_GAP, EARLY_YIELD_GAP, separateDiscs } from "./clearance";
+import { COLLISION_GAP, separateDiscs } from "./clearance";
 import { MIN_KNOWLEDGE_STAR_PIXELS } from "./presentation";
 
 export type Point = { x: number; y: number; z: number };
@@ -462,7 +462,9 @@ export class Positions {
   get settling() { return this.settle !== null; }
   get hasCompactInitialLayout() { return this.packedInitial; }
   private compactInitialLayout() {
-    const spacing = MIN_KNOWLEDGE_STAR_PIXELS + EARLY_YIELD_GAP;
+    // The first overview may zoom out to fit the whole graph. Reserve a little
+    // world-space room here; live collision and release still use the 1px gap.
+    const spacing = MIN_KNOWLEDGE_STAR_PIXELS + 5;
     const visited = new Set<string>();
     const components: { root: string; coordinates: Map<string, Slot>; radius: number; center?: Slot }[] = [];
     for (const root of [...this.nodes.keys()].sort()) {
@@ -523,19 +525,14 @@ export class Positions {
     }
     return next;
   }
-  private enforceClearance(clearance: Clearance | null, linked: ReadonlySet<string>, softFraction = 0): Set<string> {
+  private enforceClearance(clearance: Clearance | null, linked: ReadonlySet<string>): Set<string> {
     const changed = new Set<string>();
     if (!clearance) return changed;
     const current = new Map(clearance.visible.flatMap(id => {
       const node = this.nodes.get(id);
       return node ? [[id, point(node)] as const] : [];
     }));
-    let desired = current;
-    if (softFraction > 0) {
-      const soft = this.clearedPositions(clearance, current, linked, EARLY_YIELD_GAP);
-      desired = new Map([...current].map(([id, value]) => [id, id === clearance.held ? value : add(value, add(soft.get(id) ?? value, value, -1), softFraction)]));
-    }
-    for (const [id, value] of this.clearedPositions(clearance, desired, linked)) {
+    for (const [id, value] of this.clearedPositions(clearance, current, linked)) {
       const node = this.nodes.get(id)!;
       if (node.x === value.x && node.y === value.y && node.z === value.z) continue;
       fixPosition(node, value); this.observed.set(id, point(value)); changed.add(id);
@@ -628,7 +625,8 @@ export class Positions {
       const at = project(node), radius = plane.radius!(node, at.depth);
       return at.depth > 0 && Number.isFinite(radius) && radius > 0 && (!plane.isVisible || plane.isVisible(at, radius)) ? [radius] : [];
     }) : [];
-    const spacingPixels = Math.max(slackPixels, 2 * Math.max(0, ...radii) + (radii.length ? EARLY_YIELD_GAP : 0));
+    // Keep the lattice compact; the screen-space solver expands only pairs with larger visible rings.
+    const spacingPixels = Math.max(slackPixels, radii.length ? 2 * Math.min(...radii) + COLLISION_GAP : 0);
     const spacing = spacingPixels * unitsPerPixel;
     const clearance = plane.visible && plane.radius ? {
       held: id, visible: [...new Set(plane.visible)].filter(member => this.nodes.has(member)).sort(),
@@ -782,7 +780,7 @@ export class Positions {
         fixPosition(to, next); this.observed.set(edge.to, point(next)); changed = true;
       }
       if (changed) this.revision++;
-      this.enforceClearance(drag.clearance, new Set(drag.followers.keys()), fraction);
+      this.enforceClearance(drag.clearance, new Set(drag.followers.keys()));
       return;
     }
     const settle = this.settle;

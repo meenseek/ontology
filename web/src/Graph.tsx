@@ -257,8 +257,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const vertical = camera.fov * Math.PI / 180;
     const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
     const fitDistance = radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2);
-    // At first load, keep one world unit at or below one CSS pixel so lattice links
-    // reach their intended visible spacing instead of being magnified by auto-fit.
+    // Keep the pixel-sized lattice from being magnified when it fits the viewport.
+    // Larger graphs still fit in the initial overview.
     const firstOverview = positions.hasCompactInitialLayout && fit === 0 && nodes.length === snapshot.nodes.length;
     const distance = firstOverview ? Math.max(fitDistance, size.height * camera.projectionMatrix.elements[5] / 2) : fitDistance;
     instance.cameraPosition({ x: center.x, y: center.y, z: center.z + distance }, center, reduced ? 0 : 650);
