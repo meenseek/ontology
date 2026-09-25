@@ -10,7 +10,7 @@ import type { NucleusView } from "./nuclei";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
-import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, visibleLabels, type StarClock } from "./presentation";
+import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
 type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFailure: () => void };
@@ -123,7 +123,7 @@ export function starMaterial() {
     `,
   });
 }
-function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean, cursor: { current: { x: number; y: number } | null }, dragged: { current: string | null }, minimumPixels = 0) {
+function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean, cursor: { current: { x: number; y: number } | null }, dragged: { current: string | null }, minimumPixels = 0, haloMotion?: () => number) {
   const mesh = new Mesh(geometry, material), viewport = new Vector2(), position = new Vector3(), projected = new Vector3();
   const color = new Color(starColor(node));
   const phase = starPhase(node.id), opacity = active(node) ? 1 : .35;
@@ -156,6 +156,7 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
     material.uniforms.uPixels.value = pixels;
     material.uniforms.uShape.value = starShape(node.id);
     near = Math.max(near, dragged.current === node.id ? .8 : 0);
+    near = Math.max(0, near + ((haloMotion?.() ?? 1) - 1) * 3);
     material.uniforms.uNear.value = near;
     const wobble = isReduced() ? 0 : near * 0.13;
     material.uniforms.uWobble.value.set(wobble * Math.sin(clock.seconds * 9 + phase), wobble * Math.cos(clock.seconds * 7 + phase));
@@ -163,12 +164,12 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
   };
   return mesh;
 }
-function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, minimumPixels = 0, fixedPixels?: number) {
+function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, minimumPixels = 0, fixedPixels?: number, scaleMotion?: () => number) {
   const sprite = new Sprite(material), viewport = new Vector2(), position = new Vector3(), cursor = new Vector3();
   const resize = (camera: Camera) => {
     sprite.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
     const pixels = Math.max(minimumPixels, nodeScreenSize(node.kind, -position.z, viewport.y, camera.projectionMatrix.elements[5]));
-    sprite.scale.setScalar(spriteScale(fixedPixels ?? nodeScreenMetrics(pixels, selected, node.changed)[part], viewport.y, camera.projectionMatrix.elements[5]));
+    sprite.scale.setScalar(spriteScale((fixedPixels ?? nodeScreenMetrics(pixels, selected, node.changed)[part]) * (scaleMotion?.() ?? 1), viewport.y, camera.projectionMatrix.elements[5]));
     sprite.updateMatrixWorld();
   };
   sprite.onBeforeRender = (renderer, _scene, camera) => { renderer.getSize(viewport); resize(camera); };
@@ -206,6 +207,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const hoveredId = useRef<string | null>(null);
   const dragged = useRef<string | null>(null);
   const draggedSummary = useRef<{ id: string; members: readonly string[]; level: number; epoch: number } | null>(null);
+  const summaryHalo = useRef<SummaryHaloMotion | null>(null);
   const frozenSpatial = useRef<NucleusView | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [expandedCore, setExpandedCore] = useState<string | null>(null);
@@ -402,7 +404,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         setMovedGroups(current => new Map(current).set(group.id, { members: group.members, level: group.level, epoch: group.epoch }));
       }
       if (individual && moved) setMovedGroups(current => new Map([...current].filter(([, group]) => !group.members.includes(individual))));
-      dragged.current = null; draggedSummary.current = null; frozenSpatial.current = null; setDraggingId(null);
+      dragged.current = null; draggedSummary.current = null; summaryHalo.current = null; frozenSpatial.current = null; setDraggingId(null);
       pressedNode.current = null;
       // DragControls handles pointerup/leave but has no pointercancel listener.
       if (pointer.current) canvas?.dispatchEvent(new PointerEvent("pointerup", { ...pointer.current, bubbles: true }));
@@ -424,6 +426,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const dragProjection = new Vector3();
       const unitsPerPixel = 2 * Math.max(.001, depth) / (size.height * projectionY);
       const group = spatialGroups.get(node.id);
+      summaryHalo.current = group || collapsedCounts.has(node.id)
+        ? { id: node.id, startedAt: performance.now(), releasedAt: null, releaseScale: 1 } : null;
       const plane = {
         right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
         up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1), spacingPixels: 24,
@@ -585,10 +589,13 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const isKnowledge = node.kind === "document" || node.kind === "memory";
     const color = node.kind === "document" || node.kind === "memory" ? starColor(node) : node.taxonomyColor ?? node.color;
     const isSelected = node.id === selected;
+    const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
+    const haloScale = summary ? () => summaryHaloScale(summaryHalo.current, node.id, performance.now(), motionReduced.current) : undefined;
     group.add(isKnowledge
-      ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged, collapsedCounts.has(node.id) || spatialCounts.has(node.id) ? 22 : 0)
-      : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected));
-    if (spatialCounts.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .85), node, "body", false, 34));
+      ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged, summary ? 22 : 0, haloScale)
+      : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected, 0, undefined,
+        haloScale && (() => 1 + (haloScale() - 1) * 2)));
+    if (spatialCounts.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .85), node, "body", false, 34, undefined, haloScale));
     if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .7), node, "body", false, 0, 18));
     if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected));
     if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected));
@@ -644,7 +651,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       cursor.current = null;
       // A new press is a new action; the guard only belongs to the prior drag's click.
       if (!positions.dragging) suppressClickUntil.current = 0;
-      allowDrag.current = !positions.layoutMoving;
+      allowDrag.current = !positions.layoutMoving && (event.button === 0 || event.pointerType === "touch");
       if (!allowDrag.current) suppressClickUntil.current = performance.now() + 350;
       pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType };
       pressedNode.current = null;
@@ -681,20 +688,34 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       linkOpacity={.65} linkDirectionalArrowLength={link => link.kind === "evidence" ? 2 : 0} linkDirectionalArrowRelPos={.8}
       enableNodeDrag={!disabled}
       onNodeDrag={dragNode}
-      onNodeDragEnd={() => {
+      onNodeDragEnd={node => {
         const summary = draggedSummary.current;
         const individual = summary ? null : dragged.current;
         draggedSummary.current = null;
         if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
         const moved = allowDrag.current && positions.release(performance.now(), reduced);
+        const halo = summaryHalo.current;
+        if (halo) {
+          if (moved) {
+            const now = performance.now();
+            halo.releaseScale = summaryHaloScale(halo, halo.id, now, reduced);
+            halo.releasedAt = now;
+          } else summaryHalo.current = null;
+        }
         frozenSpatial.current = null;
         const current = new Map(nodes.map(value => [value.id, value]));
         for (const rendered of data.nodes) fixPosition(rendered, current.get(rendered.id)!);
+        if (!allowDrag.current) {
+          // Native DragControls also pans/rotates on secondary buttons; undo its visual transform.
+          const object = (node as PositionedNode & { __threeObj?: Group }).__threeObj;
+          const original = current.get(node.id);
+          if (object && original) { object.position.set(original.x, original.y, original.z); object.quaternion.identity(); }
+        }
         graph.current?.d3ReheatSimulation();
         dragged.current = null; setDraggingId(null);
         if (individual && moved) setMovedGroups(current => new Map([...current].filter(([, group]) => !group.members.includes(individual))));
         if (summary && moved && summary.epoch === positions.groupEpoch) setMovedGroups(current => new Map(current).set(summary.id, { members: summary.members, level: summary.level, epoch: summary.epoch }));
-        const clicked = !moved ? individual ?? (summary?.epoch === positions.groupEpoch ? summary.id : null) : null;
+        const clicked = allowDrag.current && !moved ? individual ?? (summary?.epoch === positions.groupEpoch ? summary.id : null) : null;
         if (clicked) {
           suppressClickUntil.current = 0;
           chooseNode(clicked);

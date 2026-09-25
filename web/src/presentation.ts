@@ -108,6 +108,17 @@ export function nodeScreenMetrics(size: number, selected: boolean, changed: bool
   const extent = changed ? change : selected ? selection : size;
   return { body: size, selection, change, hit: Math.max(36, extent), radius: extent / 2 };
 }
+/** A summary's ring responds to a grab and settles after release without moving its stars or hit area. */
+export type SummaryHaloMotion = { id: string; startedAt: number; releasedAt: number | null; releaseScale: number };
+export function summaryHaloScale(motion: SummaryHaloMotion | null, id: string, now: number, reduced: boolean): number {
+  if (!motion || motion.id !== id || reduced || !Number.isFinite(now)) return 1;
+  if (motion.releasedAt !== null) {
+    const elapsed = Math.max(0, now - motion.releasedAt);
+    return elapsed >= 450 ? 1 : 1 + (motion.releaseScale - 1) * Math.exp(-elapsed / 170) * Math.cos(elapsed / 85);
+  }
+  const elapsed = Math.max(0, now - motion.startedAt);
+  return 1 + .08 * (1 - Math.exp(-elapsed / 120)) + .025 * Math.sin(elapsed / 70);
+}
 /** Cosmetic motion is independent of graph status, identity, layout and hit bounds. */
 export function starPhase(id: string): number {
   let hash = 2166136261;
