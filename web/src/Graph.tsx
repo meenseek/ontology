@@ -6,6 +6,7 @@ import type { Camera, PerspectiveCamera } from "three";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { active, constellationView, expandedCoreCameraFrame, kindName, knowledge, linkColor, linkName, stateName } from "./graph";
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei";
+import type { NucleusView } from "./nuclei";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
@@ -204,10 +205,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const spatialCloseButton = useRef<HTMLButtonElement>(null);
   const hoveredId = useRef<string | null>(null);
   const dragged = useRef<string | null>(null);
-  const draggedSummary = useRef<string | null>(null);
+  const draggedSummary = useRef<{ id: string; members: readonly string[]; level: number; epoch: number } | null>(null);
+  const frozenSpatial = useRef<NucleusView | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [expandedCore, setExpandedCore] = useState<string | null>(null);
   const [spatialReveal, setSpatialReveal] = useState<SpatialReveal | null>(null);
+  const [movedGroups, setMovedGroups] = useState<Map<string, { members: readonly string[]; level: number; epoch: number }>>(new Map());
   const [lodLevel, setLodLevel] = useState(0);
   const [settledRevision, setSettledRevision] = useState(0);
   const lodLevelRef = useRef(0), movingRef = useRef(false);
@@ -220,7 +223,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   // Renderer endpoint mutation stays out of the reconciled model.
   const presentation = useMemo(() => constellationView(nodes, links, selected, expandedCore), [nodes, links, selected, expandedCore]);
   const { nodes: semanticNodes, links: displayLinks, counts: collapsedCounts, cores } = presentation;
-  const spatial = useMemo(() => nucleusView(semanticNodes, snapshot.links, draggingId && !spatialReveal?.members.size ? 0 : Math.max(lodLevel, spatialReveal?.level ?? 0), selected, spatialReveal?.members), [semanticNodes, snapshot.links, draggingId, lodLevel, selected, settledRevision, spatialReveal]);
+  const spatialLevel = Math.max(lodLevel, spatialReveal?.level ?? 0);
+  const spatialLocks = useMemo(() => new Map([...movedGroups].filter(([, group]) => group.level === spatialLevel && group.epoch === positions.groupEpoch).map(([id, group]) => [id, group.members])), [movedGroups, spatialLevel, positions.groupEpoch]);
+  const spatial = useMemo(() => frozenSpatial.current ?? nucleusView(semanticNodes, snapshot.links,
+    draggingId && !draggedSummary.current && !spatialReveal?.members.size ? 0 : spatialLevel,
+    selected, spatialReveal?.members, spatialLocks), [semanticNodes, snapshot.links, draggingId, spatialLevel, selected, settledRevision, spatialReveal, spatialLocks]);
   const { nodes: displayNodes, counts: spatialCounts, groups: spatialGroups } = spatial;
   const collapsibleCore = useMemo(() => !selected && expandedCore && constellationView(nodes, links, null, null).counts.has(expandedCore), [nodes, links, selected, expandedCore]);
   const activeExpandedCore = collapsibleCore ? expandedCore : null;
@@ -294,7 +301,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const members = cores.find(core => core.hub === activeExpandedCore)?.members;
     return members ? expandedCoreCameraFrame(nodes, links, activeExpandedCore, members)?.key ?? "" : "";
   }, [nodes, links, cores, selected, activeExpandedCore]);
-  const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${fit}:${size.width}:${size.height}:${expandedRelationKey}`;
+  const spatialCameraKey = spatialReveal?.members.size ? `${positions.structureEpoch}:${[...spatialReveal.members].sort().join("|")}` : "";
+  const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${fit}:${size.width}:${size.height}:${expandedRelationKey}:${spatialCameraKey}`;
   const appliedCamera = useRef("");
   const appliedFit = useRef(fit);
   const positionCamera = useCallback(() => {
@@ -303,12 +311,15 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     appliedCamera.current = cameraKey;
     const fitChanged = appliedFit.current !== fit;
     appliedFit.current = fit;
-    if (fitChanged && spatialReveal?.members.size) setSpatialReveal(null);
+    if (fitChanged) {
+      setSpatialReveal(null); setExpandedCore(null);
+      positions.showCore(exposesHiddenMembers ? "*" : null, performance.now(), reduced);
+    }
     // Frame the settled target while nodes travel there; framing their current
     // positions would zoom into the still-collapsed core and then jump outward.
     const cameraNodes = nodes.map(node => ({ ...node, ...(positions.layoutTarget(node.id) ?? {}) }));
     const cameraDisplayNodes = semanticNodes.map(node => ({ ...node, ...(positions.layoutTarget(node.id) ?? {}) }));
-    const target = cameraNodes.find(n => n.id === (selected ?? activeExpandedCore));
+    const target = fitChanged ? null : cameraNodes.find(n => n.id === (selected ?? activeExpandedCore));
     if (target && selected) {
       // Selection reveals the rotating surface while preserving any closer
       // user zoom and the current viewing direction, including deep links.
@@ -347,10 +358,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         return;
       }
     }
-    const bounds = cameraDisplayNodes.reduce((b, n) => ({ minX: Math.min(b.minX, n.x), maxX: Math.max(b.maxX, n.x), minY: Math.min(b.minY, n.y), maxY: Math.max(b.maxY, n.y), minZ: Math.min(b.minZ, n.z), maxZ: Math.max(b.maxZ, n.z) }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity });
+    const overviewNodes = fitChanged ? constellationView(cameraNodes, links, null, null).nodes : cameraDisplayNodes;
+    const bounds = overviewNodes.reduce((b, n) => ({ minX: Math.min(b.minX, n.x), maxX: Math.max(b.maxX, n.x), minY: Math.min(b.minY, n.y), maxY: Math.max(b.maxY, n.y), minZ: Math.min(b.minZ, n.z), maxZ: Math.max(b.maxZ, n.z) }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity });
     const center = { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2, z: (bounds.minZ + bounds.maxZ) / 2 };
     const lookAt = target ?? center;
-    const radius = Math.max(18, ...cameraDisplayNodes.map(n => Math.hypot(n.x - lookAt.x, n.y - lookAt.y, n.z - lookAt.z) + 6));
+    const radius = Math.max(18, ...overviewNodes.map(n => Math.hypot(n.x - lookAt.x, n.y - lookAt.y, n.z - lookAt.z) + 6));
     const camera = instance.camera() as PerspectiveCamera;
     const vertical = camera.fov * Math.PI / 180;
     const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
@@ -360,7 +372,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const firstOverview = positions.hasCompactInitialLayout && fit === 0 && nodes.length === snapshot.nodes.length;
     const distance = firstOverview ? Math.max(fitDistance, size.height * camera.projectionMatrix.elements[5] / 2) : fitDistance;
     instance.cameraPosition({ x: lookAt.x, y: lookAt.y, z: lookAt.z + distance }, lookAt, reduced ? 0 : 650);
-  }, [ready, cameraKey, nodes, semanticNodes, links, selected, activeExpandedCore, cores, reduced, size, positions, fit, snapshot.nodes.length, spatialReveal]);
+  }, [ready, cameraKey, nodes, semanticNodes, links, selected, activeExpandedCore, cores, reduced, size, positions, fit, snapshot.nodes.length, spatialReveal, exposesHiddenMembers]);
   useEffect(() => {
     let second = 0;
     const first = requestAnimationFrame(() => { second = requestAnimationFrame(positionCamera); });
@@ -379,8 +391,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const cancel = () => {
       allowDrag.current = false;
       if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
+      const moved = positions.dragMoved, individual = draggedSummary.current ? null : dragged.current;
       positions.cancel();
-      dragged.current = null; draggedSummary.current = null; setDraggingId(null);
+      if (draggedSummary.current && moved && draggedSummary.current.epoch === positions.groupEpoch) {
+        const group = draggedSummary.current;
+        setMovedGroups(current => new Map(current).set(group.id, { members: group.members, level: group.level, epoch: group.epoch }));
+      }
+      if (individual && moved) setMovedGroups(current => new Map([...current].filter(([, group]) => !group.members.includes(individual))));
+      dragged.current = null; draggedSummary.current = null; frozenSpatial.current = null; setDraggingId(null);
       // DragControls handles pointerup/leave but has no pointercancel listener.
       if (pointer.current) canvas?.dispatchEvent(new PointerEvent("pointerup", { ...pointer.current, bubbles: true }));
       pointer.current = null;
@@ -393,38 +411,38 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const dragNode = (node: PositionedNode) => {
     const instance = graph.current;
     if (!allowDrag.current || disabled || !instance) return;
-    if (spatialGroups.has(node.id)) {
-      const original = nodes.find(value => value.id === node.id);
-      if (original) fixPosition(node, original);
-      instance.d3ReheatSimulation();
-      draggedSummary.current = node.id;
-      return;
-    }
     if (!positions.dragging) {
       const camera = instance.camera(), controls = instance.controls() as OrbitControls;
       const origin = nodes.find(n => n.id === node.id)!;
       const depth = -new Vector3(origin.x, origin.y, origin.z).applyMatrix4(camera.matrixWorldInverse).z;
       const projectionY = camera.projectionMatrix.elements[5];
       const dragProjection = new Vector3();
-      positions.begin(node.id, 2 * Math.max(.001, depth) / (size.height * projectionY), {
+      const unitsPerPixel = 2 * Math.max(.001, depth) / (size.height * projectionY);
+      const group = spatialGroups.get(node.id);
+      const plane = {
         right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
         up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1), spacingPixels: 24,
-        visible: (spatialReveal?.members.size ? displayNodes : semanticNodes).map(value => value.id),
-        worldPerPixel: atDepth => 2 * atDepth / (size.height * projectionY),
-        isVisible: (at, radius) => Math.abs(at.x) <= size.width / 2 + radius && Math.abs(at.y) <= size.height / 2 + radius,
-        radius: (value, atDepth) => {
-          const pixels = nodeScreenSize(value.kind, atDepth, size.height, projectionY);
+        visible: (group || spatialReveal?.members.size ? displayNodes : semanticNodes).map(value => value.id),
+        worldPerPixel: (atDepth: number) => 2 * atDepth / (size.height * projectionY),
+        isVisible: (at: { x: number; y: number }, radius: number) => Math.abs(at.x) <= size.width / 2 + radius && Math.abs(at.y) <= size.height / 2 + radius,
+        radius: (value: PositionedNode, atDepth: number) => {
+          const pixels = Math.max(spatialCounts.has(value.id) ? 34 : 0, nodeScreenSize(value.kind, atDepth, size.height, projectionY));
           const metrics = nodeScreenMetrics(pixels, value.id === selected, value.changed);
-          return metrics.radius;
+          return spatialCounts.has(value.id) ? Math.max(18, metrics.radius) : metrics.radius;
         },
-        project: value => {
+        project: (value: { x: number; y: number; z: number }) => {
           camera.updateMatrixWorld();
           dragProjection.set(value.x, value.y, value.z).applyMatrix4(camera.matrixWorldInverse);
           const depth = camera.projectionMatrix.elements[11] === -1 ? -dragProjection.z : 1;
           dragProjection.applyMatrix4(camera.projectionMatrix);
           return { x: dragProjection.x * size.width / 2, y: dragProjection.y * size.height / 2, depth };
         },
-      });
+      };
+      if (group) {
+        draggedSummary.current = { id: node.id, members: group.members, level: spatialLevel, epoch: positions.groupEpoch };
+        frozenSpatial.current = spatial;
+        positions.beginGroup(node.id, group.members, unitsPerPixel, plane);
+      } else positions.begin(node.id, unitsPerPixel, plane);
       if (positions.dragging) { dragged.current = node.id; setDraggingId(node.id); }
       instance.cameraPosition({ ...camera.position }, { ...controls.target }, 0);
       controls.autoRotate = false;
@@ -454,10 +472,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive" : ""}`;
       element.children[0].textContent = collapsedCounts.has(id) ? `연결된 항목 · ${collapsedCounts.get(id)}개` : spatialCounts.has(id) ? `가까운 항목 · ${spatialCounts.get(id)}개` : label.title;
       const subtitle = element.children[1] as HTMLElement;
-      subtitle.textContent = summary ? "눌러 펼치기" : label.subtitle; subtitle.hidden = !subtitle.textContent;
+      subtitle.textContent = summary ? "별 끌기 · 눌러 펼치기" : label.subtitle; subtitle.hidden = !subtitle.textContent;
       element.children[2].textContent = summary ? "" : label.status;
       if (summary) {
-        element.setAttribute("role", "button"); element.setAttribute("aria-label", `${element.children[0].textContent}, 눌러 펼치기`);
+        element.setAttribute("role", "button"); element.setAttribute("aria-label", `${element.children[0].textContent}, 별을 끌어 함께 이동하거나 눌러 펼치기`);
         element.setAttribute("aria-hidden", "false"); element.tabIndex = 0;
       } else {
         element.removeAttribute("role"); element.removeAttribute("aria-label");
@@ -622,7 +640,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       if (!allowDrag.current) suppressClickUntil.current = performance.now() + 350;
       pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType };
     }}
-    aria-label="3D 지식 지도. 연결된 항목과 가까운 항목 묶음을 눌러 펼친 뒤 개별 점을 끌 수 있습니다. 빈 공간을 드래그해 회전하고 스크롤로 확대·축소합니다. Tab과 Enter로 묶음을 펼칠 수 있으며 전체 항목은 목록 보기에서 탐색할 수 있습니다.">
+    aria-label="3D 지식 지도. 묶음 별을 끌면 함께 이동하고 누르면 펼쳐 개별 별을 끌 수 있습니다. 빈 공간을 드래그해 회전하고 스크롤로 확대·축소합니다. Tab과 Enter로 묶음을 펼칠 수 있으며 전체 항목은 목록 보기에서 탐색할 수 있습니다.">
     {ready && <ForceGraph3D<PositionedNode, RenderLink>
       ref={graph} width={size.width} height={size.height} graphData={data}
       backgroundColor="rgba(0,0,0,0)" controlType="orbit" showNavInfo={false}
@@ -636,23 +654,27 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       enableNodeDrag={!disabled}
       onNodeDrag={dragNode}
       onNodeDragEnd={() => {
-        const summaryId = draggedSummary.current;
+        const summary = draggedSummary.current;
+        const individual = summary ? null : dragged.current;
         draggedSummary.current = null;
         if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
-        if (allowDrag.current) positions.release(performance.now(), reduced);
+        const moved = allowDrag.current && positions.release(performance.now(), reduced);
+        frozenSpatial.current = null;
         const current = new Map(nodes.map(value => [value.id, value]));
         for (const rendered of data.nodes) fixPosition(rendered, current.get(rendered.id)!);
         graph.current?.d3ReheatSimulation();
         dragged.current = null; setDraggingId(null);
-        if (summaryId) {
+        if (individual && moved) setMovedGroups(current => new Map([...current].filter(([, group]) => !group.members.includes(individual))));
+        if (summary && moved && summary.epoch === positions.groupEpoch) setMovedGroups(current => new Map(current).set(summary.id, { members: summary.members, level: summary.level, epoch: summary.epoch }));
+        if (summary && !moved && summary.epoch === positions.groupEpoch) {
           suppressClickUntil.current = 0;
-          chooseNode(summaryId);
+          chooseNode(summary.id);
           suppressClickUntil.current = performance.now() + 350;
         }
       }} enablePointerInteraction={!disabled}
       cooldownTicks={0} warmupTicks={0} onEngineStop={positionCamera}
       onNodeClick={node => chooseNode(node.id)}
-      onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: `연결된 항목 · ${collapsedCounts.get(node.id)}개`, detail: "눌러 펼치기" } : spatialCounts.has(node.id) ? { title: `가까운 항목 · ${spatialCounts.get(node.id)}개`, detail: "눌러 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
+      onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: `연결된 항목 · ${collapsedCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `가까운 항목 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
       onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
     />}
     <div className="node-labels" ref={labelLayer}
@@ -663,6 +685,6 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     {activeExpandedCore && !selected && !spatialReveal?.members.size && <button type="button" ref={coreCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); setExpandedCore(null); }}>묶음 접기</button>}
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>가까운 항목 {spatialReveal.members.size}개 접기</button>}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
-    <div className="graph-instructions" aria-hidden="true">묶음을 눌러 펼친 뒤 개별 점 끌기 · 빈 공간 회전 · 스크롤 확대·축소</div>
+    <div className="graph-instructions" aria-hidden="true">묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · 빈 공간 회전 · 스크롤 확대·축소</div>
   </div>;
 }
