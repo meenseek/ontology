@@ -5,6 +5,7 @@ import { Positions, compactSlots } from "./positions.ts";
 import { separateDiscs } from "./clearance.ts";
 import { PerspectiveCamera, Vector3 } from "three";
 import { active, constellationView, denseConstellationCores, expandedCoreCameraFrame, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
+import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 import type { ProjectedLabel } from "./presentation.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
@@ -1074,6 +1075,64 @@ test("a personal graph with hundreds of unrelated documents opens as a constella
   const reordered = reconcile({ ...source, nodes: [...nodes].reverse(), links: [...links].reverse() });
   new Positions().install(reordered, true);
   assert.deepEqual(reordered.nodes.map(node => [node.id, node.x, node.y, node.z]), model.nodes.map(node => [node.id, node.x, node.y, node.z]));
+});
+test("distant isolated stars form several bounded nuclei without hiding any relationship", () => {
+  const nodes = Array.from({ length: 536 }, (_, index) => ({ ...doc(`personal-${String(index).padStart(3, "0")}`), scope: "personal" as const }));
+  const links = Array.from({ length: 128 }, (_, index) => edge(nodes[0].id, nodes[index + 1].id));
+  const source = { ...snapshot(nodes, links), scope: "personal" as const };
+  const model = reconcile(source), positions = new Positions(); positions.install(model, true);
+  const semantic = constellationView(model.nodes, model.links, null, null);
+  const original = new Map(model.nodes.map(node => [node.id, coordinates(node)]));
+  const distant = nucleusView(semantic.nodes, model.links, 1, null);
+  assert.ok(distant.groups.size >= 5 && distant.groups.size <= 60, "the overview has several compact nuclei");
+  assert.ok(distant.nodes.length < semantic.nodes.length / 2, "a distant view actually reduces visual density");
+  assert.equal(semantic.counts.get(nodes[0].id), 129, "the linked core remains a separate summary");
+  const shown = new Set(distant.nodes.map(node => node.id));
+  for (const link of links) {
+    if (semantic.nodes.some(node => node.id === link.source)) assert.ok(shown.has(link.source));
+    if (semantic.nodes.some(node => node.id === link.target)) assert.ok(shown.has(link.target));
+  }
+  for (const [id, group] of distant.groups) {
+    assert.ok(group.members.length >= 6 && group.members.length <= 60);
+    assert.ok(shown.has(id) && group.members.includes(id), "the nucleus is a real member");
+    assert.ok(group.radius > 0 && Number.isFinite(group.radius));
+    assert.ok(group.members.every(member => !links.some(link => link.source === member || link.target === member)), "linked nodes never disappear");
+  }
+  assert.deepEqual(new Map(model.nodes.map(node => [node.id, coordinates(node)])), original, "LOD does not move knowledge");
+  assert.deepEqual(nucleusView(semantic.nodes, model.links, 0, null).nodes, semantic.nodes, "approaching restores every visible star");
+  const focused = nucleusView(semantic.nodes, model.links, 1, nodes[300].id);
+  assert.ok(focused.nodes.some(node => node.id === nodes[300].id), "focus keeps the selected star visible");
+  assert.ok(focused.nodes.length < semantic.nodes.length / 2, "selection keeps unrelated distant nuclei summarized");
+  assert.ok(![...focused.groups.values()].some(group => group.members.includes(nodes[300].id)), "focus does not hide the selected star inside a nucleus");
+  const reversed = nucleusView([...semantic.nodes].reverse(), [...model.links].reverse(), 1, null);
+  assert.deepEqual([...reversed.groups].sort(), [...distant.groups].sort(), "source order cannot change nuclei");
+});
+test("historical links and classification markers stay visible across visual LOD", () => {
+  const nodes = [doc("past-a"), doc("past-b"), ...Array.from({ length: 30 }, (_, index) => doc(`free-${index}`)), { ...doc("marker"), kind: "topic" as const }];
+  const links = [{ ...edge("past-a", "past-b", false), kind: "evidence" as const }];
+  const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model, true);
+  const distant = nucleusView(model.nodes, model.links, 3, null), ids = new Set(distant.nodes.map(node => node.id));
+  assert.ok(ids.has("past-a") && ids.has("past-b") && ids.has("marker"));
+  assert.ok(distant.groups.size > 0, "unlinked knowledge can still be summarized");
+  const filtered = nucleusView(model.nodes.filter(node => node.id.startsWith("free-")), model.links, 3, null);
+  assert.ok(filtered.nodes.every(node => node.id.startsWith("free-")), "filters cannot reintroduce excluded items");
+});
+test("camera LOD uses hysteresis instead of toggling at one zoom boundary", () => {
+  assert.equal(nucleusLevel(15, 0), 1);
+  assert.equal(nucleusLevel(22, 1), 1);
+  assert.equal(nucleusLevel(27, 1), 0);
+  assert.equal(nucleusLevel(9, 0), 2);
+  assert.equal(nucleusLevel(12, 2), 2);
+  assert.equal(nucleusLevel(14, 2), 1);
+  assert.equal(nucleusLevel(4, 0), 3);
+  assert.equal(nucleusLevel(7, 3), 2);
+});
+test("offscreen nuclei cannot consume the visible label budget after an orbit", () => {
+  const counts = new Map(Array.from({ length: 12 }, (_, index) => [`group-${index}`, 30 - index] as const));
+  const projected = Array.from({ length: 12 }, (_, index) => ({ id: `group-${index}`, x: index < 9 ? 2000 : 20 + (index - 9) * 40, y: 50, depth: 0 }));
+  assert.deepEqual([...nucleusLabelIds(projected, counts, 300, 100)], ["group-9", "group-10", "group-11"]);
+  projected[9].depth = 2;
+  assert.deepEqual([...nucleusLabelIds(projected, counts, 300, 100)], ["group-10", "group-11"]);
 });
 test("an overview nucleus expands and closes without keeping an empty halo or losing a dragged offset", () => {
   const nodes = [doc("hub"), ...Array.from({ length: 119 }, (_, index) => doc(`spoke-${index}`)),
