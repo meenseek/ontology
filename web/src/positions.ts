@@ -485,7 +485,7 @@ export class Positions {
     }));
     let desired = current;
     if (softFraction > 0) {
-      const soft = this.clearedPositions(clearance, current, linked, 26);
+      const soft = this.clearedPositions(clearance, current, linked, 15);
       desired = new Map([...current].map(([id, value]) => [id, id === clearance.held ? value : add(value, add(soft.get(id) ?? value, value, -1), softFraction)]));
     }
     for (const [id, value] of this.clearedPositions(clearance, desired, linked)) {

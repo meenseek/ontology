@@ -581,12 +581,15 @@ test("a neighboring node starts yielding before its visible footprints touch", (
   positions.begin("held", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
     visible: model.nodes.map(node => node.id), radius: () => 20,
     project: value => ({ x: value.x, y: value.y, depth: 1 }) });
-  positions.move("held", { x: 15, y: 0, z: 0 });
+  positions.move("held", { x: 19, y: 0, z: 0 });
   const other = model.nodes.find(node => node.id === "other")!;
   assert.equal(other.x, 75, "the hard collision boundary has not been reached");
   positions.advance(0, false); positions.advance(16, false);
-  assert.ok(other.x > 75 && other.x < 81, "the early clearance is eased over frames");
-  assert.ok(other.x - 15 >= 50, "the hard non-overlap boundary remains in force");
+  assert.equal(other.x, 75, "the neighboring node waits outside the compact clearance range");
+  positions.move("held", { x: 22, y: 0, z: 0 });
+  positions.advance(32, false);
+  assert.ok(other.x > 75 && other.x < 77, "the early clearance is eased over frames");
+  assert.ok(other.x - 22 >= 50, "the hard non-overlap boundary remains in force");
 });
 test("visible linked and unlinked nodes move aside throughout drag and release", () => {
   for (const reduced of [false, true]) {
