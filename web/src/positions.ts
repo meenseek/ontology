@@ -1,5 +1,5 @@
-import { visualSatellites } from "./graph";
-import type { Model, PositionedNode } from "./graph";
+import { constellationView, visualSatellites } from "./graph";
+import type { GraphLink, Model, PositionedNode } from "./graph";
 import { COLLISION_GAP, separateDiscs } from "./clearance";
 
 export type Point = { x: number; y: number; z: number };
@@ -447,6 +447,64 @@ export function compactSlots(root: string, members: string[], adjacency: Map<str
 }
 type Settle = { anchor: Point; followers: Map<string, Follower>; velocities: Map<string, Point>; clearance: Clearance | null; tolerance: number; last: number; deadline: number };
 type PendingLayout = { token: number; root: string; right: Point; up: Point; spacing: number; clearance: Clearance | null; reduced: boolean };
+type LayoutMotion = { from: Map<string, Point>; to: Map<string, Point>; actual: Map<string, Point>; start: number };
+const layoutDuration = 650;
+const graphStructure = (nodes: readonly PositionedNode[], links: readonly GraphLink[]) => JSON.stringify([
+  nodes.map(node => [node.id, node.cluster, node.kind, node.status, node.current, node.present, node.temporal, node.supported]),
+  links.map(link => [link.source, link.target, link.kind, link.current]),
+]);
+function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonly GraphLink[]): Map<string, Point> {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  const adjacency = new Map(nodes.map(node => [node.id, new Set<string>()]));
+  for (const link of links) {
+    adjacency.get(link.source)?.add(link.target); adjacency.get(link.target)?.add(link.source);
+  }
+  const spacing = 31;
+  const visited = new Set<string>();
+  const components: { root: string; coordinates: Map<string, Slot>; radius: number; center?: Slot }[] = [];
+  for (const root of [...byId.keys()].sort()) {
+    if (visited.has(root)) continue;
+    const ids = [root]; visited.add(root);
+    for (let index = 0; index < ids.length; index++) {
+      for (const other of [...(adjacency.get(ids[index]) ?? [])].sort()) {
+        if (!visited.has(other)) { visited.add(other); ids.push(other); }
+      }
+    }
+    const members = ids.slice(1).sort(), origin = byId.get(root)!;
+    const projected = new Map(ids.map(id => {
+      const node = byId.get(id)!;
+      return [id, { x: node.x - origin.x, y: node.y - origin.y }] as const;
+    }));
+    const slots = compactSlots(root, members, adjacency) ?? packedSlots(root, members, adjacency, projected);
+    const coordinates = new Map<string, Slot>([[root, { x: 0, y: 0 }], ...slots]);
+    const average = [...coordinates.values()].reduce((sum, value) => ({ x: sum.x + value.x / ids.length, y: sum.y + value.y / ids.length }), { x: 0, y: 0 });
+    let radius = spacing / 2;
+    for (const [id, value] of coordinates) {
+      const centered = { x: (value.x - average.x) * spacing, y: (value.y - average.y) * spacing };
+      coordinates.set(id, centered);
+      radius = Math.max(radius, Math.hypot(centered.x, centered.y) + spacing / 2);
+    }
+    components.push({ root, coordinates, radius });
+  }
+  components.sort((a, b) => b.radius - a.radius || a.root.localeCompare(b.root));
+  const gap = 12, step = (spacing + gap) * .55, goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  let candidate = 1;
+  for (const [index, component] of components.entries()) {
+    if (index === 0) { component.center = { x: 0, y: 0 }; continue; }
+    for (;; candidate++) {
+      const distance = step * Math.sqrt(candidate), angle = candidate * goldenAngle;
+      const center = { x: Math.cos(angle) * distance, y: Math.sin(angle) * distance };
+      if (components.some(other => other.center && Math.hypot(center.x - other.center.x, center.y - other.center.y) < component.radius + other.radius + gap)) continue;
+      component.center = center; candidate++; break;
+    }
+  }
+  const result = new Map<string, Point>();
+  for (const component of components) for (const [id, value] of component.coordinates) {
+    const x = value.x + component.center!.x, y = value.y + component.center!.y;
+    result.set(id, { x, y, z: constellationDepth(x, y, spacing) });
+  }
+  return result;
+}
 // Session-only coordinates. Reconcile owns semantic membership; the live graph
 // can pack its first view using the same link solver used after a drag.
 export class Positions {
@@ -459,62 +517,61 @@ export class Positions {
   private observed = new Map<string, Point>();
   private gesture: Pull | null = null;
   private settle: Settle | null = null;
+  private source: { nodes: PositionedNode[]; links: GraphLink[]; structure: string } | null = null;
+  private layouts = new Map<string, Map<string, Point>>();
+  private canonical = new Map<string, Point>();
+  private activeCore = "";
+  private layoutMotion: LayoutMotion | null = null;
+  private layoutNeedsRefresh = false;
   private worker: Worker | null = null;
   private pending: PendingLayout | null = null;
   private token = 0;
   get dragging() { return this.gesture !== null; }
   get settling() { return this.settle !== null; }
+  get layoutMoving() { return this.layoutMotion !== null; }
   get hasCompactInitialLayout() { return this.packedInitial; }
-  private compactInitialLayout() {
-    // The first overview may zoom out to fit the whole graph. Reserve a little
-    // world-space room here; live collision and release still use the 1px gap.
-    // World-space geometry stays stable when the distant screen footprint changes.
-    const spacing = 31;
-    const visited = new Set<string>();
-    const components: { root: string; coordinates: Map<string, Slot>; radius: number; center?: Slot }[] = [];
-    for (const root of [...this.nodes.keys()].sort()) {
-      if (visited.has(root)) continue;
-      const ids = [root]; visited.add(root);
-      for (let index = 0; index < ids.length; index++) {
-        for (const other of [...(this.adjacency.get(ids[index]) ?? [])].sort()) {
-          if (!visited.has(other)) { visited.add(other); ids.push(other); }
-        }
-      }
-      const members = ids.slice(1).sort(), origin = this.nodes.get(root)!;
-      const projected = new Map(ids.map(id => {
-        const node = this.nodes.get(id)!;
-        return [id, { x: node.x - origin.x, y: node.y - origin.y }] as const;
-      }));
-      const slots = compactSlots(root, members, this.adjacency) ?? packedSlots(root, members, this.adjacency, projected);
-      const coordinates = new Map<string, Slot>([[root, { x: 0, y: 0 }], ...slots]);
-      const average = [...coordinates.values()].reduce((sum, value) => ({ x: sum.x + value.x / ids.length, y: sum.y + value.y / ids.length }), { x: 0, y: 0 });
-      let radius = spacing / 2;
-      for (const [id, value] of coordinates) {
-        const centered = { x: (value.x - average.x) * spacing, y: (value.y - average.y) * spacing };
-        coordinates.set(id, centered);
-        radius = Math.max(radius, Math.hypot(centered.x, centered.y) + spacing / 2);
-      }
-      components.push({ root, coordinates, radius });
+  layoutTarget(id: string): Point | null {
+    const node = this.nodes.get(id);
+    if (!node) return null;
+    const motion = this.layoutMotion;
+    if (!motion) return point(node);
+    const from = motion.from.get(id) ?? point(node), to = motion.to.get(id) ?? from;
+    return add(motion.actual.get(id) ?? point(node), add(to, from, -1));
+  }
+  private coreLayout(core: string): Map<string, Point> {
+    const cached = this.layouts.get(core);
+    if (cached) return cached;
+    const source = this.source!;
+    if (core === "*") {
+      const full = packInitialCoordinates(source.nodes, source.links);
+      this.layouts.set(core, full);
+      return full;
     }
-    components.sort((a, b) => b.radius - a.radius || a.root.localeCompare(b.root));
-    // A row pack makes the many independent personal documents look like a
-    // rectangular table. Place whole components on a deterministic sunflower
-    // spiral, checking their actual bounding discs before accepting a center.
-    const gap = 12, step = (spacing + gap) * .55, goldenAngle = Math.PI * (3 - Math.sqrt(5));
-    let candidate = 1;
-    for (const [index, component] of components.entries()) {
-      if (index === 0) { component.center = { x: 0, y: 0 }; continue; }
-      for (;; candidate++) {
-        const distance = step * Math.sqrt(candidate), angle = candidate * goldenAngle;
-        const center = { x: Math.cos(angle) * distance, y: Math.sin(angle) * distance };
-        if (components.some(other => other.center && Math.hypot(center.x - other.center.x, center.y - other.center.y) < component.radius + other.radius + gap)) continue;
-        component.center = center; candidate++; break;
+    const view = constellationView(source.nodes, source.links, null, core || null);
+    const visible = packInitialCoordinates(view.nodes, view.links);
+    for (const group of view.cores) {
+      if (!view.counts.has(group.hub)) continue;
+      const hub = visible.get(group.hub)!;
+      for (const id of group.members) {
+        if (id === group.hub) continue;
+        visible.set(id, point(hub));
       }
     }
-    for (const component of components) for (const [id, value] of component.coordinates) {
-      const x = value.x + component.center!.x, y = value.y + component.center!.y;
-      fixPosition(this.nodes.get(id)!, { x, y, z: constellationDepth(x, y, spacing) });
-    }
+    this.layouts.set(core, visible);
+    return visible;
+  }
+  showCore(core: string | null, now: number, reduced: boolean) {
+    if (!this.source || !Number.isFinite(now)) return;
+    const key = core ?? "";
+    if (key === this.activeCore && !this.layoutNeedsRefresh) return;
+    this.cancel(false);
+    const target = this.coreLayout(key);
+    const actual = new Map([...this.nodes].map(([id, node]) => [id, point(node)]));
+    const from = new Map([...actual].map(([id, value]) => [id, this.canonical.get(id) ?? value]));
+    this.layoutMotion = { from, to: target, actual, start: now };
+    this.activeCore = key;
+    this.layoutNeedsRefresh = false;
+    if (reduced) this.advance(now, true);
   }
   private clearedPositions(clearance: Clearance, desired: Map<string, Point>, linked: ReadonlySet<string>, gap = COLLISION_GAP): Map<string, Point> {
     const discs = clearance.visible.flatMap(id => {
@@ -574,9 +631,20 @@ export class Positions {
     for (const link of model.links) {
       this.adjacency.get(link.source)?.add(link.target); this.adjacency.get(link.target)?.add(link.source);
     }
-    if (compactInitial && !retained.size) {
-      this.compactInitialLayout();
-      this.packedInitial = true;
+    if (compactInitial) {
+      const structure = graphStructure(model.nodes, model.links);
+      if (!this.source || this.source.structure !== structure) {
+        const nodes = model.nodes.map(node => ({ ...node })), links = model.links.map(link => ({ ...link }));
+        this.source = { nodes, links, structure };
+        this.layouts.clear();
+        if (!retained.size) {
+          const overview = this.coreLayout("");
+          for (const node of model.nodes) fixPosition(node, overview.get(node.id)!);
+          this.canonical = new Map(overview);
+          this.activeCore = "";
+          this.packedInitial = true;
+        } else this.layoutNeedsRefresh = true;
+      }
     }
     this.baseline = new Map(model.nodes.map(n => [n.id, point(n)]));
     for (const node of model.nodes) {
@@ -589,12 +657,18 @@ export class Positions {
         fixPosition(node, add(node, add(current, original, -1)));
       }
     }
+    if (this.source) {
+      for (const id of this.canonical.keys()) if (!this.nodes.has(id)) this.canonical.delete(id);
+      for (const node of model.nodes) if (!this.canonical.has(node.id)) this.canonical.set(node.id, point(node));
+    }
     this.observed = new Map(model.nodes.map(n => [n.id, point(n)]));
     this.revision++;
   }
   reset() {
     this.cancel();
-    for (const [id, value] of this.baseline) fixPosition(this.nodes.get(id)!, value);
+    const layout = this.source ? this.coreLayout(this.activeCore) : this.baseline;
+    for (const [id, value] of layout) fixPosition(this.nodes.get(id)!, value);
+    if (this.source) this.canonical = new Map(layout);
     this.observed = new Map([...this.nodes].map(([id, node]) => [id, point(node)]));
     this.revision++;
   }
@@ -777,6 +851,24 @@ export class Positions {
   }
   advance(now: number, reduced: boolean) {
     if (!Number.isFinite(now)) return;
+    const layout = this.layoutMotion;
+    if (layout) {
+      const fraction = reduced ? 1 : Math.min(1, Math.max(0, (now - layout.start) / layoutDuration));
+      const eased = 1 - (1 - fraction) ** 3;
+      let changed = false;
+      for (const [id, node] of this.nodes) {
+        const from = layout.from.get(id) ?? point(node), to = layout.to.get(id) ?? from;
+        const canonical = add(from, add(to, from, -1), eased);
+        const actual = add(layout.actual.get(id) ?? point(node), add(canonical, from, -1));
+        if (node.x !== actual.x || node.y !== actual.y || node.z !== actual.z) {
+          fixPosition(node, actual); this.observed.set(id, point(actual)); changed = true;
+        }
+        this.canonical.set(id, canonical);
+      }
+      if (changed) this.revision++;
+      if (fraction === 1) this.layoutMotion = null;
+      return;
+    }
     const drag = this.gesture;
     if (drag) {
       const held = this.nodes.get(drag.id)!;
@@ -836,7 +928,8 @@ export class Positions {
     if (displaced.size && !snap) complete = false;
     if (complete) this.settle = null;
   }
-  cancel() {
+  cancel(completeLayout = true) {
+    if (completeLayout && this.layoutMotion) this.advance(this.layoutMotion.start + layoutDuration, true);
     // A canceled click restores its tiny drag; an engaged drag freezes in place.
     if (this.gesture && !this.gesture.moved) {
       let restored = false;
@@ -848,6 +941,6 @@ export class Positions {
       if (restored) this.revision++;
     }
     this.worker?.terminate(); this.worker = null; this.pending = null; this.token++;
-    this.gesture = null; this.settle = null;
+    this.gesture = null; this.settle = null; this.layoutMotion = null;
   }
 }

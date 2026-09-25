@@ -1045,14 +1045,88 @@ test("a personal graph with hundreds of unrelated documents opens as a constella
   const source = snapshot(nodes, links); source.scope = "personal";
   const model = reconcile(source), positions = new Positions(); positions.install(model, true);
   assert.equal(positions.hasCompactInitialLayout, true);
+  const overview = constellationView(model.nodes, model.links, null, null);
+  const core = overview.cores[0], hub = model.nodes.find(node => node.id === core.hub)!;
+  assert.equal(core.count, 129);
+  assert.ok([...core.members].every(id => {
+    const node = model.nodes.find(value => value.id === id)!;
+    return node.x === hub.x && node.y === hub.y && node.z === hub.z;
+  }), "collapsed spokes share the visible nucleus until expanded");
   const isolated = model.nodes.filter(node => Number(node.id.slice(-3)) > 128);
   assert.ok(new Set(isolated.map(node => node.y.toFixed(2))).size > 300, "unrelated stars do not form shelf rows");
-  for (const [index, node] of model.nodes.entries()) for (const other of model.nodes.slice(index + 1)) {
-    assert.ok(Math.hypot(node.x - other.x, node.y - other.y) >= 31 - 1e-8, "initial stars do not overlap");
+  for (const [index, node] of overview.nodes.entries()) for (const other of overview.nodes.slice(index + 1)) {
+    assert.ok(Math.hypot(node.x - other.x, node.y - other.y) >= 31 - 1e-8, "visible initial stars do not overlap");
   }
+  assert.ok(Math.min(...isolated.map(node => Math.hypot(node.x - hub.x, node.y - hub.y))) < 70,
+    "the hidden constellation footprint no longer leaves an empty halo");
   const reordered = reconcile({ ...source, nodes: [...nodes].reverse(), links: [...links].reverse() });
   new Positions().install(reordered, true);
   assert.deepEqual(reordered.nodes.map(node => [node.id, node.x, node.y, node.z]), model.nodes.map(node => [node.id, node.x, node.y, node.z]));
+});
+test("an overview nucleus expands and closes without keeping an empty halo or losing a dragged offset", () => {
+  const nodes = [doc("hub"), ...Array.from({ length: 119 }, (_, index) => doc(`spoke-${index}`)),
+    ...Array.from({ length: 80 }, (_, index) => doc(`outside-${index}`))];
+  const links = nodes.slice(1, 120).map(node => edge("hub", node.id));
+  const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model, true);
+  const byId = new Map(model.nodes.map(node => [node.id, node]));
+  const hub = byId.get("hub")!, spoke = byId.get("spoke-0")!, outside = nodes.slice(120).map(node => byId.get(node.id)!);
+  const near = () => Math.min(...outside.map(node => Math.hypot(node.x - hub.x, node.y - hub.y)));
+  const compactDistance = near();
+  assert.ok(compactDistance < 70);
+  assert.equal(Math.hypot(spoke.x - hub.x, spoke.y - hub.y), 0);
+  positions.showCore("hub", 0, false);
+  const targetHub = positions.layoutTarget("hub")!, targetSpoke = positions.layoutTarget("spoke-0")!;
+  assert.ok(Math.hypot(targetSpoke.x - targetHub.x, targetSpoke.y - targetHub.y) >= 31 - 1e-8,
+    "camera framing can use the expanded destination before nodes finish moving");
+  positions.advance(325, false);
+  assert.ok(Math.hypot(spoke.x - hub.x, spoke.y - hub.y) > 0, "spokes flow outward during expansion");
+  positions.advance(650, false);
+  assert.equal(positions.layoutMoving, false);
+  const expandedHubX = hub.x;
+  const expanded = constellationView(model.nodes, model.links, null, "hub").nodes;
+  for (const [index, node] of expanded.entries()) for (const other of expanded.slice(index + 1)) {
+    assert.ok(Math.hypot(node.x - other.x, node.y - other.y) >= 31 - 1e-8, "expanded stars do not overlap");
+  }
+  assert.ok(near() > compactDistance + 50, "expanding makes room for the real constellation");
+  positions.showCore(null, 700, false);
+  positions.advance(1025, false); positions.advance(1350, false);
+  assert.ok(Math.abs(near() - compactDistance) < 1e-7);
+  assert.ok(Math.hypot(spoke.x - hub.x, spoke.y - hub.y) < 1e-7);
+  const originalX = hub.x;
+  positions.begin("hub", 1);
+  positions.move("hub", { x: originalX + 90, y: hub.y, z: hub.z });
+  positions.advance(1400, false); positions.advance(1416, false); positions.release(1416, true);
+  positions.showCore("hub", 1500, true);
+  assert.ok(Math.abs(hub.x - expandedHubX - 90) < 1e-7, "expansion retains the nucleus drag");
+  assert.ok(Math.hypot(spoke.x - hub.x, spoke.y - hub.y) >= 31 - 1e-7,
+    "hidden members expand around the dragged nucleus");
+  positions.showCore(null, 1600, true);
+  assert.ok(Math.hypot(spoke.x - hub.x, spoke.y - hub.y) < 1e-7);
+});
+test("interrupting a constellation transition completes its layout before dragging", () => {
+  const nodes = [doc("hub"), ...Array.from({ length: 25 }, (_, index) => doc(`spoke-${index}`))];
+  const links = nodes.slice(1).map(node => edge("hub", node.id));
+  const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model, true);
+  const hub = model.nodes.find(node => node.id === "hub")!, spoke = model.nodes.find(node => node.id === "spoke-0")!;
+  positions.showCore("hub", 0, false); positions.advance(325, false);
+  positions.begin("hub", 1);
+  assert.equal(positions.layoutMoving, false);
+  assert.ok(Math.hypot(spoke.x - hub.x, spoke.y - hub.y) >= 31 - 1e-8, "a gesture cannot freeze the expanded layout halfway");
+  positions.cancel();
+  positions.showCore(null, 700, false); positions.advance(800, false); positions.cancel();
+  assert.equal(positions.layoutMoving, false);
+  assert.equal(Math.hypot(spoke.x - hub.x, spoke.y - hub.y), 0, "cancel completes the collapsed layout");
+});
+test("filter-exposed spokes receive distinct positions when their nucleus is absent", () => {
+  const nodes = [doc("hub"), ...Array.from({ length: 25 }, (_, index) => doc(`spoke-${index}`))];
+  const model = reconcile(snapshot(nodes, nodes.slice(1).map(node => edge("hub", node.id))));
+  const positions = new Positions(); positions.install(model, true);
+  const hub = model.nodes.find(node => node.id === "hub")!, spokes = model.nodes.filter(node => node.id !== "hub");
+  assert.ok(spokes.every(node => node.x === hub.x && node.y === hub.y));
+  positions.showCore("*", 0, true);
+  for (const [index, node] of spokes.entries()) for (const other of spokes.slice(index + 1)) {
+    assert.ok(Math.hypot(node.x - other.x, node.y - other.y) >= 31 - 1e-8);
+  }
 });
 test("a high-degree component has one stable overview core and expands without losing links", () => {
   const nodes = [doc("hub"), ...Array.from({ length: 119 }, (_, index) => doc(`spoke-${index}`)), doc("independent")];
@@ -1157,6 +1231,13 @@ test("two dense groups joined at their hubs keep separate expandable cores and t
   assert.deepEqual(overview.links, [edge("a", "b")]);
   assert.equal(constellationView(model.nodes, model.links, null, "a").nodes.length, 27);
   assert.equal(constellationView(model.nodes, model.links, null, "a").links.length, 26);
+  const switched = constellationView(model.nodes, model.links, "b-0", "a");
+  assert.equal(switched.nodes.length, 27, "selection in another core closes the previously expanded one");
+  assert.equal(switched.counts.has("a"), true);
+  assert.equal(switched.counts.has("b"), false);
+  const positions = new Positions(); positions.install(model, true); positions.showCore("b", 0, true);
+  const b = model.nodes.find(node => node.id === "b")!, selected = model.nodes.find(node => node.id === "b-0")!;
+  assert.ok(Math.hypot(selected.x - b.x, selected.y - b.y) >= 31 - 1e-8);
 });
 test("overview, orbit, focus, refresh and reset keep a dense personal constellation readable", async () => {
   const { focusedCameraDistance, nodeScreenSize, starMotion } = await import("./presentation.ts");
@@ -1165,16 +1246,17 @@ test("overview, orbit, focus, refresh and reset keep a dense personal constellat
   const source = { ...snapshot(nodes, links), scope: "personal" as const };
   const model = reconcile(source), positions = new Positions(); positions.install(model, true);
   const initial = new Map(model.nodes.map(node => [node.id, coordinates(node)]));
+  const overview = constellationView(model.nodes, model.links, null, null).nodes;
   const width = 1200, height = 800, camera = new PerspectiveCamera(60, width / height, .1, 10000);
-  const bounds = model.nodes.reduce((value, node) => ({
+  const bounds = overview.reduce((value, node) => ({
     minX: Math.min(value.minX, node.x), maxX: Math.max(value.maxX, node.x),
     minY: Math.min(value.minY, node.y), maxY: Math.max(value.maxY, node.y),
     minZ: Math.min(value.minZ, node.z), maxZ: Math.max(value.maxZ, node.z),
   }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity });
   const center = new Vector3((bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2, (bounds.minZ + bounds.maxZ) / 2);
-  const radius = Math.max(18, ...model.nodes.map(node => Math.hypot(node.x - center.x, node.y - center.y, node.z - center.z) + 6));
+  const radius = Math.max(18, ...overview.map(node => Math.hypot(node.x - center.x, node.y - center.y, node.z - center.z) + 6));
   const distance = Math.max(radius * 1.15 / Math.sin(camera.fov * Math.PI / 360), height * camera.projectionMatrix.elements[5] / 2);
-  const project = () => model.nodes.map(node => {
+  const project = () => overview.map(node => {
     const point = new Vector3(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
     const size = nodeScreenSize(node.kind, -point.z, height, camera.projectionMatrix.elements[5]);
     point.applyMatrix4(camera.projectionMatrix);

@@ -200,9 +200,19 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   // Renderer endpoint mutation stays out of the reconciled model.
   const presentation = useMemo(() => constellationView(nodes, links, selected, expandedCore), [nodes, links, selected, expandedCore]);
   const { nodes: displayNodes, links: displayLinks, counts: collapsedCounts, cores } = presentation;
-  const collapsibleCore = useMemo(() => expandedCore && constellationView(nodes, links, null, null).counts.has(expandedCore), [nodes, links, expandedCore]);
+  const collapsibleCore = useMemo(() => !selected && expandedCore && constellationView(nodes, links, null, null).counts.has(expandedCore), [nodes, links, selected, expandedCore]);
   const activeExpandedCore = collapsibleCore ? expandedCore : null;
+  // A filter can remove a hub and expose members hidden in the full overview.
+  // Give those visible nodes their own positions instead of stacking them at the missing hub.
+  const exposesHiddenMembers = useMemo(() => {
+    if (nodes.length === snapshot.nodes.length) return false;
+    const overview = constellationView(snapshot.nodes, snapshot.links, null, null);
+    const visible = new Set(overview.nodes.map(node => node.id));
+    return displayNodes.some(node => !visible.has(node.id));
+  }, [nodes, snapshot, displayNodes]);
+  const layoutCore = exposesHiddenMembers ? "*" : activeExpandedCore ?? cores.find(core => selected && core.members.has(selected))?.hub ?? null;
   useEffect(() => { if (expandedCore && !activeExpandedCore) setExpandedCore(null); }, [expandedCore, activeExpandedCore]);
+  useEffect(() => { positions.showCore(layoutCore, performance.now(), reduced); }, [positions, layoutCore, nodes, links, reduced]);
   const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: displayLinks.map(l => ({ ...l })) }), [displayNodes, displayLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
@@ -258,7 +268,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const instance = graph.current;
     if (!ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
     appliedCamera.current = cameraKey;
-    const target = nodes.find(n => n.id === (selected ?? activeExpandedCore));
+    // Frame the settled target while nodes travel there; framing their current
+    // positions would zoom into the still-collapsed core and then jump outward.
+    const cameraNodes = nodes.map(node => ({ ...node, ...(positions.layoutTarget(node.id) ?? {}) }));
+    const cameraDisplayNodes = displayNodes.map(node => ({ ...node, ...(positions.layoutTarget(node.id) ?? {}) }));
+    const target = cameraNodes.find(n => n.id === (selected ?? activeExpandedCore));
     if (target && selected) {
       // Selection reveals the rotating surface while preserving any closer
       // user zoom and the current viewing direction, including deep links.
@@ -274,7 +288,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (target && activeExpandedCore) {
       const members = cores.find(core => core.hub === activeExpandedCore)?.members;
       if (members) {
-        const radius = expandedCoreCameraFrame(nodes, links, activeExpandedCore, members)?.radius ?? 18;
+        const radius = expandedCoreCameraFrame(cameraNodes, links, activeExpandedCore, members)?.radius ?? 18;
         const camera = instance.camera() as PerspectiveCamera;
         const controls = instance.controls() as OrbitControls;
         const vertical = camera.fov * Math.PI / 180;
@@ -287,10 +301,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         return;
       }
     }
-    const bounds = nodes.reduce((b, n) => ({ minX: Math.min(b.minX, n.x), maxX: Math.max(b.maxX, n.x), minY: Math.min(b.minY, n.y), maxY: Math.max(b.maxY, n.y), minZ: Math.min(b.minZ, n.z), maxZ: Math.max(b.maxZ, n.z) }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity });
+    const bounds = cameraDisplayNodes.reduce((b, n) => ({ minX: Math.min(b.minX, n.x), maxX: Math.max(b.maxX, n.x), minY: Math.min(b.minY, n.y), maxY: Math.max(b.maxY, n.y), minZ: Math.min(b.minZ, n.z), maxZ: Math.max(b.maxZ, n.z) }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity });
     const center = { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2, z: (bounds.minZ + bounds.maxZ) / 2 };
     const lookAt = target ?? center;
-    const radius = Math.max(18, ...nodes.map(n => Math.hypot(n.x - lookAt.x, n.y - lookAt.y, n.z - lookAt.z) + 6));
+    const radius = Math.max(18, ...cameraDisplayNodes.map(n => Math.hypot(n.x - lookAt.x, n.y - lookAt.y, n.z - lookAt.z) + 6));
     const camera = instance.camera() as PerspectiveCamera;
     const vertical = camera.fov * Math.PI / 180;
     const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
@@ -300,7 +314,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const firstOverview = positions.hasCompactInitialLayout && fit === 0 && nodes.length === snapshot.nodes.length;
     const distance = firstOverview ? Math.max(fitDistance, size.height * camera.projectionMatrix.elements[5] / 2) : fitDistance;
     instance.cameraPosition({ x: lookAt.x, y: lookAt.y, z: lookAt.z + distance }, lookAt, reduced ? 0 : 650);
-  }, [ready, cameraKey, nodes, links, selected, activeExpandedCore, cores, reduced, size, positions, fit, snapshot.nodes.length]);
+  }, [ready, cameraKey, nodes, displayNodes, links, selected, activeExpandedCore, cores, reduced, size, positions, fit, snapshot.nodes.length]);
   useEffect(() => {
     let second = 0;
     const first = requestAnimationFrame(() => { second = requestAnimationFrame(positionCamera); });
@@ -342,7 +356,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       positions.begin(node.id, 2 * Math.max(.001, depth) / (size.height * projectionY), {
         right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
         up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1), spacingPixels: 24,
-        visible: nodes.map(value => value.id),
+        visible: displayNodes.map(value => value.id),
         worldPerPixel: atDepth => 2 * atDepth / (size.height * projectionY),
         isVisible: (at, radius) => Math.abs(at.x) <= size.width / 2 + radius && Math.abs(at.y) <= size.height / 2 + radius,
         radius: (value, atDepth) => {
@@ -413,7 +427,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         instance.d3ReheatSimulation();
       }
       const controls = instance?.controls() as OrbitControls | undefined;
-      if (controls) controls.autoRotate = rotate && !positions.dragging && !positions.settling && controls.enabled;
+      if (controls) controls.autoRotate = rotate && !positions.dragging && !positions.settling && !positions.layoutMoving && controls.enabled;
       const camera = instance?.camera();
       if (camera) {
         camera.updateMatrixWorld();
@@ -441,7 +455,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       frame = requestAnimationFrame(draw);
     };
     draw(); return () => cancelAnimationFrame(frame);
-  }, [ready, nodes, displayNodes, collapsedCounts, selected, size, visible, positions, data, reduced, rotate]);
+  }, [ready, nodes, displayNodes, collapsedCounts, selected, size, visible, positions, data, reduced, rotate, positionCamera]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     const material = (kind: "ring" | "selection" | "change" | "hit", color: string, opacity: number) => {
@@ -472,7 +486,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       cursor.current = { x: event.clientX - rect.left, y: event.clientY - rect.top };
     }}
     onPointerLeave={() => { cursor.current = null; }}
-    onPointerDownCapture={event => { cursor.current = null; allowDrag.current = true; pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType }; }}
+    onPointerDownCapture={event => {
+      cursor.current = null;
+      allowDrag.current = !positions.layoutMoving;
+      if (!allowDrag.current) suppressClickUntil.current = performance.now() + 350;
+      pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType };
+    }}
     aria-label="3D 지식 지도. 성단 핵을 누르면 연결된 항목이 펼쳐집니다. 점을 끌어 배치하고 빈 공간을 드래그해 회전합니다. 스크롤로 커서 위치를 중심으로 확대·축소합니다. 키보드는 목록 보기를 이용하세요.">
     {ready && <ForceGraph3D<PositionedNode, RenderLink>
       ref={graph} width={size.width} height={size.height} graphData={data}

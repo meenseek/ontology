@@ -214,8 +214,9 @@ export function denseConstellationCores(nodes: readonly (GraphNode & { cluster?:
 }
 export function constellationView(nodes: PositionedNode[], links: GraphLink[], selected: string | null, expandedCore: string | null) {
   const cores = denseConstellationCores(nodes, links);
+  const exposedCore = selected ? cores.find(core => core.members.has(selected))?.hub ?? null : expandedCore;
   // A visible edge from a hidden member to an outside node must not disappear.
-  const collapsed = cores.filter(core => core.hub !== expandedCore && !(selected && core.members.has(selected)) &&
+  const collapsed = cores.filter(core => core.hub !== exposedCore &&
     !links.some(link => core.members.has(link.source) !== core.members.has(link.target) &&
       (core.members.has(link.source) ? link.source : link.target) !== core.hub));
   const counts = new Map(collapsed.map(core => [core.hub, core.count]));
