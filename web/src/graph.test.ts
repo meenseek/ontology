@@ -924,6 +924,28 @@ function satelliteFixture() {
     { source: orphan.id, target: "a0", kind: "evidence", current: false }, { source: orphan.id, target: "b0", kind: "evidence", current: false }];
   return snapshot(nodes, links);
 }
+test("the first live view packs current and brown edges without changing semantic groups", () => {
+  const source = satelliteFixture(), model = reconcile(source);
+  const groups = new Map(model.nodes.map(node => [node.id, node.cluster]));
+  const positions = new Positions(); positions.install(model, true);
+  assert.equal(positions.hasCompactInitialLayout, true);
+  const byId = new Map(model.nodes.map(node => [node.id, node]));
+  for (const link of model.links) {
+    const a = byId.get(link.source)!, b = byId.get(link.target)!;
+    assert.ok(Math.hypot(a.x - b.x, a.y - b.y) <= 31 + 1e-9, `${link.source} → ${link.target} starts compact`);
+  }
+  for (const [index, a] of model.nodes.entries()) for (const b of model.nodes.slice(index + 1)) {
+    assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= 31 - 1e-9, `${a.id} and ${b.id} do not overlap`);
+  }
+  assert.deepEqual(new Map(model.nodes.map(node => [node.id, node.cluster])), groups);
+  const original = model.nodes.map(node => ({ ...node }));
+  const previous = { ...model, nodes: original };
+  const refreshed = reconcile(source, previous); positions.install(refreshed, true);
+  assert.deepEqual(refreshed.nodes, original, "an unchanged refresh retains the first layout");
+  const reversed = reconcile(snapshot([...source.nodes].reverse(), [...source.links].reverse()));
+  new Positions().install(reversed, true);
+  assert.deepEqual(reversed.nodes, original, "first-view layout ignores source order");
+});
 test("past-evidence singleton is initially near one host without changing semantic clusters or state", () => {
   const source = satelliteFixture(), model = reconcile(source), byId = new Map(model.nodes.map(n => [n.id, n]));
   const record = byId.get("z_record")!, host = byId.get("a0")!;
