@@ -143,6 +143,8 @@ async function check(size: number) {
     button("목록 보기").click();
     releaseGraph();
     await until(() => idleGraph() && host.querySelectorAll(".graph-list > button").length === size, "initial list");
+    await until(() => host.querySelector(".load-timing")?.textContent?.includes("목록 표시") === true, "list timing");
+    assert(/응답 \d+ms · 목록 표시 \d+ms/.test(host.querySelector(".load-timing")?.textContent ?? ""), "Timing names both measured phases");
     const first = host.querySelector<HTMLButtonElement>(".graph-list > button")!;
     first.click();
     await until(() => bodyIs(records.meenseek.get(id(1))!.body), "selected memory");
