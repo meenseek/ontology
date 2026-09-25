@@ -461,7 +461,7 @@ function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonl
   }
   const spacing = 31;
   const visited = new Set<string>();
-  const components: { root: string; coordinates: Map<string, Slot>; radius: number; center?: Slot }[] = [];
+  const components: { root: string; coordinates: Map<string, Slot>; radius: number }[] = [];
   for (const root of [...byId.keys()].sort()) {
     if (visited.has(root)) continue;
     const ids = [root]; visited.add(root);
@@ -487,21 +487,41 @@ function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonl
     components.push({ root, coordinates, radius });
   }
   components.sort((a, b) => b.radius - a.radius || a.root.localeCompare(b.root));
-  const gap = 12, step = (spacing + gap) * .55, goldenAngle = Math.PI * (3 - Math.sqrt(5));
-  let candidate = 1;
-  for (const [index, component] of components.entries()) {
-    if (index === 0) { component.center = { x: 0, y: 0 }; continue; }
-    for (;; candidate++) {
-      const distance = step * Math.sqrt(candidate), angle = candidate * goldenAngle;
-      const center = { x: Math.cos(angle) * distance, y: Math.sin(angle) * distance };
-      if (components.some(other => other.center && Math.hypot(center.x - other.center.x, center.y - other.center.y) < component.radius + other.radius + gap)) continue;
-      component.center = center; candidate++; break;
+  const step = spacing * .55, goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const cells = new Map<string, Slot[]>();
+  const cell = (x: number, y: number) => `${Math.floor(x / spacing)},${Math.floor(y / spacing)}`;
+  const free = (x: number, y: number) => {
+    const column = Math.floor(x / spacing), row = Math.floor(y / spacing);
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+      for (const other of cells.get(`${column + dx},${row + dy}`) ?? []) {
+        if (Math.hypot(x - other.x, y - other.y) < spacing - 1e-8) return false;
+      }
     }
-  }
+    return true;
+  };
   const result = new Map<string, Point>();
-  for (const component of components) for (const [id, value] of component.coordinates) {
-    const x = value.x + component.center!.x, y = value.y + component.center!.y;
-    result.set(id, { x, y, z: constellationDepth(x, y, spacing) });
+  // A rejected center stays blocked for the same shape as more stars are added.
+  // A different shape can fit there, so it gets its own search cursor.
+  const nextCandidate = new Map<string, number>();
+  for (const [index, component] of components.entries()) {
+    let center: Slot = { x: 0, y: 0 };
+    const points = [...component.coordinates.values()];
+    if (index) {
+      const shape = points.map(value => `${value.x},${value.y}`).sort().join(";");
+      let candidate = nextCandidate.get(shape) ?? 1;
+      for (;; candidate++) {
+        const distance = step * Math.sqrt(candidate), angle = candidate * goldenAngle;
+        center = { x: Math.cos(angle) * distance, y: Math.sin(angle) * distance };
+        if (points.every(value => free(value.x + center.x, value.y + center.y))) break;
+      }
+      nextCandidate.set(shape, candidate + 1);
+    }
+    for (const [id, value] of component.coordinates) {
+      const x = value.x + center.x, y = value.y + center.y;
+      result.set(id, { x, y, z: constellationDepth(x, y, spacing) });
+      const key = cell(x, y), bucket = cells.get(key) ?? [];
+      bucket.push({ x, y }); cells.set(key, bucket);
+    }
   }
   return result;
 }

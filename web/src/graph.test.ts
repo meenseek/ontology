@@ -6,6 +6,7 @@ import { separateDiscs } from "./clearance.ts";
 import { PerspectiveCamera, Vector3 } from "three";
 import { active, constellationView, denseConstellationCores, expandedCoreCameraFrame, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
+import type { ProjectedLabel } from "./presentation.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
 const memory = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "memory", label: id, revision: "1", status: "accepted", temporal: "current", supported: true });
 const edge = (source: string, target: string, current = true): GraphLink => ({ source, target, kind: "related", current });
@@ -270,6 +271,14 @@ test("hovering any visible label preserves every box and its order", async () =>
     assert.deepEqual(visibleLabels([...candidates].reverse(), 1300, 700, selected, null), base);
   }
   assert.deepEqual(candidates, original, "layout does not retain hover state in the input");
+});
+test("collapsed group labels stay visible among crowded document labels", async () => {
+  const { visibleLabels } = await import("./presentation.ts");
+  const candidates: ProjectedLabel[] = Array.from({ length: 40 }, (_, index) => ({ id: `a-${index}`, kind: "document", active: true,
+    x: 600 + index % 8 * 12, y: 300 + Math.floor(index / 8) * 12, depth: 0, radius: 12, width: 110, height: 30 }));
+  candidates.push({ id: "z-summary", kind: "document", active: true, summary: true,
+    x: 630, y: 330, depth: 0, radius: 12, width: 110, height: 30 });
+  assert.ok(visibleLabels(candidates, 1280, 720, null, null).some(box => box.id === "z-summary"));
 });
 test("a hidden hover replaces only local collisions, protects selection and restores the base on exit", async () => {
   const { visibleLabels } = await import("./presentation.ts");
@@ -787,6 +796,9 @@ test("a crowded hub keeps its constellation together when its center or a spoke 
   for (const held of ["hub", leaves[0].id]) for (const reduced of [false, true]) {
     const model = makeModel();
     const positions = new Positions(); positions.install(model, true);
+    // This case checks group translation; keep the unrelated star outside its drag path.
+    const unrelated = model.nodes.find(node => node.id === "unrelated")!;
+    unrelated.x = unrelated.fx = 1000;
     const before = new Map(model.nodes.map(node => [node.id, { x: node.x, y: node.y, z: node.z }]));
     const start = before.get(held)!;
     positions.begin(held, 1, dragPlane(model));
@@ -1057,8 +1069,8 @@ test("a personal graph with hundreds of unrelated documents opens as a constella
   for (const [index, node] of overview.nodes.entries()) for (const other of overview.nodes.slice(index + 1)) {
     assert.ok(Math.hypot(node.x - other.x, node.y - other.y) >= 31 - 1e-8, "visible initial stars do not overlap");
   }
-  assert.ok(Math.min(...isolated.map(node => Math.hypot(node.x - hub.x, node.y - hub.y))) < 70,
-    "the hidden constellation footprint no longer leaves an empty halo");
+  assert.ok(Math.min(...isolated.map(node => Math.hypot(node.x - hub.x, node.y - hub.y))) < 40,
+    "only visible stars reserve space around the collapsed group");
   const reordered = reconcile({ ...source, nodes: [...nodes].reverse(), links: [...links].reverse() });
   new Positions().install(reordered, true);
   assert.deepEqual(reordered.nodes.map(node => [node.id, node.x, node.y, node.z]), model.nodes.map(node => [node.id, node.x, node.y, node.z]));
@@ -1238,6 +1250,20 @@ test("two dense groups joined at their hubs keep separate expandable cores and t
   const positions = new Positions(); positions.install(model, true); positions.showCore("b", 0, true);
   const b = model.nodes.find(node => node.id === "b")!, selected = model.nodes.find(node => node.id === "b-0")!;
   assert.ok(Math.hypot(selected.x - b.x, selected.y - b.y) >= 31 - 1e-8);
+});
+test("separate collapsed groups each sit among unrelated stars without a reserved halo", () => {
+  const nodes = ["a", "b"].flatMap(hub => [doc(hub), ...Array.from({ length: 25 }, (_, index) => doc(`${hub}-${index}`))])
+    .concat(Array.from({ length: 100 }, (_, index) => doc(`outside-${index}`)));
+  const links = ["a", "b"].flatMap(hub => Array.from({ length: 25 }, (_, index) => edge(hub, `${hub}-${index}`)));
+  const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model, true);
+  const overview = constellationView(model.nodes, model.links, null, null);
+  assert.deepEqual([...overview.counts], [["a", 26], ["b", 26]]);
+  const outside = overview.nodes.filter(node => node.id.startsWith("outside-"));
+  for (const hubId of overview.counts.keys()) {
+    const hub = model.nodes.find(node => node.id === hubId)!;
+    assert.ok(Math.min(...outside.map(node => Math.hypot(node.x - hub.x, node.y - hub.y))) < 40,
+      `${hubId} has unrelated stars within one visible slot`);
+  }
 });
 test("overview, orbit, focus, refresh and reset keep a dense personal constellation readable", async () => {
   const { focusedCameraDistance, nodeScreenSize, starMotion } = await import("./presentation.ts");
