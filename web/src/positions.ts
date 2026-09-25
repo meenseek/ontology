@@ -643,7 +643,7 @@ export class Positions {
       return [member, { x: delta.x * plane.right.x + delta.y * plane.right.y + delta.z * plane.right.z,
         y: delta.x * plane.up.x + delta.y * plane.up.y + delta.z * plane.up.z }] as const;
     }));
-    let priorStep = 0, edgeCount = 0, overfull = false;
+    let priorStep = 0, edgeCount = 0, overfull = false, maxDegree = 0;
     for (const member of included) {
       let degree = 0;
       for (const other of this.adjacency.get(member) ?? []) {
@@ -653,8 +653,12 @@ export class Positions {
         const a = projected.get(member)!, b = projected.get(other)!;
         if (!priorStep) priorStep = Math.hypot(a.x - b.x, a.y - b.y);
       }
+      maxDegree = Math.max(maxDegree, degree);
       if (degree > 6) overfull = true;
     }
+    // A hub needing more than two hex rings of neighbors looks worse when
+    // repacked on every drag and pushed outward again on release.
+    const dense = maxDegree > 18;
     // Small and sparse graphs keep their canonical layout; large multi-cycle graphs can reuse a valid existing shape.
     const prior = included.size >= 20 && edgeCount > included.size && priorStep > 1e-9 ? new Map(members.map(member => {
       const at = projected.get(member)!;
@@ -664,7 +668,7 @@ export class Positions {
     // exact layout arrives; a speculative packed layout can stretch linked nodes.
     const defer = typeof Worker !== "undefined" && (included.size >= 128 || (included.size >= 32 && edgeCount > included.size));
     const exact = overfull ? null : validSlots(id, members, this.adjacency, prior) ? prior : defer && edgeCount > 0 ? null : compactSlots(id, members, this.adjacency);
-    const layout = exact ?? (overfull ? packedSlots(id, members, this.adjacency, projected) : null);
+    const layout = dense ? null : exact ?? (overfull ? packedSlots(id, members, this.adjacency, projected) : null);
     for (const member of members) {
       const target = layout?.get(member);
       const offset = target ? add(add(zero(), plane.right, target.x * spacing), plane.up, target.y * spacing) : add(point(this.nodes.get(member)!), start, -1);
@@ -700,8 +704,13 @@ export class Positions {
       edges.push({ from, to, limit: Math.hypot(a.x - b.x, a.y - b.y) + slackPixels });
     }
     edges.sort((a, b) => depth.get(a.to)! - depth.get(b.to)! || depth.get(a.from)! - depth.get(b.from)! || a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
-    const initial = new Map([...new Set([...included, ...(clearance?.visible ?? [])])].map(member => [member, point(this.nodes.get(member)!)] as const));
-    this.gesture = { id, start, initial, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance, moved: false, last: null };
+    // A dense component may overlap within itself, but the held star still
+    // moves an unrelated star aside at the normal one-pixel boundary.
+    const activeClearance = dense && clearance ? {
+      ...clearance, visible: clearance.visible.filter(member => member === id || !included.has(member)),
+    } : clearance;
+    const initial = new Map([...new Set([...included, ...(activeClearance?.visible ?? [])])].map(member => [member, point(this.nodes.get(member)!)] as const));
+    this.gesture = { id, start, initial, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance: activeClearance, moved: false, last: null };
     if (!exact && !overfull && members.length) this.searchLater(id, members, included, plane, spacing, unitsPerPixel * .05);
   }
   private searchLater(root: string, members: string[], included: Set<string>, plane: { right: Point; up: Point }, spacing: number, tolerance: number) {

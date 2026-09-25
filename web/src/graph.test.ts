@@ -763,6 +763,59 @@ test("seven historical spokes compact without overlap even though seven exact 24
     }
   }
 });
+test("a crowded hub keeps its constellation together when its center or a spoke is dragged", () => {
+  const leaves = Array.from({ length: 64 }, (_, index) => doc(`spoke-${String(index).padStart(2, "0")}`));
+  const makeModel = () => reconcile(snapshot([doc("hub"), ...leaves, doc("unrelated")],
+    leaves.map(leaf => ({ ...edge("hub", leaf.id, false), kind: "evidence" as const }))));
+  const dragPlane = (model: ReturnType<typeof makeModel>) => ({
+    right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    visible: model.nodes.map(node => node.id), radius: () => 20, worldPerPixel: () => 1,
+    project: (value: { x: number; y: number; z: number }) => ({ x: value.x, y: value.y, depth: 1 }),
+  });
+  for (const held of ["hub", leaves[0].id]) for (const reduced of [false, true]) {
+    const model = makeModel();
+    const positions = new Positions(); positions.install(model, true);
+    const before = new Map(model.nodes.map(node => [node.id, { x: node.x, y: node.y, z: node.z }]));
+    const start = before.get(held)!;
+    positions.begin(held, 1, dragPlane(model));
+    positions.move(held, { ...start, x: start.x + 200 });
+    positions.advance(0, false); positions.advance(16, false);
+    positions.release(16, reduced);
+    if (!reduced && held === "hub") {
+      const hub = model.nodes.find(node => node.id === "hub")!;
+      const widest = () => Math.max(...leaves.map(({ id }) => {
+        const leaf = model.nodes.find(node => node.id === id)!;
+        return Math.hypot(leaf.x - hub.x, leaf.y - hub.y);
+      }));
+      const releaseWidth = widest();
+      for (const time of [32, 80, 240, 1000, 2100]) {
+        positions.advance(time, false);
+        assert.ok(widest() <= releaseWidth + 1, "the normal release does not fling spokes farther out");
+      }
+    } else if (!reduced) for (const time of [32, 80, 240, 1000, 2100]) positions.advance(time, false);
+    for (const node of model.nodes) {
+      const original = before.get(node.id)!;
+      const translation = node.id === "unrelated" ? 0 : 200;
+      assert.ok(Math.abs(node.x - original.x - translation) < 1e-8 && Math.abs(node.y - original.y) < 1e-8,
+        `${held} drag preserves ${node.id}'s place in the constellation`);
+    }
+  }
+  for (const reduced of [false, true]) {
+    const model = makeModel(), positions = new Positions(); positions.install(model, true);
+    const hub = model.nodes.find(node => node.id === "hub")!, unrelated = model.nodes.find(node => node.id === "unrelated")!;
+    const leaf = model.nodes.find(node => node.id === leaves[0].id)!;
+    const originalOffset = { x: leaf.x - hub.x, y: leaf.y - hub.y };
+    const destination = { x: unrelated.x, y: unrelated.y };
+    const separated = () => assert.ok(Math.hypot(hub.x - unrelated.x, hub.y - unrelated.y) >= 41 - 1e-6,
+      "an unrelated star still yields at the one-pixel boundary");
+    positions.begin("hub", 1, dragPlane(model)); positions.move("hub", { ...destination, z: 0 }); separated();
+    positions.release(0, reduced); separated();
+    if (!reduced) for (const time of [16, 80, 240, 2100]) { positions.advance(time, false); separated(); }
+    assert.ok(Math.abs(leaf.x - hub.x - originalOffset.x) < 1e-8 &&
+      Math.abs(leaf.y - hub.y - originalOffset.y) < 1e-8,
+    "unrelated-star clearance does not pull connected spokes out of their constellation");
+  }
+});
 test("tension travels through a chain only after each successive edge stretches", () => {
   const ids = ["a", "b", "c"];
   const model = reconcile(snapshot(ids.map(doc), [edge("a", "b"), edge("b", "c")]));
