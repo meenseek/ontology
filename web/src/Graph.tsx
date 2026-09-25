@@ -14,6 +14,16 @@ import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresen
 type RenderLink = Omit<GraphLink, "source" | "target">;
 type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFailure: () => void };
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
+function spatialCameraFrame(camera: PerspectiveCamera, controls: OrbitControls, group: { center: { x: number; y: number; z: number }; radius: number }, size: { width: number; height: number }) {
+  const vertical = camera.fov * Math.PI / 180;
+  const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
+  const fitDistance = group.radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2);
+  const readableDistance = 31 * size.height * camera.projectionMatrix.elements[5] / (2 * 28);
+  const offset = camera.position.clone().sub(controls.target);
+  if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
+  offset.normalize().multiplyScalar(Math.max(50, Math.min(fitDistance, readableDistance)));
+  return { position: { x: group.center.x + offset.x, y: group.center.y + offset.y, z: group.center.z + offset.z }, target: group.center };
+}
 function texture(kind: "ring" | "selection" | "change") {
   const canvas = document.createElement("canvas"); canvas.width = canvas.height = 128;
   const context = canvas.getContext("2d");
@@ -152,12 +162,12 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
   };
   return mesh;
 }
-function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, minimumPixels = 0) {
+function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, minimumPixels = 0, fixedPixels?: number) {
   const sprite = new Sprite(material), viewport = new Vector2(), position = new Vector3(), cursor = new Vector3();
   const resize = (camera: Camera) => {
     sprite.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
     const pixels = Math.max(minimumPixels, nodeScreenSize(node.kind, -position.z, viewport.y, camera.projectionMatrix.elements[5]));
-    sprite.scale.setScalar(spriteScale(nodeScreenMetrics(pixels, selected, node.changed)[part], viewport.y, camera.projectionMatrix.elements[5]));
+    sprite.scale.setScalar(spriteScale(fixedPixels ?? nodeScreenMetrics(pixels, selected, node.changed)[part], viewport.y, camera.projectionMatrix.elements[5]));
     sprite.updateMatrixWorld();
   };
   sprite.onBeforeRender = (renderer, _scene, camera) => { renderer.getSize(viewport); resize(camera); };
@@ -190,6 +200,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const container = useRef<HTMLDivElement>(null);
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
   const labelLayer = useRef<HTMLDivElement>(null);
+  const coreCloseButton = useRef<HTMLButtonElement>(null);
+  const spatialCloseButton = useRef<HTMLButtonElement>(null);
   const hoveredId = useRef<string | null>(null);
   const dragged = useRef<string | null>(null);
   const draggedSummary = useRef<string | null>(null);
@@ -284,10 +296,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   }, [nodes, links, cores, selected, activeExpandedCore]);
   const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${fit}:${size.width}:${size.height}:${expandedRelationKey}`;
   const appliedCamera = useRef("");
+  const appliedFit = useRef(fit);
   const positionCamera = useCallback(() => {
     const instance = graph.current;
     if (!ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
     appliedCamera.current = cameraKey;
+    const fitChanged = appliedFit.current !== fit;
+    appliedFit.current = fit;
+    if (fitChanged && spatialReveal?.members.size) setSpatialReveal(null);
     // Frame the settled target while nodes travel there; framing their current
     // positions would zoom into the still-collapsed core and then jump outward.
     const cameraNodes = nodes.map(node => ({ ...node, ...(positions.layoutTarget(node.id) ?? {}) }));
@@ -304,6 +320,16 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       offset.normalize().multiplyScalar(distance);
       instance.cameraPosition({ x: target.x + offset.x, y: target.y + offset.y, z: target.z + offset.z }, { x: target.x, y: target.y, z: target.z }, reduced ? 0 : 650);
       return;
+    }
+    if (spatialReveal?.members.size && !fitChanged) {
+      const members = cameraNodes.filter(node => spatialReveal.members.has(node.id));
+      if (members.length) {
+        const center = members.reduce((sum, node) => ({ x: sum.x + node.x / members.length, y: sum.y + node.y / members.length, z: sum.z + node.z / members.length }), { x: 0, y: 0, z: 0 });
+        const radius = Math.max(...members.map(node => Math.hypot(node.x - center.x, node.y - center.y, node.z - center.z))) + 6;
+        const frame = spatialCameraFrame(instance.camera() as PerspectiveCamera, instance.controls() as OrbitControls, { center, radius }, size);
+        instance.cameraPosition(frame.position, frame.target, reduced ? 0 : 650);
+        return;
+      }
     }
     if (target && activeExpandedCore) {
       const members = cores.find(core => core.hub === activeExpandedCore)?.members;
@@ -334,7 +360,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const firstOverview = positions.hasCompactInitialLayout && fit === 0 && nodes.length === snapshot.nodes.length;
     const distance = firstOverview ? Math.max(fitDistance, size.height * camera.projectionMatrix.elements[5] / 2) : fitDistance;
     instance.cameraPosition({ x: lookAt.x, y: lookAt.y, z: lookAt.z + distance }, lookAt, reduced ? 0 : 650);
-  }, [ready, cameraKey, nodes, semanticNodes, links, selected, activeExpandedCore, cores, reduced, size, positions, fit, snapshot.nodes.length]);
+  }, [ready, cameraKey, nodes, semanticNodes, links, selected, activeExpandedCore, cores, reduced, size, positions, fit, snapshot.nodes.length, spatialReveal]);
   useEffect(() => {
     let second = 0;
     const first = requestAnimationFrame(() => { second = requestAnimationFrame(positionCamera); });
@@ -415,8 +441,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const layer = labelLayer.current;
     if (!ready || !layer || !visible) return;
     const elements = [...layer.children] as HTMLElement[];
-    for (const element of elements) { element.hidden = true; delete element.dataset.nodeId; }
-    const measuring = elements[0];
+    const measuring = elements.find(element => element !== document.activeElement);
     if (!measuring) return;
     const labels = new Map(displayNodes.map(node => [node.id, {
       node, ...nodePresentation(node, true),
@@ -427,7 +452,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const summary = collapsedCounts.has(id) || spatialCounts.has(id);
       element.dataset.nodeId = id;
       element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive" : ""}`;
-      element.children[0].textContent = collapsedCounts.has(id) ? `연결된 항목 · ${collapsedCounts.get(id)}개` : spatialCounts.has(id) ? `가까운 묶음 · ${spatialCounts.get(id)}개` : label.title;
+      element.children[0].textContent = collapsedCounts.has(id) ? `연결된 항목 · ${collapsedCounts.get(id)}개` : spatialCounts.has(id) ? `가까운 항목 · ${spatialCounts.get(id)}개` : label.title;
       const subtitle = element.children[1] as HTMLElement;
       subtitle.textContent = summary ? "눌러 펼치기" : label.subtitle; subtitle.hidden = !subtitle.textContent;
       element.children[2].textContent = summary ? "" : label.status;
@@ -442,13 +467,16 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     // Measure each literal label once per model/viewport change using an existing slot.
     // Animation frames only project points and reposition the same bounded DOM pool.
     const dimensions = new Map<string, { width: number; height: number }>();
+    const measuredId = measuring.dataset.nodeId, measuredHidden = measuring.hidden;
     measuring.hidden = false; measuring.style.visibility = "hidden";
     for (const node of displayNodes) {
       fill(measuring, node.id);
       dimensions.set(node.id, { width: measuring.offsetWidth, height: measuring.offsetHeight });
     }
-    measuring.hidden = true; measuring.style.visibility = "";
-    let frame = 0, lastProjection = "", lastPositions = -1;
+    if (measuredId && labels.has(measuredId)) fill(measuring, measuredId);
+    else { delete measuring.dataset.nodeId; measuring.className = "node-label"; measuring.removeAttribute("role"); measuring.removeAttribute("aria-label"); measuring.setAttribute("aria-hidden", "true"); measuring.tabIndex = -1; }
+    measuring.hidden = measuredHidden; measuring.style.visibility = "";
+    let frame = 0, lastProjection = "", lastPositions = -1, refreshLabels = true;
     const projected = new Vector3();
     const draw = () => {
       const instance = graph.current;
@@ -464,7 +492,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         instance.d3ReheatSimulation();
       }
       const controls = instance?.controls() as OrbitControls | undefined;
-      if (controls) controls.autoRotate = rotate && !positions.dragging && !positions.settling && !positions.layoutMoving && controls.enabled;
+      const focusedElement = elements.find(element => element === document.activeElement);
+      const focusedId = focusedElement?.dataset.nodeId;
+      const focusedSummary = focusedId && (collapsedCounts.has(focusedId) || spatialCounts.has(focusedId)) ? focusedId : null;
+      if (controls) controls.autoRotate = rotate && !focusedSummary && !positions.dragging && !positions.settling && !positions.layoutMoving && controls.enabled;
       const camera = instance?.camera();
       if (camera) {
         camera.updateMatrixWorld();
@@ -477,7 +508,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             lodLevelRef.current = next; hoveredId.current = null; setHover(null); setLodLevel(next);
           }
         }
-        const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}|${dragged.current}|${positions.revision}`;
+        const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}|${focusedSummary}|${dragged.current}|${positions.revision}`;
         if (key !== lastProjection) {
           lastProjection = key;
           const candidates = displayNodes.map(node => {
@@ -488,16 +519,28 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             return { id: node.id, kind: node.kind, active: active(node), summary: collapsedCounts.has(node.id) || spatialCounts.has(node.id), importance: collapsedCounts.has(node.id) ? 2 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)! };
           });
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
-          const labelCandidates = candidates.filter(node => !spatialCounts.has(node.id) || spatialLabels.has(node.id) || node.id === hoveredId.current);
-          const visible = visibleLabels(labelCandidates, size.width, size.height, dragged.current ?? selected, hoveredId.current);
-          for (const [index, element] of elements.entries()) {
-            const box = visible[index];
+          const labelCandidates = candidates.filter(node => !spatialCounts.has(node.id) || spatialLabels.has(node.id) || node.id === hoveredId.current || node.id === focusedSummary);
+          const visible = visibleLabels(labelCandidates, size.width, size.height, focusedSummary ?? dragged.current ?? selected, hoveredId.current);
+          const remaining = new Map(visible.map(box => [box.id, box]));
+          const assigned = new Map<HTMLElement, (typeof visible)[number]>();
+          for (const element of elements) {
+            const box = remaining.get(element.dataset.nodeId ?? "");
+            if (box) { assigned.set(element, box); remaining.delete(box.id); }
+          }
+          if (focusedElement && (!assigned.has(focusedElement) || !focusedSummary)) focusedElement.blur();
+          for (const box of remaining.values()) {
+            const slot = elements.find(element => !assigned.has(element));
+            if (slot) assigned.set(slot, box);
+          }
+          for (const element of elements) {
+            const box = assigned.get(element);
+            if (box && (refreshLabels || element.dataset.nodeId !== box.id)) fill(element, box.id);
             element.hidden = !box;
-            if (box && element.dataset.nodeId !== box.id) fill(element, box.id);
             element.classList.toggle("hovered", !!box && box.id === hoveredId.current);
             if (!box) continue;
             element.style.left = `${box.left}px`; element.style.top = `${box.top}px`;
           }
+          refreshLabels = false;
         }
       }
       frame = requestAnimationFrame(draw);
@@ -522,12 +565,13 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged, collapsedCounts.has(node.id) || spatialCounts.has(node.id) ? 22 : 0)
       : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected));
     if (spatialCounts.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .85), node, "body", false, 34));
+    if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .7), node, "body", false, 0, 18));
     if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected));
     if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected));
     // The invisible plane follows the star and status rings, with a 36px minimum.
     group.add(screenSprite(material("hit", "#ffffff", 0), node, "hit", isSelected));
     return group;
-  }, [resources, selected, collapsedCounts, spatialCounts]);
+  }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal]);
   const chooseNode = (id: string) => {
     hoveredId.current = null; setHover(null);
     if (disabled || performance.now() < suppressClickUntil.current) return;
@@ -547,14 +591,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         members: new Set(group.members), level: Math.max(lodLevelRef.current, previous?.level ?? 0),
         camera: previous?.camera ?? { ...camera.position }, target: previous?.target ?? { ...controls.target },
       });
-      const vertical = camera.fov * Math.PI / 180;
-      const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
-      const fitDistance = group.radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2);
-      const readableDistance = 31 * size.height * camera.projectionMatrix.elements[5] / (2 * 28);
-      const offset = camera.position.clone().sub(controls.target);
-      if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
-      offset.normalize().multiplyScalar(Math.max(50, Math.min(fitDistance, readableDistance)));
-      instance.cameraPosition({ x: group.center.x + offset.x, y: group.center.y + offset.y, z: group.center.z + offset.z }, group.center, reduced ? 0 : 650);
+      const frame = spatialCameraFrame(camera, controls, group, size);
+      instance.cameraPosition(frame.position, frame.target, reduced ? 0 : 650);
     } else {
       if (!spatialReveal?.members.has(id)) setSpatialReveal(null);
       onSelect(id);
@@ -571,7 +609,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       spatialCloseTimer.current = null;
     }, reduced ? 0 : 700);
   };
-  return <div className="graph-canvas" ref={container}
+  return <div className="graph-canvas" ref={container} tabIndex={-1}
     onPointerMoveCapture={event => {
       if (disabled || positions.dragging || (event.pointerType !== "mouse" && event.pointerType !== "pen")) { cursor.current = null; return; }
       const rect = event.currentTarget.getBoundingClientRect();
@@ -584,7 +622,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       if (!allowDrag.current) suppressClickUntil.current = performance.now() + 350;
       pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType };
     }}
-    aria-label="3D 지식 지도. 연결된 항목과 가까운 항목 묶음을 눌러 펼친 뒤 개별 점을 끌 수 있습니다. 빈 공간을 드래그해 회전하고 스크롤로 확대·축소합니다. 키보드는 목록 보기를 이용하세요.">
+    aria-label="3D 지식 지도. 연결된 항목과 가까운 항목 묶음을 눌러 펼친 뒤 개별 점을 끌 수 있습니다. 빈 공간을 드래그해 회전하고 스크롤로 확대·축소합니다. Tab과 Enter로 묶음을 펼칠 수 있으며 전체 항목은 목록 보기에서 탐색할 수 있습니다.">
     {ready && <ForceGraph3D<PositionedNode, RenderLink>
       ref={graph} width={size.width} height={size.height} graphData={data}
       backgroundColor="rgba(0,0,0,0)" controlType="orbit" showNavInfo={false}
@@ -614,16 +652,16 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       }} enablePointerInteraction={!disabled}
       cooldownTicks={0} warmupTicks={0} onEngineStop={positionCamera}
       onNodeClick={node => chooseNode(node.id)}
-      onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: `연결된 항목 · ${collapsedCounts.get(node.id)}개`, detail: "눌러 펼치기" } : spatialCounts.has(node.id) ? { title: `가까운 묶음 · ${spatialCounts.get(node.id)}개`, detail: "눌러 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
+      onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: `연결된 항목 · ${collapsedCounts.get(node.id)}개`, detail: "눌러 펼치기" } : spatialCounts.has(node.id) ? { title: `가까운 항목 · ${spatialCounts.get(node.id)}개`, detail: "눌러 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
       onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
     />}
     <div className="node-labels" ref={labelLayer}
       onClick={event => { const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) chooseNode(label.dataset.nodeId); }}
-      onKeyDown={event => { if (event.key !== "Enter" && event.key !== " ") return; const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { event.preventDefault(); chooseNode(label.dataset.nodeId); } }}>
+      onKeyDown={event => { if (event.key !== "Enter" && event.key !== " ") return; const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { event.preventDefault(); const id = label.dataset.nodeId, spatial = spatialCounts.has(id); chooseNode(id); requestAnimationFrame(() => (spatial ? spatialCloseButton : coreCloseButton).current?.focus()); } }}>
       {Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /></div>)}
     </div>
-    {activeExpandedCore && !selected && !spatialReveal?.members.size && <button type="button" className="graph-core-close" onClick={() => { hoveredId.current = null; setHover(null); setExpandedCore(null); }}>묶음 접기</button>}
-    {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" className="graph-core-close" onClick={closeSpatialReveal}>가까운 묶음 접기</button>}
+    {activeExpandedCore && !selected && !spatialReveal?.members.size && <button type="button" ref={coreCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); setExpandedCore(null); }}>묶음 접기</button>}
+    {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>가까운 항목 {spatialReveal.members.size}개 접기</button>}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
     <div className="graph-instructions" aria-hidden="true">묶음을 눌러 펼친 뒤 개별 점 끌기 · 빈 공간 회전 · 스크롤 확대·축소</div>
   </div>;
