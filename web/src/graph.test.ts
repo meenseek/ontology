@@ -581,7 +581,7 @@ test("a neighboring node starts yielding before its visible footprints touch", (
   positions.begin("held", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
     visible: model.nodes.map(node => node.id), radius: () => 20,
     project: value => ({ x: value.x, y: value.y, depth: 1 }) });
-  positions.move("held", { x: 19, y: 0, z: 0 });
+  positions.move("held", { x: 20.5, y: 0, z: 0 });
   const other = model.nodes.find(node => node.id === "other")!;
   assert.equal(other.x, 75, "the hard collision boundary has not been reached");
   positions.advance(0, false); positions.advance(16, false);
