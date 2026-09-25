@@ -3,11 +3,12 @@ export type ScreenPosition = { x: number; y: number };
 export const COLLISION_GAP = 1;
 
 /** Place the held node first, then linked nodes, without moving a placed node again. */
-export function separateDiscs(discs: Disc[], held: string, linked: ReadonlySet<string>, gap = COLLISION_GAP): Map<string, ScreenPosition> {
+export function separateDiscs(discs: Disc[], held: string, linked: ReadonlySet<string>, gap = COLLISION_GAP, fixed: ReadonlySet<string> = new Set([held])): Map<string, ScreenPosition> {
   const anchor = discs.find(disc => disc.id === held);
   const ordered = [...discs].sort((a, b) => {
     if (a.id === held) return -1;
     if (b.id === held) return 1;
+    if (fixed.has(a.id) !== fixed.has(b.id)) return fixed.has(a.id) ? -1 : 1;
     if (linked.has(a.id) !== linked.has(b.id)) return linked.has(a.id) ? -1 : 1;
     const da = anchor ? Math.hypot(a.x - anchor.x, a.y - anchor.y) : 0;
     const db = anchor ? Math.hypot(b.x - anchor.x, b.y - anchor.y) : 0;
@@ -31,7 +32,7 @@ export function separateDiscs(discs: Disc[], held: string, linked: ReadonlySet<s
   for (const disc of ordered) {
     if (![disc.x, disc.y, disc.radius].every(Number.isFinite) || disc.radius <= 0) continue;
     let x = disc.x, y = disc.y;
-    if (disc.id !== held) {
+    if (!fixed.has(disc.id)) {
       let clear = false;
       for (let attempt = 0; attempt < 32; attempt++) {
         let blocker: Disc | null = null, penetration = 0;

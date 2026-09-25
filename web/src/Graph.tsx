@@ -8,7 +8,7 @@ import { active, kindName, linkColor, linkName, stateName } from "./graph";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
-import { MAX_VISIBLE_LABELS, advanceStarClock, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, visibleLabels, type StarClock } from "./presentation";
+import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, visibleLabels, type StarClock } from "./presentation";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
 type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onFailure: () => void };
@@ -244,16 +244,17 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const positionCamera = useCallback(() => {
     const instance = graph.current;
     if (!ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
-    const initialView = !appliedCamera.current;
     appliedCamera.current = cameraKey;
     const target = nodes.find(n => n.id === selected);
-    if (target && !initialView) {
-      // Opening the detail pane changes the viewport width. Pan to the picked
-      // star while preserving the user's zoom, so existing edges do not jump
-      // from overview scale to an arbitrary close-up.
+    if (target) {
+      // Selection reveals the rotating surface while preserving any closer
+      // user zoom and the current viewing direction, including deep links.
       const camera = instance.camera() as PerspectiveCamera;
       const controls = instance.controls() as OrbitControls;
       const offset = camera.position.clone().sub(controls.target);
+      const distance = focusedCameraDistance(offset.length(), size.height, camera.projectionMatrix.elements[5]);
+      if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
+      offset.normalize().multiplyScalar(distance);
       instance.cameraPosition({ x: target.x + offset.x, y: target.y + offset.y, z: target.z + offset.z }, { x: target.x, y: target.y, z: target.z }, reduced ? 0 : 650);
       return;
     }

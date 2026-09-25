@@ -84,12 +84,21 @@ export function spriteScale(pixels: number, viewportHeight: number, projectionY:
   return 2 * pixels / (viewportHeight * projectionY);
 }
 
-export const MIN_KNOWLEDGE_STAR_PIXELS = 26;
+// Distant stars must be able to shrink with their projected spacing. A fixed
+// 26px floor turned a fitted dense constellation into a solid white disc.
+export const MIN_KNOWLEDGE_STAR_PIXELS = 10;
+export const FOCUSED_KNOWLEDGE_STAR_PIXELS = 72;
+const KNOWLEDGE_STAR_WORLD_SIZE = 14;
 /** Perspective diameter in CSS pixels, shared by rendering, picking and projected labels. */
 export function nodeScreenSize(kind: string, depth: number, viewportHeight: number, projectionY: number): number {
   if (![depth, viewportHeight, projectionY].every(Number.isFinite) || depth <= 0 || viewportHeight <= 0 || projectionY <= 0) return 0;
   if (kind !== "document" && kind !== "memory") return 10;
-  return Math.min(140, Math.max(MIN_KNOWLEDGE_STAR_PIXELS, 14 * (viewportHeight / depth) * projectionY / 2));
+  return Math.min(140, Math.max(MIN_KNOWLEDGE_STAR_PIXELS, KNOWLEDGE_STAR_WORLD_SIZE * (viewportHeight / depth) * projectionY / 2));
+}
+/** Keep an already close camera; otherwise reach the visible surface on selection. */
+export function focusedCameraDistance(currentDistance: number, viewportHeight: number, projectionY: number): number {
+  if (![currentDistance, viewportHeight, projectionY].every(Number.isFinite) || currentDistance <= 0 || viewportHeight <= 0 || projectionY <= 0) return currentDistance;
+  return Math.min(currentDistance, KNOWLEDGE_STAR_WORLD_SIZE * viewportHeight * projectionY / (2 * FOCUSED_KNOWLEDGE_STAR_PIXELS));
 }
 /** Clear the corona and padded ring textures with one footprint for labels and picking. */
 export function nodeScreenMetrics(size: number, selected: boolean, changed: boolean) {

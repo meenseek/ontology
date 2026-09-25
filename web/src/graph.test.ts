@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Positions, compactSlots } from "./positions.ts";
 import { separateDiscs } from "./clearance.ts";
+import { PerspectiveCamera, Vector3 } from "three";
 import { active, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
@@ -368,8 +369,8 @@ test("knowledge stars grow monotonically with perspective and retain bounded ove
   const { nodeScreenSize, spriteScale } = await import("./presentation.ts");
   for (const kind of ["document", "memory"]) {
     const sizes = [10000, 1000, 400, 200, 100, 20, 1].map(depth => nodeScreenSize(kind, depth, 800, 2));
-    assert.equal(sizes[0], 26); assert.equal(sizes.at(-1), 140);
-    assert.ok(sizes.every((size, index) => size >= 26 && size <= 140 && (!index || size >= sizes[index - 1])));
+    assert.equal(sizes[0], 10); assert.equal(sizes.at(-1), 140);
+    assert.ok(sizes.every((size, index) => size >= 10 && size <= 140 && (!index || size >= sizes[index - 1])));
     assert.ok(sizes[3] > sizes[2], "approaching within the unclamped range visibly enlarges a star");
     const base = nodeScreenSize(kind, 400, 800, 2);
     assert.ok(Math.abs(nodeScreenSize(kind, 400, 1200, 2) - base * 1.5) < 1e-10);
@@ -570,6 +571,17 @@ test("screen clearance keeps a dragged node fixed and separates coincident neigh
     const first = placed.get(a.id)!, second = placed.get(b.id)!;
     assert.ok(Math.hypot(first.x - second.x, first.y - second.y) >= a.radius + b.radius + 1 - 1e-4);
   }
+});
+test("screen clearance lets an unrelated star yield to a fixed constellation spoke", () => {
+  const discs = [
+    { id: "hub", x: 0, y: 0, radius: 20 },
+    { id: "spoke", x: 80, y: 0, radius: 20 },
+    { id: "unrelated", x: 80, y: 0, radius: 20 },
+  ];
+  const placed = separateDiscs(discs, "hub", new Set(["spoke"]), 1, new Set(["hub", "spoke"]));
+  assert.deepEqual(placed.get("hub"), { x: 0, y: 0 });
+  assert.deepEqual(placed.get("spoke"), { x: 80, y: 0 });
+  assert.ok(Math.hypot(placed.get("unrelated")!.x - 80, placed.get("unrelated")!.y) >= 41);
 });
 test("a neighboring node moves only at the visible one-pixel clearance boundary", () => {
   const model = reconcile(snapshot([doc("held"), doc("other")], []));
@@ -815,6 +827,23 @@ test("a crowded hub keeps its constellation together when its center or a spoke 
       Math.abs(leaf.y - hub.y - originalOffset.y) < 1e-8,
     "unrelated-star clearance does not pull connected spokes out of their constellation");
   }
+  for (const reduced of [false, true]) {
+    const model = makeModel(), positions = new Positions(); positions.install(model, true);
+    const hub = model.nodes.find(node => node.id === "hub")!, unrelated = model.nodes.find(node => node.id === "unrelated")!;
+    const spoke = model.nodes.filter(node => node.id.startsWith("spoke-")).sort((a, b) =>
+      Math.hypot(b.x - hub.x, b.y - hub.y) - Math.hypot(a.x - hub.x, a.y - hub.y))[0];
+    const offset = { x: spoke.x - hub.x, y: spoke.y - hub.y };
+    const destination = { x: unrelated.x - offset.x, y: unrelated.y - offset.y, z: hub.z };
+    positions.begin("hub", 1, dragPlane(model));
+    positions.move("hub", destination);
+    positions.advance(0, false); positions.advance(16, false);
+    positions.release(16, reduced);
+    if (!reduced) for (const time of [80, 240, 1000, 2100]) positions.advance(time, false);
+    assert.ok(Math.abs(spoke.x - hub.x - offset.x) < 1e-8 && Math.abs(spoke.y - hub.y - offset.y) < 1e-8,
+      "a dense constellation keeps its spoke offset after release");
+    assert.ok(Math.hypot(spoke.x - unrelated.x, spoke.y - unrelated.y) >= 41 - 1e-6,
+      "an unrelated star yields to the moving spoke, even when the hub does not touch it");
+  }
 });
 test("tension travels through a chain only after each successive edge stretches", () => {
   const ids = ["a", "b", "c"];
@@ -1024,6 +1053,58 @@ test("a personal graph with hundreds of unrelated documents opens as a constella
   const reordered = reconcile({ ...source, nodes: [...nodes].reverse(), links: [...links].reverse() });
   new Positions().install(reordered, true);
   assert.deepEqual(reordered.nodes.map(node => [node.id, node.x, node.y, node.z]), model.nodes.map(node => [node.id, node.x, node.y, node.z]));
+});
+test("overview, orbit, focus, refresh and reset keep a dense personal constellation readable", async () => {
+  const { focusedCameraDistance, nodeScreenSize, starMotion } = await import("./presentation.ts");
+  const nodes = Array.from({ length: 536 }, (_, index) => ({ ...doc(`personal-${String(index).padStart(3, "0")}`), scope: "personal" as const }));
+  const links = Array.from({ length: 128 }, (_, index) => edge(nodes[0].id, nodes[index + 1].id));
+  const source = { ...snapshot(nodes, links), scope: "personal" as const };
+  const model = reconcile(source), positions = new Positions(); positions.install(model, true);
+  const initial = new Map(model.nodes.map(node => [node.id, coordinates(node)]));
+  const width = 1200, height = 800, camera = new PerspectiveCamera(60, width / height, .1, 10000);
+  const bounds = model.nodes.reduce((value, node) => ({
+    minX: Math.min(value.minX, node.x), maxX: Math.max(value.maxX, node.x),
+    minY: Math.min(value.minY, node.y), maxY: Math.max(value.maxY, node.y),
+    minZ: Math.min(value.minZ, node.z), maxZ: Math.max(value.maxZ, node.z),
+  }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity });
+  const center = new Vector3((bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2, (bounds.minZ + bounds.maxZ) / 2);
+  const radius = Math.max(18, ...model.nodes.map(node => Math.hypot(node.x - center.x, node.y - center.y, node.z - center.z) + 6));
+  const distance = Math.max(radius * 1.15 / Math.sin(camera.fov * Math.PI / 360), height * camera.projectionMatrix.elements[5] / 2);
+  const project = () => model.nodes.map(node => {
+    const point = new Vector3(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
+    const size = nodeScreenSize(node.kind, -point.z, height, camera.projectionMatrix.elements[5]);
+    point.applyMatrix4(camera.projectionMatrix);
+    return { x: (point.x + 1) * width / 2, y: (1 - point.y) * height / 2, size };
+  });
+  camera.position.copy(center).add(new Vector3(0, 0, distance)); camera.lookAt(center); camera.updateMatrixWorld();
+  const front = project();
+  let overlaps = 0;
+  for (let i = 0; i < front.length; i++) for (let j = i + 1; j < front.length; j++) {
+    if (Math.hypot(front[i].x - front[j].x, front[i].y - front[j].y) < (front[i].size + front[j].size) / 2) overlaps++;
+  }
+  assert.ok(overlaps < 100, `${overlaps} projected bodies overlap in the first view`);
+  camera.up.set(0, 0, 1); camera.position.copy(center).add(new Vector3(0, distance, 0)); camera.lookAt(center); camera.updateMatrixWorld();
+  const side = project(), sideHeight = Math.max(...side.map(node => node.y)) - Math.min(...side.map(node => node.y));
+  const sideWidth = Math.max(...side.map(node => node.x)) - Math.min(...side.map(node => node.x));
+  assert.ok(sideHeight > height / 4 && sideHeight > sideWidth * .55, "orbiting across the old plane retains visible depth instead of a line");
+  const focus = focusedCameraDistance(distance, height, camera.projectionMatrix.elements[5]);
+  assert.ok(nodeScreenSize("document", focus, height, camera.projectionMatrix.elements[5]) >= 72);
+  assert.ok(starMotion(72, 1, 1).detail > .5, "a focused star reveals its rotating surface");
+  assert.equal(focusedCameraDistance(focus / 2, height, camera.projectionMatrix.elements[5]), focus / 2, "closer user zoom is retained");
+  const refreshed = reconcile(source, model); positions.install(refreshed, true);
+  assert.deepEqual(new Map(refreshed.nodes.map(node => [node.id, coordinates(node)])), initial, "refresh retains the volumetric layout");
+  const root = refreshed.nodes[0]; positions.begin(root.id, 1);
+  positions.move(root.id, { x: root.x + 200, y: root.y, z: root.z }); positions.advance(0, false); positions.advance(16, false);
+  positions.release(16, false); positions.advance(2100, false);
+  assert.ok(refreshed.nodes.every(node => [node.x, node.y, node.z].every(Number.isFinite)), "drag and settle keep finite coordinates");
+  positions.reset();
+  assert.deepEqual(new Map(refreshed.nodes.map(node => [node.id, coordinates(node)])), initial, "reset restores the first view");
+});
+test("unlinked first views also have depth when orbited", () => {
+  const model = reconcile(snapshot(Array.from({ length: 60 }, (_, index) => doc(`single-${index}`))));
+  const positions = new Positions(); positions.install(model, true);
+  assert.ok(new Set(model.nodes.map(node => node.z.toFixed(2))).size > 20);
+  assert.equal(positions.hasCompactInitialLayout, true);
 });
 test("past-evidence singleton is initially near one host without changing semantic clusters or state", () => {
   const source = satelliteFixture(), model = reconcile(source), byId = new Map(model.nodes.map(n => [n.id, n]));
