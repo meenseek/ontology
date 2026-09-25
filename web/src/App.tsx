@@ -97,8 +97,8 @@ export default function App() {
     request<Snapshot>(`/api/graph?${params}`, { signal: controller.signal }).then(snapshot => {
       if (controller.signal.aborted || !sameGraphLocation(current, routeRef.current)) return;
       const model = reconcile(snapshot, previous.current);
+      positions.install(model, true);
       previous.current = { ...model, nodes: model.nodes.map(node => ({ ...node })) };
-      positions.install(model);
       setStored({ snapshot, model });
       setFilters(f => f.cluster && !model.clusters.some(c => c.id === f.cluster) ? { ...f, cluster: null } : f);
       const focus = routeRef.current.focus;

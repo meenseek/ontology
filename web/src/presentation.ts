@@ -84,11 +84,12 @@ export function spriteScale(pixels: number, viewportHeight: number, projectionY:
   return 2 * pixels / (viewportHeight * projectionY);
 }
 
+export const MIN_KNOWLEDGE_STAR_PIXELS = 26;
 /** Perspective diameter in CSS pixels, shared by rendering, picking and projected labels. */
 export function nodeScreenSize(kind: string, depth: number, viewportHeight: number, projectionY: number): number {
   if (![depth, viewportHeight, projectionY].every(Number.isFinite) || depth <= 0 || viewportHeight <= 0 || projectionY <= 0) return 0;
   if (kind !== "document" && kind !== "memory") return 10;
-  return Math.min(140, Math.max(26, 14 * (viewportHeight / depth) * projectionY / 2));
+  return Math.min(140, Math.max(MIN_KNOWLEDGE_STAR_PIXELS, 14 * (viewportHeight / depth) * projectionY / 2));
 }
 /** Clear the corona and padded ring textures with one footprint for labels and picking. */
 export function nodeScreenMetrics(size: number, selected: boolean, changed: boolean) {

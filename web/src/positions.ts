@@ -1,6 +1,7 @@
 import { visualSatellites } from "./graph";
 import type { Model, PositionedNode } from "./graph";
 import { COLLISION_GAP, EARLY_YIELD_GAP, separateDiscs } from "./clearance";
+import { MIN_KNOWLEDGE_STAR_PIXELS } from "./presentation";
 
 export type Point = { x: number; y: number; z: number };
 const point = ({ x, y, z }: Point): Point => ({ x, y, z });
@@ -442,9 +443,11 @@ export function compactSlots(root: string, members: string[], adjacency: Map<str
 }
 type Settle = { anchor: Point; followers: Map<string, Follower>; velocities: Map<string, Point>; clearance: Clearance | null; tolerance: number; last: number; deadline: number };
 type PendingLayout = { token: number; root: string; right: Point; up: Point; spacing: number; clearance: Clearance | null; reduced: boolean };
-// Session-only coordinates. Membership and the automatic layout remain owned by reconcile().
+// Session-only coordinates. Reconcile owns semantic membership; the live graph
+// can pack its first view using the same link solver used after a drag.
 export class Positions {
   revision = 0;
+  private packedInitial = false;
   private nodes = new Map<string, PositionedNode>();
   private satellites = new Map<string, string>();
   private adjacency = new Map<string, Set<string>>();
@@ -457,6 +460,50 @@ export class Positions {
   private token = 0;
   get dragging() { return this.gesture !== null; }
   get settling() { return this.settle !== null; }
+  get hasCompactInitialLayout() { return this.packedInitial; }
+  private compactInitialLayout() {
+    const spacing = MIN_KNOWLEDGE_STAR_PIXELS + EARLY_YIELD_GAP;
+    const visited = new Set<string>();
+    const components: { root: string; coordinates: Map<string, Slot>; radius: number; center?: Slot }[] = [];
+    for (const root of [...this.nodes.keys()].sort()) {
+      if (visited.has(root)) continue;
+      const ids = [root]; visited.add(root);
+      for (let index = 0; index < ids.length; index++) {
+        for (const other of [...(this.adjacency.get(ids[index]) ?? [])].sort()) {
+          if (!visited.has(other)) { visited.add(other); ids.push(other); }
+        }
+      }
+      const members = ids.slice(1).sort(), origin = this.nodes.get(root)!;
+      const projected = new Map(ids.map(id => {
+        const node = this.nodes.get(id)!;
+        return [id, { x: node.x - origin.x, y: node.y - origin.y }] as const;
+      }));
+      const slots = compactSlots(root, members, this.adjacency) ?? packedSlots(root, members, this.adjacency, projected);
+      const coordinates = new Map<string, Slot>([[root, { x: 0, y: 0 }], ...slots]);
+      const average = [...coordinates.values()].reduce((sum, value) => ({ x: sum.x + value.x / ids.length, y: sum.y + value.y / ids.length }), { x: 0, y: 0 });
+      let radius = spacing / 2;
+      for (const [id, value] of coordinates) {
+        const centered = { x: (value.x - average.x) * spacing, y: (value.y - average.y) * spacing };
+        coordinates.set(id, centered);
+        radius = Math.max(radius, Math.hypot(centered.x, centered.y) + spacing / 2);
+      }
+      components.push({ root, coordinates, radius });
+    }
+    components.sort((a, b) => b.radius - a.radius || a.root.localeCompare(b.root));
+    const gap = 24, width = Math.max(0, ...components.map(component => 2 * component.radius + gap),
+      Math.sqrt(components.reduce((sum, component) => sum + (2 * component.radius + gap) ** 2, 0)));
+    let x = 0, y = 0, rowHeight = 0, usedWidth = 0;
+    for (const component of components) {
+      const side = 2 * component.radius + gap;
+      if (x && x + side > width) { x = 0; y += rowHeight; rowHeight = 0; }
+      component.center = { x: x + side / 2, y: y + side / 2 };
+      x += side; rowHeight = Math.max(rowHeight, side); usedWidth = Math.max(usedWidth, x);
+    }
+    const offset = { x: usedWidth / 2, y: (y + rowHeight) / 2 };
+    for (const component of components) for (const [id, value] of component.coordinates) {
+      fixPosition(this.nodes.get(id)!, { x: value.x + component.center!.x - offset.x, y: value.y + component.center!.y - offset.y, z: 0 });
+    }
+  }
   private clearedPositions(clearance: Clearance, desired: Map<string, Point>, linked: ReadonlySet<string>, gap = COLLISION_GAP): Map<string, Point> {
     const discs = clearance.visible.flatMap(id => {
       const node = this.nodes.get(id), value = desired.get(id);
@@ -511,16 +558,20 @@ export class Positions {
     }
     this.settle = { anchor, followers, velocities: new Map(), clearance, tolerance, last: now, deadline: now + 2000 };
   }
-  install(model: Model) {
+  install(model: Model, compactInitial = false) {
     this.cancel();
     const retained = this.nodes, priorSatellites = this.satellites;
     this.satellites = visualSatellites(model);
-    this.baseline = new Map(model.nodes.map(n => [n.id, point(n)]));
     this.nodes = new Map(model.nodes.map(n => [n.id, n]));
     this.adjacency = new Map(model.nodes.map(n => [n.id, new Set<string>()]));
     for (const link of model.links) {
       this.adjacency.get(link.source)?.add(link.target); this.adjacency.get(link.target)?.add(link.source);
     }
+    if (compactInitial && !retained.size && model.links.length) {
+      this.compactInitialLayout();
+      this.packedInitial = true;
+    }
+    this.baseline = new Map(model.nodes.map(n => [n.id, point(n)]));
     for (const node of model.nodes) {
       const prior = retained.get(node.id);
       const host = this.satellites.get(node.id);
