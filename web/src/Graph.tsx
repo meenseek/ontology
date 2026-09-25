@@ -636,6 +636,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     onPointerLeave={() => { cursor.current = null; }}
     onPointerDownCapture={event => {
       cursor.current = null;
+      // A new press is a new action; the guard only belongs to the prior drag's click.
+      if (!positions.dragging) suppressClickUntil.current = 0;
       allowDrag.current = !positions.layoutMoving;
       if (!allowDrag.current) suppressClickUntil.current = performance.now() + 350;
       pointer.current = { pointerId: event.pointerId, pointerType: event.pointerType };
@@ -678,8 +680,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
     />}
     <div className="node-labels" ref={labelLayer}
-      onClick={event => { const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) chooseNode(label.dataset.nodeId); }}
-      onKeyDown={event => { if (event.key !== "Enter" && event.key !== " ") return; const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { event.preventDefault(); const id = label.dataset.nodeId, spatial = spatialCounts.has(id); chooseNode(id); requestAnimationFrame(() => (spatial ? spatialCloseButton : coreCloseButton).current?.focus()); } }}>
+      onClick={event => { const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { if (event.detail === 0) suppressClickUntil.current = 0; chooseNode(label.dataset.nodeId); } }}
+      onKeyDown={event => { if (event.key !== "Enter" && event.key !== " ") return; const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { event.preventDefault(); suppressClickUntil.current = 0; const id = label.dataset.nodeId, spatial = spatialCounts.has(id); chooseNode(id); requestAnimationFrame(() => (spatial ? spatialCloseButton : coreCloseButton).current?.focus()); } }}>
       {Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /></div>)}
     </div>
     {activeExpandedCore && !selected && !spatialReveal?.members.size && <button type="button" ref={coreCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); setExpandedCore(null); }}>묶음 접기</button>}
