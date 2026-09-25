@@ -82,6 +82,13 @@ class Stub {
       this.item = { ...this.item, ...input, evidence: this.item.evidence, revision: this.item.revision + 1, status: op === "propose" ? "proposed" : "accepted" };
       return this.item;
     }
+    if (op === "grouping-set") {
+      const subjectId = body.subject_id as string | null;
+      const mode = body.mode as "manual" | "auto" | "off";
+      this.item = { ...this.item, subject_id: subjectId, subject_name: subjectId === null ? null : "합성 묶음 0", revision: this.item.revision + 1,
+        grouping: { mode, state: mode === "manual" ? "manual" : mode === "auto" ? "pending" : "off", suggestions: {}, reason: null } };
+      return this.item;
+    }
     throw new Error(`예상하지 않은 합성 요청: ${op}`);
   }
   request: Request = <T,>(url: string, options?: RequestInit): Promise<T> => {
@@ -179,6 +186,19 @@ async function scenario(name: string, size: number, kind: "memory" | "documents"
 }
 
 async function main() {
+  await scenario("Memory 읽기 화면에서 묶음 변경", 1, "memory", async stub => {
+    await waitFor(() => !!host.querySelector(".memory-body"), "기록 읽기");
+    counts(stub, { read: 1 }, "초기 읽기에서 묶음 목록을 요청하지 않음");
+    await toggle("기록 묶음 · 없음");
+    await waitFor(() => stub.calls.some(call => call.op === "subjects" && call.state === "resolved"), "읽기 화면의 묶음 목록");
+    counts(stub, { read: 1, subjects: 1 }, "묶음 선택을 열 때만 조회");
+    await button("합성 묶음 0에 묶기");
+    assert(stub.changed.at(-1)?.subject_id === "fixture-subject-0", "관리 없이 묶음 변경");
+    counts(stub, { read: 1, subjects: 1, "grouping-set": 1 }, "묶음 변경은 한 번의 쓰기");
+    await button("묶음 없음");
+    assert(stub.changed.at(-1)?.subject_id === null && stub.changed.at(-1)?.grouping?.mode === "off", "기록을 보존하고 묶음만 해제");
+    counts(stub, { read: 1, subjects: 1, "grouping-set": 2 }, "묶음 해제는 한 번의 쓰기");
+  });
   for (const size of [0, 1, 20]) {
     await scenario(`Memory 정상·draft·subjects·쓰기·history (${size})`, size, "memory", async stub => {
       await waitFor(() => !!host.querySelector(".memory-body"), "기록 읽기");

@@ -199,6 +199,10 @@ pub enum BrainCommand {
         idempotency_key: String,
         name: String,
     },
+    SubjectDelete {
+        scope: Scope,
+        id: String,
+    },
     Subjects {
         scope: Scope,
         #[serde(default)]
@@ -460,6 +464,7 @@ impl Store {
                 idempotency_key,
                 name,
             } => self.subject_create(scope, &idempotency_key, &name).await,
+            BrainCommand::SubjectDelete { scope, id } => self.subject_delete(scope, &id).await,
             BrainCommand::Subjects {
                 scope,
                 query,
@@ -493,6 +498,62 @@ impl Store {
         let value: Value = sqlx::query_scalar("INSERT INTO subjects(id,scope,name,key_digest,payload_digest) VALUES($1,$2,$3,$4,$5) ON CONFLICT(scope,key_digest) DO UPDATE SET key_digest=EXCLUDED.key_digest WHERE subjects.payload_digest=EXCLUDED.payload_digest RETURNING jsonb_build_object('id',id,'scope',scope,'name',name,'created_at',created_at)")
             .bind(format!("p_{}",Uuid::new_v4())).bind(scope.as_str()).bind(name).bind(digest(key.as_bytes())).bind(digest(name.as_bytes())).fetch_optional(self.pool()).await.map_err(|_|Error::Storage)?.ok_or(Error::Conflict)?;
         Ok(value)
+    }
+    async fn subject_delete(&self, scope: Scope, id: &str) -> Result<Value, Error> {
+        native_id(id, "p_")?;
+        let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
+        self.lock_memories(&mut tx, scope).await?;
+        self.count(1);
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT id FROM subjects WHERE scope=$1 AND id=$2 FOR UPDATE")
+                .bind(scope.as_str())
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| Error::Storage)?;
+        if exists.is_none() {
+            return Err(Error::NotFound);
+        }
+        self.count(1);
+        let moved: Vec<String> = sqlx::query_scalar(
+            "UPDATE memories SET subject_id=NULL,revision=revision+1,updated_at=now() WHERE scope=$1 AND subject_id=$2 RETURNING id",
+        )
+        .bind(scope.as_str())
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| Error::Storage)?;
+        if !moved.is_empty() {
+            self.count(1);
+            sqlx::query("INSERT INTO memory_history(scope,memory_id,revision,status,subject_id,document) SELECT scope,id,revision,status,subject_id,document FROM memories WHERE scope=$1 AND id=ANY($2::text[])")
+                .bind(scope.as_str()).bind(&moved).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
+            self.count(1);
+            sqlx::query("INSERT INTO evidence_snapshots(scope,memory_id,revision,entity_id,digest) SELECT m.scope,m.id,m.revision,x->>'entity_id',x->>'content_digest' FROM memories m CROSS JOIN LATERAL jsonb_array_elements(m.document->'evidence') x WHERE m.scope=$1 AND m.id=ANY($2::text[]) AND EXISTS(SELECT 1 FROM evidence_snapshots previous WHERE previous.scope=m.scope AND previous.memory_id=m.id AND previous.revision=m.revision-1 AND previous.entity_id=x->>'entity_id' AND previous.digest=x->>'content_digest')")
+                .bind(scope.as_str()).bind(&moved).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
+            if scope == Scope::Personal {
+                self.count(1);
+                sqlx::query("UPDATE memory_grouping g SET mode='off',state='off',source_revision=m.revision,attempts=0,lease_until=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() FROM memories m WHERE g.memory_id=m.id AND m.scope='personal' AND m.id=ANY($1::text[])")
+                    .bind(&moved).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
+            }
+        }
+        if scope == Scope::Personal {
+            self.count(1);
+            sqlx::query("UPDATE memory_grouping g SET state='pending',source_revision=m.revision,attempts=0,lease_until=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() FROM memories m WHERE g.memory_id=m.id AND m.scope='personal' AND g.mode='auto' AND g.state='suggested' AND g.suggestions->'candidate_ids' ? $1")
+                .bind(id).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
+        }
+        self.count(1);
+        let deleted: Option<String> =
+            sqlx::query_scalar("DELETE FROM subjects WHERE scope=$1 AND id=$2 RETURNING id")
+                .bind(scope.as_str())
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| Error::Storage)?;
+        if deleted.is_none() {
+            return Err(Error::Conflict);
+        }
+        tx.commit().await.map_err(|_| Error::Storage)?;
+        Ok(json!({ "id": id, "deleted": true, "ungrouped": moved.len() }))
     }
     async fn subjects(
         &self,

@@ -1201,3 +1201,171 @@ async fn evidence_migration_preserves_existing_records() {
     .await;
     assert_eq!(call(&store,json!({"op":"evidence-read","scope":"meenseek","id":m["id"],"revision":3,"entity_id":source.entity_id})).await["content"],"Changed policy");
 }
+
+#[tokio::test]
+async fn subject_delete_keeps_records_and_bounds_database_calls() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    sqlx::query("TRUNCATE memory_grouping,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects")
+        .execute(store.pool()).await.expect("reset synthetic memories only");
+
+    let empty = call(&store, json!({"op":"subject-create","scope":"personal","idempotency_key":"empty-delete","name":"빈 합성 묶음"})).await;
+    let empty_id = empty["id"].as_str().unwrap();
+    let before_empty = store.calls();
+    let removed = call(
+        &store,
+        json!({"op":"subject-delete","scope":"personal","id":empty_id}),
+    )
+    .await;
+    assert_eq!(removed["ungrouped"], 0);
+    assert_eq!(
+        store.calls() - before_empty,
+        5,
+        "empty deletion has a fixed call bound"
+    );
+
+    let subject = call(&store, json!({"op":"subject-create","scope":"personal","idempotency_key":"linked-delete","name":"합성 묶음"})).await;
+    let id = subject["id"].as_str().unwrap();
+    assert_eq!(
+        store
+            .brain(cmd(
+                json!({"op":"subject-delete","scope":"meenseek","id":id})
+            ))
+            .await,
+        Err(Error::NotFound)
+    );
+    let source_hash = digest(b"subject-delete-evidence");
+    let source = ImportedRecord {
+        source_id: format!("s_{source_hash}"),
+        entity_id: format!("e_{source_hash}"),
+        scope: Scope::Personal,
+        repository: "/synthetic/subject-delete".into(),
+        path: "subject-delete-evidence.md".into(),
+        kind: SourceKind::Git,
+        source_revision: "a".repeat(40),
+        digest: Some(digest(b"preserved evidence")),
+        content: Some("preserved evidence".into()),
+    };
+    store
+        .apply_import(std::slice::from_ref(&source))
+        .await
+        .expect("synthetic evidence source");
+    let options = call(
+        &store,
+        json!({"op":"evidence","scope":"personal","query":"subject-delete-evidence.md"}),
+    )
+    .await;
+    let candidate = &options["items"][0];
+    let evidence = json!({"entity_id":candidate["entity_id"],"source_revision":candidate["source_revision"],"content_digest":candidate["content_digest"],"generation":candidate["generation"]});
+    let suggestion = call(&store, json!({"op":"remember","scope":"personal","idempotency_key":"suggestion-memory","memory":{"title":"미분류 기록","body":"후보 묶음을 기다림"}})).await;
+    sqlx::query("UPDATE memory_grouping SET state='suggested',suggestions=jsonb_build_object('candidate_ids',jsonb_build_array($2::text),'candidate_names',jsonb_build_object($2::text,'합성 묶음')) WHERE memory_id=$1")
+        .bind(suggestion["id"].as_str().unwrap()).bind(id).execute(store.pool()).await.unwrap();
+    let mut memories = Vec::new();
+    for index in 0..20 {
+        let linked = if index == 1 {
+            vec![evidence.clone()]
+        } else {
+            vec![]
+        };
+        memories.push(call(&store, json!({"op":"remember","scope":"personal","idempotency_key":format!("keep-memory-{index}"),"memory":{"title":format!("보존할 기록 {index}"),"body":"묶음만 삭제한다","subject_id":id,"evidence":linked}})).await);
+    }
+    let withdrawn = call(
+        &store,
+        json!({"op":"withdraw","scope":"personal","id":memories[0]["id"],"revision":1}),
+    )
+    .await;
+    assert_eq!(withdrawn["status"], "withdrawn");
+    let before_linked = store.calls();
+    let removed = call(
+        &store,
+        json!({"op":"subject-delete","scope":"personal","id":id}),
+    )
+    .await;
+    assert_eq!(removed["ungrouped"], 20);
+    assert_eq!(
+        store.calls() - before_linked,
+        8,
+        "linked deletion batches history, evidence and grouping regardless of record count"
+    );
+    let before_missing = store.calls();
+    assert_eq!(
+        store
+            .brain(cmd(
+                json!({"op":"subject-delete","scope":"personal","id":id})
+            ))
+            .await,
+        Err(Error::NotFound)
+    );
+    assert_eq!(
+        store.calls() - before_missing,
+        2,
+        "missing subject stops after the locked lookup"
+    );
+    for (index, memory) in memories.iter().enumerate() {
+        let kept = call(
+            &store,
+            json!({"op":"read","scope":"personal","id":memory["id"]}),
+        )
+        .await;
+        assert_eq!(kept["body"], memory["body"]);
+        assert!(kept["subject_id"].is_null());
+        assert_eq!(kept["grouping"]["mode"], "off");
+        assert_eq!(kept["revision"], if index == 0 { 3 } else { 2 });
+        assert_eq!(
+            kept["status"],
+            if index == 0 { "withdrawn" } else { "accepted" }
+        );
+    }
+    let history = call(
+        &store,
+        json!({"op":"history","scope":"personal","id":memories[0]["id"]}),
+    )
+    .await;
+    assert_eq!(history["items"].as_array().unwrap().len(), 3);
+    assert_eq!(history["items"][0]["subject_id"], Value::Null);
+    assert_eq!(history["items"][1]["subject_id"], subject["id"]);
+    let refreshed_suggestion = call(
+        &store,
+        json!({"op":"read","scope":"personal","id":suggestion["id"]}),
+    )
+    .await;
+    assert_eq!(refreshed_suggestion["grouping"]["state"], "pending");
+    assert_eq!(refreshed_suggestion["grouping"]["suggestions"], json!({}));
+    let pinned = call(&store, json!({"op":"evidence-read","scope":"personal","id":memories[1]["id"],"revision":2,"entity_id":source.entity_id})).await;
+    assert_eq!(pinned["content"], "preserved evidence");
+    let graph = call(
+        &store,
+        json!({"op":"search","scope":"personal","query":"합성 묶음"}),
+    )
+    .await;
+    assert!(
+        !graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["id"] == id)
+    );
+    let company_subject = call(&store, json!({"op":"subject-create","scope":"meenseek","idempotency_key":"company-delete","name":"회사 합성 묶음"})).await;
+    let company_memory = call(&store, json!({"op":"remember","scope":"meenseek","idempotency_key":"company-memory","memory":{"title":"회사 기록","body":"그룹만 삭제","subject_id":company_subject["id"]}})).await;
+    let before_company = store.calls();
+    assert_eq!(
+        call(
+            &store,
+            json!({"op":"subject-delete","scope":"meenseek","id":company_subject["id"]})
+        )
+        .await["ungrouped"],
+        1
+    );
+    assert_eq!(
+        store.calls() - before_company,
+        6,
+        "company deletion skips personal grouping state"
+    );
+    let company_kept = call(
+        &store,
+        json!({"op":"read","scope":"meenseek","id":company_memory["id"]}),
+    )
+    .await;
+    assert!(company_kept["subject_id"].is_null());
+    assert_eq!(company_kept["body"], company_memory["body"]);
+}

@@ -313,11 +313,14 @@ JSON
 | `withdraw` | `id`, `revision`. 현재 적용하지 않는 상태로 표시하고 검색과 이력에는 남긴다. 철회한 기억은 정정하거나 다시 수락할 수 없다. |
 | `forget` | `id`, `revision`. 해당 기억·이력·근거 연결을 앱의 활성 데이터에서 논리적으로 삭제한다. |
 | `subject-create`, `subjects` | 기억 묶음 생성은 `idempotency_key`, `name`; 목록은 선택적으로 `query`, `after`, `limit`. 반환된 `p_UUID`를 기억이나 조회의 `subject_id`로 쓴다. |
+| `subject-delete` | `id`(`p_UUID`). 묶음을 삭제하고 연결된 기록은 보존하며 미분류로 바꾼다. 변경된 기록은 새 리비전과 이력을 남기고, 응답의 `ungrouped`에 변경 개수를 반환한다. |
 | `search` | `query`, `limit`(1~20). 상단 검색과 같은 그래프 조회를 사용한다. 문서·직접 기록·분류 표식을 함께 반환하며 `nodes`에서 종류와 상태를 확인한다. |
 | `evidence-read` | `id`, `revision`, `entity_id`. 해당 기록 시점에 보존한 근거 원문을 읽는다. `available=false`면 당시 본문을 복원할 수 없는 상태다. |
 | `evidence` | 선택적으로 `query`, `limit`을 보내 같은 범위의 현재 근거 후보를 찾는다. |
 | `grouping-retry` | `personal`에서 분류 실패·제안·미분류 상태인 기록의 `id`를 보내 재검토한다. |
 | `grouping-set` | `personal`의 `id`, 현재 `revision`, `mode`(`manual`, `off`, `auto`)와 `subject_id`를 보낸다. `manual`은 기존 개인 묶음 ID가 필수이고 다른 모드는 `null`만 허용한다. 본문과 정리 근거는 유지하며 묶음 선택 이력을 남긴다. |
+
+앱에서는 기록 상세의 **기록 묶음**에서 바로 묶음을 바꾸거나 해제할 수 있다. 묶음 표식의 상세 화면에는 **묶음 삭제**가 있으며, 확인 후 연결된 기록을 남기고 묶음 연결만 해제한다. 기록 본문을 정정하는 **관리** 화면은 이 작업에 필요하지 않다.
 
 `memory`에는 필수 `body`와 선택적으로 `kind`, `title`, `subject_id`, `effective_from`, `effective_until`, `evidence`를 넣는다. 유효 시각은 UTC Unix 초이며 시작은 포함하고 끝은 제외한다. 생략할 선택 필드는 빼고, 응답 객체를 통째로 요청에 복사하지 않는다. 알 수 없는 필드는 거부한다. 입력 JSON은 16 KiB, 제목은 160자·640 UTF-8 바이트, 본문은 8,192 UTF-8 바이트, 근거는 10개까지다. 근거의 원래 적용 조건과 정리 정보를 포함한 최종 기록은 PostgreSQL JSON 표현으로 24 KiB 이하여야 하며, 저장 전에 합산 크기를 확인해 초과하면 `limit` 오류로 반환한다. 내용을 잘라 저장하지 않는다. 목록·이력·검색은 한 번에 1~20개이며 목록·이력·기억 묶음 목록의 다음 페이지에는 응답의 커서를 쓴다.
 

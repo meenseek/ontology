@@ -27,6 +27,26 @@ class GraphBoundary extends Component<{ children: ReactNode; onFailure: () => vo
   componentDidCatch() { this.props.onFailure(); }
   render() { return this.state.failed ? null : this.props.children; }
 }
+function SubjectDelete({ scope, id, label, csrf, disabled, onBusy, onDeleted }: { scope: Scope; id: string; label: string; csrf: string; disabled: boolean; onBusy: (value: boolean) => void; onDeleted: (ungrouped: number) => void }) {
+  const [confirming, setConfirming] = useState(false), [error, setError] = useState("");
+  const pending = useRef(false);
+  async function remove() {
+    if (pending.current) return;
+    pending.current = true;
+    onBusy(true); setError("");
+    try {
+      const result = await request<{ id: string; deleted: boolean; ungrouped: number }>("/api/brain", { method: "POST", headers: { "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify({ op: "subject-delete", scope, id }) });
+      onDeleted(result.ungrouped);
+    } catch (failure) {
+      setError(message(failure));
+    } finally { pending.current = false; onBusy(false); }
+  }
+  return <section className="section">
+    <button disabled={disabled} onClick={() => { setConfirming(true); setError(""); }}>묶음 삭제</button>
+    {confirming && <div className="subject-delete-confirm"><p>‘{label}’ 묶음을 삭제할까요? 연결된 기록은 남기고 묶음 연결만 해제합니다.</p><button disabled={disabled} onClick={() => void remove()}>삭제 확인</button><button disabled={disabled} onClick={() => { setConfirming(false); setError(""); }}>취소</button></div>}
+    {error && <p className="error" role="alert">{error}</p>}
+  </section>;
+}
 const initialFilters: Filters = { kind: "all", state: "all", cluster: null, sourceScope: null };
 export default function App() {
   const [route, setRoute] = useState(() => parseLocation(window.location.search));
@@ -140,6 +160,11 @@ export default function App() {
     syncRoute({ ...routeRef.current, focus: id }, true);
     setSavedMemory(item); setManaging(false); setPanel(id ? "node" : "manage"); setFilters(initialFilters);
     setRefresh(v => v + 1); setPanelEpoch(v => v + 1); setNotice("");
+  }
+  function subjectDeleted(ungrouped: number) {
+    setStored(null); setInput(""); setFilters(initialFilters); setPanel(null);
+    setNotice(ungrouped ? `기록 ${ungrouped}개의 묶음 연결을 해제하고 묶음을 삭제했습니다.` : "빈 기록 묶음을 삭제했습니다.");
+    syncRoute({ scope: route.scope, q: "", focus: null });
   }
   function groupingChanged(item: MemoryItem, contentChanged: boolean) {
     setSavedMemory(item);
@@ -256,7 +281,7 @@ export default function App() {
         <div className="panel-heading"><span>{panel === "manage" ? "기록 남기기" : selected ? kindName[selected.kind] : memorySeed ? "기록" : "자료 상세"}</span><div className="panel-actions">{panel === "node" && (memorySeed || selected && knowledge(selected) && selected.source_kind !== "original") && <button disabled={busy} aria-expanded={managing} onClick={toggleManagement}>{managing ? "읽기로 돌아가기" : "관리"}</button>}<button ref={closeButton} disabled={busy} aria-label="관리 패널 닫기" onClick={closePanel}>닫기 ×</button></div></div>
         {panel === "manage" ? <><Memory visible={visible} managing key={`${route.scope}:manage:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={null} onBusy={updateBusy} onChange={changed} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /><SyncPanel key={panelEpoch} visible={visible} /></> : !selected && !memorySeed ? <p className="empty">선택한 자료를 불러오는 중…</p> : <>
           {selected?.changed && <p className="notice">이전 조회 이후 기록이나 관계가 변경되었습니다.</p>}
-          {selected?.kind === "document" ? selected.source_kind === "original" && selected.context_scope && selected.context_path ? <OriginalDetail key={selected.id} scope={selected.context_scope} path={selected.context_path} request={request} related={relatedOriginals} onNavigate={choose} csrf={session.csrf} onBusy={updateBusy} onChange={() => setRefresh(v => v + 1)} onDirtyChange={updateDirty} /> : <Documents visible={visible} managing={managing} key={`${route.scope}:${selected.id}:${panelEpoch}`} scope={route.scope} id={selected.id} csrf={session.csrf} allAreas={session.areas} request={request} onBusy={updateBusy} onChange={reload} onNavigate={choose} contextScope={selected.context_scope} contextPath={selected.context_path} onDirtyChange={updateDirty} /> : selected?.kind === "memory" || memorySeed ? <Memory latestNode={selected} visible={visible} managing={managing} initialItem={memorySeed} key={`${route.scope}:${route.focus}:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={route.focus} onBusy={updateBusy} onChange={changed} onBackgroundChange={groupingChanged} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /> : selected && <><h2>{selected.label}</h2><p className="hint">{kindName[selected.kind]} 표식입니다.</p><button onClick={() => fitView(selected.cluster)}>이 군집 보기</button><div className="compact-list">{data?.model.links.filter(l => l.source === selected.id || l.target === selected.id).map(l => { const other = data.model.nodes.find(n => n.id === (l.source === selected.id ? l.target : l.source)); return other && <button key={`${l.kind}:${other.id}`} disabled={busy} onClick={() => choose(other.id)}><span>{linkName[l.kind]}</span><strong>{nodePresentation(other).title}</strong>{nodePresentation(other).subtitle && <small>{nodePresentation(other).subtitle}</small>}</button>; })}</div></>}
+          {selected?.kind === "document" ? selected.source_kind === "original" && selected.context_scope && selected.context_path ? <OriginalDetail key={selected.id} scope={selected.context_scope} path={selected.context_path} request={request} related={relatedOriginals} onNavigate={choose} csrf={session.csrf} onBusy={updateBusy} onChange={() => setRefresh(v => v + 1)} onDirtyChange={updateDirty} /> : <Documents visible={visible} managing={managing} key={`${route.scope}:${selected.id}:${panelEpoch}`} scope={route.scope} id={selected.id} csrf={session.csrf} allAreas={session.areas} request={request} onBusy={updateBusy} onChange={reload} onNavigate={choose} contextScope={selected.context_scope} contextPath={selected.context_path} onDirtyChange={updateDirty} /> : selected?.kind === "memory" || memorySeed ? <Memory latestNode={selected} visible={visible} managing={managing} initialItem={memorySeed} key={`${route.scope}:${route.focus}:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={route.focus} onBusy={updateBusy} onChange={changed} onBackgroundChange={groupingChanged} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /> : selected && <><h2>{selected.label}</h2><p className="hint">{kindName[selected.kind]} 표식입니다.</p><button onClick={() => fitView(selected.cluster)}>이 군집 보기</button>{selected.kind === "subject" && <SubjectDelete key={selected.id} scope={route.scope} id={selected.id} label={selected.label} csrf={session.csrf} disabled={busy} onBusy={updateBusy} onDeleted={subjectDeleted} />}<div className="compact-list">{data?.model.links.filter(l => l.source === selected.id || l.target === selected.id).map(l => { const other = data.model.nodes.find(n => n.id === (l.source === selected.id ? l.target : l.source)); return other && <button key={`${l.kind}:${other.id}`} disabled={busy} onClick={() => choose(other.id)}><span>{linkName[l.kind]}</span><strong>{nodePresentation(other).title}</strong>{nodePresentation(other).subtitle && <small>{nodePresentation(other).subtitle}</small>}</button>; })}</div></>}
           {managing && <p className="section node-permalink"><a href={graphUrl(route.scope, route.q, route.focus)}>이 자료 링크</a></p>}
         </>}
       </aside>}

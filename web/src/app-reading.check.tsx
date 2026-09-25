@@ -39,12 +39,14 @@ function enter(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
   element.dispatchEvent(new Event("change", { bubbles: true }));
 }
 const id = (index: number) => `m_00000000-0000-4000-8000-${index.toString().padStart(12, "0")}`;
+const subjectId = "p_00000000-0000-4000-8000-000000000001";
 function item(index: number, scope: Scope): Item {
   return { id: id(index), scope, revision: 1, kind: "fact", title: `${scope} 합성 기록 ${index}`, body: `${scope} 합성 본문 ${index}`, subject_id: null, subject_name: null, effective_from: null, effective_until: null, evidence: [], status: "accepted", origin: "user", support: "user-recorded", updated_at: "2026-09-11T00:00:00Z" };
 }
-function graph(items: Item[], scope: Scope, query: string, focus: string | null): Snapshot {
+function graph(items: Item[], scope: Scope, query: string, focus: string | null, subjectExists: boolean): Snapshot {
   const nodes: GraphNode[] = items.map(value => ({ id: value.id, scope, kind: "memory", label: value.title, revision: String(value.revision), status: "accepted", temporal: "current", supported: true }));
-  return { scope, query, focus: { id: focus, found: nodes.some(node => node.id === focus) }, nodes, links: [], matched: nodes.length, totals: { documents: 0, memories: nodes.length, markers: 0, links: 0 }, returned: { knowledge: nodes.length, markers: 0, links: 0 }, omitted: { nodes: 0, links: 0 }, eligible: { nodes: nodes.length, links: 0 }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
+  if (scope === "personal" && subjectExists) nodes.push({ id: subjectId, scope, kind: "subject", label: "빈 묶음" });
+  return { scope, query, focus: { id: focus, found: nodes.some(node => node.id === focus) }, nodes, links: [], matched: nodes.length, totals: { documents: 0, memories: items.length, markers: nodes.length - items.length, links: 0 }, returned: { knowledge: items.length, markers: nodes.length - items.length, links: 0 }, omitted: { nodes: 0, links: 0 }, eligible: { nodes: nodes.length, links: 0 }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
 }
 
 async function check(size: number) {
@@ -60,7 +62,7 @@ async function check(size: number) {
   };
   let releaseGraph!: () => void;
   const initialGraph = new Promise<void>(resolve => { releaseGraph = resolve; });
-  let firstGraph = true, failSync = false;
+  let firstGraph = true, failSync = false, subjectExists = true;
   function phase(name: string, start: number, expected: Record<string, number>) {
     const current = calls.slice(start), counts: Record<string, number> = {};
     for (const call of current) counts[call.operation] = (counts[call.operation] ?? 0) + 1;
@@ -102,7 +104,7 @@ async function check(size: number) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const scope = url.searchParams.get("scope") as Scope;
         assert(scope === "meenseek" || scope === "personal", "Graph scope");
-        return response(graph([...records[scope].values()], scope, url.searchParams.get("q") ?? "", url.searchParams.get("focus")));
+        return response(graph([...records[scope].values()], scope, url.searchParams.get("q") ?? "", url.searchParams.get("focus"), subjectExists));
       }
       if (url.pathname === "/api/sync" && method === "GET") {
         if (failSync) { failSync = false; return response({ error: "synthetic failure" }, 503); }
@@ -117,6 +119,11 @@ async function check(size: number) {
           return response(value ?? { error: "missing" }, value ? 200 : 404);
         }
         if (body.op === "subjects") return response({ items: [], next_after: null });
+        if (body.op === "subject-delete") {
+          assert(scope === "personal" && body.id === subjectId && subjectExists, "Only the empty fixture subject can be deleted");
+          subjectExists = false;
+          return response({ id: subjectId, deleted: true, ungrouped: 0 });
+        }
         if (body.op === "remember" || body.op === "correct") {
           const prior = body.op === "correct" ? records[scope].get(body.id) : item(999, scope);
           assert(prior, "Corrected record exists");
@@ -139,7 +146,7 @@ async function check(size: number) {
     const first = host.querySelector<HTMLButtonElement>(".graph-list > button")!;
     first.click();
     await until(() => bodyIs(records.meenseek.get(id(1))!.body), "selected memory");
-    phase("session + graph + selected read; subjects closed", 0, { session: 1, graph: 1, read: 1 });
+    phase("session + graph + selected read; subjects closed", 0, { session: 1, graph: 2, read: 1 });
 
     button("닫기 ×").click();
     await until(() => !host.querySelector(".management-panel"), "close selection");
@@ -200,6 +207,16 @@ async function check(size: number) {
     start = calls.length; button("상태 새로고침", sync.element).click();
     await until(() => !sync.element.querySelector(".error") && sync.summary.textContent?.includes("꺼짐") === true, "sync explicit retry");
     phase("SyncPanel explicit retry", start, { sync: 1 });
+    button("닫기 ×").click(); await settle();
+    start = calls.length;
+    window.history.pushState(null, "", `/?scope=personal&focus=${subjectId}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await until(() => idleGraph() && host.querySelector(".management-panel h2")?.textContent === "빈 묶음", "empty subject selected");
+    button("묶음 삭제").click(); await settle();
+    assert(calls.length - start === 1, "Delete confirmation has no network call");
+    button("삭제 확인").click();
+    await until(() => idleGraph() && !subjectExists && !host.querySelector(".management-panel") && !window.location.search.includes("focus="), "subject deletion refreshed graph");
+    phase("empty subject deletion from marker", start, { graph: 2, "subject-delete": 1 });
     assert(!forbidden.length, "No unexpected or forwarded requests");
     return { size, passed: true, phases, calls, totalResponseBytes: calls.reduce((sum, call) => sum + call.responseBytes, 0), forbidden };
   } finally {
