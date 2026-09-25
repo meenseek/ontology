@@ -74,6 +74,11 @@ impl Store {
                     sqlx::query("SET lock_timeout = '3s'")
                         .execute(&mut *connection)
                         .await?;
+                    // The graph projection runs in milliseconds without JIT, but its
+                    // estimated cost otherwise triggers seconds of JIT compilation.
+                    sqlx::query("SET jit = off")
+                        .execute(&mut *connection)
+                        .await?;
                     Ok(())
                 })
             })
