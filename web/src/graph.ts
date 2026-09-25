@@ -223,6 +223,15 @@ export function constellationView(nodes: PositionedNode[], links: GraphLink[], s
   return { nodes: nodes.filter(node => !hidden.has(node.id)),
     links: links.filter(link => !hidden.has(link.source) && !hidden.has(link.target)), counts, cores };
 }
+/** A relation refresh refits an expanded core; coordinate-only drags do not. */
+export function expandedCoreCameraFrame(nodes: readonly PositionedNode[], links: readonly GraphLink[], hubId: string, members: ReadonlySet<string>) {
+  const hub = nodes.find(node => node.id === hubId);
+  if (!hub) return null;
+  const radius = Math.max(18, ...nodes.filter(node => members.has(node.id)).map(node => Math.hypot(node.x - hub.x, node.y - hub.y, node.z - hub.z) + 6));
+  const internalLinks = links.filter(link => members.has(link.source) && members.has(link.target))
+    .map(link => JSON.stringify([link.source, link.target, link.kind, link.current])).sort();
+  return { radius, key: JSON.stringify([[...members].sort(), internalLinks]) };
+}
 /** Put filename matches ahead of broad body/path matches in the searchable list. */
 export function searchResults<T extends GraphNode>(nodes: T[], query: string): T[] {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);

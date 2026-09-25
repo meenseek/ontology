@@ -4,7 +4,7 @@ import type { ForceGraphMethods } from "react-force-graph-3d";
 import { CanvasTexture, Color, Group, Mesh, PlaneGeometry, ShaderMaterial, Sprite, SpriteMaterial, Vector2, Vector3 } from "three";
 import type { Camera, PerspectiveCamera } from "three";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { active, constellationView, kindName, linkColor, linkName, stateName } from "./graph";
+import { active, constellationView, expandedCoreCameraFrame, kindName, linkColor, linkName, stateName } from "./graph";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
@@ -245,7 +245,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (controls) { controls.zoomToCursor = true; controls.autoRotate = rotate; controls.autoRotateSpeed = .2; controls.enableDamping = !reduced; }
   }, [ready, rotate, reduced]);
   const viewKey = nodes.map(n => n.id).sort().join("|");
-  const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${fit}:${size.width}:${size.height}`;
+  // A relationship refresh can change the expanded core without changing node IDs.
+  // Dragged coordinates are deliberately excluded so an unchanged refresh keeps the camera.
+  const expandedRelationKey = useMemo(() => {
+    if (!activeExpandedCore || selected) return "";
+    const members = cores.find(core => core.hub === activeExpandedCore)?.members;
+    return members ? expandedCoreCameraFrame(nodes, links, activeExpandedCore, members)?.key ?? "" : "";
+  }, [nodes, links, cores, selected, activeExpandedCore]);
+  const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${fit}:${size.width}:${size.height}:${expandedRelationKey}`;
   const appliedCamera = useRef("");
   const positionCamera = useCallback(() => {
     const instance = graph.current;
@@ -267,7 +274,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (target && activeExpandedCore) {
       const members = cores.find(core => core.hub === activeExpandedCore)?.members;
       if (members) {
-        const radius = Math.max(18, ...nodes.filter(node => members.has(node.id)).map(node => Math.hypot(node.x - target.x, node.y - target.y, node.z - target.z) + 6));
+        const radius = expandedCoreCameraFrame(nodes, links, activeExpandedCore, members)?.radius ?? 18;
         const camera = instance.camera() as PerspectiveCamera;
         const controls = instance.controls() as OrbitControls;
         const vertical = camera.fov * Math.PI / 180;
@@ -293,7 +300,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const firstOverview = positions.hasCompactInitialLayout && fit === 0 && nodes.length === snapshot.nodes.length;
     const distance = firstOverview ? Math.max(fitDistance, size.height * camera.projectionMatrix.elements[5] / 2) : fitDistance;
     instance.cameraPosition({ x: lookAt.x, y: lookAt.y, z: lookAt.z + distance }, lookAt, reduced ? 0 : 650);
-  }, [ready, cameraKey, nodes, selected, activeExpandedCore, cores, reduced, size, positions, fit, snapshot.nodes.length]);
+  }, [ready, cameraKey, nodes, links, selected, activeExpandedCore, cores, reduced, size, positions, fit, snapshot.nodes.length]);
   useEffect(() => {
     let second = 0;
     const first = requestAnimationFrame(() => { second = requestAnimationFrame(positionCamera); });

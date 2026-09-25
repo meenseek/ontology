@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { Positions, compactSlots } from "./positions.ts";
 import { separateDiscs } from "./clearance.ts";
 import { PerspectiveCamera, Vector3 } from "three";
-import { active, constellationView, denseConstellationCores, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
+import { active, constellationView, denseConstellationCores, expandedCoreCameraFrame, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
 const memory = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "memory", label: id, revision: "1", status: "accepted", temporal: "current", supported: true });
@@ -1105,6 +1105,45 @@ test("a high-degree component has one stable overview core and expands without l
   assert.equal(constellationView(positioned, hubEvidence, null, null).counts.get("hub"), 120);
   assert.equal(constellationView(positioned, hubEvidence, null, null).links.length, 1,
     "a relationship attached directly to the visible core remains visible");
+});
+test("an expanded core refits for changed relationships but retains the camera after drag and unchanged refresh", () => {
+  const nodes = [doc("hub"), ...Array.from({ length: 25 }, (_, index) => doc(`spoke-${index}`)), doc("late")];
+  const links = nodes.slice(1, 26).map(node => edge("hub", node.id));
+  const model = reconcile(snapshot(nodes, links)), positions = new Positions();
+  positions.install(model, true);
+  const hub = model.nodes.find(node => node.id === "hub")!;
+  const late = model.nodes.find(node => node.id === "late")!;
+  late.x = hub.x + 1000;
+  const firstCore = constellationView(model.nodes, model.links, null, "hub").cores.find(core => core.hub === "hub")!;
+  const first = expandedCoreCameraFrame(model.nodes, model.links, "hub", firstCore.members)!;
+  const changedLinks = [...links, edge("hub", "late")];
+  const refreshed = reconcile(snapshot(nodes, changedLinks), { ...model, nodes: model.nodes.map(node => ({ ...node })) });
+  positions.install(refreshed, true);
+  assert.deepEqual(refreshed.nodes.map(node => node.id), model.nodes.map(node => node.id));
+  const nextCore = constellationView(refreshed.nodes, refreshed.links, null, "hub").cores.find(core => core.hub === "hub")!;
+  const next = expandedCoreCameraFrame(refreshed.nodes, refreshed.links, "hub", nextCore.members)!;
+  assert.notEqual(next.key, first.key, "new core membership invalidates the previous camera fit");
+  assert.ok(next.radius > first.radius, "the newly connected distant node is included in the fit");
+  assert.equal(expandedCoreCameraFrame([...refreshed.nodes].reverse(), [...refreshed.links].reverse(), "hub", nextCore.members)!.key, next.key,
+    "response order alone does not move the camera");
+  const movedHub = refreshed.nodes.find(node => node.id === "hub")!, originalX = movedHub.x;
+  positions.begin("hub", 1);
+  positions.move("hub", { x: originalX + 200, y: movedHub.y, z: movedHub.z });
+  positions.advance(0, false); positions.advance(16, false); positions.release(16, true);
+  assert.notEqual(movedHub.x, originalX);
+  assert.equal(expandedCoreCameraFrame(refreshed.nodes, refreshed.links, "hub", nextCore.members)!.key, next.key,
+    "dragging the core does not invalidate its camera fit");
+  const unchanged = reconcile(snapshot(nodes, changedLinks), { ...refreshed, nodes: refreshed.nodes.map(node => ({ ...node })) });
+  positions.install(unchanged, true);
+  const unchangedCore = constellationView(unchanged.nodes, unchanged.links, null, "hub").cores.find(core => core.hub === "hub")!;
+  assert.equal(expandedCoreCameraFrame(unchanged.nodes, unchanged.links, "hub", unchangedCore.members)!.key, next.key,
+    "an unchanged refresh after drag retains the current camera fit");
+  const rewiredLinks = [...changedLinks, edge("spoke-0", "spoke-1")];
+  const rewired = reconcile(snapshot(nodes, rewiredLinks), unchanged);
+  positions.install(rewired, true);
+  const rewiredCore = constellationView(rewired.nodes, rewired.links, null, "hub").cores.find(core => core.hub === "hub")!;
+  assert.notEqual(expandedCoreCameraFrame(rewired.nodes, rewired.links, "hub", rewiredCore.members)!.key, next.key,
+    "changed internal relationships invalidate the fit even with unchanged membership");
 });
 test("two dense groups joined at their hubs keep separate expandable cores and their bridge", () => {
   const nodes = ["a", "b"].flatMap(hub => [doc(hub), ...Array.from({ length: 25 }, (_, index) => doc(`${hub}-${index}`))]);
