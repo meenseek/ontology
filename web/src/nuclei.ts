@@ -46,14 +46,14 @@ function bounded(groups: PositionedNode[], limit: number): PositionedNode[][] {
 }
 
 /** Only visually summarize zero-degree knowledge stars; no relationship is rewritten. */
-export function nucleusView(nodes: readonly PositionedNode[], allLinks: readonly GraphLink[], level: number, selected: string | null): NucleusView {
+export function nucleusView(nodes: readonly PositionedNode[], allLinks: readonly GraphLink[], level: number, selected: string | null, expanded: ReadonlySet<string> = new Set()): NucleusView {
   const counts = new Map<string, number>(), groups = new Map<string, Nucleus>();
   if (!level) return { nodes: [...nodes], counts, groups };
   const linked = new Set(allLinks.flatMap(link => [link.source, link.target]));
   const radius = 144 * 2 ** (level - 1), limit = 60 * 2 ** (level - 1);
   const cells = new Map<string, PositionedNode[]>();
   for (const node of nodes) {
-    if (!knowledge(node) || linked.has(node.id)) continue;
+    if (!knowledge(node) || linked.has(node.id) || expanded.has(node.id)) continue;
     const key = hexKey(node, radius), bucket = cells.get(key) ?? [];
     bucket.push(node); cells.set(key, bucket);
   }

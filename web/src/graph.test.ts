@@ -1099,6 +1099,14 @@ test("distant isolated stars form several bounded nuclei without hiding any rela
     assert.ok(group.members.every(member => !links.some(link => link.source === member || link.target === member)), "linked nodes never disappear");
   }
   assert.deepEqual(new Map(model.nodes.map(node => [node.id, coordinates(node)])), original, "LOD does not move knowledge");
+  const opened = [...distant.groups.values()][0], pinned = new Set(opened.members);
+  for (const level of [1, 2, 3]) {
+    const expanded = nucleusView(semantic.nodes, model.links, level, null, pinned);
+    const visibleIds = new Set(expanded.nodes.map(node => node.id));
+    assert.ok(opened.members.every(id => visibleIds.has(id)), "a clicked group's real members remain visible while zooming");
+    assert.ok(expanded.groups.size > 0, "opening one group leaves unrelated groups summarized");
+    assert.ok(![...expanded.groups.values()].some(group => group.members.some(id => pinned.has(id))), "a changed representative cannot hide an opened member");
+  }
   assert.deepEqual(nucleusView(semantic.nodes, model.links, 0, null).nodes, semantic.nodes, "approaching restores every visible star");
   const focused = nucleusView(semantic.nodes, model.links, 1, nodes[300].id);
   assert.ok(focused.nodes.some(node => node.id === nodes[300].id), "focus keeps the selected star visible");
@@ -1106,6 +1114,12 @@ test("distant isolated stars form several bounded nuclei without hiding any rela
   assert.ok(![...focused.groups.values()].some(group => group.members.includes(nodes[300].id)), "focus does not hide the selected star inside a nucleus");
   const reversed = nucleusView([...semantic.nodes].reverse(), [...model.links].reverse(), 1, null);
   assert.deepEqual([...reversed.groups].sort(), [...distant.groups].sort(), "source order cannot change nuclei");
+  const draggedMember = model.nodes.find(node => node.id === opened.members[0])!;
+  positions.begin(draggedMember.id, 1);
+  positions.move(draggedMember.id, { x: draggedMember.x + 45, y: draggedMember.y, z: draggedMember.z });
+  positions.release(100, true);
+  assert.ok(nucleusView(semantic.nodes, model.links, 1, null, pinned).nodes.some(node => node.id === draggedMember.id), "a dragged member stays visible after regrouping");
+  assert.ok(nucleusView(semantic.nodes, model.links, 1, null).groups.size > 0, "closing restores compact groups");
 });
 test("historical links and classification markers stay visible across visual LOD", () => {
   const nodes = [doc("past-a"), doc("past-b"), ...Array.from({ length: 30 }, (_, index) => doc(`free-${index}`)), { ...doc("marker"), kind: "topic" as const }];
