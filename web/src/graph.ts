@@ -187,6 +187,42 @@ export function visibleGraph(model: Model, filters: Filters): { nodes: Positione
   const ids = new Set(nodes.map(n => n.id));
   return { nodes, links: model.links.filter(l => ids.has(l.source) && ids.has(l.target)) };
 }
+/** Summarize only components whose hub cannot fit its neighbors in two compact rings. */
+export function denseConstellationCores(nodes: readonly (GraphNode & { cluster?: string })[], links: readonly GraphLink[], threshold = 18) {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  const neighbors = new Map(nodes.map(node => [node.id, new Set<string>()]));
+  for (const link of links) {
+    const source = byId.get(link.source), target = byId.get(link.target);
+    if (link.source === link.target || !link.current || !source || !target || !active(source) || !active(target) ||
+      (source.cluster && target.cluster && source.cluster !== target.cluster)) continue;
+    neighbors.get(link.source)!.add(link.target); neighbors.get(link.target)!.add(link.source);
+  }
+  const seen = new Set<string>();
+  const cores: { hub: string; members: ReadonlySet<string>; count: number }[] = [];
+  for (const id of [...neighbors.keys()].sort()) {
+    if (seen.has(id)) continue;
+    const component = [id]; seen.add(id);
+    for (let index = 0; index < component.length; index++) {
+      for (const other of [...neighbors.get(component[index])!].sort()) {
+        if (!seen.has(other)) { seen.add(other); component.push(other); }
+      }
+    }
+    const hub = component.sort((a, b) => neighbors.get(b)!.size - neighbors.get(a)!.size || compare(a, b))[0];
+    if (neighbors.get(hub)!.size > threshold) cores.push({ hub, members: new Set(component), count: component.length });
+  }
+  return cores;
+}
+export function constellationView(nodes: PositionedNode[], links: GraphLink[], selected: string | null, expandedCore: string | null) {
+  const cores = denseConstellationCores(nodes, links);
+  // A visible edge from a hidden member to an outside node must not disappear.
+  const collapsed = cores.filter(core => core.hub !== expandedCore && !(selected && core.members.has(selected)) &&
+    !links.some(link => core.members.has(link.source) !== core.members.has(link.target) &&
+      (core.members.has(link.source) ? link.source : link.target) !== core.hub));
+  const counts = new Map(collapsed.map(core => [core.hub, core.count]));
+  const hidden = new Set(collapsed.flatMap(core => [...core.members].filter(id => id !== core.hub)));
+  return { nodes: nodes.filter(node => !hidden.has(node.id)),
+    links: links.filter(link => !hidden.has(link.source) && !hidden.has(link.target)), counts, cores };
+}
 /** Put filename matches ahead of broad body/path matches in the searchable list. */
 export function searchResults<T extends GraphNode>(nodes: T[], query: string): T[] {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);

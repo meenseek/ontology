@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { Positions, compactSlots } from "./positions.ts";
 import { separateDiscs } from "./clearance.ts";
 import { PerspectiveCamera, Vector3 } from "three";
-import { active, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
+import { active, constellationView, denseConstellationCores, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
 const memory = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "memory", label: id, revision: "1", status: "accepted", temporal: "current", supported: true });
@@ -1053,6 +1053,71 @@ test("a personal graph with hundreds of unrelated documents opens as a constella
   const reordered = reconcile({ ...source, nodes: [...nodes].reverse(), links: [...links].reverse() });
   new Positions().install(reordered, true);
   assert.deepEqual(reordered.nodes.map(node => [node.id, node.x, node.y, node.z]), model.nodes.map(node => [node.id, node.x, node.y, node.z]));
+});
+test("a high-degree component has one stable overview core and expands without losing links", () => {
+  const nodes = [doc("hub"), ...Array.from({ length: 119 }, (_, index) => doc(`spoke-${index}`)), doc("independent")];
+  const links = nodes.slice(1, 120).map(node => edge("hub", node.id));
+  const first = denseConstellationCores(nodes, links);
+  const reordered = denseConstellationCores([...nodes].reverse(), [...links].reverse());
+  assert.deepEqual(first, reordered);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].hub, "hub");
+  assert.equal(first[0].count, 120);
+  assert.equal(first[0].members.has("independent"), false);
+  const model = reconcile(snapshot(nodes, links)), positioned = model.nodes;
+  const overview = constellationView(positioned, links, null, null);
+  assert.deepEqual(overview.nodes.map(node => node.id), ["hub", "independent"]);
+  assert.equal(overview.links.length, 0);
+  assert.equal(overview.counts.get("hub"), 120);
+  for (const expanded of [constellationView(positioned, links, null, "hub"), constellationView(positioned, links, "spoke-0", null)]) {
+    assert.equal(expanded.nodes.length, 121);
+    assert.equal(expanded.links.length, 119, "expansion restores every relationship");
+    assert.equal(expanded.counts.size, 0);
+  }
+  assert.deepEqual(constellationView(positioned, links, null, null).nodes.map(node => node.id), overview.nodes.map(node => node.id),
+    "closing an expansion returns to the same core");
+  const positions = new Positions(); positions.install(model, true);
+  const lengths = links.map(link => {
+    const source = positioned.find(node => node.id === link.source)!, target = positioned.find(node => node.id === link.target)!;
+    return Math.hypot(source.x - target.x, source.y - target.y, source.z - target.z);
+  });
+  const hub = positioned.find(node => node.id === "hub")!;
+  positions.begin(hub.id, 1);
+  positions.move(hub.id, { x: hub.x + 200, y: hub.y + 140, z: hub.z });
+  positions.advance(0, false); positions.advance(16, false); positions.release(16, true);
+  for (const [index, link] of links.entries()) {
+    const source = positioned.find(node => node.id === link.source)!, target = positioned.find(node => node.id === link.target)!;
+    assert.ok(Math.abs(Math.hypot(source.x - target.x, source.y - target.y, source.z - target.z) - lengths[index]) < 1e-5,
+      "moving a collapsed core keeps its hidden members and link geometry together");
+  }
+  assert.equal(constellationView(positioned, links, null, null).nodes.length, 2, "drag and release retain the core summary");
+  assert.equal(denseConstellationCores(nodes.slice(0, 19), links.slice(0, 18)).length, 0);
+  const pastOnly = links.map(link => ({ ...link, current: false }));
+  assert.equal(denseConstellationCores(nodes, pastOnly).length, 0, "historical evidence cannot create a summary core");
+  assert.equal(constellationView(positioned, pastOnly, null, null).links.length, 119, "historical edges remain inspectable");
+  assert.equal(denseConstellationCores([{ ...doc("hub"), current: false }, ...nodes.slice(1)], links).length, 0,
+    "a nonusable node cannot make unrelated records into a core");
+  const externalEvidence = [...links, edge("spoke-0", "independent", false)];
+  assert.equal(constellationView(positioned, externalEvidence, null, null).counts.size, 0,
+    "an outside historical edge keeps the whole relationship visible");
+  assert.equal(constellationView(positioned, externalEvidence, null, null).links.length, 120);
+  const hubEvidence = [...links, edge("hub", "independent", false)];
+  assert.equal(constellationView(positioned, hubEvidence, null, null).counts.get("hub"), 120);
+  assert.equal(constellationView(positioned, hubEvidence, null, null).links.length, 1,
+    "a relationship attached directly to the visible core remains visible");
+});
+test("two dense groups joined at their hubs keep separate expandable cores and their bridge", () => {
+  const nodes = ["a", "b"].flatMap(hub => [doc(hub), ...Array.from({ length: 25 }, (_, index) => doc(`${hub}-${index}`))]);
+  const links = ["a", "b"].flatMap(hub => Array.from({ length: 25 }, (_, index) => edge(hub, `${hub}-${index}`)));
+  links.push(edge("a", "b"));
+  const model = reconcile(snapshot(nodes, links));
+  const cores = denseConstellationCores(model.nodes, model.links);
+  assert.deepEqual(cores.map(core => [core.hub, core.count]), [["a", 26], ["b", 26]]);
+  const overview = constellationView(model.nodes, model.links, null, null);
+  assert.deepEqual(overview.nodes.map(node => node.id), ["a", "b"]);
+  assert.deepEqual(overview.links, [edge("a", "b")]);
+  assert.equal(constellationView(model.nodes, model.links, null, "a").nodes.length, 27);
+  assert.equal(constellationView(model.nodes, model.links, null, "a").links.length, 26);
 });
 test("overview, orbit, focus, refresh and reset keep a dense personal constellation readable", async () => {
   const { focusedCameraDistance, nodeScreenSize, starMotion } = await import("./presentation.ts");
