@@ -1,6 +1,6 @@
 import { constellationView, visualSatellites } from "./graph";
 import type { GraphLink, Model, PositionedNode } from "./graph";
-import { COLLISION_GAP, separateDiscs } from "./clearance";
+import { COLLISION_GAP, clearRigidTranslation, separateDiscs } from "./clearance";
 
 export type Point = { x: number; y: number; z: number };
 const point = ({ x, y, z }: Point): Point => ({ x, y, z });
@@ -24,7 +24,7 @@ type DragPlane = { right: Point; up: Point; spacingPixels: number; project?: (va
 type Clearance = { held: string; visible: string[]; right: Point; up: Point; project: (value: Point) => ScreenPoint;
   radius: (node: PositionedNode, depth: number) => number; worldPerPixel: (depth: number) => number;
   isVisible: (at: ScreenPoint, radius: number) => boolean; fixed?: ReadonlySet<string> };
-type Pull = { id: string; start: Point; initial: Map<string, Point>; threshold: number; tolerance: number; followers: Map<string, Follower>; edges: TensionEdge[]; project: (value: Point) => ScreenPoint; clearance: Clearance | null; moved: boolean; last: number | null };
+type Pull = { id: string; start: Point; initial: Map<string, Point>; threshold: number; tolerance: number; followers: Map<string, Follower>; edges: TensionEdge[]; project: (value: Point) => ScreenPoint; clearance: Clearance | null; rigid: ReadonlySet<string> | null; moved: boolean; last: number | null };
 type Axial = { q: number; r: number };
 const directions: Axial[] = [{ q: 1, r: 0 }, { q: 0, r: -1 }, { q: -1, r: 1 }, { q: -1, r: 0 }, { q: 0, r: 1 }, { q: 1, r: -1 }];
 const axialKey = ({ q, r }: Axial) => `${q},${r}`;
@@ -450,8 +450,8 @@ type PendingLayout = { token: number; root: string; right: Point; up: Point; spa
 type LayoutMotion = { from: Map<string, Point>; to: Map<string, Point>; actual: Map<string, Point>; start: number };
 const layoutDuration = 650;
 const graphStructure = (nodes: readonly PositionedNode[], links: readonly GraphLink[]) => JSON.stringify([
-  nodes.map(node => [node.id, node.cluster, node.kind, node.status, node.current, node.present, node.temporal, node.supported]),
-  links.map(link => [link.source, link.target, link.kind, link.current]),
+  nodes.map(node => JSON.stringify([node.id, node.cluster, node.kind, node.status, node.current, node.present, node.temporal, node.supported])).sort(),
+  links.map(link => JSON.stringify([link.source, link.target, link.kind, link.current])).sort(),
 ]);
 function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonly GraphLink[]): Map<string, Point> {
   const byId = new Map(nodes.map(node => [node.id, node]));
@@ -529,6 +529,8 @@ function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonl
 // can pack its first view using the same link solver used after a drag.
 export class Positions {
   revision = 0;
+  structureEpoch = 0;
+  groupEpoch = 0;
   private packedInitial = false;
   private nodes = new Map<string, PositionedNode>();
   private satellites = new Map<string, string>();
@@ -547,6 +549,7 @@ export class Positions {
   private pending: PendingLayout | null = null;
   private token = 0;
   get dragging() { return this.gesture !== null; }
+  get dragMoved() { return this.gesture?.moved ?? false; }
   get settling() { return this.settle !== null; }
   get layoutMoving() { return this.layoutMotion !== null; }
   get hasCompactInitialLayout() { return this.packedInitial; }
@@ -654,6 +657,8 @@ export class Positions {
     if (compactInitial) {
       const structure = graphStructure(model.nodes, model.links);
       if (!this.source || this.source.structure !== structure) {
+        this.structureEpoch++;
+        this.groupEpoch++;
         const nodes = model.nodes.map(node => ({ ...node })), links = model.links.map(link => ({ ...link }));
         this.source = { nodes, links, structure };
         this.layouts.clear();
@@ -686,6 +691,7 @@ export class Positions {
   }
   reset() {
     this.cancel();
+    this.groupEpoch++;
     const layout = this.source ? this.coreLayout(this.activeCore) : this.baseline;
     for (const [id, value] of layout) fixPosition(this.nodes.get(id)!, value);
     if (this.source) this.canonical = new Map(layout);
@@ -810,8 +816,67 @@ export class Positions {
       ...clearance, fixed: included,
     } : clearance;
     const initial = new Map([...new Set([...included, ...(activeClearance?.visible ?? [])])].map(member => [member, point(this.nodes.get(member)!)] as const));
-    this.gesture = { id, start, initial, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance: activeClearance, moved: false, last: null };
+    this.gesture = { id, start, initial, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance: activeClearance, rigid: null, moved: false, last: null };
     if (!exact && !overfull && members.length) this.searchLater(id, members, included, plane, spacing, unitsPerPixel * .05);
+  }
+  /** A spatial summary owns real, unlinked members; translate that exact cohort as one gesture. */
+  beginGroup(id: string, members: readonly string[], unitsPerPixel: number, plane: DragPlane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24 }) {
+    this.cancel();
+    if (!this.nodes.has(id) || !Number.isFinite(unitsPerPixel) || unitsPerPixel <= 0) return;
+    const rigid = new Set(members.filter(member => this.nodes.has(member)));
+    if (!rigid.has(id)) return;
+    const initial = new Map([...rigid].map(member => [member, point(this.nodes.get(member)!)] as const));
+    const project = plane.project ?? ((value: Point) => ({ x: value.x / unitsPerPixel, y: value.y / unitsPerPixel, depth: 1 }));
+    const clearance = plane.visible && plane.radius ? {
+      held: id, visible: [...new Set(plane.visible)].filter(member => this.nodes.has(member)).sort(),
+      right: point(plane.right), up: point(plane.up), project, radius: plane.radius,
+      worldPerPixel: plane.worldPerPixel ?? (() => unitsPerPixel), isVisible: plane.isVisible ?? (() => true),
+    } : null;
+    this.gesture = { id, start: point(this.nodes.get(id)!), initial, threshold: unitsPerPixel * 6,
+      tolerance: unitsPerPixel * .05, followers: new Map(), edges: [],
+      project, clearance, rigid, moved: false, last: null };
+  }
+  private clearRigidDrop(drag: Pull) {
+    const clearance = drag.clearance;
+    if (!clearance || !drag.rigid) return;
+    const fixed = clearance.visible.flatMap(id => {
+      if (drag.rigid!.has(id)) return [];
+      const node = this.nodes.get(id)!;
+      const at = clearance.project(node), radius = clearance.radius(node, at.depth);
+      return at.depth > 0 && [at.x, at.y, radius].every(Number.isFinite) && radius > 0 && clearance.isVisible(at, radius) ? [{ id, x: at.x, y: at.y, radius }] : [];
+    });
+    const held = this.nodes.get(drag.id)!;
+    const at = clearance.project(held), scale = clearance.worldPerPixel(at.depth);
+    if (at.depth <= 0 || !Number.isFinite(scale) || scale <= 0) return;
+    const moving = [...drag.rigid].flatMap(id => {
+      const node = this.nodes.get(id)!, member = clearance.project(node);
+      const radius = clearance.radius(node, member.depth), memberScale = clearance.worldPerPixel(member.depth);
+      const factor = scale / memberScale;
+      if (member.depth <= 0 || ![member.x, member.y, radius, factor].every(Number.isFinite) || radius <= 0 || factor <= 0) return [];
+      return [{ id, x: member.x, y: member.y, radius, factor }];
+    });
+    const allowed = (offset: { x: number; y: number }) => clearance.isVisible({ ...at, x: at.x + offset.x, y: at.y + offset.y }, clearance.radius(held, at.depth));
+    let reach = 96, target = { x: 0, y: 0 };
+    for (;;) {
+      // A pair farther than reach from the current drop cannot block any
+      // smaller translation. Most of the 800-node graph is skipped here.
+      const forbidden = moving.flatMap(member => fixed.flatMap(other => {
+        const x = (other.x - member.x) / member.factor, y = (other.y - member.y) / member.factor;
+        const radius = (member.radius + other.radius + COLLISION_GAP) / member.factor;
+        return Math.hypot(x, y) <= radius + reach ? [{ id: `${member.id}|${other.id}`, x, y, radius }] : [];
+      }));
+      target = clearRigidTranslation(forbidden, allowed);
+      if (Math.hypot(target.x, target.y) < reach || !Number.isFinite(reach)) break;
+      reach = reach > 1e6 ? Infinity : reach * 2;
+    }
+    const dx = target.x * scale, dy = target.y * scale;
+    if (!dx && !dy) return;
+    for (const id of drag.rigid) {
+      const node = this.nodes.get(id)!;
+      const next = add(add(node, clearance.right, dx), clearance.up, dy);
+      fixPosition(node, next); this.observed.set(id, point(next));
+    }
+    this.revision++;
   }
   private searchLater(root: string, members: string[], included: Set<string>, plane: { right: Point; up: Point }, spacing: number, tolerance: number) {
     if (typeof Worker === "undefined") return;
@@ -853,6 +918,16 @@ export class Positions {
   move(id: string, value: Point) {
     const drag = this.gesture;
     if (!drag || drag.id !== id || ![value.x, value.y, value.z].every(Number.isFinite)) return;
+    if (drag.rigid) {
+      const delta = add(value, drag.start, -1);
+      if (Math.hypot(delta.x, delta.y, delta.z) >= drag.threshold) drag.moved = true;
+      for (const member of drag.rigid) {
+        const next = add(drag.initial.get(member)!, delta);
+        fixPosition(this.nodes.get(member)!, next); this.observed.set(member, point(next));
+      }
+      this.revision++;
+      return;
+    }
     fixPosition(this.nodes.get(id)!, value);
     this.observed.set(id, point(value));
     const delta = add(value, drag.start, -1);
@@ -860,14 +935,16 @@ export class Positions {
     this.revision++;
     this.enforceClearance(drag.clearance, new Set(drag.followers.keys()));
   }
-  release(now: number, reduced: boolean) {
+  release(now: number, reduced: boolean): boolean {
     const drag = this.gesture;
-    if (!drag?.moved) { this.cancel(); return; }
+    if (!drag?.moved) { this.cancel(); return false; }
     this.gesture = null;
-    if (!Number.isFinite(now)) { this.cancel(); return; }
+    if (!Number.isFinite(now)) { this.cancel(); return false; }
+    if (drag.rigid) { this.clearRigidDrop(drag); return true; }
     if (this.pending?.root === drag.id) this.pending.reduced = reduced;
     this.startSettle(drag.id, drag.followers, drag.clearance, drag.tolerance, now);
     if (reduced) this.advance(now, true);
+    return true;
   }
   advance(now: number, reduced: boolean) {
     if (!Number.isFinite(now)) return;

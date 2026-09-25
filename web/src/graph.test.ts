@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Positions, compactSlots } from "./positions.ts";
+import { Positions, compactSlots, fixPosition } from "./positions.ts";
 import { separateDiscs } from "./clearance.ts";
 import { PerspectiveCamera, Vector3 } from "three";
 import { active, constellationView, denseConstellationCores, expandedCoreCameraFrame, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
@@ -1121,6 +1121,118 @@ test("distant isolated stars form several bounded nuclei without hiding any rela
   assert.ok(nucleusView(semantic.nodes, model.links, 1, null, pinned).nodes.some(node => node.id === draggedMember.id), "a dragged member stays visible after regrouping");
   assert.ok(nucleusView(semantic.nodes, model.links, 1, null).groups.size > 0, "closing restores compact groups");
 });
+test("a spatial summary moves its exact members together and stays grouped across cell boundaries", () => {
+  const nodes = Array.from({ length: 64 }, (_, index) => doc(`free-${String(index).padStart(2, "0")}`));
+  const model = reconcile(snapshot(nodes)), positions = new Positions(); positions.install(model, true);
+  const original = nucleusView(model.nodes, model.links, 1, null);
+  const group = [...original.groups.values()][0];
+  assert.ok(group && original.groups.size > 1);
+  const before = new Map(model.nodes.map(node => [node.id, coordinates(node)]));
+  const representative = model.nodes.find(node => node.id === group.representative)!;
+  const start = { x: representative.x, y: representative.y, z: representative.z };
+  positions.beginGroup(group.representative, group.members, 1);
+  positions.move(group.representative, { ...start, x: start.x + 500 });
+  assert.equal(positions.dragging, true);
+  assert.equal(positions.release(100, false), true);
+  for (const node of model.nodes) {
+    const [x, y, z] = before.get(node.id)!;
+    assert.deepEqual(coordinates(node), group.members.includes(node.id) ? [x + 500, y, z] : [x, y, z]);
+  }
+  const second = [...original.groups.values()].find(value => value.representative !== group.representative)!;
+  const other = model.nodes.find(node => node.id === second.representative)!;
+  positions.beginGroup(other.id, second.members, 1);
+  positions.move(other.id, { x: other.x - 500, y: other.y, z: other.z });
+  assert.equal(positions.release(200, true), true);
+  const locks = new Map([[group.representative, group.members], [second.representative, second.members]]);
+  const locked = nucleusView(model.nodes, model.links, 1, null, new Set(), locks);
+  assert.deepEqual(locked.groups.get(group.representative)?.members, group.members);
+  assert.deepEqual(locked.groups.get(second.representative)?.members, second.members, "multiple moved groups remain separate");
+  assert.equal(locked.nodes.filter(node => group.members.includes(node.id)).length, 1);
+  const expanded = nucleusView(model.nodes, model.links, 1, null, new Set(group.members), new Map([[group.representative, group.members]]));
+  assert.equal(expanded.nodes.filter(node => group.members.includes(node.id)).length, group.members.length);
+  const linked = nucleusView(model.nodes, [edge(group.members[0], group.members[1])], 1, null, new Set(), new Map([[group.representative, group.members]]));
+  assert.equal(linked.groups.has(group.representative), false, "a changed relationship invalidates the old summary");
+  assert.equal(positions.settling, false, "dropping an unlinked group does not repack its members");
+});
+test("a spatial summary click-sized gesture restores its members, while a return drag remains a drag", () => {
+  const model = reconcile(snapshot(Array.from({ length: 30 }, (_, index) => doc(`free-${index}`))));
+  const positions = new Positions(); positions.install(model, true);
+  const group = [...nucleusView(model.nodes, model.links, 2, null).groups.values()][0];
+  const before = new Map(model.nodes.map(node => [node.id, coordinates(node)]));
+  const star = model.nodes.find(node => node.id === group.representative)!;
+  const start = { x: star.x, y: star.y, z: star.z };
+  positions.beginGroup(star.id, group.members, 1);
+  positions.move(star.id, { ...start, x: start.x + 3 });
+  assert.equal(positions.release(10, false), false);
+  assert.deepEqual(new Map(model.nodes.map(node => [node.id, coordinates(node)])), before);
+  positions.beginGroup(star.id, group.members, 1);
+  positions.move(star.id, { ...start, x: start.x + 12 });
+  positions.move(star.id, start);
+  assert.equal(positions.release(20, false), true);
+  assert.deepEqual(new Map(model.nodes.map(node => [node.id, coordinates(node)])), before);
+});
+test("dropping a spatial group on another star clears the one-pixel boundary as a rigid cohort", () => {
+  const model = reconcile(snapshot(Array.from({ length: 64 }, (_, index) => doc(`free-${String(index).padStart(2, "0")}`))));
+  const positions = new Positions(); positions.install(model, true);
+  const groups = [...nucleusView(model.nodes, model.links, 1, null).groups.values()];
+  assert.ok(groups.length > 1);
+  const moving = groups[0], target = groups[1];
+  const held = model.nodes.find(node => node.id === moving.representative)!;
+  const blocker = model.nodes.find(node => node.id === target.representative)!;
+  const start = { x: held.x, y: held.y, z: held.z };
+  const original = new Map(moving.members.map(id => {
+    const node = model.nodes.find(value => value.id === id)!;
+    return [id, { x: node.x - start.x, y: node.y - start.y, z: node.z - start.z }] as const;
+  }));
+  const visible = groups.map(group => group.representative);
+  positions.beginGroup(held.id, moving.members, 1, {
+    right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    visible, radius: () => 18, worldPerPixel: () => 1, isVisible: () => true,
+    project: node => ({ x: node.x, y: node.y, depth: 1 }),
+  });
+  positions.move(held.id, { x: blocker.x, y: blocker.y, z: start.z });
+  assert.equal(positions.release(100, false), true);
+  for (const id of visible.filter(id => id !== held.id)) {
+    const node = model.nodes.find(value => value.id === id)!;
+    assert.ok(Math.hypot(held.x - node.x, held.y - node.y) >= 37 - 1e-4, `representative ${id} remains pickable`);
+  }
+  for (const id of moving.members) {
+    const node = model.nodes.find(value => value.id === id)!, offset = original.get(id)!;
+    assert.ok(Math.hypot(node.x - held.x - offset.x, node.y - held.y - offset.y, node.z - held.z - offset.z) < 1e-7, `member ${id} keeps its group offset`);
+  }
+});
+test("a hidden member cannot be dropped on a visible star even when the representative is clear", () => {
+  const model = reconcile(snapshot([doc("held"), doc("far-member"), doc("blocker")]));
+  fixPosition(model.nodes.find(node => node.id === "held")!, { x: 0, y: 0, z: 0 });
+  fixPosition(model.nodes.find(node => node.id === "far-member")!, { x: 60, y: 0, z: 0 });
+  fixPosition(model.nodes.find(node => node.id === "blocker")!, { x: 200, y: 0, z: 0 });
+  const positions = new Positions(); positions.install(model);
+  positions.beginGroup("held", ["held", "far-member"], 1, {
+    right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    visible: ["held", "blocker"], radius: () => 18, worldPerPixel: () => 1,
+    isVisible: () => true, project: node => ({ x: node.x, y: node.y, depth: 1 }),
+  });
+  positions.move("held", { x: 140, y: 0, z: 0 });
+  assert.equal(positions.release(100, false), true);
+  const held = model.nodes.find(node => node.id === "held")!;
+  const member = model.nodes.find(node => node.id === "far-member")!;
+  const blocker = model.nodes.find(node => node.id === "blocker")!;
+  assert.ok(Math.hypot(held.x - blocker.x, held.y - blocker.y) >= 37 - 1e-5);
+  assert.ok(Math.hypot(member.x - blocker.x, member.y - blocker.y) >= 37 - 1e-5);
+  assert.equal(member.x - held.x, 60, "the hidden member stays attached to the group");
+});
+test("group locks expire when graph structure or the automatic layout changes", () => {
+  const model = reconcile(snapshot(Array.from({ length: 24 }, (_, index) => doc(`free-${index}`))));
+  const positions = new Positions(); positions.install(model, true);
+  const initial = positions.groupEpoch;
+  positions.install(reconcile(snapshot([...model.nodes].reverse().map(node => doc(node.id)))), true);
+  assert.equal(positions.groupEpoch, initial, "response order does not invalidate an unchanged group");
+  positions.reset();
+  assert.ok(positions.groupEpoch > initial, "reset invalidates moved groups");
+  const afterReset = positions.groupEpoch;
+  positions.install(reconcile(snapshot([...model.nodes.map(node => doc(node.id)), doc("new-star")])), true);
+  assert.ok(positions.groupEpoch > afterReset, "new membership invalidates moved groups");
+});
 test("historical links and classification markers stay visible across visual LOD", () => {
   const nodes = [doc("past-a"), doc("past-b"), ...Array.from({ length: 30 }, (_, index) => doc(`free-${index}`)), { ...doc("marker"), kind: "topic" as const }];
   const links = [{ ...edge("past-a", "past-b", false), kind: "evidence" as const }];
@@ -1270,6 +1382,7 @@ test("an expanded core refits for changed relationships but retains the camera a
   const links = nodes.slice(1, 26).map(node => edge("hub", node.id));
   const model = reconcile(snapshot(nodes, links)), positions = new Positions();
   positions.install(model, true);
+  const firstEpoch = positions.structureEpoch;
   const hub = model.nodes.find(node => node.id === "hub")!;
   const late = model.nodes.find(node => node.id === "late")!;
   late.x = hub.x + 1000;
@@ -1278,6 +1391,8 @@ test("an expanded core refits for changed relationships but retains the camera a
   const changedLinks = [...links, edge("hub", "late")];
   const refreshed = reconcile(snapshot(nodes, changedLinks), { ...model, nodes: model.nodes.map(node => ({ ...node })) });
   positions.install(refreshed, true);
+  assert.ok(positions.structureEpoch > firstEpoch, "relationship changes invalidate spatial camera framing too");
+  const changedEpoch = positions.structureEpoch;
   assert.deepEqual(refreshed.nodes.map(node => node.id), model.nodes.map(node => node.id));
   const nextCore = constellationView(refreshed.nodes, refreshed.links, null, "hub").cores.find(core => core.hub === "hub")!;
   const next = expandedCoreCameraFrame(refreshed.nodes, refreshed.links, "hub", nextCore.members)!;
@@ -1289,17 +1404,23 @@ test("an expanded core refits for changed relationships but retains the camera a
   positions.begin("hub", 1);
   positions.move("hub", { x: originalX + 200, y: movedHub.y, z: movedHub.z });
   positions.advance(0, false); positions.advance(16, false); positions.release(16, true);
+  assert.equal(positions.structureEpoch, changedEpoch, "dragging does not retrigger camera framing");
   assert.notEqual(movedHub.x, originalX);
   assert.equal(expandedCoreCameraFrame(refreshed.nodes, refreshed.links, "hub", nextCore.members)!.key, next.key,
     "dragging the core does not invalidate its camera fit");
   const unchanged = reconcile(snapshot(nodes, changedLinks), { ...refreshed, nodes: refreshed.nodes.map(node => ({ ...node })) });
   positions.install(unchanged, true);
+  assert.equal(positions.structureEpoch, changedEpoch, "an unchanged refresh keeps the camera stable");
+  const reordered = reconcile(snapshot([...nodes].reverse(), [...changedLinks].reverse()), unchanged);
+  positions.install(reordered, true);
+  assert.equal(positions.structureEpoch, changedEpoch, "response order alone keeps the camera stable");
   const unchangedCore = constellationView(unchanged.nodes, unchanged.links, null, "hub").cores.find(core => core.hub === "hub")!;
   assert.equal(expandedCoreCameraFrame(unchanged.nodes, unchanged.links, "hub", unchangedCore.members)!.key, next.key,
     "an unchanged refresh after drag retains the current camera fit");
   const rewiredLinks = [...changedLinks, edge("spoke-0", "spoke-1")];
   const rewired = reconcile(snapshot(nodes, rewiredLinks), unchanged);
   positions.install(rewired, true);
+  assert.ok(positions.structureEpoch > changedEpoch);
   const rewiredCore = constellationView(rewired.nodes, rewired.links, null, "hub").cores.find(core => core.hub === "hub")!;
   assert.notEqual(expandedCoreCameraFrame(rewired.nodes, rewired.links, "hub", rewiredCore.members)!.key, next.key,
     "changed internal relationships invalidate the fit even with unchanged membership");
