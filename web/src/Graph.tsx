@@ -244,15 +244,23 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const positionCamera = useCallback(() => {
     const instance = graph.current;
     if (!ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
+    const initialView = !appliedCamera.current;
     appliedCamera.current = cameraKey;
     const target = nodes.find(n => n.id === selected);
-    if (target) {
-      instance.cameraPosition({ x: target.x + 80, y: target.y + 45, z: target.z + 130 }, { x: target.x, y: target.y, z: target.z }, reduced ? 0 : 650);
+    if (target && !initialView) {
+      // Opening the detail pane changes the viewport width. Pan to the picked
+      // star while preserving the user's zoom, so existing edges do not jump
+      // from overview scale to an arbitrary close-up.
+      const camera = instance.camera() as PerspectiveCamera;
+      const controls = instance.controls() as OrbitControls;
+      const offset = camera.position.clone().sub(controls.target);
+      instance.cameraPosition({ x: target.x + offset.x, y: target.y + offset.y, z: target.z + offset.z }, { x: target.x, y: target.y, z: target.z }, reduced ? 0 : 650);
       return;
     }
     const bounds = nodes.reduce((b, n) => ({ minX: Math.min(b.minX, n.x), maxX: Math.max(b.maxX, n.x), minY: Math.min(b.minY, n.y), maxY: Math.max(b.maxY, n.y), minZ: Math.min(b.minZ, n.z), maxZ: Math.max(b.maxZ, n.z) }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity });
     const center = { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2, z: (bounds.minZ + bounds.maxZ) / 2 };
-    const radius = Math.max(18, ...nodes.map(n => Math.hypot(n.x - center.x, n.y - center.y, n.z - center.z) + 6));
+    const lookAt = target ?? center;
+    const radius = Math.max(18, ...nodes.map(n => Math.hypot(n.x - lookAt.x, n.y - lookAt.y, n.z - lookAt.z) + 6));
     const camera = instance.camera() as PerspectiveCamera;
     const vertical = camera.fov * Math.PI / 180;
     const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
@@ -261,7 +269,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     // Larger graphs still fit in the initial overview.
     const firstOverview = positions.hasCompactInitialLayout && fit === 0 && nodes.length === snapshot.nodes.length;
     const distance = firstOverview ? Math.max(fitDistance, size.height * camera.projectionMatrix.elements[5] / 2) : fitDistance;
-    instance.cameraPosition({ x: center.x, y: center.y, z: center.z + distance }, center, reduced ? 0 : 650);
+    instance.cameraPosition({ x: lookAt.x, y: lookAt.y, z: lookAt.z + distance }, lookAt, reduced ? 0 : 650);
   }, [ready, cameraKey, nodes, selected, reduced, size, positions, fit, snapshot.nodes.length]);
   useEffect(() => {
     let second = 0;

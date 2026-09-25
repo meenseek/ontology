@@ -957,6 +957,21 @@ test("the first live view packs current and brown edges without changing semanti
   new Positions().install(reversed, true);
   assert.deepEqual(reversed.nodes, original, "first-view layout ignores source order");
 });
+test("a personal graph with hundreds of unrelated documents opens as a constellation", () => {
+  const nodes = Array.from({ length: 536 }, (_, index) => ({ ...doc(`personal-${String(index).padStart(3, "0")}`), scope: "personal" as const }));
+  const links = Array.from({ length: 128 }, (_, index) => edge(nodes[0].id, nodes[index + 1].id));
+  const source = snapshot(nodes, links); source.scope = "personal";
+  const model = reconcile(source), positions = new Positions(); positions.install(model, true);
+  assert.equal(positions.hasCompactInitialLayout, true);
+  const isolated = model.nodes.filter(node => Number(node.id.slice(-3)) > 128);
+  assert.ok(new Set(isolated.map(node => node.y.toFixed(2))).size > 300, "unrelated stars do not form shelf rows");
+  for (const [index, node] of model.nodes.entries()) for (const other of model.nodes.slice(index + 1)) {
+    assert.ok(Math.hypot(node.x - other.x, node.y - other.y) >= 31 - 1e-8, "initial stars do not overlap");
+  }
+  const reordered = reconcile({ ...source, nodes: [...nodes].reverse(), links: [...links].reverse() });
+  new Positions().install(reordered, true);
+  assert.deepEqual(reordered.nodes.map(node => [node.id, node.x, node.y, node.z]), model.nodes.map(node => [node.id, node.x, node.y, node.z]));
+});
 test("past-evidence singleton is initially near one host without changing semantic clusters or state", () => {
   const source = satelliteFixture(), model = reconcile(source), byId = new Map(model.nodes.map(n => [n.id, n]));
   const record = byId.get("z_record")!, host = byId.get("a0")!;
