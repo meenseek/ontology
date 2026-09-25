@@ -10,6 +10,7 @@ import { graphUrl, kindName, knowledge, linkName, parseLocation, reconcile, same
 import type { Filters, GraphNode, Model, Scope, Snapshot } from "./graph";
 const Graph = lazy(() => import("./Graph.tsx"));
 type Session = { csrf: string; areas: { id: string; label: string }[] };
+type GraphTiming = { location: ReturnType<typeof parseLocation>; responseMs: number; displayMs: number; list: boolean };
 class ApiError extends Error {
   constructor(public status: number) {
     super(status === 409 ? "다른 변경이 먼저 저장되었습니다. 다시 읽은 뒤 확인해 주세요." : status === 403 ? "세션을 확인할 수 없습니다. 페이지를 새로고침해 주세요." : status === 404 ? "자료가 없거나 이 범위에 속하지 않습니다." : "요청을 완료하지 못했습니다. 입력과 서버 상태를 확인해 주세요.");
@@ -55,6 +56,8 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [stored, setStored] = useState<{ snapshot: Snapshot; model: Model } | null>(null);
   const previous = useRef<Model | undefined>(undefined);
+  const pendingTiming = useRef<{ location: typeof route; startedAt: number; responseMs: number } | null>(null);
+  const [timing, setTiming] = useState<GraphTiming | null>(null);
   const data = stored?.snapshot.scope === route.scope && stored.snapshot.query === route.q ? stored : null;
   const [input, setInput] = useState(route.q), [refresh, setRefresh] = useState(0), [panelEpoch, setPanelEpoch] = useState(0);
   const [filters, setFilters] = useState<Filters>(initialFilters);
@@ -111,14 +114,18 @@ export default function App() {
   useEffect(() => {
     if (!visible || !session) return;
     const controller = new AbortController(); const current = routeRef.current;
-    setLoading(true); setError("");
+    const startedAt = performance.now();
+    pendingTiming.current = null;
+    setLoading(true); setError(""); setTiming(null);
     const params = new URLSearchParams({ scope: current.scope, q: current.q });
     if (current.focus) params.set("focus", current.focus);
     request<Snapshot>(`/api/graph?${params}`, { signal: controller.signal }).then(snapshot => {
       if (controller.signal.aborted || !sameGraphLocation(current, routeRef.current)) return;
+      const responseMs = performance.now() - startedAt;
       const model = reconcile(snapshot, previous.current);
       positions.install(model, true);
       previous.current = { ...model, nodes: model.nodes.map(node => ({ ...node })) };
+      pendingTiming.current = { location: current, startedAt, responseMs };
       setStored({ snapshot, model });
       setFilters(f => f.cluster && !model.clusters.some(c => c.id === f.cluster) ? { ...f, cluster: null } : f);
       const focus = routeRef.current.focus;
@@ -129,6 +136,19 @@ export default function App() {
     }).catch(e => { if (!controller.signal.aborted && sameGraphLocation(current, routeRef.current)) setError(message(e)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [visible, session, route.scope, route.q, route.focus, refresh, positions]);
+  useEffect(() => {
+    const pending = pendingTiming.current;
+    if (!visible || !pending || loading || !data || !sameGraphLocation(pending.location, routeRef.current)) return;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        if (pendingTiming.current !== pending || !sameGraphLocation(pending.location, routeRef.current)) return;
+        setTiming({ location: pending.location, responseMs: pending.responseMs, displayMs: performance.now() - pending.startedAt, list: fallback });
+        pendingTiming.current = null;
+      });
+    });
+    return () => { cancelAnimationFrame(firstFrame); cancelAnimationFrame(secondFrame); };
+  }, [data, loading, route.scope, route.q, route.focus, fallback, visible]);
   function confirmDiscard() {
     if (busyRef.current) return false;
     if (!dirtyRef.current) return true;
@@ -252,7 +272,7 @@ export default function App() {
         <details className="section"><summary>검색 방법</summary><p className="hint">단어를 띄어 쓰면 순서와 관계없이 모든 단어가 포함된 항목을 찾습니다. 경로와 검색 가능한 원문 내용도 함께 찾습니다. 텍스트를 검색할 수 없는 첨부 파일은 경로로 찾습니다. 관계 없는 원문은 독립 항목입니다.</p></details>
       </aside>}
       <section className="galaxy" aria-label="지식 지도" aria-busy={loading} inert={!!panel && narrow}>
-        <div className="map-toolbar"><div className="map-title"><h1>{cluster ? cluster.label : route.q ? `“${route.q}” 검색` : "지식 지도"}</h1><p className="count-breakdown">표시 중 · 문서 {data ? displayed.filter(n => n.kind === "document").length : "—"} · 기록 {data ? displayed.filter(n => n.kind === "memory").length : "—"} · 관계 {data ? shown.links.length : "—"}</p></div>
+        <div className="map-toolbar"><div className="map-title"><h1>{cluster ? cluster.label : route.q ? `“${route.q}” 검색` : "지식 지도"}</h1><p className="count-breakdown">표시 중 · 문서 {data ? displayed.filter(n => n.kind === "document").length : "—"} · 기록 {data ? displayed.filter(n => n.kind === "memory").length : "—"} · 관계 {data ? shown.links.length : "—"}</p>{timing && data && !loading && sameGraphLocation(timing.location, route) && <p className="count-breakdown load-timing" title="응답은 자료 요청부터 JSON 수신까지, 목록 표시는 요청부터 목록의 첫 화면이 그려질 때까지입니다. 앱 실행·접속 시간은 제외합니다.">최근 조회 · 응답 {Math.round(timing.responseMs)}ms{timing.list && fallback && <> · 목록 표시 {Math.round(timing.displayMs)}ms</>}</p>}</div>
           <div className="map-actions">
             <button ref={filterButton} disabled={busy} aria-expanded={explore} onClick={() => setExplore(v => !v)}>필터·군집</button>
             <button disabled={busy} aria-pressed={fallback} onClick={() => { if (webglFailed) { setWebglFailed(false); setListMode(false); } else setListMode(v => !v); }}>{fallback ? "3D 보기" : "목록 보기"}</button>
