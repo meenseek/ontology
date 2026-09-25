@@ -80,7 +80,7 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
     return () => controller.abort();
   }, [scope, csrf, selectedId, visible, readRetry]);
   useEffect(() => { if (selected && editing && managing) editForm.current?.querySelector("textarea")?.focus(); }, [editing, managing]);
-  const needsSubjects = (subjectsRequested && editing && (!selected || managing)) || selected?.grouping?.state === "suggested";
+  const needsSubjects = subjectsRequested || selected?.grouping?.state === "suggested";
   useEffect(() => {
     if (!visible || !needsSubjects || subjectsLoaded.current || subjectsFailed.current) return;
     const controller = new AbortController(); setSubjectsLoading(true); setSubjectsError("");
@@ -134,14 +134,24 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
       active.current = value.id; setSelected(value); setDraft(draftFromItem(value)); setEditing(false); setHistory(null); setHistoryNext(null); setEvidenceView(null); setEvidenceSnapshots({}); setNotice("기록을 저장했습니다."); onChange(value);
     });
   }
-  async function confirmGroup(subjectId: string) {
+  async function setGroup(subjectId: string | null, mode: "manual" | "auto" | "off") {
     if (!selected) return;
     await run(async () => {
-      const value = await command<Item>({ op: "grouping-set", id: selected.id, revision: selected.revision, subject_id: subjectId, mode: "manual" });
+      const value = await command<Item>({ op: "grouping-set", id: selected.id, revision: selected.revision, subject_id: subjectId, mode });
       if (!mounted.current) return;
       setSelected(value); setDraft(draftFromItem(value)); setHistory(null); onChange(value);
     });
   }
+  async function createAndAssignSubject() {
+    if (!selected || !subjectName.trim()) return;
+    await run(async () => {
+      const subject = await command<Subject>({ op: "subject-create", idempotency_key: subjectKey, name: subjectName.trim() });
+      const value = await command<Item>({ op: "grouping-set", id: selected.id, revision: selected.revision, subject_id: subject.id, mode: "manual" });
+      if (!mounted.current) return;
+      setSelected(value); setDraft(draftFromItem(value)); setHistory(null); onChange(value);
+    });
+  }
+  async function confirmGroup(subjectId: string) { await setGroup(subjectId, "manual"); }
   async function mutate(op: "accept" | "withdraw" | "forget") {
     if (!selected) return; const snapshot = selected;
     await run(async () => {
@@ -221,6 +231,7 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
           {scope === "personal" && selected.grouping?.state === "error" && <p className="warning">묶음 분류를 완료하지 못했습니다. <button type="button" disabled={busy} onClick={() => void run(async () => { const value = await command<Item>({ op: "grouping-retry", id: selected.id }); setSelected(value); setDraft(draftFromItem(value)); })}>다시 시도</button></p>}
           {scope === "personal" && selected.grouping?.state === "unmatched" && <p className="hint">{selected.grouping.reason ?? "적합한 기존 묶음을 찾지 못했습니다."} 새 묶음을 만든 뒤 다시 검토할 수 있습니다. <button type="button" disabled={busy} onClick={() => void run(async () => { const value = await command<Item>({ op: "grouping-retry", id: selected.id }); setSelected(value); setDraft(draftFromItem(value)); })}>다시 분류</button></p>}
           {scope === "personal" && selected.grouping?.state === "suggested" && <section className="section"><h3>묶음 제안</h3><p>{selected.grouping.reason}</p>{selected.grouping.suggestions.candidate_ids?.map(id => <button type="button" key={id} disabled={busy} onClick={() => void confirmGroup(id)}>{selected.grouping?.suggestions.candidate_names?.[id] ?? subjects.find(item => item.id === id)?.name ?? id}에 묶기</button>)}{selected.grouping.suggestions.new_subject && <button type="button" disabled={busy} onClick={() => void run(async () => { const name = selected.grouping?.suggestions.new_subject; if (!name) return; const subject = await command<Subject>({ op: "subject-create", idempotency_key: await groupKey(selected.id, selected.revision, name), name }); const value = await command<Item>({ op: "grouping-set", id: selected.id, revision: selected.revision, subject_id: subject.id, mode: "manual" }); setSubjects(current => [...current, subject]); setSelected(value); setDraft(draftFromItem(value)); onMetadataChange(); onChange(value); })}>새 묶음 ‘{selected.grouping.suggestions.new_subject}’ 만들고 연결</button>}</section>}
+          {scope === "personal" && selected.status !== "withdrawn" && <details className="section" onToggle={event => { if (event.currentTarget.open) setSubjectsRequested(true); }}><summary>기록 묶음 · {selected.subject_name ?? (["pending", "processing"].includes(selected.grouping?.state ?? "") ? "자동 분류 중" : "없음")}</summary><p className="hint">기록 내용은 그대로 두고 묶음만 바꿉니다.</p>{subjectStatus}<div className="compact-list">{subjects.map(subject => <button type="button" key={subject.id} disabled={busy || selected.subject_id === subject.id} onClick={() => void setGroup(subject.id, "manual")}>{subject.name}{selected.subject_id === subject.id ? " · 현재 묶음" : "에 묶기"}</button>)}</div><div className="memory-actions"><button type="button" disabled={busy || selected.grouping?.mode === "off"} onClick={() => void setGroup(null, "off")}>묶음 없음</button><button type="button" disabled={busy || selected.grouping?.mode === "auto"} onClick={() => void setGroup(null, "auto")}>Codex가 다시 분류</button></div><details className="section"><summary>새 묶음 만들고 연결</summary><label className="topic-label">묶음 이름<input value={subjectName} maxLength={80} onChange={event => { setSubjectName(event.target.value); setSubjectKey(crypto.randomUUID()); }} /></label><button type="button" disabled={busy || !subjectName.trim()} onClick={() => void createAndAssignSubject()}>만들고 연결</button></details></details>}
           {selected.effective_from !== null && selected.effective_from > Date.now() / 1000 && <p className="warning">아직 유효 시작 시점이 되지 않았습니다.</p>}
           {selected.effective_until !== null && selected.effective_until <= Date.now() / 1000 && <p className="warning">유효기간이 지난 기록입니다.</p>}
           {selected.status === "withdrawn" && <p className="warning">철회한 기록입니다. 이전 내용과 이력은 남아 있습니다.</p>}
