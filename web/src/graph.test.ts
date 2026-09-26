@@ -638,16 +638,20 @@ test("a neighboring node moves only at the visible one-pixel clearance boundary"
   assert.equal(other.x, 75, "touching the one-pixel boundary does not push the neighbor");
   assert.equal(positions.collisionReaction("other", performance.now(), false), null, "proximity alone has no visual reaction");
   positions.move("held", { x: 34.1, y: 0, z: 0 });
+  assert.equal(other.x, 75, "the pointer cannot teleport its neighbor");
+  positions.advance(32, false);
   assert.ok(other.x > 75 && positions.collisionReaction("other", performance.now(), false), "fractional contact also reacts");
   positions.move("held", { x: 35, y: 0, z: 0 });
-  assert.ok(other.x > 75 && other.x < 77, "the neighbor follows only when the boundary is crossed");
-  assert.ok(other.x - 35 >= 41, "the 1px hard boundary applies during a drag");
+  positions.advance(48, false);
+  assert.ok(other.x > 75 && other.x < 77, "the neighbor eases after crossing the boundary");
+  positions.release(48, false); positions.advance(2048, false);
+  assert.ok(other.x - 35 >= 41, "the 1px hard boundary applies at rest");
   const now = performance.now(), reaction = positions.collisionReaction("other", now, false);
   assert.ok(reaction && reaction.x > 0 && reaction.glow > 0, "contact gives the displaced star a directed response");
   assert.equal(positions.collisionReaction("other", now, true), null, "reduced motion suppresses the response");
   const frozen = { x: other.x, y: other.y, z: other.z };
   assert.equal(positions.collisionReaction("other", now + 500, false), null, "the response expires");
-  assert.deepEqual({ x: other.x, y: other.y, z: other.z }, frozen, "visual recoil never changes collision geometry");
+  assert.deepEqual({ x: other.x, y: other.y, z: other.z }, frozen, "reading the visual recoil never changes geometry");
 });
 test("an ordinary star yields at its visible one-pixel boundary, regardless of its hit target", async () => {
   const { nodeScreenMetrics } = await import("./presentation.ts");
@@ -668,8 +672,10 @@ test("an ordinary star yields at its visible one-pixel boundary, regardless of i
   positions.advance(0, false); positions.advance(16, false);
   assert.equal(other.x, 45, "a 27px center distance is exactly the 1px boundary");
   positions.move("held", { x: 19, y: 0, z: 0 });
+  positions.advance(32, false);
   assert.ok(other.x > 45 && other.x < 47, "the star moves only after crossing that boundary");
-  assert.ok(other.x - 19 >= 27, "the visible 26px stars retain a 1px hard gap");
+  positions.release(32, false); positions.advance(2032, false);
+  assert.ok(other.x - 19 >= 27, "the visible 26px stars retain a 1px final gap");
 });
 test("a small drag waits for contact and cancellation restores the neighboring node", async () => {
   const { nodeScreenMetrics } = await import("./presentation.ts");
@@ -689,9 +695,10 @@ test("a small drag waits for contact and cancellation restores the neighboring n
   positions.advance(0, false); positions.advance(16, false);
   assert.equal(other.x, 31, "no early motion runs on animation frames");
   positions.move("held", { x: 5, y: 0, z: 0 });
+  positions.advance(32, false);
   assert.ok(other.x > 31 && other.x < 33, "contact displaces the neighbor even below the click threshold");
   assert.ok(positions.collisionReaction("other", performance.now(), false), "contact reacts before the click threshold");
-  positions.release(16, false);
+  positions.release(32, false);
   assert.equal(model.nodes.find(node => node.id === "held")!.x, 0, "a sub-threshold gesture remains a click");
   assert.equal(other.x, 31, "click jitter does not leave the neighbor displaced");
   assert.equal(positions.collisionReaction("other", performance.now(), false), null, "canceling the click clears its visual reaction");
@@ -727,7 +734,7 @@ test("one enlarged ring does not spread ordinary linked stars on release", () =>
   assert.ok(Math.abs(distance("held", "normal") - 27) < 1e-6, "ordinary pair keeps a one-pixel visible gap");
   assert.ok(distance("normal", "ring") >= 43 - 1e-4, "the enlarged ring gets only its own clearance");
 });
-test("visible linked and unlinked nodes move aside throughout drag and release", () => {
+test("visible linked and unlinked nodes flow during drag and clear after release", () => {
   for (const reduced of [false, true]) {
     const model = reconcile(snapshot([doc("held"), doc("linked"), doc("other")], [edge("held", "linked")]));
     for (const node of model.nodes) {
@@ -744,12 +751,16 @@ test("visible linked and unlinked nodes move aside throughout drag and release",
       }
     };
     positions.begin("held", 1, plane);
-    positions.move("held", { x: 80, y: 0, z: 0 }); clear();
+    positions.move("held", { x: 80, y: 0, z: 0 });
     assert.equal(model.nodes.find(node => node.id === "held")!.x, 80);
+    assert.equal(model.nodes.find(node => node.id === "other")!.x, 80, "a held star can pass through before its neighbors flow");
+    for (const time of [0, 16, 32]) positions.advance(time, reduced);
     assert.notEqual(model.nodes.find(node => node.id === "other")!.x, 80, "unlinked neighbor yields during the drag");
-    for (const time of [0, 16, 32]) { positions.advance(time, reduced); clear(); }
-    positions.release(32, reduced); clear();
-    for (const time of [48, 80, 160, 500, 1000, 2100]) { positions.advance(time, reduced); clear(); }
+    const atRelease = model.nodes.map(node => ({ ...node }));
+    positions.release(32, reduced);
+    if (!reduced) assert.deepEqual(model.nodes, atRelease, "release does not jump any node or edge endpoint");
+    for (const time of [48, 80, 160, 500, 1000, 2100]) positions.advance(time, reduced);
+    clear();
     const frozen = model.nodes.map(node => ({ ...node }));
     positions.cancel(); positions.advance(3000, reduced); assert.deepEqual(model.nodes, frozen);
   }
@@ -775,12 +786,38 @@ test("clearance follows perspective, zoom, and different visible footprints", ()
     }
   };
   positions.begin("held", 100, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
-    visible: model.nodes.map(node => node.id), radius: node => radii.get(node.id)!, worldPerPixel: depth => depth / zoom, project });
-  positions.move("held", { x: 7000, y: 0, z: 0 }); separated();
+    visible: model.nodes.map(node => node.id), radius: node => radii.get(node.id)!, worldPerPixel: depth => depth / zoom,
+    project, viewKey: () => String(zoom) });
+  positions.move("held", { x: 7000, y: 0, z: 0 }); positions.advance(0, false); positions.advance(16, false);
+  positions.release(16, false);
   zoom = .5;
-  positions.move("held", { x: 7000, y: 0, z: 0 }); separated();
+  for (const time of [32, 80, 240, 1000, 2100]) positions.advance(time, false);
+  separated();
+});
+test("a camera turn during settling retargets clearance in the current screen plane", () => {
+  const model = reconcile(snapshot([doc("held"), doc("other")], []));
+  fixPosition(model.nodes[0], { x: 0, y: 0, z: 0 });
+  fixPosition(model.nodes[1], { x: 75, y: 0, z: 0 });
+  const positions = new Positions(); positions.install(model);
+  let turned = false, zoom = 1;
+  const project = (value: { x: number; y: number; z: number }) => ({
+    x: (turned ? -value.y : value.x) * zoom, y: (turned ? value.x : value.y) * zoom, depth: 1,
+  });
+  positions.begin("held", 1, {
+    right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+    visible: ["held", "other"], radius: () => 20, project, worldPerPixel: () => 1 / zoom,
+    viewKey: () => `${turned}:${zoom}`,
+    basis: () => turned ? { right: { x: 0, y: -1, z: 0 }, up: { x: 1, y: 0, z: 0 } } :
+      { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 } },
+  });
+  positions.move("held", { x: 34.1, y: 0, z: 0 });
   positions.release(0, false);
-  for (const time of [16, 32, 80, 240, 1000, 2100]) { positions.advance(time, false); separated(); }
+  positions.advance(16, false);
+  turned = true; zoom = .5;
+  for (const time of [32, 80, 240, 1000, 2100]) positions.advance(time, false);
+  const a = project(model.nodes[0]), b = project(model.nodes[1]);
+  assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= 41 - 1e-4,
+    "the finished stars remain one screen pixel apart after the camera turns and zooms");
 });
 test("clicks stay unchanged; a drag returning near its origin still rearranges on release", () => {
   const model = reconcile(snapshot([doc("a"), doc("b")], [edge("a", "b")]));
@@ -870,9 +907,10 @@ test("a crowded hub keeps its constellation together when its center or a spoke 
     const destination = { x: unrelated.x, y: unrelated.y };
     const separated = () => assert.ok(Math.hypot(hub.x - unrelated.x, hub.y - unrelated.y) >= 41 - 1e-6,
       "an unrelated star still yields at the one-pixel boundary");
-    positions.begin("hub", 1, dragPlane(model)); positions.move("hub", { ...destination, z: 0 }); separated();
-    positions.release(0, reduced); separated();
-    if (!reduced) for (const time of [16, 80, 240, 2100]) { positions.advance(time, false); separated(); }
+    positions.begin("hub", 1, dragPlane(model)); positions.move("hub", { ...destination, z: 0 });
+    positions.release(0, reduced);
+    if (!reduced) for (const time of [16, 80, 240, 2100]) positions.advance(time, false);
+    separated();
     assert.ok(Math.abs(leaf.x - hub.x - originalOffset.x) < 1e-8 &&
       Math.abs(leaf.y - hub.y - originalOffset.y) < 1e-8,
     "unrelated-star clearance does not pull connected spokes out of their constellation");
@@ -1223,13 +1261,22 @@ test("dropping a spatial group on another star clears the one-pixel boundary as 
     return [id, { x: node.x - start.x, y: node.y - start.y, z: node.z - start.z }] as const;
   }));
   const visible = groups.map(group => group.representative);
+  const cohorts = new Map(groups.map(group => [group.representative, group.members] as const));
+  const targetMember = model.nodes.find(node => node.id === target.members.find(id => id !== target.representative))!;
+  const targetOffset = { x: targetMember.x - blocker.x, y: targetMember.y - blocker.y };
   positions.beginGroup(held.id, moving.members, 1, {
     right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
-    visible, radius: () => 18, worldPerPixel: () => 1, isVisible: () => true,
+    visible, cohorts, radius: () => 18, worldPerPixel: () => 1, isVisible: () => true,
     project: node => ({ x: node.x, y: node.y, depth: 1 }),
   });
   positions.move(held.id, { x: blocker.x, y: blocker.y, z: start.z });
-  assert.equal(positions.release(100, false), true);
+  positions.advance(0, false); positions.advance(16, false);
+  assert.notEqual(blocker.x, held.x, "the nearby group starts to yield while held");
+  const atRelease = new Map(model.nodes.map(node => [node.id, { x: node.x, y: node.y, z: node.z }]));
+  assert.equal(positions.release(16, false), true);
+  assert.deepEqual(new Map(model.nodes.map(node => [node.id, { x: node.x, y: node.y, z: node.z }])), atRelease,
+    "dropping a group does not teleport either cohort");
+  for (const time of [32, 80, 240, 1000, 2016]) positions.advance(time, false);
   for (const id of visible.filter(id => id !== held.id)) {
     const node = model.nodes.find(value => value.id === id)!;
     assert.ok(Math.hypot(held.x - node.x, held.y - node.y) >= 37 - 1e-4, `representative ${id} remains pickable`);
@@ -1238,6 +1285,8 @@ test("dropping a spatial group on another star clears the one-pixel boundary as 
     const node = model.nodes.find(value => value.id === id)!, offset = original.get(id)!;
     assert.ok(Math.hypot(node.x - held.x - offset.x, node.y - held.y - offset.y, node.z - held.z - offset.z) < 1e-7, `member ${id} keeps its group offset`);
   }
+  assert.ok(Math.abs(targetMember.x - blocker.x - targetOffset.x) < 1e-7 &&
+    Math.abs(targetMember.y - blocker.y - targetOffset.y) < 1e-7, "a pushed group's hidden member stays attached");
 });
 test("a hidden member cannot be dropped on a visible star even when the representative is clear", () => {
   const model = reconcile(snapshot([doc("held"), doc("far-member"), doc("blocker")]));
@@ -1252,6 +1301,7 @@ test("a hidden member cannot be dropped on a visible star even when the represen
   });
   positions.move("held", { x: 140, y: 0, z: 0 });
   assert.equal(positions.release(100, false), true);
+  positions.advance(2100, false);
   const held = model.nodes.find(node => node.id === "held")!;
   const member = model.nodes.find(node => node.id === "far-member")!;
   const blocker = model.nodes.find(node => node.id === "blocker")!;
