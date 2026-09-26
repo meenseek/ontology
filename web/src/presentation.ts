@@ -127,8 +127,10 @@ export function starPhase(id: string): number {
   hash = Math.imul(hash ^ (hash >>> 15), 0x846ca68b);
   return ((hash ^ (hash >>> 16)) >>> 0) / 4294967296 * Math.PI * 2;
 }
-const documentStars = ["#bad3ee", "#adcbed", "#c4c7ee", "#b5d9df"];
-const memoryStars = ["#efd8ac", "#eac9ae", "#e7d6bd", "#efd0c0"];
+// A bounded spectrum keeps the stars luminous on the dark sky. Identity and
+// taxonomy, rather than render timing, choose each color.
+const documentStars = ["#8ecbff", "#6cc6ef", "#6bd5be", "#9bcf82", "#a0baff", "#bc9ee9", "#d694d1", "#79cfdb"];
+const memoryStars = ["#f2ca79", "#f3ac77", "#e9969f", "#c89bdf", "#96b9e9", "#8ad0a7", "#e7a8b9", "#e4d17d"];
 /** Stable variation; an explicit single taxonomy marker gives its members one color. */
 export function starColor(node: { id: string; kind: string; taxonomyColor?: string }): string {
   if (node.taxonomyColor) return node.taxonomyColor;
