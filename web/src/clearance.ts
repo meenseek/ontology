@@ -70,35 +70,3 @@ export function separateDiscs(discs: Disc[], held: string, linked: ReadonlySet<s
   }
   return result;
 }
-
-/** Find one screen translation that clears every member of a rigid group. */
-export function clearRigidTranslation(forbidden: readonly Disc[], allowed: (offset: ScreenPosition) => boolean = () => true): ScreenPosition {
-  if (!forbidden.some(disc => Math.hypot(disc.x, disc.y) < disc.radius)) return { x: 0, y: 0 };
-  let best: ScreenPosition | null = null, bestDistance = Infinity;
-  let fallback: ScreenPosition | null = null, fallbackDistance = Infinity;
-  // Along a ray, each forbidden disc is one interval. The first gap is clear
-  // for the entire cohort, so members keep their exact offsets.
-  for (let index = 0; index < 48; index++) {
-    const angle = index * Math.PI * 2 / 48, ux = Math.cos(angle), uy = Math.sin(angle);
-    const intervals: { start: number; end: number }[] = [];
-    for (const disc of forbidden) {
-      const along = disc.x * ux + disc.y * uy;
-      const perpendicular2 = disc.x * disc.x + disc.y * disc.y - along * along;
-      const radius2 = disc.radius * disc.radius;
-      if (perpendicular2 >= radius2) continue;
-      const half = Math.sqrt(Math.max(0, radius2 - perpendicular2));
-      if (along + half < 0) continue;
-      intervals.push({ start: Math.max(0, along - half), end: along + half });
-    }
-    intervals.sort((a, b) => a.start - b.start);
-    let distance = 0;
-    for (const interval of intervals) {
-      if (interval.start > distance + 1e-9) break;
-      distance = Math.max(distance, interval.end + 1e-6);
-    }
-    const candidate = { x: ux * distance, y: uy * distance };
-    if (distance < fallbackDistance) { fallback = candidate; fallbackDistance = distance; }
-    if (allowed(candidate) && distance < bestDistance) { best = candidate; bestDistance = distance; }
-  }
-  return best ?? fallback ?? { x: 0, y: 0 };
-}

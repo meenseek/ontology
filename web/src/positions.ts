@@ -1,6 +1,6 @@
 import { constellationView, visualSatellites } from "./graph";
 import type { GraphLink, Model, PositionedNode } from "./graph";
-import { COLLISION_GAP, clearRigidTranslation, separateDiscs } from "./clearance";
+import { COLLISION_GAP, separateDiscs } from "./clearance";
 
 export type Point = { x: number; y: number; z: number };
 const point = ({ x, y, z }: Point): Point => ({ x, y, z });
@@ -20,12 +20,15 @@ function constellationDepth(x: number, y: number, spacing: number): number {
 type ScreenPoint = Slot & { depth: number };
 type DragPlane = { right: Point; up: Point; spacingPixels: number; project?: (value: Point) => ScreenPoint;
   visible?: readonly string[]; radius?: (node: PositionedNode, depth: number) => number; worldPerPixel?: (depth: number) => number;
-  isVisible?: (at: ScreenPoint, radius: number) => boolean };
+  isVisible?: (at: ScreenPoint, radius: number) => boolean; cohorts?: ReadonlyMap<string, readonly string[]>;
+  viewKey?: () => string; basis?: () => { right: Point; up: Point } };
 type Clearance = { held: string; visible: string[]; right: Point; up: Point; project: (value: Point) => ScreenPoint;
   radius: (node: PositionedNode, depth: number) => number; worldPerPixel: (depth: number) => number;
-  isVisible: (at: ScreenPoint, radius: number) => boolean; fixed?: ReadonlySet<string> };
+  isVisible: (at: ScreenPoint, radius: number) => boolean; fixed?: ReadonlySet<string>; physical?: ReadonlySet<string>;
+  cohorts?: ReadonlyMap<string, readonly string[]>; viewKey?: () => string;
+  basis?: () => { right: Point; up: Point } };
 type CollisionReaction = { at: number; x: number; y: number; strength: number };
-type Pull = { id: string; start: Point; initial: Map<string, Point>; threshold: number; tolerance: number; followers: Map<string, Follower>; edges: TensionEdge[]; project: (value: Point) => ScreenPoint; clearance: Clearance | null; rigid: ReadonlySet<string> | null; moved: boolean; last: number | null };
+type Pull = { id: string; start: Point; initial: Map<string, Point>; threshold: number; tolerance: number; followers: Map<string, Follower>; edges: TensionEdge[]; project: (value: Point) => ScreenPoint; clearance: Clearance | null; rigid: ReadonlySet<string> | null; velocities: Map<string, Point>; moved: boolean; last: number | null };
 type Axial = { q: number; r: number };
 const directions: Axial[] = [{ q: 1, r: 0 }, { q: 0, r: -1 }, { q: -1, r: 1 }, { q: -1, r: 0 }, { q: 0, r: 1 }, { q: 1, r: -1 }];
 const axialKey = ({ q, r }: Axial) => `${q},${r}`;
@@ -446,7 +449,15 @@ export function compactSlots(root: string, members: string[], adjacency: Map<str
   placed.delete(root);
   return validSlots(root, members, adjacency, placed) ? placed : null;
 }
-type Settle = { anchor: Point; followers: Map<string, Follower>; velocities: Map<string, Point>; clearance: Clearance | null; tolerance: number; last: number; deadline: number };
+type Settle = { anchor: Point; followers: Map<string, Follower>; velocities: Map<string, Point>; tolerance: number; last: number; deadline: number;
+  clearance: Clearance | null; desired: Map<string, Point>; starts: Map<string, Point>; priority: Set<string>; viewKey: string | null };
+function springStep(value: number, target: number, velocity: number, dt: number, frequency: number, damping: number): [number, number] {
+  const wave = Math.sqrt(frequency * frequency - damping * damping);
+  const decay = Math.exp(-damping * dt), cosine = Math.cos(wave * dt), sine = Math.sin(wave * dt);
+  const displacement = value - target;
+  return [target + decay * (displacement * cosine + (velocity + damping * displacement) / wave * sine),
+    decay * (velocity * cosine - (frequency * frequency * displacement + damping * velocity) / wave * sine)];
+}
 type PendingLayout = { token: number; root: string; right: Point; up: Point; spacing: number; clearance: Clearance | null; reduced: boolean };
 type LayoutMotion = { from: Map<string, Point>; to: Map<string, Point>; actual: Map<string, Point>; start: number };
 const layoutDuration = 650;
@@ -553,6 +564,10 @@ export class Positions {
   get dragging() { return this.gesture !== null; }
   get dragMoved() { return this.gesture?.moved ?? false; }
   get settling() { return this.settle !== null; }
+  settlingTarget(id: string): Point | null {
+    const follower = this.settle?.followers.get(id);
+    return follower && this.settle ? add(this.settle.anchor, follower.offset) : null;
+  }
   collisionReaction(id: string, now: number, reduced: boolean): { x: number; y: number; glow: number; pulse: number } | null {
     if (reduced || !Number.isFinite(now)) return null;
     const reaction = this.collisionReactions.get(id);
@@ -609,8 +624,9 @@ export class Positions {
     if (reduced) this.advance(now, true);
   }
   private clearedPositions(clearance: Clearance, desired: Map<string, Point>, linked: ReadonlySet<string>, gap = COLLISION_GAP): Map<string, Point> {
-    const discs = clearance.visible.flatMap(id => {
-      const node = this.nodes.get(id), value = desired.get(id);
+    const { right, up } = clearance.basis?.() ?? clearance;
+    const discs = [...new Set([...clearance.visible, ...(clearance.physical ?? [])])].flatMap(id => {
+      const node = this.nodes.get(id), value = desired.get(id) ?? (clearance.physical?.has(id) && node ? point(node) : undefined);
       if (!node || !value) return [];
       const at = clearance.project(value), radius = clearance.radius(node, at.depth);
       return at.depth > 0 && [at.x, at.y, radius].every(Number.isFinite) && radius > 0 && clearance.isVisible(at, radius) ? [{ id, x: at.x, y: at.y, radius }] : [];
@@ -623,47 +639,94 @@ export class Positions {
       const scale = clearance.worldPerPixel(clearance.project(desired.get(disc.id)!).depth);
       if (!Number.isFinite(scale) || scale <= 0) continue;
       const dx = (at.x - disc.x) * scale, dy = (at.y - disc.y) * scale;
-      if (dx || dy) next.set(disc.id, add(add(desired.get(disc.id)!, clearance.right, dx), clearance.up, dy));
+      if (dx || dy) next.set(disc.id, add(add(desired.get(disc.id)!, right, dx), up, dy));
     }
     return next;
   }
-  private enforceClearance(clearance: Clearance | null, linked: ReadonlySet<string>): Set<string> {
-    const changed = new Set<string>();
-    if (!clearance) return changed;
-    const current = new Map(clearance.visible.flatMap(id => {
-      const node = this.nodes.get(id);
-      return node ? [[id, point(node)] as const] : [];
-    }));
-    for (const [id, value] of this.clearedPositions(clearance, current, linked)) {
-      const node = this.nodes.get(id)!;
-      if (node.x === value.x && node.y === value.y && node.z === value.z) continue;
-      if (this.gesture && !this.gesture.rigid && id !== clearance.held) {
-        const from = clearance.project(node), to = clearance.project(value);
-        const dx = to.x - from.x, dy = to.y - from.y, distance = Math.hypot(dx, dy);
-        if (Number.isFinite(distance) && distance > 0) {
-          this.collisionReactions.set(id, { at: performance.now(), x: dx / distance, y: dy / distance,
-            strength: Math.min(1, .35 + distance / 6) });
-        }
-      }
-      fixPosition(node, value); this.observed.set(id, point(value)); changed.add(id);
+  private placeCohort(id: string, value: Point, clearance: Clearance, independentlyMoving: ReadonlySet<string>): boolean {
+    const node = this.nodes.get(id)!;
+    const delta = add(value, node, -1);
+    if (!delta.x && !delta.y && !delta.z) return false;
+    fixPosition(node, value); this.observed.set(id, point(value));
+    for (const member of clearance.cohorts?.get(id) ?? []) {
+      if (member === id || independentlyMoving.has(member)) continue;
+      const hidden = this.nodes.get(member);
+      if (!hidden) continue;
+      const next = add(hidden, delta);
+      fixPosition(hidden, next); this.observed.set(member, point(next));
     }
-    if (changed.size) this.revision++;
-    return changed;
+    return true;
   }
-  private startSettle(root: string, followers: Map<string, Follower>, clearance: Clearance | null, tolerance: number, now: number) {
-    const anchor = point(this.nodes.get(root)!);
-    if (clearance) {
-      const desired = new Map(clearance.visible.flatMap(id => {
-        const node = this.nodes.get(id), follower = followers.get(id);
-        return node ? [[id, follower ? add(anchor, follower.offset) : point(node)] as const] : [];
-      }));
-      for (const [id, target] of this.clearedPositions(clearance, desired, new Set(followers.keys()))) {
-        if (id !== root && (followers.has(id) || target.x !== this.nodes.get(id)!.x || target.y !== this.nodes.get(id)!.y || target.z !== this.nodes.get(id)!.z)) {
-          followers.set(id, { offset: add(target, anchor, -1) });
-        }
+  private relaxClearance(drag: Pull, dt: number, reduced: boolean, edgeMoved: ReadonlySet<string>) {
+    const clearance = drag.clearance;
+    if (!clearance) return;
+    const linked = new Set(drag.followers.keys());
+    const desired = new Map(clearance.visible.flatMap(id => {
+      const node = this.nodes.get(id);
+      if (!node) return [];
+      return [[id, id === drag.id || linked.has(id) || clearance.fixed?.has(id) ? point(node) : drag.initial.get(id) ?? point(node)] as const];
+    }));
+    const targets = this.clearedPositions(clearance, desired, linked);
+    let changed = false;
+    for (const [id, target] of targets) {
+      if (id === drag.id || clearance.fixed?.has(id)) continue;
+      const node = this.nodes.get(id)!, current = point(node), velocity = drag.velocities.get(id) ?? zero();
+      const collision = add(target, desired.get(id)!, -1);
+      if (collision.x || collision.y || collision.z) {
+        const from = clearance.project(node), to = clearance.project(target);
+        const dx = to.x - from.x, dy = to.y - from.y, distance = Math.hypot(dx, dy);
+        if (Number.isFinite(distance) && distance > 0) this.collisionReactions.set(id, {
+          at: performance.now(), x: dx / distance, y: dy / distance, strength: Math.min(1, .35 + distance / 6),
+        });
+      }
+      if (linked.has(id) && !collision.x && !collision.y && !collision.z) {
+        if (!edgeMoved.has(id)) drag.velocities.delete(id);
+        continue;
+      }
+      const [x, vx] = reduced ? [target.x, 0] : springStep(current.x, target.x, velocity.x, dt, 20, 11);
+      const [y, vy] = reduced ? [target.y, 0] : springStep(current.y, target.y, velocity.y, dt, 20, 11);
+      const [z, vz] = reduced ? [target.z, 0] : springStep(current.z, target.z, velocity.z, dt, 20, 11);
+      const next = { x, y, z }, nextVelocity = { x: vx, y: vy, z: vz };
+      if (Math.hypot(target.x - x, target.y - y, target.z - z) < drag.tolerance &&
+          Math.hypot(vx, vy, vz) < drag.tolerance * 14) {
+        changed = this.placeCohort(id, target, clearance, linked) || changed;
+        drag.velocities.delete(id);
+      } else {
+        changed = this.placeCohort(id, next, clearance, linked) || changed;
+        drag.velocities.set(id, nextVelocity);
       }
     }
-    this.settle = { anchor, followers, velocities: new Map(), clearance, tolerance, last: now, deadline: now + 2000 };
+    if (changed) this.revision++;
+  }
+  private startSettle(root: string, followers: Map<string, Follower>, clearance: Clearance | null, tolerance: number, now: number,
+    velocities: Map<string, Point> = this.settle?.velocities ?? new Map(), baseline?: ReadonlyMap<string, Point>) {
+    const anchor = point(this.nodes.get(root)!);
+    const desired = new Map(clearance?.visible.flatMap(id => {
+      const node = this.nodes.get(id), follower = followers.get(id);
+      return node ? [[id, follower ? add(anchor, follower.offset) :
+        id === root || clearance.fixed?.has(id) ? point(node) : baseline?.get(id) ?? point(node)] as const] : [];
+    }) ?? []);
+    const settle: Settle = { anchor, followers, velocities: new Map(velocities), tolerance, last: now, deadline: now + 2000,
+      clearance, desired, starts: new Map([...this.nodes].map(([id, node]) => [id, point(node)])),
+      priority: new Set(followers.keys()), viewKey: clearance?.viewKey?.() ?? null };
+    this.retargetSettle(settle);
+    this.settle = settle;
+  }
+  private retargetSettle(settle: Settle) {
+    const clearance = settle.clearance;
+    if (!clearance) return;
+    for (const [id, target] of this.clearedPositions(clearance, settle.desired, settle.priority)) {
+      if (id === clearance.held || clearance.fixed?.has(id) && !settle.priority.has(id)) continue;
+      const start = settle.starts.get(id);
+      if (!start || !(settle.followers.has(id) || target.x !== start.x || target.y !== start.y || target.z !== start.z)) continue;
+      settle.followers.set(id, { offset: add(target, settle.anchor, -1) });
+      const shift = add(target, start, -1);
+      for (const member of clearance.cohorts?.get(id) ?? []) {
+        if (member === id || settle.priority.has(member)) continue;
+        const hidden = settle.starts.get(member);
+        if (hidden) settle.followers.set(member, { offset: add(add(hidden, shift), settle.anchor, -1) });
+      }
+    }
   }
   install(model: Model, compactInitial = false) {
     this.cancel();
@@ -762,6 +825,7 @@ export class Positions {
       held: id, visible: [...new Set(plane.visible)].filter(member => this.nodes.has(member)).sort(),
       right: point(plane.right), up: point(plane.up), project, radius: plane.radius,
       worldPerPixel: plane.worldPerPixel ?? (() => unitsPerPixel), isVisible: plane.isVisible ?? (() => true),
+      cohorts: plane.cohorts, viewKey: plane.viewKey, basis: plane.basis,
     } : null;
     // Reuse an already valid screen-plane shape (at any scale) before searching.
     const projected = new Map([...included].map(member => {
@@ -835,8 +899,9 @@ export class Positions {
     const activeClearance = dense && clearance ? {
       ...clearance, fixed: included,
     } : clearance;
-    const initial = new Map([...new Set([...included, ...(activeClearance?.visible ?? [])])].map(member => [member, point(this.nodes.get(member)!)] as const));
-    this.gesture = { id, start, initial, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance: activeClearance, rigid: null, moved: false, last: null };
+    const initialIds = new Set([...included, ...(activeClearance?.visible ?? []), ...[...(activeClearance?.cohorts?.values() ?? [])].flat()]);
+    const initial = new Map([...initialIds].filter(member => this.nodes.has(member)).map(member => [member, point(this.nodes.get(member)!)] as const));
+    this.gesture = { id, start, initial, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance: activeClearance, rigid: null, velocities: new Map(), moved: false, last: null };
     if (!exact && !overfull && members.length) this.searchLater(id, members, included, plane, spacing, unitsPerPixel * .05);
   }
   /** A spatial summary owns real, unlinked members; translate that exact cohort as one gesture. */
@@ -845,58 +910,18 @@ export class Positions {
     if (!this.nodes.has(id) || !Number.isFinite(unitsPerPixel) || unitsPerPixel <= 0) return;
     const rigid = new Set(members.filter(member => this.nodes.has(member)));
     if (!rigid.has(id)) return;
-    const initial = new Map([...rigid].map(member => [member, point(this.nodes.get(member)!)] as const));
+    const initialIds = new Set([...rigid, ...(plane.visible ?? []), ...[...(plane.cohorts?.values() ?? [])].flat()]);
+    const initial = new Map([...initialIds].filter(member => this.nodes.has(member)).map(member => [member, point(this.nodes.get(member)!)] as const));
     const project = plane.project ?? ((value: Point) => ({ x: value.x / unitsPerPixel, y: value.y / unitsPerPixel, depth: 1 }));
     const clearance = plane.visible && plane.radius ? {
       held: id, visible: [...new Set(plane.visible)].filter(member => this.nodes.has(member)).sort(),
       right: point(plane.right), up: point(plane.up), project, radius: plane.radius,
       worldPerPixel: plane.worldPerPixel ?? (() => unitsPerPixel), isVisible: plane.isVisible ?? (() => true),
+      fixed: rigid, physical: rigid, cohorts: plane.cohorts, viewKey: plane.viewKey, basis: plane.basis,
     } : null;
     this.gesture = { id, start: point(this.nodes.get(id)!), initial, threshold: unitsPerPixel * 6,
       tolerance: unitsPerPixel * .05, followers: new Map(), edges: [],
-      project, clearance, rigid, moved: false, last: null };
-  }
-  private clearRigidDrop(drag: Pull) {
-    const clearance = drag.clearance;
-    if (!clearance || !drag.rigid) return;
-    const fixed = clearance.visible.flatMap(id => {
-      if (drag.rigid!.has(id)) return [];
-      const node = this.nodes.get(id)!;
-      const at = clearance.project(node), radius = clearance.radius(node, at.depth);
-      return at.depth > 0 && [at.x, at.y, radius].every(Number.isFinite) && radius > 0 && clearance.isVisible(at, radius) ? [{ id, x: at.x, y: at.y, radius }] : [];
-    });
-    const held = this.nodes.get(drag.id)!;
-    const at = clearance.project(held), scale = clearance.worldPerPixel(at.depth);
-    if (at.depth <= 0 || !Number.isFinite(scale) || scale <= 0) return;
-    const moving = [...drag.rigid].flatMap(id => {
-      const node = this.nodes.get(id)!, member = clearance.project(node);
-      const radius = clearance.radius(node, member.depth), memberScale = clearance.worldPerPixel(member.depth);
-      const factor = scale / memberScale;
-      if (member.depth <= 0 || ![member.x, member.y, radius, factor].every(Number.isFinite) || radius <= 0 || factor <= 0) return [];
-      return [{ id, x: member.x, y: member.y, radius, factor }];
-    });
-    const allowed = (offset: { x: number; y: number }) => clearance.isVisible({ ...at, x: at.x + offset.x, y: at.y + offset.y }, clearance.radius(held, at.depth));
-    let reach = 96, target = { x: 0, y: 0 };
-    for (;;) {
-      // A pair farther than reach from the current drop cannot block any
-      // smaller translation. Most of the 800-node graph is skipped here.
-      const forbidden = moving.flatMap(member => fixed.flatMap(other => {
-        const x = (other.x - member.x) / member.factor, y = (other.y - member.y) / member.factor;
-        const radius = (member.radius + other.radius + COLLISION_GAP) / member.factor;
-        return Math.hypot(x, y) <= radius + reach ? [{ id: `${member.id}|${other.id}`, x, y, radius }] : [];
-      }));
-      target = clearRigidTranslation(forbidden, allowed);
-      if (Math.hypot(target.x, target.y) < reach || !Number.isFinite(reach)) break;
-      reach = reach > 1e6 ? Infinity : reach * 2;
-    }
-    const dx = target.x * scale, dy = target.y * scale;
-    if (!dx && !dy) return;
-    for (const id of drag.rigid) {
-      const node = this.nodes.get(id)!;
-      const next = add(add(node, clearance.right, dx), clearance.up, dy);
-      fixPosition(node, next); this.observed.set(id, point(next));
-    }
-    this.revision++;
+      project, clearance, rigid, velocities: new Map(), moved: false, last: null };
   }
   private searchLater(root: string, members: string[], included: Set<string>, plane: { right: Point; up: Point }, spacing: number, tolerance: number) {
     if (typeof Worker === "undefined") return;
@@ -953,16 +978,14 @@ export class Positions {
     const delta = add(value, drag.start, -1);
     if (Math.hypot(delta.x, delta.y, delta.z) >= drag.threshold) drag.moved = true;
     this.revision++;
-    this.enforceClearance(drag.clearance, new Set(drag.followers.keys()));
   }
   release(now: number, reduced: boolean): boolean {
     const drag = this.gesture;
     if (!drag?.moved) { this.cancel(); return false; }
     this.gesture = null;
     if (!Number.isFinite(now)) { this.cancel(); return false; }
-    if (drag.rigid) { this.clearRigidDrop(drag); return true; }
     if (this.pending?.root === drag.id) this.pending.reduced = reduced;
-    this.startSettle(drag.id, drag.followers, drag.clearance, drag.tolerance, now);
+    this.startSettle(drag.id, drag.followers, drag.clearance, drag.tolerance, now, drag.velocities, drag.initial);
     if (reduced) this.advance(now, true);
     return true;
   }
@@ -995,7 +1018,8 @@ export class Positions {
       drag.last = Math.max(drag.last ?? now, now);
       const fraction = reduced ? 1 : 1 - Math.exp(-18 * dt);
       let changed = false;
-      for (const edge of drag.edges) {
+      const edgeMoved = new Set<string>();
+      for (const edge of drag.rigid ? [] : drag.edges) {
         const from = this.nodes.get(edge.from)!, to = this.nodes.get(edge.to)!;
         const a = drag.project(from), b = drag.project(to), distance = Math.hypot(b.x - a.x, b.y - a.y);
         if (distance <= edge.limit || !Number.isFinite(distance) || !fraction) continue;
@@ -1006,33 +1030,34 @@ export class Positions {
         const travel = a.depth > 0 && b.depth > 0 && denominator > 0 ? visibleFraction * a.depth / denominator : visibleFraction;
         const target = add(from, delta, travel);
         const next = add(to, add(target, to, -1), fraction);
+        drag.velocities.set(edge.to, reduced ? zero() : add(zero(), add(target, next, -1), 18));
+        edgeMoved.add(edge.to);
         fixPosition(to, next); this.observed.set(edge.to, point(next)); changed = true;
       }
       if (changed) this.revision++;
-      this.enforceClearance(drag.clearance, new Set(drag.followers.keys()));
+      this.relaxClearance(drag, dt, reduced, edgeMoved);
       return;
     }
     const settle = this.settle;
     if (!settle) return;
+    const viewKey = settle.clearance?.viewKey?.() ?? null;
+    if (viewKey !== settle.viewKey) {
+      settle.viewKey = viewKey;
+      this.retargetSettle(settle);
+      settle.deadline = Math.max(settle.deadline, now + 600);
+    }
     const dt = Math.max(0, (now - settle.last) / 1000);
     settle.last = Math.max(settle.last, now);
     const snap = reduced || now >= settle.deadline;
     if (!snap && !dt) return;
-    // A short damped ripple carries each node into a clearance-sized slot without a release jump.
-    const damping = 9.5, frequency = Math.sqrt(14 * 14 - damping * damping);
-    const decay = Math.exp(-damping * dt), cosine = Math.cos(frequency * dt), sine = Math.sin(frequency * dt);
-    const step = (value: number, target: number, velocity: number): [number, number] => {
-      const displacement = value - target;
-      return [target + decay * (displacement * cosine + (velocity + damping * displacement) / frequency * sine),
-        decay * (velocity * cosine - (14 * 14 * displacement + damping * velocity) / frequency * sine)];
-    };
+    // Spring every displaced representative and hidden cohort member toward one resolved layout.
     let changed = false, complete = true;
     for (const [id, follower] of settle.followers) {
       const node = this.nodes.get(id)!, target = add(settle.anchor, follower.offset), velocity = settle.velocities.get(id) ?? zero();
       const previous = point(node);
-      const [x, vx] = snap ? [target.x, 0] : step(node.x, target.x, velocity.x);
-      const [y, vy] = snap ? [target.y, 0] : step(node.y, target.y, velocity.y);
-      const [z, vz] = snap ? [target.z, 0] : step(node.z, target.z, velocity.z);
+      const [x, vx] = snap ? [target.x, 0] : springStep(node.x, target.x, velocity.x, dt, 14, 9.5);
+      const [y, vy] = snap ? [target.y, 0] : springStep(node.y, target.y, velocity.y, dt, 14, 9.5);
+      const [z, vz] = snap ? [target.z, 0] : springStep(node.z, target.z, velocity.z, dt, 14, 9.5);
       const next = { x, y, z }, nextVelocity = { x: vx, y: vy, z: vz };
       if (Math.hypot(target.x - x, target.y - y, target.z - z) <= settle.tolerance && Math.hypot(vx, vy, vz) <= settle.tolerance * 14) {
         fixPosition(node, target); settle.velocities.delete(id);
@@ -1041,9 +1066,6 @@ export class Positions {
       if (previous.x !== node.x || previous.y !== node.y || previous.z !== node.z) changed = true;
     }
     if (changed) this.revision++;
-    const displaced = this.enforceClearance(settle.clearance, new Set(settle.followers.keys()));
-    for (const id of displaced) settle.velocities.delete(id);
-    if (displaced.size && !snap) complete = false;
     if (complete) this.settle = null;
   }
   cancel(completeLayout = true) {

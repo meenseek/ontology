@@ -222,7 +222,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const [movedGroups, setMovedGroups] = useState<Map<string, { members: readonly string[]; level: number; epoch: number }>>(new Map());
   const [lodLevel, setLodLevel] = useState(0);
   const [settledRevision, setSettledRevision] = useState(0);
-  const lodLevelRef = useRef(0), movingRef = useRef(false);
+  const lodLevelRef = useRef(0), movingRef = useRef(false), settleMovingRef = useRef(false);
   const spatialCloseTimer = useRef<number | null>(null);
   const allowDrag = useRef(true), suppressClickUntil = useRef(0);
   const pointer = useRef<{ pointerId: number; pointerType: string } | null>(null);
@@ -454,18 +454,26 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const projectionY = camera.projectionMatrix.elements[5];
       const dragProjection = new Vector3();
       const unitsPerPixel = 2 * Math.max(.001, depth) / (size.height * projectionY);
+      const viewport = () => ({ width: container.current?.clientWidth || size.width, height: container.current?.clientHeight || size.height });
       const group = spatialGroups.get(node.id);
+      const cohorts = new Map<string, readonly string[]>([
+        ...[...spatialGroups].map(([id, value]) => [id, value.members] as const),
+        ...cores.filter(core => collapsedCounts.has(core.hub)).map(core => [core.hub, [...core.members]] as const),
+      ]);
       summaryHalo.current = group || collapsedCounts.has(node.id)
         ? { id: node.id, startedAt: performance.now(), releasedAt: null, releaseScale: 1 } : null;
       const plane = {
         right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
         up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1), spacingPixels: 24,
         visible: displayNodes.map(value => value.id),
-        worldPerPixel: (atDepth: number) => 2 * atDepth / (size.height * projectionY),
-        isVisible: (at: { x: number; y: number }, radius: number) => Math.abs(at.x) <= size.width / 2 + radius && Math.abs(at.y) <= size.height / 2 + radius,
+        cohorts,
+        basis: () => { camera.updateMatrixWorld(); return { right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1) }; },
+        viewKey: () => { camera.updateMatrixWorld(); const { width, height } = viewport(); return `${width}|${height}|${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}`; },
+        worldPerPixel: (atDepth: number) => 2 * atDepth / (viewport().height * camera.projectionMatrix.elements[5]),
+        isVisible: (at: { x: number; y: number }, radius: number) => { const { width, height } = viewport(); return Math.abs(at.x) <= width / 2 + radius && Math.abs(at.y) <= height / 2 + radius; },
         radius: (value: PositionedNode, atDepth: number) => {
           const isSummary = collapsedCounts.has(value.id) || spatialCounts.has(value.id);
-          const pixels = Math.max(isSummary ? 36 : 0, nodeScreenSize(value.kind, atDepth, size.height, projectionY));
+          const pixels = Math.max(isSummary ? 36 : 0, nodeScreenSize(value.kind, atDepth, viewport().height, camera.projectionMatrix.elements[5]));
           const metrics = nodeScreenMetrics(pixels, value.id === selected, value.changed);
           return isSummary ? Math.max(18, metrics.radius) : metrics.radius;
         },
@@ -474,7 +482,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           dragProjection.set(value.x, value.y, value.z).applyMatrix4(camera.matrixWorldInverse);
           const depth = camera.projectionMatrix.elements[11] === -1 ? -dragProjection.z : 1;
           dragProjection.applyMatrix4(camera.projectionMatrix);
-          return { x: dragProjection.x * size.width / 2, y: dragProjection.y * size.height / 2, depth };
+          const { width, height } = viewport();
+          return { x: dragProjection.x * width / 2, y: dragProjection.y * height / 2, depth };
         },
       };
       if (group) {
@@ -539,8 +548,28 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const instance = graph.current;
       instance?.camera().updateMatrixWorld();
       positions.advance(performance.now(), reduced);
+      if (positions.settling) settleMovingRef.current = true;
       if (positions.layoutMoving || positions.settling || positions.dragging) movingRef.current = true;
-      else if (movingRef.current) { movingRef.current = false; setSettledRevision(value => value + 1); }
+      else if (movingRef.current) {
+        movingRef.current = false;
+        if (settleMovingRef.current) {
+          const byId = new Map(nodes.map(node => [node.id, node]));
+          const shifted = [...spatialGroups].filter(([, group]) => {
+            const center = group.members.reduce((sum, id) => {
+              const node = byId.get(id)!;
+              return { x: sum.x + node.x / group.members.length, y: sum.y + node.y / group.members.length, z: sum.z + node.z / group.members.length };
+            }, { x: 0, y: 0, z: 0 });
+            return Math.hypot(center.x - group.center.x, center.y - group.center.y, center.z - group.center.z) > .001;
+          });
+          if (shifted.length) setMovedGroups(previous => {
+            const next = new Map(previous);
+            for (const [id, group] of shifted) next.set(id, { members: group.members, level: spatialLevel, epoch: positions.groupEpoch });
+            return next;
+          });
+        }
+        settleMovingRef.current = false;
+        setSettledRevision(value => value + 1);
+      }
       if (instance && lastPositions !== positions.revision) {
         lastPositions = positions.revision;
         const byId = new Map(nodes.map(node => [node.id, node]));
@@ -604,7 +633,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       frame = requestAnimationFrame(draw);
     };
     draw(); return () => cancelAnimationFrame(frame);
-  }, [ready, nodes, displayNodes, collapsedCounts, spatialCounts, selected, size, visible, positions, data, reduced, rotate, positionCamera]);
+  }, [ready, nodes, displayNodes, collapsedCounts, spatialCounts, spatialGroups, spatialLevel, selected, size, visible, positions, data, reduced, rotate, positionCamera]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;
@@ -764,8 +793,23 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         }
         graph.current?.d3ReheatSimulation();
         dragged.current = null; setDraggingId(null);
-        if (individual && moved) setMovedGroups(current => new Map([...current].filter(([, group]) => !group.members.includes(individual))));
-        if (summary && moved && summary.epoch === positions.groupEpoch) setMovedGroups(current => new Map(current).set(summary.id, { members: summary.members, level: summary.level, epoch: summary.epoch }));
+        if (moved) setMovedGroups(previous => {
+          const next = new Map([...previous].filter(([, group]) => !individual || !group.members.includes(individual)));
+          if (summary?.epoch === positions.groupEpoch) next.set(summary.id, { members: summary.members, level: summary.level, epoch: summary.epoch });
+          for (const [id, group] of spatialGroups) {
+            const representative = current.get(id), target = positions.settlingTarget(id);
+            const shifted = group.members.reduce((sum, member) => {
+              const node = current.get(member)!;
+              return { x: sum.x + node.x / group.members.length, y: sum.y + node.y / group.members.length, z: sum.z + node.z / group.members.length };
+            }, { x: 0, y: 0, z: 0 });
+            const willMove = target && representative && Math.hypot(target.x - representative.x, target.y - representative.y, target.z - representative.z) > .001;
+            const hasMoved = Math.hypot(shifted.x - group.center.x, shifted.y - group.center.y, shifted.z - group.center.z) > .001;
+            if (willMove || hasMoved) {
+              next.set(id, { members: group.members, level: spatialLevel, epoch: positions.groupEpoch });
+            }
+          }
+          return next;
+        });
         const clicked = allowDrag.current && !moved ? individual ?? (summary?.epoch === positions.groupEpoch ? summary.id : null) : null;
         if (clicked) {
           suppressClickUntil.current = 0;
