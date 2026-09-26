@@ -607,16 +607,18 @@ export class Positions {
       const group = templateView.cores.find(candidate => candidate.hub === core);
       if (templateView.disclosure && group) {
         const template = scope ? packInitialCoordinates(templateView.nodes, templateView.links) : this.coreLayout(core, 0);
+        const shown = new Set(templateView.nodes.map(node => node.id));
         if (scope) for (const collapsed of templateView.cores) {
           if (!templateView.counts.has(collapsed.hub)) continue;
           const center = template.get(collapsed.hub)!;
-          for (const id of collapsed.members) if (id !== collapsed.hub) template.set(id, point(center));
+          for (const id of collapsed.members) if (!shown.has(id)) template.set(id, point(center));
         }
         const hub = template.get(core)!;
-        const slots = [...templateView.disclosure.visible].filter(id => id !== core).sort().map(id => template.get(id)!);
+        const pinned = templateView.disclosure.pinned;
+        const slots = [...templateView.disclosure.visible].filter(id => id !== core && !pinned.has(id)).sort().map(id => template.get(id)!);
         const visible = new Map(template);
-        for (const id of group.members) if (id !== core) visible.set(id, point(hub));
-        for (const [index, id] of [...visibleMembers].filter(id => id !== core).sort().entries()) {
+        for (const id of group.members) if (id !== core && !pinned.has(id)) visible.set(id, point(hub));
+        for (const [index, id] of [...visibleMembers].filter(id => id !== core && !pinned.has(id)).sort().entries()) {
           if (slots[index] && group.members.has(id)) visible.set(id, point(slots[index]));
         }
         this.layouts.set(key, visible);
@@ -630,11 +632,12 @@ export class Positions {
     }
     const view = constellationView(source.nodes, source.links, null, core || null, page);
     const visible = packInitialCoordinates(view.nodes, view.links);
+    const shown = new Set(view.nodes.map(node => node.id));
     for (const group of view.cores) {
       if (!view.counts.has(group.hub)) continue;
       const hub = visible.get(group.hub)!;
       for (const id of group.members) {
-        if (id === group.hub) continue;
+        if (shown.has(id)) continue;
         visible.set(id, point(hub));
       }
     }
@@ -726,9 +729,9 @@ export class Positions {
         if (!edgeMoved.has(id)) drag.velocities.delete(id);
         continue;
       }
-      const [x, vx] = reduced ? [target.x, 0] : springStep(current.x, target.x, velocity.x, dt, 20, 11);
-      const [y, vy] = reduced ? [target.y, 0] : springStep(current.y, target.y, velocity.y, dt, 20, 11);
-      const [z, vz] = reduced ? [target.z, 0] : springStep(current.z, target.z, velocity.z, dt, 20, 11);
+      const [x, vx] = reduced ? [target.x, 0] : springStep(current.x, target.x, velocity.x, dt, 16, 9);
+      const [y, vy] = reduced ? [target.y, 0] : springStep(current.y, target.y, velocity.y, dt, 16, 9);
+      const [z, vz] = reduced ? [target.z, 0] : springStep(current.z, target.z, velocity.z, dt, 16, 9);
       const next = { x, y, z }, nextVelocity = { x: vx, y: vy, z: vz };
       if (Math.hypot(target.x - x, target.y - y, target.z - z) < drag.tolerance &&
           Math.hypot(vx, vy, vz) < drag.tolerance * 14) {
@@ -788,6 +791,12 @@ export class Positions {
         const nodes = model.nodes.map(node => ({ ...node })), links = model.links.map(link => ({ ...link }));
         this.source = { nodes, links, structure };
         this.layouts.clear();
+        this.activeCore = "";
+        this.activePage = undefined;
+        this.activeVisible = undefined;
+        this.activeVisibleKey = "";
+        this.activeScope = undefined;
+        this.activeScopeKey = "";
         if (!retained.size) {
           const overview = this.coreLayout("");
           for (const node of model.nodes) fixPosition(node, overview.get(node.id)!);
@@ -1038,7 +1047,7 @@ export class Positions {
     const layout = this.layoutMotion;
     if (layout) {
       const fraction = reduced ? 1 : Math.min(1, Math.max(0, (now - layout.start) / layoutDuration));
-      const eased = 1 - (1 - fraction) ** 3;
+      const eased = fraction * fraction * (3 - 2 * fraction);
       let changed = false;
       for (const [id, node] of this.nodes) {
         const from = layout.from.get(id) ?? point(node), to = layout.to.get(id) ?? from;
@@ -1059,7 +1068,7 @@ export class Positions {
       if (!drag.moved && Math.hypot(held.x - drag.start.x, held.y - drag.start.y, held.z - drag.start.z) <= drag.tolerance) return;
       const dt = drag.last === null ? 0 : Math.max(0, (now - drag.last) / 1000);
       drag.last = Math.max(drag.last ?? now, now);
-      const fraction = reduced ? 1 : 1 - Math.exp(-18 * dt);
+      const fraction = reduced ? 1 : 1 - Math.exp(-14 * dt);
       let changed = false;
       const edgeMoved = new Set<string>();
       for (const edge of drag.rigid ? [] : drag.edges) {
@@ -1073,7 +1082,7 @@ export class Positions {
         const travel = a.depth > 0 && b.depth > 0 && denominator > 0 ? visibleFraction * a.depth / denominator : visibleFraction;
         const target = add(from, delta, travel);
         const next = add(to, add(target, to, -1), fraction);
-        drag.velocities.set(edge.to, reduced ? zero() : add(zero(), add(target, next, -1), 18));
+        drag.velocities.set(edge.to, reduced ? zero() : add(zero(), add(target, next, -1), 14));
         edgeMoved.add(edge.to);
         fixPosition(to, next); this.observed.set(edge.to, point(next)); changed = true;
       }
