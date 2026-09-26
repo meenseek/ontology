@@ -70,7 +70,7 @@ export default function App() {
   const updateBusy = useCallback((value: boolean) => { busyRef.current = value; setBusy(value); }, []);
   const dirtyRef = useRef(false);
   const updateDirty = useCallback((value: boolean) => { dirtyRef.current = value; }, []);
-  const [notice, setNotice] = useState(""), [listMode, setListMode] = useState(route.scope === "personal" || !!route.q), [webglFailed, setWebglFailed] = useState(false);
+  const [notice, setNotice] = useState(""), [listMode, setListMode] = useState(false), [webglFailed, setWebglFailed] = useState(false);
   const [visible, setVisible] = useState(document.visibilityState !== "hidden");
   const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   const [rotate, setRotate] = useState(false), [fit, setFit] = useState(0);
@@ -100,7 +100,7 @@ export default function App() {
     const visibility = () => setVisible(document.visibilityState !== "hidden");
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
     const motion = () => setReduced(media.matches);
-    const pop = () => { if (busyRef.current || dirtyRef.current && !window.confirm("저장하지 않은 원문 초안을 버리고 이동할까요?")) { window.history.pushState(null, "", graphUrl(routeRef.current.scope, routeRef.current.q, routeRef.current.focus)); return; } updateDirty(false); const next = parseLocation(window.location.search); routeRef.current = next; setRoute(next); setInput(next.q); setListMode(next.scope === "personal" || !!next.q); setFilters(initialFilters); setPanel(next.focus ? "node" : null); setManaging(false); setSavedMemory(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); };
+    const pop = () => { if (busyRef.current || dirtyRef.current && !window.confirm("저장하지 않은 원문 초안을 버리고 이동할까요?")) { window.history.pushState(null, "", graphUrl(routeRef.current.scope, routeRef.current.q, routeRef.current.focus)); return; } updateDirty(false); const next = parseLocation(window.location.search); routeRef.current = next; setRoute(next); setInput(next.q); setFilters(initialFilters); setPanel(next.focus ? "node" : null); setManaging(false); setSavedMemory(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); };
     const beforeUnload = (event: BeforeUnloadEvent) => { if (dirtyRef.current || busyRef.current) event.preventDefault(); };
     document.addEventListener("visibilitychange", visibility); media.addEventListener("change", motion); window.addEventListener("popstate", pop); window.addEventListener("beforeunload", beforeUnload);
     return () => { document.removeEventListener("visibilitychange", visibility); media.removeEventListener("change", motion); window.removeEventListener("popstate", pop); window.removeEventListener("beforeunload", beforeUnload); };
@@ -160,12 +160,12 @@ export default function App() {
     if (busy || !confirmDiscard()) return;
     const next = query.trim(), same = route.q === next;
     setInput(next); syncRoute({ scope: route.scope, q: next, focus: null });
-    setListMode(route.scope === "personal" || !!next); if (panel !== "manage") setPanel(null);
+    if (panel !== "manage") setPanel(null);
     setFilters(initialFilters); setNotice(""); if (same) setRefresh(v => v + 1);
   }
   function changeScope(scope: Scope) {
     if (busy || scope === route.scope || !confirmDiscard()) return;
-    previous.current = undefined; setStored(null); setInput(""); setListMode(scope === "personal"); setFilters(initialFilters); setPanel(null); setManaging(false); setSavedMemory(null); setNotice(""); setError("");
+    previous.current = undefined; setStored(null); setInput(""); setFilters(initialFilters); setPanel(null); setManaging(false); setSavedMemory(null); setNotice(""); setError("");
     syncRoute({ scope, q: "", focus: null });
   }
   function choose(id: string) {

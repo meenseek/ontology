@@ -88,6 +88,7 @@ export function spriteScale(pixels: number, viewportHeight: number, projectionY:
 // 26px floor turned a fitted dense constellation into a solid white disc.
 export const MIN_KNOWLEDGE_STAR_PIXELS = 10;
 export const FOCUSED_KNOWLEDGE_STAR_PIXELS = 72;
+export const SUMMARY_GLYPH_PIXELS = 36;
 const KNOWLEDGE_STAR_WORLD_SIZE = 14;
 /** Perspective diameter in CSS pixels, shared by rendering, picking and projected labels. */
 export function nodeScreenSize(kind: string, depth: number, viewportHeight: number, projectionY: number): number {
@@ -107,6 +108,12 @@ export function nodeScreenMetrics(size: number, selected: boolean, changed: bool
   const selection = Math.max(27, size + 12) * (128 / 112), change = Math.max(36, size + 24) * (128 / 112);
   const extent = changed ? change : selected ? selection : size;
   return { body: size, selection, change, hit: Math.max(36, extent), radius: extent / 2 };
+}
+/** Summary glyphs stay screen-sized; selection and change rings still grow on approach. */
+export function nodeVisualRadius(size: number, selected: boolean, changed: boolean, summary: boolean): number {
+  const radius = nodeScreenMetrics(size, selected, changed).radius;
+  if (!summary || radius <= 0) return radius;
+  return selected || changed ? Math.max(SUMMARY_GLYPH_PIXELS / 2, radius) : SUMMARY_GLYPH_PIXELS / 2;
 }
 /** A summary's ring responds to a grab and settles after release without moving its stars or hit area. */
 export type SummaryHaloMotion = { id: string; startedAt: number; releasedAt: number | null; releaseScale: number };

@@ -10,7 +10,7 @@ import type { NucleusView } from "./nuclei";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
-import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
+import { MAX_VISIBLE_LABELS, SUMMARY_GLYPH_PIXELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
@@ -479,9 +479,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         isVisible: (at: { x: number; y: number }, radius: number) => { const { width, height } = viewport(); return Math.abs(at.x) <= width / 2 + radius && Math.abs(at.y) <= height / 2 + radius; },
         radius: (value: PositionedNode, atDepth: number) => {
           const isSummary = collapsedCounts.has(value.id) || spatialCounts.has(value.id);
-          const pixels = Math.max(isSummary ? 36 : 0, nodeScreenSize(value.kind, atDepth, viewport().height, camera.projectionMatrix.elements[5]));
-          const metrics = nodeScreenMetrics(pixels, value.id === selected, value.changed);
-          return isSummary ? Math.max(18, metrics.radius) : metrics.radius;
+          const pixels = nodeScreenSize(value.kind, atDepth, viewport().height, camera.projectionMatrix.elements[5]);
+          return nodeVisualRadius(pixels, value.id === selected, value.changed, isSummary);
         },
         project: (value: { x: number; y: number; z: number }) => {
           camera.updateMatrixWorld();
@@ -606,8 +605,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           const candidates = displayNodes.map(node => {
             projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
             const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
-            const pixels = Math.max(summary ? 36 : 0, nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]));
-            const { radius } = nodeScreenMetrics(pixels, node.id === selected, node.changed);
+            const pixels = nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]);
+            const radius = nodeVisualRadius(pixels, node.id === selected, node.changed, summary);
             projected.applyMatrix4(camera.projectionMatrix);
             return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)! };
           });
@@ -675,7 +674,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         glyph.signature = signature;
         previous.dispose();
       }
-      group.add(screenSprite(glyph.material, node, "body", false, 0, 36,
+      group.add(screenSprite(glyph.material, node, "body", false, 0, SUMMARY_GLYPH_PIXELS,
         haloScale && (() => 1 + (haloScale() - 1) * .35),
         () => (contactMotion()?.pulse ?? 0) * .09));
     } else group.add(isKnowledge

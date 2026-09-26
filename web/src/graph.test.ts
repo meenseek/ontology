@@ -434,6 +434,18 @@ test("enlarged stars share padded ring, hit and label clearance at overview and 
     assert.ok(box.left >= node.x + metrics.radius + 5, "horizontal label clears the entire footprint");
   }
 });
+test("summary collision and labels use the fixed glyph body while enlarged status rings stay clear", async () => {
+  const { nodeScreenMetrics, nodeVisualRadius, SUMMARY_GLYPH_PIXELS } = await import("./presentation.ts");
+  for (const size of [10, 36, 72, 140]) {
+    assert.equal(nodeVisualRadius(size, false, false, true), SUMMARY_GLYPH_PIXELS / 2);
+    assert.equal(nodeVisualRadius(size, false, false, false), size / 2);
+    for (const [selected, changed] of [[true, false], [false, true], [true, true]]) {
+      assert.equal(nodeVisualRadius(size, selected, changed, true),
+        Math.max(SUMMARY_GLYPH_PIXELS / 2, nodeScreenMetrics(size, selected, changed).radius));
+    }
+  }
+  assert.equal(nodeVisualRadius(0, false, false, true), 0);
+});
 test("390px closeups keep the selected name visible above or below its enlarged rings", async () => {
   const { nodeScreenMetrics, nodeScreenSize, visibleLabels } = await import("./presentation.ts");
   const metrics = nodeScreenMetrics(nodeScreenSize("document", 20, 300, 2), true, true);
@@ -1457,9 +1469,10 @@ test("a high-degree component has one stable overview core and expands without l
   assert.equal(denseConstellationCores([{ ...doc("hub"), current: false }, ...nodes.slice(1)], links).length, 0,
     "a nonusable node cannot make unrelated records into a core");
   const externalEvidence = [...links, edge("spoke-0", "independent", false)];
-  assert.equal(constellationView(positioned, externalEvidence, null, null).counts.size, 0,
-    "an outside historical edge keeps the whole relationship visible");
-  assert.equal(constellationView(positioned, externalEvidence, null, null).links.length, 120);
+  assert.equal(constellationView(positioned, externalEvidence, null, null).counts.get("hub"), 120,
+    "one outside historical edge does not expose the entire core");
+  assert.equal(constellationView(positioned, externalEvidence, null, null).links.length, 2,
+    "the outside historical edge and its member's hub edge keep their actual endpoints visible");
   const hubEvidence = [...links, edge("hub", "independent", false)];
   assert.equal(constellationView(positioned, hubEvidence, null, null).counts.get("hub"), 120);
   assert.equal(constellationView(positioned, hubEvidence, null, null).links.length, 1,
@@ -1509,8 +1522,43 @@ test("a large connected core opens in compact pages without losing access to any
     "reset keeps the active filtered page layout");
   assert.equal(constellationView(model.nodes, links, null, "hub").links.length, 119,
     "explicit full expansion still exposes every relation at once");
-  assert.equal(constellationView(model.nodes, [...links, edge("spoke-090", "outside")], null, "hub", 0).disclosure, null,
-    "an external member relation prevents paging that would hide its endpoint");
+});
+test("outside relations keep their real endpoints while the rest of a large core stays compact", () => {
+  const nodes = [doc("hub"), ...Array.from({ length: 119 }, (_, index) => doc(`spoke-${String(index).padStart(3, "0")}`)), doc("outside")];
+  const links = [...nodes.slice(1, 120).map(node => edge("hub", node.id)), edge("spoke-090", "outside", false)];
+  const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model, true);
+  const overview = constellationView(model.nodes, model.links, null, null);
+  assert.equal(overview.counts.get("hub"), 120);
+  assert.deepEqual(new Set(overview.nodes.map(node => node.id)), new Set(["hub", "spoke-090", "outside"]));
+  assert.ok(overview.links.some(link => link.source === "spoke-090" && link.target === "outside"));
+  const hub = model.nodes.find(node => node.id === "hub")!, pinned = model.nodes.find(node => node.id === "spoke-090")!;
+  assert.ok(Math.hypot(pinned.x - hub.x, pinned.y - hub.y) > 0, "the outside relation's endpoint stays visible and separated");
+  const first = constellationView(model.nodes, model.links, null, "hub", 0);
+  assert.equal(first.disclosure?.pages, 10);
+  assert.equal(first.nodes.length, 15, "the exposed core shows twelve ordinary members and one pinned member");
+  assert.ok(first.links.some(link => link.source === "spoke-090" && link.target === "outside"));
+  positions.showCore("hub", 0, true, first.disclosure?.index, first.disclosure?.visible);
+  assert.ok(Math.hypot(pinned.x - hub.x, pinned.y - hub.y) > 0);
+  const pinnedAt = { x: pinned.x, y: pinned.y, z: pinned.z };
+  const next = constellationView(model.nodes, model.links, null, "hub", 1);
+  positions.showCore("hub", 10, true, next.disclosure?.index, next.disclosure?.visible);
+  assert.deepEqual({ x: pinned.x, y: pinned.y, z: pinned.z }, pinnedAt,
+    "the endpoint of an outside relation stays put when ordinary members change pages");
+});
+test("reset after a filtered page and a same-route refresh drops obsolete layout scope", () => {
+  const nodes = [doc("hub"), ...Array.from({ length: 50 }, (_, index) => doc(`spoke-${String(index).padStart(3, "0")}`))];
+  const links = nodes.slice(1).map(node => edge("hub", node.id));
+  const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model, true);
+  const filteredNodes = model.nodes.filter(node => node.id !== "spoke-045");
+  const filteredLinks = links.filter(link => link.target !== "spoke-045");
+  const page = constellationView(filteredNodes, filteredLinks, null, "hub", 3);
+  positions.showCore("hub", 0, true, page.disclosure?.index, page.disclosure?.visible, { nodes: filteredNodes, links: filteredLinks });
+  const updatedNodes = nodes.filter(node => node.id !== "spoke-040" && node.id !== "spoke-045");
+  const updatedLinks = links.filter(link => updatedNodes.some(node => node.id === link.target));
+  const updated = reconcile(snapshot(updatedNodes, updatedLinks), model);
+  positions.install(updated, true);
+  assert.doesNotThrow(() => positions.reset());
+  assert.ok(updated.nodes.every(node => [node.x, node.y, node.z].every(Number.isFinite)));
 });
 test("a filtered core still opens compactly when its hub changes or another hub disappears", () => {
   const nodes = [doc("a"), doc("b"), ...Array.from({ length: 40 }, (_, index) => doc(`a-${index}`)),
@@ -1626,13 +1674,14 @@ test("separate collapsed groups each sit among unrelated stars without a reserve
   }
 });
 test("overview, orbit, focus, refresh and reset keep a dense personal constellation readable", async () => {
-  const { focusedCameraDistance, nodeScreenSize, starMotion } = await import("./presentation.ts");
+  const { focusedCameraDistance, nodeScreenSize, nodeVisualRadius, starMotion } = await import("./presentation.ts");
   const nodes = Array.from({ length: 536 }, (_, index) => ({ ...doc(`personal-${String(index).padStart(3, "0")}`), scope: "personal" as const }));
   const links = Array.from({ length: 128 }, (_, index) => edge(nodes[0].id, nodes[index + 1].id));
   const source = { ...snapshot(nodes, links), scope: "personal" as const };
   const model = reconcile(source), positions = new Positions(); positions.install(model, true);
   const initial = new Map(model.nodes.map(node => [node.id, coordinates(node)]));
-  const overview = constellationView(model.nodes, model.links, null, null).nodes;
+  const overviewView = constellationView(model.nodes, model.links, null, null);
+  const overview = overviewView.nodes;
   const width = 1200, height = 800, camera = new PerspectiveCamera(60, width / height, .1, 10000);
   const bounds = overview.reduce((value, node) => ({
     minX: Math.min(value.minX, node.x), maxX: Math.max(value.maxX, node.x),
@@ -1646,13 +1695,14 @@ test("overview, orbit, focus, refresh and reset keep a dense personal constellat
     const point = new Vector3(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
     const size = nodeScreenSize(node.kind, -point.z, height, camera.projectionMatrix.elements[5]);
     point.applyMatrix4(camera.projectionMatrix);
-    return { x: (point.x + 1) * width / 2, y: (1 - point.y) * height / 2, size };
+    return { x: (point.x + 1) * width / 2, y: (1 - point.y) * height / 2,
+      radius: nodeVisualRadius(size, false, false, overviewView.counts.has(node.id)) };
   });
   camera.position.copy(center).add(new Vector3(0, 0, distance)); camera.lookAt(center); camera.updateMatrixWorld();
   const front = project();
   let overlaps = 0;
   for (let i = 0; i < front.length; i++) for (let j = i + 1; j < front.length; j++) {
-    if (Math.hypot(front[i].x - front[j].x, front[i].y - front[j].y) < (front[i].size + front[j].size) / 2) overlaps++;
+    if (Math.hypot(front[i].x - front[j].x, front[i].y - front[j].y) < front[i].radius + front[j].radius) overlaps++;
   }
   assert.ok(overlaps < 100, `${overlaps} projected bodies overlap in the first view`);
   camera.up.set(0, 0, 1); camera.position.copy(center).add(new Vector3(0, distance, 0)); camera.lookAt(center); camera.updateMatrixWorld();
