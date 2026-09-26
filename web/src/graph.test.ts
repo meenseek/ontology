@@ -51,9 +51,24 @@ test("unclassified stars have stable but varied colors and silhouettes", async (
   const colors = ids.map(id => starColor({ id, kind: "document" }));
   const shapes = ids.map(starShape);
   assert.ok(new Set(colors).size >= 3);
+  assert.ok(new Set(Array.from({ length: 100 }, (_, index) => starColor({ id: `spectrum-${index}`, kind: "document" }))).size >= 7);
   assert.deepEqual(new Set(shapes), new Set([0, 1, 2, 3]));
   assert.deepEqual(ids.map(id => starColor({ id, kind: "document" })), colors);
   assert.deepEqual(ids.map(starShape), shapes);
+});
+test("summary glyph samples real members into a stable, bounded star cloud", async () => {
+  const { summaryGlyphStars } = await import("./summary-glyph.ts");
+  const members = Array.from({ length: 120 }, (_, index) => ({ id: `member-${index}`, kind: "document", taxonomyColor: index === 0 ? "#abc123" : undefined }));
+  const stars = summaryGlyphStars("group-a", members);
+  assert.equal(stars.length, 14);
+  assert.deepEqual(stars, summaryGlyphStars("group-a", [...members].reverse()));
+  assert.ok(stars.every(star => Number.isFinite(star.x) && Number.isFinite(star.y) && Math.hypot(star.x, star.y) < 1 && star.depth >= -1 && star.depth <= 1));
+  assert.ok(new Set(stars.map(star => star.color)).size > 1);
+  assert.ok(new Set(stars.map(star => star.shape)).size > 1);
+  const mixed = summaryGlyphStars("small", members.slice(0, 6).map((member, index) => ({ ...member, opacity: index === 0 ? .4 : 1 })));
+  assert.equal(mixed.length, 6);
+  assert.ok(mixed.some(star => star.color === "#abc123" && star.opacity === .4));
+  assert.ok(mixed.some(star => star.opacity === 1));
 });
 test("empty, isolated and larger disconnected inputs have finite deterministic positions", () => {
   for (const size of [0, 1, 400]) {

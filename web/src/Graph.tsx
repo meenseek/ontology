@@ -11,6 +11,7 @@ import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
 import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
+import { summaryGlyphTexture } from "./summary-glyph";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
 type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFailure: () => void };
@@ -231,6 +232,16 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const spatial = useMemo(() => frozenSpatial.current ?? nucleusView(semanticNodes, snapshot.links,
     spatialLevel, selected, spatialReveal?.members, spatialLocks), [semanticNodes, snapshot.links, spatialLevel, selected, settledRevision, spatialReveal, spatialLocks]);
   const { nodes: displayNodes, counts: spatialCounts, groups: spatialGroups } = spatial;
+  const glyphMembers = useMemo(() => {
+    const byId = new Map(nodes.map(node => [node.id, node]));
+    const members = new Map<string, PositionedNode[]>();
+    for (const id of collapsedCounts.keys()) {
+      const core = cores.find(candidate => candidate.hub === id);
+      if (core) members.set(id, [...core.members].map(memberId => byId.get(memberId)).filter((node): node is PositionedNode => Boolean(node)));
+    }
+    for (const [id, group] of spatialGroups) members.set(id, group.members.map(memberId => byId.get(memberId)).filter((node): node is PositionedNode => Boolean(node)));
+    return members;
+  }, [nodes, collapsedCounts, cores, spatialGroups]);
   const collapsibleCore = useMemo(() => !selected && expandedCore && constellationView(nodes, links, null, null).counts.has(expandedCore), [nodes, links, selected, expandedCore]);
   const activeExpandedCore = collapsibleCore ? expandedCore : null;
   // A filter can remove a hub and expose members hidden in the full overview.
@@ -247,7 +258,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: displayLinks.map(l => ({ ...l })) }), [displayNodes, displayLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
-  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), ring: texture("ring"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>() }), []);
+  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), ring: texture("ring"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>(), summaries: new Map<string, { signature: string; texture: CanvasTexture; material: SpriteMaterial }>() }), []);
   useEffect(() => {
     const element = container.current;
     if (!element) return;
@@ -261,7 +272,19 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     resources.geometry.dispose(); resources.star.dispose(); resources.ring.dispose(); resources.selection.dispose(); resources.change.dispose();
     for (const material of resources.materials.values()) material.dispose();
     resources.materials.clear();
+    for (const summary of resources.summaries.values()) { summary.material.dispose(); summary.texture.dispose(); }
+    resources.summaries.clear();
   }, [resources]);
+  useEffect(() => {
+    // ForceGraph replaces old node objects during this commit. Retire absent
+    // summary textures on the following frame, after their sprites are gone.
+    const frame = requestAnimationFrame(() => {
+      for (const [id, glyph] of resources.summaries) if (!glyphMembers.has(id)) {
+        glyph.material.dispose(); glyph.texture.dispose(); resources.summaries.delete(id);
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [glyphMembers, resources]);
   const ready = size.width > 0 && size.height > 0;
   useEffect(() => {
     const instance = graph.current;
@@ -435,9 +458,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         worldPerPixel: (atDepth: number) => 2 * atDepth / (size.height * projectionY),
         isVisible: (at: { x: number; y: number }, radius: number) => Math.abs(at.x) <= size.width / 2 + radius && Math.abs(at.y) <= size.height / 2 + radius,
         radius: (value: PositionedNode, atDepth: number) => {
-          const pixels = Math.max(spatialCounts.has(value.id) ? 34 : 0, nodeScreenSize(value.kind, atDepth, size.height, projectionY));
+          const isSummary = collapsedCounts.has(value.id) || spatialCounts.has(value.id);
+          const pixels = Math.max(isSummary ? 36 : 0, nodeScreenSize(value.kind, atDepth, size.height, projectionY));
           const metrics = nodeScreenMetrics(pixels, value.id === selected, value.changed);
-          return spatialCounts.has(value.id) ? Math.max(18, metrics.radius) : metrics.radius;
+          return isSummary ? Math.max(18, metrics.radius) : metrics.radius;
         },
         project: (value: { x: number; y: number; z: number }) => {
           camera.updateMatrixWorld();
@@ -540,10 +564,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           lastProjection = key;
           const candidates = displayNodes.map(node => {
             projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
-            const pixels = Math.max(collapsedCounts.has(node.id) || spatialCounts.has(node.id) ? 22 : 0, nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]));
+            const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
+            const pixels = Math.max(summary ? 36 : 0, nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]));
             const { radius } = nodeScreenMetrics(pixels, node.id === selected, node.changed);
             projected.applyMatrix4(camera.projectionMatrix);
-            return { id: node.id, kind: node.kind, active: active(node), summary: collapsedCounts.has(node.id) || spatialCounts.has(node.id), importance: collapsedCounts.has(node.id) ? 2 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)! };
+            return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)! };
           });
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
           const labelCandidates = candidates.filter(node => !spatialCounts.has(node.id) || spatialLabels.has(node.id) || node.id === hoveredId.current || node.id === focusedSummary);
@@ -591,18 +616,35 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const isSelected = node.id === selected;
     const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
     const haloScale = summary ? () => summaryHaloScale(summaryHalo.current, node.id, performance.now(), motionReduced.current) : undefined;
-    group.add(isKnowledge
+    const members = glyphMembers.get(node.id);
+    if (summary && members?.length) {
+      const samples = members.map(member => ({ id: member.id, kind: member.kind, taxonomyColor: member.taxonomyColor, opacity: active(member) ? 1 : .4 }));
+      const signature = samples.map(member => `${member.id}:${starColor(member)}:${member.opacity}`).sort().join("|");
+      let glyph = resources.summaries.get(node.id);
+      if (!glyph) {
+        const image = summaryGlyphTexture(node.id, samples);
+        glyph = { signature, texture: image, material: new SpriteMaterial({ map: image, color: "#ffffff", transparent: true, opacity: 1, depthWrite: false, depthTest: true, sizeAttenuation: false }) };
+        resources.summaries.set(node.id, glyph);
+      } else if (glyph.signature !== signature) {
+        const previous = glyph.texture;
+        glyph.texture = summaryGlyphTexture(node.id, samples);
+        glyph.material.map = glyph.texture;
+        glyph.material.needsUpdate = true;
+        glyph.signature = signature;
+        previous.dispose();
+      }
+      group.add(screenSprite(glyph.material, node, "body", false, 0, 36, haloScale && (() => 1 + (haloScale() - 1) * .35)));
+    } else group.add(isKnowledge
       ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged, summary ? 22 : 0, haloScale)
       : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected, 0, undefined,
         haloScale && (() => 1 + (haloScale() - 1) * 2)));
-    if (spatialCounts.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .85), node, "body", false, 34, undefined, haloScale));
     if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .7), node, "body", false, 0, 18));
     if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected));
     if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected));
     // The invisible plane follows the star and status rings, with a 36px minimum.
     group.add(screenSprite(material("hit", "#ffffff", 0), node, "hit", isSelected));
     return group;
-  }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal]);
+  }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal, glyphMembers]);
   const chooseNode = (id: string) => {
     hoveredId.current = null; setHover(null);
     if (disabled || performance.now() < suppressClickUntil.current) return;
