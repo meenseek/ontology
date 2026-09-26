@@ -460,6 +460,7 @@ function springStep(value: number, target: number, velocity: number, dt: number,
 }
 type PendingLayout = { token: number; root: string; right: Point; up: Point; spacing: number; clearance: Clearance | null; reduced: boolean };
 type LayoutMotion = { from: Map<string, Point>; to: Map<string, Point>; actual: Map<string, Point>; start: number };
+type LayoutScope = { nodes: PositionedNode[]; links: GraphLink[] };
 const layoutDuration = 650;
 const graphStructure = (nodes: readonly PositionedNode[], links: readonly GraphLink[]) => JSON.stringify([
   nodes.map(node => JSON.stringify([node.id, node.cluster, node.kind, node.status, node.current, node.present, node.temporal, node.supported])).sort(),
@@ -556,6 +557,11 @@ export class Positions {
   private layouts = new Map<string, Map<string, Point>>();
   private canonical = new Map<string, Point>();
   private activeCore = "";
+  private activePage: number | undefined;
+  private activeVisible: ReadonlySet<string> | undefined;
+  private activeVisibleKey = "";
+  private activeScope: LayoutScope | undefined;
+  private activeScopeKey = "";
   private layoutMotion: LayoutMotion | null = null;
   private layoutNeedsRefresh = false;
   private worker: Worker | null = null;
@@ -588,16 +594,41 @@ export class Positions {
     const from = motion.from.get(id) ?? point(node), to = motion.to.get(id) ?? from;
     return add(motion.actual.get(id) ?? point(node), add(to, from, -1));
   }
-  private coreLayout(core: string): Map<string, Point> {
-    const cached = this.layouts.get(core);
+  private coreLayout(core: string, page?: number, visibleMembers?: ReadonlySet<string>, scope?: LayoutScope): Map<string, Point> {
+    const visibleKey = visibleMembers ? [...visibleMembers].sort().join("|") : "";
+    const scopeKey = scope ? graphStructure(scope.nodes, scope.links) : "";
+    const key = `${core}:${page ?? "all"}:${visibleKey}:${scopeKey}`;
+    const cached = this.layouts.get(key);
     if (cached) return cached;
     const source = this.source!;
+    if (visibleMembers && core && core !== "*") {
+      const basis = scope ?? source;
+      const templateView = constellationView(basis.nodes, basis.links, null, core, 0);
+      const group = templateView.cores.find(candidate => candidate.hub === core);
+      if (templateView.disclosure && group) {
+        const template = scope ? packInitialCoordinates(templateView.nodes, templateView.links) : this.coreLayout(core, 0);
+        if (scope) for (const collapsed of templateView.cores) {
+          if (!templateView.counts.has(collapsed.hub)) continue;
+          const center = template.get(collapsed.hub)!;
+          for (const id of collapsed.members) if (id !== collapsed.hub) template.set(id, point(center));
+        }
+        const hub = template.get(core)!;
+        const slots = [...templateView.disclosure.visible].filter(id => id !== core).sort().map(id => template.get(id)!);
+        const visible = new Map(template);
+        for (const id of group.members) if (id !== core) visible.set(id, point(hub));
+        for (const [index, id] of [...visibleMembers].filter(id => id !== core).sort().entries()) {
+          if (slots[index] && group.members.has(id)) visible.set(id, point(slots[index]));
+        }
+        this.layouts.set(key, visible);
+        return visible;
+      }
+    }
     if (core === "*") {
       const full = packInitialCoordinates(source.nodes, source.links);
-      this.layouts.set(core, full);
+      this.layouts.set(key, full);
       return full;
     }
-    const view = constellationView(source.nodes, source.links, null, core || null);
+    const view = constellationView(source.nodes, source.links, null, core || null, page);
     const visible = packInitialCoordinates(view.nodes, view.links);
     for (const group of view.cores) {
       if (!view.counts.has(group.hub)) continue;
@@ -607,19 +638,31 @@ export class Positions {
         visible.set(id, point(hub));
       }
     }
-    this.layouts.set(core, visible);
+    if (view.disclosure) {
+      const hub = visible.get(view.disclosure.hub)!;
+      for (const id of view.cores.find(group => group.hub === view.disclosure!.hub)!.members) {
+        if (!view.disclosure.visible.has(id)) visible.set(id, point(hub));
+      }
+    }
+    this.layouts.set(key, visible);
     return visible;
   }
-  showCore(core: string | null, now: number, reduced: boolean) {
+  showCore(core: string | null, now: number, reduced: boolean, page?: number, visibleMembers?: ReadonlySet<string>, scope?: LayoutScope) {
     if (!this.source || !Number.isFinite(now)) return;
-    const key = core ?? "";
-    if (key === this.activeCore && !this.layoutNeedsRefresh) return;
+    const key = core ?? "", visibleKey = visibleMembers ? [...visibleMembers].sort().join("|") : "";
+    const scopeKey = scope ? graphStructure(scope.nodes, scope.links) : "";
+    if (key === this.activeCore && page === this.activePage && visibleKey === this.activeVisibleKey && scopeKey === this.activeScopeKey && !this.layoutNeedsRefresh) return;
     this.cancel(false);
-    const target = this.coreLayout(key);
+    const target = this.coreLayout(key, page, visibleMembers, scope);
     const actual = new Map([...this.nodes].map(([id, node]) => [id, point(node)]));
     const from = new Map([...actual].map(([id, value]) => [id, this.canonical.get(id) ?? value]));
     this.layoutMotion = { from, to: target, actual, start: now };
     this.activeCore = key;
+    this.activePage = page;
+    this.activeVisible = visibleMembers ? new Set(visibleMembers) : undefined;
+    this.activeVisibleKey = visibleKey;
+    this.activeScope = scope;
+    this.activeScopeKey = scopeKey;
     this.layoutNeedsRefresh = false;
     if (reduced) this.advance(now, true);
   }
@@ -775,7 +818,7 @@ export class Positions {
   reset() {
     this.cancel();
     this.groupEpoch++;
-    const layout = this.source ? this.coreLayout(this.activeCore) : this.baseline;
+    const layout = this.source ? this.coreLayout(this.activeCore, this.activePage, this.activeVisible, this.activeScope) : this.baseline;
     for (const [id, value] of layout) fixPosition(this.nodes.get(id)!, value);
     if (this.source) this.canonical = new Map(layout);
     this.observed = new Map([...this.nodes].map(([id, node]) => [id, point(node)]));
