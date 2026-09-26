@@ -636,9 +636,18 @@ test("a neighboring node moves only at the visible one-pixel clearance boundary"
   assert.equal(other.x, 75, "the neighboring node waits outside the visible clearance range");
   positions.move("held", { x: 34, y: 0, z: 0 });
   assert.equal(other.x, 75, "touching the one-pixel boundary does not push the neighbor");
+  assert.equal(positions.collisionReaction("other", performance.now(), false), null, "proximity alone has no visual reaction");
+  positions.move("held", { x: 34.1, y: 0, z: 0 });
+  assert.ok(other.x > 75 && positions.collisionReaction("other", performance.now(), false), "fractional contact also reacts");
   positions.move("held", { x: 35, y: 0, z: 0 });
   assert.ok(other.x > 75 && other.x < 77, "the neighbor follows only when the boundary is crossed");
   assert.ok(other.x - 35 >= 41, "the 1px hard boundary applies during a drag");
+  const now = performance.now(), reaction = positions.collisionReaction("other", now, false);
+  assert.ok(reaction && reaction.x > 0 && reaction.glow > 0, "contact gives the displaced star a directed response");
+  assert.equal(positions.collisionReaction("other", now, true), null, "reduced motion suppresses the response");
+  const frozen = { x: other.x, y: other.y, z: other.z };
+  assert.equal(positions.collisionReaction("other", now + 500, false), null, "the response expires");
+  assert.deepEqual({ x: other.x, y: other.y, z: other.z }, frozen, "visual recoil never changes collision geometry");
 });
 test("an ordinary star yields at its visible one-pixel boundary, regardless of its hit target", async () => {
   const { nodeScreenMetrics } = await import("./presentation.ts");
@@ -681,9 +690,11 @@ test("a small drag waits for contact and cancellation restores the neighboring n
   assert.equal(other.x, 31, "no early motion runs on animation frames");
   positions.move("held", { x: 5, y: 0, z: 0 });
   assert.ok(other.x > 31 && other.x < 33, "contact displaces the neighbor even below the click threshold");
+  assert.ok(positions.collisionReaction("other", performance.now(), false), "contact reacts before the click threshold");
   positions.release(16, false);
   assert.equal(model.nodes.find(node => node.id === "held")!.x, 0, "a sub-threshold gesture remains a click");
   assert.equal(other.x, 31, "click jitter does not leave the neighbor displaced");
+  assert.equal(positions.collisionReaction("other", performance.now(), false), null, "canceling the click clears its visual reaction");
   positions.begin("held", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
     visible: model.nodes.map(node => node.id), radius: () => radius,
     project: value => ({ x: value.x, y: value.y, depth: 1 }) });
