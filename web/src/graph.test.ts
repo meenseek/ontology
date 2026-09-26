@@ -1465,6 +1465,84 @@ test("a high-degree component has one stable overview core and expands without l
   assert.equal(constellationView(positioned, hubEvidence, null, null).links.length, 1,
     "a relationship attached directly to the visible core remains visible");
 });
+test("a large connected core opens in compact pages without losing access to any member or relation", () => {
+  const nodes = [doc("hub"), ...Array.from({ length: 119 }, (_, index) => doc(`spoke-${String(index).padStart(3, "0")}`)), doc("outside")];
+  const links = nodes.slice(1, 120).map(node => edge("hub", node.id));
+  const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model, true);
+  const seenNodes = new Set<string>(), seenLinks = new Set<string>();
+  const first = constellationView(model.nodes, links, null, "hub", 0);
+  assert.equal(first.disclosure?.pages, 10);
+  assert.equal(first.nodes.length, 14, "the first view has the hub, twelve spokes and the unrelated star");
+  for (let page = 0; page < first.disclosure!.pages; page++) {
+    const view = constellationView(model.nodes, links, null, "hub", page);
+    assert.ok(view.nodes.length <= 14 && view.links.length <= 12, "one page cannot form a 119-spoke fan");
+    for (const node of view.nodes) seenNodes.add(node.id);
+    for (const link of view.links) seenLinks.add(`${link.source}|${link.target}`);
+  }
+  assert.deepEqual(seenNodes, new Set(nodes.map(node => node.id)), "every member remains reachable through the pages");
+  assert.deepEqual(seenLinks, new Set(links.map(link => `${link.source}|${link.target}`)), "every relation remains reachable");
+  positions.showCore("hub", 0, true, 0, first.disclosure?.visible);
+  const hub = model.nodes.find(node => node.id === "hub")!;
+  const outside = model.nodes.find(node => node.id === "outside")!;
+  const outsideAt = { x: outside.x, y: outside.y, z: outside.z };
+  assert.ok(first.nodes.filter(node => node.id.startsWith("spoke-")).every(node => Math.hypot(node.x - hub.x, node.y - hub.y) < 120),
+    "the shown page stays around its hub instead of inheriting the full fan radius");
+  const hidden = model.nodes.find(node => node.id === "spoke-090")!;
+  assert.ok(Math.hypot(hidden.x - hub.x, hidden.y - hub.y) < 1e-7, "unshown members remain in the nucleus");
+  const focused = constellationView(model.nodes, links, "spoke-090", null, 0);
+  assert.ok(focused.nodes.some(node => node.id === hidden.id), "a direct selection opens the selected member's page");
+  positions.showCore("hub", 100, true, focused.disclosure?.index, focused.disclosure?.visible);
+  assert.ok(Math.hypot(hidden.x - hub.x, hidden.y - hub.y) > 0, "switching pages reveals the selected real star");
+  assert.ok(Math.hypot(outside.x - outsideAt.x, outside.y - outsideAt.y, outside.z - outsideAt.z) < 1e-8,
+    "paging leaves unrelated components in place, including the shorter final page");
+  const last = constellationView(model.nodes, links, null, "hub", 9);
+  positions.showCore("hub", 150, true, last.disclosure?.index, last.disclosure?.visible);
+  assert.ok(Math.hypot(outside.x - outsideAt.x, outside.y - outsideAt.y, outside.z - outsideAt.z) < 1e-8);
+  const filteredNodes = model.nodes.filter(node => node.id === "hub" || node.id === "outside" || node.id >= "spoke-030");
+  const filteredIds = new Set(filteredNodes.map(node => node.id));
+  const filtered = constellationView(filteredNodes, links.filter(link => filteredIds.has(link.source) && filteredIds.has(link.target)), null, "hub", 0);
+  positions.showCore("hub", 175, true, filtered.disclosure?.index, filtered.disclosure?.visible);
+  assert.ok(filtered.nodes.filter(node => node.id.startsWith("spoke-")).every(node => Math.hypot(node.x - hub.x, node.y - hub.y) > 0),
+    "a filtered page positions its actual visible members, not the full source's page members");
+  positions.reset();
+  assert.ok(filtered.nodes.filter(node => node.id.startsWith("spoke-")).every(node => Math.hypot(node.x - hub.x, node.y - hub.y) > 0),
+    "reset keeps the active filtered page layout");
+  assert.equal(constellationView(model.nodes, links, null, "hub").links.length, 119,
+    "explicit full expansion still exposes every relation at once");
+  assert.equal(constellationView(model.nodes, [...links, edge("spoke-090", "outside")], null, "hub", 0).disclosure, null,
+    "an external member relation prevents paging that would hide its endpoint");
+});
+test("a filtered core still opens compactly when its hub changes or another hub disappears", () => {
+  const nodes = [doc("a"), doc("b"), ...Array.from({ length: 40 }, (_, index) => doc(`a-${index}`)),
+    ...Array.from({ length: 38 }, (_, index) => doc(`b-${index}`))];
+  const links = [edge("a", "b"), ...nodes.filter(node => node.id.startsWith("a-")).map(node => edge("a", node.id)),
+    ...nodes.filter(node => node.id.startsWith("b-")).map(node => edge("b", node.id))];
+  const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model, true);
+  assert.equal(denseConstellationCores(model.nodes, links)[0]?.hub, "a");
+  const filteredNodes = model.nodes.filter(node => !/^a-[0-9]$/.test(node.id));
+  const ids = new Set(filteredNodes.map(node => node.id));
+  const filteredLinks = links.filter(link => ids.has(link.source) && ids.has(link.target));
+  const view = constellationView(filteredNodes, filteredLinks, null, "b", 0);
+  assert.equal(view.disclosure?.hub, "b");
+  positions.showCore("b", 0, true, view.disclosure?.index, view.disclosure?.visible, { nodes: filteredNodes, links: filteredLinks });
+  const hub = model.nodes.find(node => node.id === "b")!;
+  assert.ok(view.nodes.filter(node => node.id !== "b").every(node => Math.hypot(node.x - hub.x, node.y - hub.y) > 0),
+    "filtered visible stars must not stack at the old source hub");
+
+  const otherNodes = [doc("p"), doc("q"), ...Array.from({ length: 50 }, (_, index) => doc(`p-${index}`)),
+    ...Array.from({ length: 50 }, (_, index) => doc(`q-${index}`))];
+  const otherLinks = otherNodes.filter(node => node.id.startsWith("p-")).map(node => edge("p", node.id)).concat(
+    otherNodes.filter(node => node.id.startsWith("q-")).map(node => edge("q", node.id)));
+  const other = reconcile(snapshot(otherNodes, otherLinks)), place = new Positions(); place.install(other, true);
+  const partialNodes = other.nodes.filter(node => node.id !== "q"), partialIds = new Set(partialNodes.map(node => node.id));
+  const partialLinks = otherLinks.filter(link => partialIds.has(link.source) && partialIds.has(link.target));
+  const partial = constellationView(partialNodes, partialLinks, null, "p", 0);
+  assert.equal(partial.disclosure?.hub, "p");
+  place.showCore("p", 0, true, partial.disclosure?.index, partial.disclosure?.visible, { nodes: partialNodes, links: partialLinks });
+  const q0 = other.nodes.find(node => node.id === "q-0")!, q1 = other.nodes.find(node => node.id === "q-1")!;
+  assert.ok(Math.hypot(q0.x - q1.x, q0.y - q1.y) > 1,
+    "stars exposed by removing a different hub retain independent positions");
+});
 test("an expanded core refits for changed relationships but retains the camera after drag and unchanged refresh", () => {
   const nodes = [doc("hub"), ...Array.from({ length: 25 }, (_, index) => doc(`spoke-${index}`)), doc("late")];
   const links = nodes.slice(1, 26).map(node => edge("hub", node.id));

@@ -212,17 +212,28 @@ export function denseConstellationCores(nodes: readonly (GraphNode & { cluster?:
   }
   return cores;
 }
-export function constellationView(nodes: PositionedNode[], links: GraphLink[], selected: string | null, expandedCore: string | null) {
+export function constellationView(nodes: PositionedNode[], links: GraphLink[], selected: string | null, expandedCore: string | null, page?: number) {
   const cores = denseConstellationCores(nodes, links);
   const exposedCore = selected ? cores.find(core => core.members.has(selected))?.hub ?? null : expandedCore;
+  const exposed = cores.find(core => core.hub === exposedCore);
+  const canHideMembers = (core: (typeof cores)[number]) => !links.some(link => core.members.has(link.source) !== core.members.has(link.target) &&
+    (core.members.has(link.source) ? link.source : link.target) !== core.hub);
   // A visible edge from a hidden member to an outside node must not disappear.
-  const collapsed = cores.filter(core => core.hub !== exposedCore &&
-    !links.some(link => core.members.has(link.source) !== core.members.has(link.target) &&
-      (core.members.has(link.source) ? link.source : link.target) !== core.hub));
+  const collapsed = cores.filter(core => core.hub !== exposedCore && canHideMembers(core));
   const counts = new Map(collapsed.map(core => [core.hub, core.count]));
   const hidden = new Set(collapsed.flatMap(core => [...core.members].filter(id => id !== core.hub)));
+  let disclosure: { hub: string; index: number; pages: number; visible: ReadonlySet<string>; total: number } | null = null;
+  if (page !== undefined && exposed && exposed.count > 36 && canHideMembers(exposed)) {
+    const members = [...exposed.members].filter(id => id !== exposed.hub).sort();
+    const pages = Math.ceil(members.length / 12);
+    const selectedIndex = selected ? members.indexOf(selected) : -1;
+    const index = selectedIndex >= 0 ? Math.floor(selectedIndex / 12) : Math.max(0, Math.min(pages - 1, Math.trunc(page) || 0));
+    const visible = new Set([exposed.hub, ...members.slice(index * 12, (index + 1) * 12)]);
+    for (const id of exposed.members) if (!visible.has(id)) hidden.add(id);
+    disclosure = { hub: exposed.hub, index, pages, visible, total: exposed.count };
+  }
   return { nodes: nodes.filter(node => !hidden.has(node.id)),
-    links: links.filter(link => !hidden.has(link.source) && !hidden.has(link.target)), counts, cores };
+    links: links.filter(link => !hidden.has(link.source) && !hidden.has(link.target)), counts, cores, disclosure };
 }
 /** A relation refresh refits an expanded core; coordinate-only drags do not. */
 export function expandedCoreCameraFrame(nodes: readonly PositionedNode[], links: readonly GraphLink[], hubId: string, members: ReadonlySet<string>) {

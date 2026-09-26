@@ -218,6 +218,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const frozenSpatial = useRef<NucleusView | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [expandedCore, setExpandedCore] = useState<string | null>(null);
+  const [corePage, setCorePage] = useState(0);
+  const [showAllCore, setShowAllCore] = useState(false);
   const [spatialReveal, setSpatialReveal] = useState<SpatialReveal | null>(null);
   const [movedGroups, setMovedGroups] = useState<Map<string, { members: readonly string[]; level: number; epoch: number }>>(new Map());
   const [lodLevel, setLodLevel] = useState(0);
@@ -231,8 +233,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [hover, setHover] = useState<{ title: string; detail: string } | null>(null);
   // Renderer endpoint mutation stays out of the reconciled model.
-  const presentation = useMemo(() => constellationView(nodes, links, selected, expandedCore), [nodes, links, selected, expandedCore]);
-  const { nodes: semanticNodes, links: displayLinks, counts: collapsedCounts, cores } = presentation;
+  const presentation = useMemo(() => constellationView(nodes, links, selected, expandedCore, showAllCore ? undefined : corePage),
+    [nodes, links, selected, expandedCore, showAllCore, corePage]);
+  const { nodes: semanticNodes, links: displayLinks, counts: collapsedCounts, cores, disclosure } = presentation;
   const spatialLevel = Math.max(lodLevel, spatialReveal?.level ?? 0);
   const spatialLocks = useMemo(() => new Map([...movedGroups].filter(([, group]) => group.level === spatialLevel && group.epoch === positions.groupEpoch).map(([id, group]) => [id, group.members])), [movedGroups, spatialLevel, positions.groupEpoch]);
   const spatial = useMemo(() => frozenSpatial.current ?? nucleusView(semanticNodes, snapshot.links,
@@ -258,9 +261,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const visible = new Set(overview.nodes.map(node => node.id));
     return displayNodes.some(node => !visible.has(node.id));
   }, [nodes, snapshot, displayNodes]);
-  const layoutCore = exposesHiddenMembers ? "*" : activeExpandedCore ?? cores.find(core => selected && core.members.has(selected))?.hub ?? null;
+  const layoutCore = exposesHiddenMembers && !disclosure ? "*" : activeExpandedCore ?? cores.find(core => selected && core.members.has(selected))?.hub ?? null;
   useEffect(() => { if (expandedCore && !activeExpandedCore) setExpandedCore(null); }, [expandedCore, activeExpandedCore]);
-  useEffect(() => { positions.showCore(layoutCore, performance.now(), reduced); }, [positions, layoutCore, nodes, links, reduced]);
+  useEffect(() => { positions.showCore(layoutCore, performance.now(), reduced, disclosure?.index, disclosure?.visible,
+    disclosure && nodes.length !== snapshot.nodes.length ? { nodes, links } : undefined); },
+  [positions, layoutCore, disclosure, nodes, links, snapshot.nodes.length, reduced]);
   const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: displayLinks.map(l => ({ ...l })) }), [displayNodes, displayLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
@@ -333,7 +338,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     return members ? expandedCoreCameraFrame(nodes, links, activeExpandedCore, members)?.key ?? "" : "";
   }, [nodes, links, cores, selected, activeExpandedCore]);
   const spatialCameraKey = spatialReveal?.members.size ? `${positions.structureEpoch}:${[...spatialReveal.members].sort().join("|")}` : "";
-  const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${fit}:${size.width}:${size.height}:${expandedRelationKey}:${spatialCameraKey}`;
+  const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${disclosure?.index ?? "all"}:${fit}:${size.width}:${size.height}:${expandedRelationKey}:${spatialCameraKey}`;
   const appliedCamera = useRef("");
   const appliedFit = useRef(fit);
   const positionCamera = useCallback(() => {
@@ -377,7 +382,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (target && activeExpandedCore) {
       const members = cores.find(core => core.hub === activeExpandedCore)?.members;
       if (members) {
-        const radius = expandedCoreCameraFrame(cameraNodes, links, activeExpandedCore, members)?.radius ?? 18;
+        const radius = expandedCoreCameraFrame(cameraNodes, links, activeExpandedCore,
+          disclosure?.hub === activeExpandedCore ? disclosure.visible : members)?.radius ?? 18;
         const camera = instance.camera() as PerspectiveCamera;
         const controls = instance.controls() as OrbitControls;
         const vertical = camera.fov * Math.PI / 180;
@@ -407,7 +413,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
     offset.normalize().multiplyScalar(distance);
     instance.cameraPosition({ x: lookAt.x + offset.x, y: lookAt.y + offset.y, z: lookAt.z + offset.z }, lookAt, reduced ? 0 : 650);
-  }, [ready, cameraKey, nodes, semanticNodes, links, selected, activeExpandedCore, cores, reduced, size, positions, fit, snapshot.nodes.length, spatialReveal, exposesHiddenMembers]);
+  }, [ready, cameraKey, nodes, semanticNodes, links, selected, activeExpandedCore, cores, disclosure, reduced, size, positions, fit, snapshot.nodes.length, spatialReveal, exposesHiddenMembers]);
   useEffect(() => {
     let second = 0;
     const first = requestAnimationFrame(() => { second = requestAnimationFrame(positionCamera); });
@@ -689,6 +695,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (collapsedCounts.has(id)) {
       if (selected && !onClearSelection()) return;
       setSpatialReveal(null);
+      setCorePage(0); setShowAllCore(false);
       setExpandedCore(id);
     } else if (spatialGroups.has(id)) {
       const group = spatialGroups.get(id)!, instance = graph.current;
@@ -827,7 +834,17 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       onKeyDown={event => { if (event.key !== "Enter" && event.key !== " ") return; const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { event.preventDefault(); suppressClickUntil.current = 0; const id = label.dataset.nodeId, spatial = spatialCounts.has(id); chooseNode(id); requestAnimationFrame(() => (spatial ? spatialCloseButton : coreCloseButton).current?.focus()); } }}>
       {Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /></div>)}
     </div>
-    {activeExpandedCore && !selected && !spatialReveal?.members.size && <button type="button" ref={coreCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); setExpandedCore(null); }}>묶음 접기</button>}
+    {activeExpandedCore && !selected && !spatialReveal?.members.size && <div className="graph-core-actions">
+      <button type="button" ref={coreCloseButton} onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); setExpandedCore(null); }}>묶음 접기</button>
+      {disclosure?.hub === activeExpandedCore && <>
+        <button type="button" disabled={disclosure.index === 0} onClick={() => setCorePage(disclosure.index - 1)}>이전</button>
+        <span>연결된 항목 {disclosure.total}개 · {disclosure.index + 1}/{disclosure.pages}</span>
+        <button type="button" disabled={disclosure.index + 1 === disclosure.pages} onClick={() => setCorePage(disclosure.index + 1)}>다음</button>
+        <button type="button" onClick={() => setShowAllCore(true)}>전체 보기</button>
+      </>}
+      {showAllCore && cores.find(core => core.hub === activeExpandedCore && core.count > 36) &&
+        <button type="button" onClick={() => setShowAllCore(false)}>나눠 보기</button>}
+    </div>}
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>가까운 항목 {spatialReveal.members.size}개 접기</button>}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
     <div className="graph-instructions" aria-hidden="true">묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · 빈 공간 회전 · 스크롤 확대·축소</div>
