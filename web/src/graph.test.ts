@@ -1162,7 +1162,8 @@ test("a spatial summary moves its exact members together and stays grouped acros
   const expanded = nucleusView(model.nodes, model.links, 1, null, new Set(group.members), new Map([[group.representative, group.members]]));
   assert.equal(expanded.nodes.filter(node => group.members.includes(node.id)).length, group.members.length);
   const linked = nucleusView(model.nodes, [edge(group.members[0], group.members[1])], 1, null, new Set(), new Map([[group.representative, group.members]]));
-  assert.equal(linked.groups.has(group.representative), false, "a changed relationship invalidates the old summary");
+  assert.notDeepEqual(linked.groups.get(group.representative)?.members, group.members, "a changed relationship invalidates the old summary");
+  assert.ok(group.members.slice(0, 2).every(id => linked.nodes.some(node => node.id === id)), "newly linked members remain visible");
   assert.equal(positions.settling, false, "dropping an unlinked group does not repack its members");
 });
 test("a spatial summary click-sized gesture restores its members, while a return drag remains a drag", () => {

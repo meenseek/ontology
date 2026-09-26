@@ -50,7 +50,7 @@ export function nucleusView(nodes: readonly PositionedNode[], allLinks: readonly
   const counts = new Map<string, number>(), groups = new Map<string, Nucleus>();
   if (!level) return { nodes: [...nodes], counts, groups };
   const linked = new Set(allLinks.flatMap(link => [link.source, link.target]));
-  const radius = 144 * 2 ** (level - 1), limit = 60 * 2 ** (level - 1);
+  const radius = 120 * 1.5 ** (level - 1), limit = 60 * 2 ** (level - 1);
   const byId = new Map(nodes.map(node => [node.id, node]));
   const hidden = new Set<string>(), reserved = new Set<string>();
   const summarize = (members: PositionedNode[], representative?: string) => {
