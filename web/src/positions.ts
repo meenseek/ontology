@@ -24,6 +24,7 @@ type DragPlane = { right: Point; up: Point; spacingPixels: number; project?: (va
 type Clearance = { held: string; visible: string[]; right: Point; up: Point; project: (value: Point) => ScreenPoint;
   radius: (node: PositionedNode, depth: number) => number; worldPerPixel: (depth: number) => number;
   isVisible: (at: ScreenPoint, radius: number) => boolean; fixed?: ReadonlySet<string> };
+type CollisionReaction = { at: number; x: number; y: number; strength: number };
 type Pull = { id: string; start: Point; initial: Map<string, Point>; threshold: number; tolerance: number; followers: Map<string, Follower>; edges: TensionEdge[]; project: (value: Point) => ScreenPoint; clearance: Clearance | null; rigid: ReadonlySet<string> | null; moved: boolean; last: number | null };
 type Axial = { q: number; r: number };
 const directions: Axial[] = [{ q: 1, r: 0 }, { q: 0, r: -1 }, { q: -1, r: 1 }, { q: -1, r: 0 }, { q: 0, r: 1 }, { q: 1, r: -1 }];
@@ -539,6 +540,7 @@ export class Positions {
   private observed = new Map<string, Point>();
   private gesture: Pull | null = null;
   private settle: Settle | null = null;
+  private collisionReactions = new Map<string, CollisionReaction>();
   private source: { nodes: PositionedNode[]; links: GraphLink[]; structure: string } | null = null;
   private layouts = new Map<string, Map<string, Point>>();
   private canonical = new Map<string, Point>();
@@ -551,6 +553,16 @@ export class Positions {
   get dragging() { return this.gesture !== null; }
   get dragMoved() { return this.gesture?.moved ?? false; }
   get settling() { return this.settle !== null; }
+  collisionReaction(id: string, now: number, reduced: boolean): { x: number; y: number; glow: number; pulse: number } | null {
+    if (reduced || !Number.isFinite(now)) return null;
+    const reaction = this.collisionReactions.get(id);
+    if (!reaction) return null;
+    const elapsed = Math.max(0, now - reaction.at);
+    if (elapsed >= 500) { this.collisionReactions.delete(id); return null; }
+    const envelope = reaction.strength * Math.exp(-elapsed / 150);
+    const sway = envelope * Math.cos(elapsed / 80);
+    return { x: reaction.x * sway, y: reaction.y * sway, glow: envelope, pulse: sway };
+  }
   get layoutMoving() { return this.layoutMotion !== null; }
   get hasCompactInitialLayout() { return this.packedInitial; }
   layoutTarget(id: string): Point | null {
@@ -625,6 +637,14 @@ export class Positions {
     for (const [id, value] of this.clearedPositions(clearance, current, linked)) {
       const node = this.nodes.get(id)!;
       if (node.x === value.x && node.y === value.y && node.z === value.z) continue;
+      if (this.gesture && !this.gesture.rigid && id !== clearance.held) {
+        const from = clearance.project(node), to = clearance.project(value);
+        const dx = to.x - from.x, dy = to.y - from.y, distance = Math.hypot(dx, dy);
+        if (Number.isFinite(distance) && distance > 0) {
+          this.collisionReactions.set(id, { at: performance.now(), x: dx / distance, y: dy / distance,
+            strength: Math.min(1, .35 + distance / 6) });
+        }
+      }
       fixPosition(node, value); this.observed.set(id, point(value)); changed.add(id);
     }
     if (changed.size) this.revision++;
@@ -948,6 +968,7 @@ export class Positions {
   }
   advance(now: number, reduced: boolean) {
     if (!Number.isFinite(now)) return;
+    if (reduced) this.collisionReactions.clear();
     const layout = this.layoutMotion;
     if (layout) {
       const fraction = reduced ? 1 : Math.min(1, Math.max(0, (now - layout.start) / layoutDuration));
@@ -1038,6 +1059,7 @@ export class Positions {
       if (restored) this.revision++;
     }
     this.worker?.terminate(); this.worker = null; this.pending = null; this.token++;
+    this.collisionReactions.clear();
     this.gesture = null; this.settle = null; this.layoutMotion = null;
   }
 }

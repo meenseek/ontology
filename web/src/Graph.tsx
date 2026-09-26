@@ -124,7 +124,7 @@ export function starMaterial() {
     `,
   });
 }
-function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean, cursor: { current: { x: number; y: number } | null }, dragged: { current: string | null }, minimumPixels = 0, haloMotion?: () => number) {
+function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean, cursor: { current: { x: number; y: number } | null }, dragged: { current: string | null }, minimumPixels = 0, haloMotion?: () => number, contactMotion?: () => { x: number; y: number; glow: number } | null) {
   const mesh = new Mesh(geometry, material), viewport = new Vector2(), position = new Vector3(), projected = new Vector3();
   const color = new Color(starColor(node));
   const phase = starPhase(node.id), opacity = active(node) ? 1 : .35;
@@ -157,15 +157,18 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
     material.uniforms.uPixels.value = pixels;
     material.uniforms.uShape.value = starShape(node.id);
     near = Math.max(near, dragged.current === node.id ? .8 : 0);
-    near = Math.max(0, near + ((haloMotion?.() ?? 1) - 1) * 3);
+    const contact = contactMotion?.();
+    near = Math.max(0, near + ((haloMotion?.() ?? 1) - 1) * 3 + (contact?.glow ?? 0) * .65);
     material.uniforms.uNear.value = near;
     const wobble = isReduced() ? 0 : near * 0.13;
-    material.uniforms.uWobble.value.set(wobble * Math.sin(clock.seconds * 9 + phase), wobble * Math.cos(clock.seconds * 7 + phase));
+    // Recoil moves the light inside its quad; the collision footprint and pick target stay fixed.
+    material.uniforms.uWobble.value.set(wobble * Math.sin(clock.seconds * 9 + phase) + (contact?.x ?? 0) * .06,
+      wobble * Math.cos(clock.seconds * 7 + phase) + (contact?.y ?? 0) * .06);
     material.uniformsNeedUpdate = true;
   };
   return mesh;
 }
-function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, minimumPixels = 0, fixedPixels?: number, scaleMotion?: () => number) {
+function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, minimumPixels = 0, fixedPixels?: number, scaleMotion?: () => number, rotationMotion?: () => number) {
   const sprite = new Sprite(material), viewport = new Vector2(), position = new Vector3(), cursor = new Vector3();
   const resize = (camera: Camera) => {
     sprite.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
@@ -173,7 +176,10 @@ function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "bod
     sprite.scale.setScalar(spriteScale((fixedPixels ?? nodeScreenMetrics(pixels, selected, node.changed)[part]) * (scaleMotion?.() ?? 1), viewport.y, camera.projectionMatrix.elements[5]));
     sprite.updateMatrixWorld();
   };
-  sprite.onBeforeRender = (renderer, _scene, camera) => { renderer.getSize(viewport); resize(camera); };
+  sprite.onBeforeRender = (renderer, _scene, camera) => {
+    renderer.getSize(viewport); resize(camera);
+    if (rotationMotion) material.rotation = rotationMotion();
+  };
   // Draw luminous bodies over native relation lines while retaining their positions.
   sprite.renderOrder = part === "hit" ? 0 : 1;
   const raycast = sprite.raycast;
@@ -616,6 +622,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const isSelected = node.id === selected;
     const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
     const haloScale = summary ? () => summaryHaloScale(summaryHalo.current, node.id, performance.now(), motionReduced.current) : undefined;
+    const contactMotion = () => positions.collisionReaction(node.id, performance.now(), motionReduced.current);
     const members = glyphMembers.get(node.id);
     if (summary && members?.length) {
       const samples = members.map(member => ({ id: member.id, kind: member.kind, taxonomyColor: member.taxonomyColor, opacity: active(member) ? 1 : .4 }));
@@ -633,18 +640,20 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         glyph.signature = signature;
         previous.dispose();
       }
-      group.add(screenSprite(glyph.material, node, "body", false, 0, 36, haloScale && (() => 1 + (haloScale() - 1) * .35)));
+      group.add(screenSprite(glyph.material, node, "body", false, 0, 36,
+        haloScale && (() => 1 + (haloScale() - 1) * .35),
+        () => (contactMotion()?.pulse ?? 0) * .09));
     } else group.add(isKnowledge
-      ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged, summary ? 22 : 0, haloScale)
+      ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged, summary ? 22 : 0, haloScale, contactMotion)
       : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected, 0, undefined,
-        haloScale && (() => 1 + (haloScale() - 1) * 2)));
+        () => (1 + ((haloScale?.() ?? 1) - 1) * 2) * (1 + (contactMotion()?.pulse ?? 0) * .05)));
     if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .7), node, "body", false, 0, 18));
     if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected));
     if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected));
     // The invisible plane follows the star and status rings, with a 36px minimum.
     group.add(screenSprite(material("hit", "#ffffff", 0), node, "hit", isSelected));
     return group;
-  }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal, glyphMembers]);
+  }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal, glyphMembers, positions]);
   const chooseNode = (id: string) => {
     hoveredId.current = null; setHover(null);
     if (disabled || performance.now() < suppressClickUntil.current) return;
