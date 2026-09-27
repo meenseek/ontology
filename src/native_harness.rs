@@ -2910,6 +2910,41 @@ cat "$0.events.$n"
     }
 
     #[cfg(unix)]
+    fn codex_prepare_document_write_events(
+        engine: &HarnessEngine,
+        prepared: &PreparedHarnessRun,
+        binary: &Path,
+    ) {
+        let mut step = engine
+            .begin_execution(&prepared.plan.resolved_request, &prepared.role_run, &[])
+            .expect("document write fixture must begin");
+        let mut number = 0;
+        while let Some(invocation) = step.ready_role_invocations.first() {
+            number += 1;
+            let outcome = codex_write_scenario_outcome(prepared, invocation, "completed-accepted");
+            codex_test_events(binary, number, outcome.clone());
+            let lifecycle =
+                codex_test_lifecycle(invocation.role, format!("fixture-{number}"), &outcome);
+            let result = invocation
+                .bind_result(lifecycle, outcome)
+                .expect("fixture result must bind");
+            step = engine
+                .advance_execution(
+                    &prepared.plan.resolved_request,
+                    &prepared.role_run,
+                    &[],
+                    &step.record,
+                    HarnessExecutionEvent::RoleResult {
+                        result: Box::new(result),
+                    },
+                )
+                .expect("document write fixture must advance");
+        }
+        assert_eq!(number, 3, "strict document write uses three roles");
+        assert!(step.ready_tool_invocation.is_none());
+    }
+
+    #[cfg(unix)]
     fn codex_assert_process_isolation(binary: &Path, pid: &str) -> String {
         let cwd = fs::read_to_string(format!("{}.cwd.{pid}", binary.display()))
             .expect("cwd must be captured");
@@ -3360,6 +3395,68 @@ cat "$0.events.$n"
         );
         assert!(codex_calls(&binary).is_empty());
         assert!(validate_codex_binary(Path::new("relative-codex")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_document_write_runs_writer_through_core_and_preserves_sources() {
+        use context_core::harness::{HarnessExecutionState, SubjectStatus};
+
+        let temp = TempDirectory::new("codex-document-writer");
+        let (engine, prepared, raw, workspace) =
+            codex_fixture_for_action(&temp, 2, 8, HarnessAction::DocumentWrite);
+        let binary = codex_test_script(&temp, CODEX_CAPTURE);
+        codex_prepare_document_write_events(&engine, &prepared, &binary);
+        let head = HarnessExecutionRecord::begin_durable(
+            &engine,
+            &raw,
+            &prepared,
+            "native-document-writer",
+        )
+        .expect("document write must begin");
+        let writer_input = serde_json::to_vec(&head.ready_role_invocations[0].segments)
+            .expect("writer segments must serialize");
+        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
+            .expect("Writer, Verifier and Reviewer must execute through the current frontier");
+        assert_eq!(evaluated.state, HarnessExecutionState::Evaluated);
+        assert_eq!(
+            evaluated
+                .evaluation
+                .as_ref()
+                .expect("Core evaluation must exist")
+                .subject_status,
+            SubjectStatus::Accepted
+        );
+        assert_eq!(
+            evaluated.role_execution.accepted_role_order,
+            [
+                HarnessRole::Writer,
+                HarnessRole::Verifier,
+                HarnessRole::Reviewer,
+            ]
+        );
+        let calls = codex_calls(&binary);
+        assert_eq!(calls.len(), 3);
+        let actual_writer_input = fs::read(format!("{}.stdin.{}", binary.display(), calls[0]))
+            .expect("native Writer input must be captured");
+        assert_eq!(actual_writer_input, writer_input);
+        for pid in &calls {
+            codex_assert_process_isolation(&binary, pid);
+        }
+        let schema: serde_json::Value =
+            serde_json::from_str(codex_output_schema()).expect("native output schema must be JSON");
+        assert_eq!(
+            schema["$defs"]["result"]["anyOf"][0]["properties"]["role"]["enum"],
+            serde_json::json!(["writer"])
+        );
+        for index in 0..2 {
+            assert!(
+                fs::read_to_string(workspace.join(format!("document-{index}.md")))
+                    .expect("frozen source must still exist")
+                    .starts_with(&format!("# 문서 {index}")),
+                "evaluation must not apply the Writer candidate"
+            );
+        }
     }
 
     #[cfg(unix)]

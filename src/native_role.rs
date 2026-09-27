@@ -2,9 +2,9 @@ use crate::native_harness::{
     MAX_HARNESS_JSON_BYTES, NativeHarnessError as ContextVaultError, NativeHarnessResult as Result,
 };
 use context_core::harness::{
-    HarnessEngine, HarnessExecutionEvent, HarnessExecutionRecord, HarnessRole, PreparedHarnessRun,
-    ReportedRoleLifecycle, RoleExecutionOutcome, RoleExecutionResult, RoleInvocationContract,
-    RoleLifecycleLimits, RoleTerminalState, decode_current_json,
+    HarnessAction, HarnessEngine, HarnessExecutionEvent, HarnessExecutionRecord, HarnessRole,
+    PreparedHarnessRun, ReportedRoleLifecycle, RoleExecutionOutcome, RoleExecutionResult,
+    RoleInvocationContract, RoleLifecycleLimits, RoleTerminalState, decode_current_json,
 };
 use std::{
     env, fs,
@@ -51,15 +51,13 @@ pub(crate) fn execute_codex_frontier(
             ));
         }
         if record.ready_tool_invocation.is_some()
-            || record.ready_role_invocations.iter().any(|invocation| {
-                !matches!(
-                    invocation.role,
-                    HarnessRole::Reviewer | HarnessRole::Verifier
-                )
-            })
+            || record
+                .ready_role_invocations
+                .iter()
+                .any(|invocation| !codex_role_supported(prepared, invocation.role))
         {
             return Err(ContextVaultError::invalid_input(
-                "unsupported runtime: --codex-binary supports only Reviewer/Verifier frontiers without tools",
+                "unsupported runtime: --codex-binary supports only DocumentWrite Writer and Reviewer/Verifier frontiers without tools",
             ));
         }
         let Some(invocation) = record.ready_role_invocations.first() else {
@@ -88,6 +86,11 @@ pub(crate) fn execute_codex_frontier(
     }
 }
 
+fn codex_role_supported(prepared: &PreparedHarnessRun, role: HarnessRole) -> bool {
+    matches!(role, HarnessRole::Reviewer | HarnessRole::Verifier)
+        || (role == HarnessRole::Writer && prepared.plan.action == HarnessAction::DocumentWrite)
+}
+
 // The native output schema needs an object at its root. This transport envelope
 // contains exactly the existing outcome; the entire envelope is decoded strictly.
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -107,7 +110,9 @@ pub(crate) fn codex_output_schema() -> &'static str {
     "requirement": {"type": "object","properties": {"unit": {"type": "string"},"passed": {"type": "boolean"},"detail": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["unit","passed","detail","evidence"],"additionalProperties": false},
     "observation": {"type": "object","properties": {"message": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["message","evidence"],"additionalProperties": false},
     "learning": {"type": "object","properties": {"title": {"type": "string"},"guidance": {"type": "string"},"failed_unit": {"type": "string"},"requirement_result_digest": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["title","guidance","failed_unit","requirement_result_digest","evidence"],"additionalProperties": false},
-    "result": {"anyOf": [{"type": "object","properties": {"role": {"type": "string","enum": ["verifier"]},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"requirement_results": {"type": "array","items": {"$ref": "#/$defs/requirement"}}},"required": ["role","subject_evidence","requirement_results"],"additionalProperties": false},{"type": "object","properties": {"role": {"type": "string","enum": ["reviewer"]},"summary": {"type": "string"},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"requirement_results": {"type": "array","items": {"$ref": "#/$defs/requirement"}},"blocking_findings": {"type": "array","items": {"$ref": "#/$defs/observation"}},"improvements": {"type": "array","items": {"$ref": "#/$defs/observation"}},"learning_candidates": {"type": "array","items": {"$ref": "#/$defs/learning"}}},"required": ["role","summary","subject_evidence","requirement_results","blocking_findings","improvements","learning_candidates"],"additionalProperties": false}]},
+    "file-change": {"anyOf": [{"type":"object","properties":{"operation":{"type":"string","enum":["create"]},"path":{"type":"string"},"content":{"type":"string"}},"required":["operation","path","content"],"additionalProperties":false},{"type":"object","properties":{"operation":{"type":"string","enum":["update"]},"path":{"type":"string"},"expected_content_digest":{"type":"string"},"content":{"type":"string"}},"required":["operation","path","expected_content_digest","content"],"additionalProperties":false},{"type":"object","properties":{"operation":{"type":"string","enum":["delete"]},"path":{"type":"string"},"expected_content_digest":{"type":"string"}},"required":["operation","path","expected_content_digest"],"additionalProperties":false}]},
+    "writer-artifact": {"type":"object","properties":{"kind":{"type":"string","enum":["changes"]},"changes":{"type":"array","items":{"$ref":"#/$defs/file-change"}}},"required":["kind","changes"],"additionalProperties":false},
+    "result": {"anyOf": [{"type":"object","properties":{"role":{"type":"string","enum":["writer"]},"artifact":{"$ref":"#/$defs/writer-artifact"}},"required":["role","artifact"],"additionalProperties":false},{"type": "object","properties": {"role": {"type": "string","enum": ["verifier"]},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"requirement_results": {"type": "array","items": {"$ref": "#/$defs/requirement"}}},"required": ["role","subject_evidence","requirement_results"],"additionalProperties": false},{"type": "object","properties": {"role": {"type": "string","enum": ["reviewer"]},"summary": {"type": "string"},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"requirement_results": {"type": "array","items": {"$ref": "#/$defs/requirement"}},"blocking_findings": {"type": "array","items": {"$ref": "#/$defs/observation"}},"improvements": {"type": "array","items": {"$ref": "#/$defs/observation"}},"learning_candidates": {"type": "array","items": {"$ref": "#/$defs/learning"}}},"required": ["role","summary","subject_evidence","requirement_results","blocking_findings","improvements","learning_candidates"],"additionalProperties": false}]},
     "request": {"type": "object","properties": {"reason": {"type": "string"},"blocked_verification_units": {"type": "array","items": {"type": "string"}},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"candidate": {"anyOf": [{"type": "object","properties": {"kind": {"type": "string","enum": ["additional-workspace-target"]},"workspace_relative_path": {"type": "string"}},"required": ["kind","workspace_relative_path"],"additionalProperties": false},{"type": "object","properties": {"kind": {"type": "string","enum": ["vault-evidence"]},"repository_relative_path": {"type": "string"}},"required": ["kind","repository_relative_path"],"additionalProperties": false}]}},"required": ["reason","blocked_verification_units","subject_evidence","candidate"],"additionalProperties": false}
   }
 }"##
@@ -294,12 +299,9 @@ pub(crate) fn execute_codex_role(
     prepared: &PreparedHarnessRun,
     invocation: &RoleInvocationContract,
 ) -> Result<RoleExecutionResult> {
-    if !matches!(
-        invocation.role,
-        HarnessRole::Reviewer | HarnessRole::Verifier
-    ) {
+    if !codex_role_supported(prepared, invocation.role) {
         return Err(ContextVaultError::invalid_input(
-            "unsupported runtime: only Reviewer/Verifier may execute",
+            "unsupported runtime: only DocumentWrite Writer and Reviewer/Verifier may execute",
         ));
     }
     // Serialize the exact typed segments once: no wrapper, prompt preamble, target
