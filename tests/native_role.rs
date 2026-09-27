@@ -56,6 +56,29 @@ async fn native_role_launches_document_writer_and_rejects_missing_native_protoco
             .contains("without an observed native thread.started context ID")
     );
     assert!(Path::new(&marker).exists());
+    fs::remove_file(&marker).expect("clear first launch marker");
+    let resumed = fixtures::command(
+        &store,
+        &root,
+        &workspace,
+        "advance",
+        &[
+            "--run-id".into(),
+            "native-document-writer".into(),
+            "--codex-binary".into(),
+            binary.display().to_string(),
+        ],
+    )
+    .await;
+    assert!(!resumed.status.success());
+    assert!(
+        String::from_utf8_lossy(&resumed.stderr)
+            .contains("without an observed native thread.started context ID")
+    );
+    assert!(
+        marker.exists(),
+        "advance must launch the authenticated ready role"
+    );
     assert_eq!(
         fs::read_to_string(workspace.join("document.md")).expect("source remains unchanged"),
         "# Synthetic document"
