@@ -3,8 +3,9 @@ use crate::native_harness::{
 };
 use context_core::harness::{
     HarnessAction, HarnessEngine, HarnessExecutionEvent, HarnessExecutionRecord, HarnessRole,
-    PreparedHarnessRun, ReportedRoleLifecycle, RoleExecutionOutcome, RoleExecutionResult,
-    RoleInvocationContract, RoleLifecycleLimits, RoleTerminalState, decode_current_json,
+    PreparedHarnessRun, ReportedRoleLifecycle, RequirementResult, ResultEvidenceReference,
+    RoleExecutionOutcome, RoleExecutionResult, RoleInvocationContract, RoleLifecycleLimits,
+    RoleTerminalState, VerificationOwner, decode_current_json,
 };
 use std::{
     env, fs,
@@ -106,16 +107,48 @@ pub(crate) fn codex_output_schema() -> &'static str {
   "required": ["outcome"],
   "additionalProperties": false,
   "$defs": {
-    "evidence": {"anyOf": [{"type": "object","properties": {"source": {"type": "string","enum": ["target"]},"workspace_relative_path": {"type": "string"},"content_digest": {"type": "string"},"locator": {"type": "string"}},"required": ["source","workspace_relative_path","content_digest","locator"],"additionalProperties": false},{"type": "object","properties": {"source": {"type": "string","enum": ["bound-document"]},"relative_path": {"type": "string"},"content_digest": {"type": "string"},"locator": {"type": "string"}},"required": ["source","relative_path","content_digest","locator"],"additionalProperties": false},{"type": "object","properties": {"source": {"type": "string","enum": ["tool-result"]},"unit": {"type": "string"},"result_digest": {"type": "string"}},"required": ["source","unit","result_digest"],"additionalProperties": false},{"type": "object","properties": {"source": {"type": "string","enum": ["produced-artifact"]},"artifact_digest": {"type": "string"},"locator": {"type": "string"}},"required": ["source","artifact_digest","locator"],"additionalProperties": false}]},
-    "requirement": {"type": "object","properties": {"unit": {"type": "string"},"passed": {"type": "boolean"},"detail": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["unit","passed","detail","evidence"],"additionalProperties": false},
+    "verification-unit": {"type":"string","enum":["completion-contract","scope-compliance","terminology-and-readability","code-correctness","tests-and-static-analysis","source-ownership","fact-and-claim-boundary","evidence-and-uncertainty","idea-not-promoted-to-decision","solo-mvp-ideation-contract","retrieval-scope-and-digest","curation-provenance","source-and-ontology-boundary","career-evidence-lineage","career-surface-contract","career-perspective-routing","career-public-safety","career-output-surface-selection","resume-first-screen-and-artifact","career-description-case-structure","portfolio-local-build-and-public-copy","professional-profile-artifact","career-holistic-coherence","output-adapter-contract","output-adapter-surface-selection","resume-output-adapter-artifact","career-description-output-adapter-artifact","professional-profile-output-adapter-artifact"]},
+    "evidence": {"anyOf": [{"type": "object","properties": {"source": {"type": "string","enum": ["target"]},"workspace_relative_path": {"type": "string"},"content_digest": {"type": "string"},"locator": {"type": "string"}},"required": ["source","workspace_relative_path","content_digest","locator"],"additionalProperties": false},{"type": "object","properties": {"source": {"type": "string","enum": ["bound-document"]},"relative_path": {"type": "string"},"content_digest": {"type": "string"},"locator": {"type": "string"}},"required": ["source","relative_path","content_digest","locator"],"additionalProperties": false},{"type": "object","properties": {"source": {"type": "string","enum": ["tool-result"]},"unit": {"$ref":"#/$defs/verification-unit"},"result_digest": {"type": "string"}},"required": ["source","unit","result_digest"],"additionalProperties": false},{"type": "object","properties": {"source": {"type": "string","enum": ["produced-artifact"]},"artifact_digest": {"type": "string"},"locator": {"type": "string"}},"required": ["source","artifact_digest","locator"],"additionalProperties": false}]},
+    "requirement": {"type": "object","properties": {"unit": {"$ref":"#/$defs/verification-unit"},"passed": {"type": "boolean"},"detail": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["unit","passed","detail","evidence"],"additionalProperties": false},
     "observation": {"type": "object","properties": {"message": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["message","evidence"],"additionalProperties": false},
-    "learning": {"type": "object","properties": {"title": {"type": "string"},"guidance": {"type": "string"},"failed_unit": {"type": "string"},"requirement_result_digest": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["title","guidance","failed_unit","requirement_result_digest","evidence"],"additionalProperties": false},
+    "learning": {"type": "object","properties": {"title": {"type": "string"},"guidance": {"type": "string"},"failed_unit": {"$ref":"#/$defs/verification-unit"},"requirement_result_digest": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["title","guidance","failed_unit","requirement_result_digest","evidence"],"additionalProperties": false},
     "file-change": {"anyOf": [{"type":"object","properties":{"operation":{"type":"string","enum":["create"]},"path":{"type":"string"},"content":{"type":"string"}},"required":["operation","path","content"],"additionalProperties":false},{"type":"object","properties":{"operation":{"type":"string","enum":["update"]},"path":{"type":"string"},"expected_content_digest":{"type":"string"},"content":{"type":"string"}},"required":["operation","path","expected_content_digest","content"],"additionalProperties":false},{"type":"object","properties":{"operation":{"type":"string","enum":["delete"]},"path":{"type":"string"},"expected_content_digest":{"type":"string"}},"required":["operation","path","expected_content_digest"],"additionalProperties":false}]},
     "writer-artifact": {"type":"object","properties":{"kind":{"type":"string","enum":["changes"]},"changes":{"type":"array","items":{"$ref":"#/$defs/file-change"}}},"required":["kind","changes"],"additionalProperties":false},
     "result": {"anyOf": [{"type":"object","properties":{"role":{"type":"string","enum":["writer"]},"artifact":{"$ref":"#/$defs/writer-artifact"}},"required":["role","artifact"],"additionalProperties":false},{"type": "object","properties": {"role": {"type": "string","enum": ["verifier"]},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"requirement_results": {"type": "array","items": {"$ref": "#/$defs/requirement"}}},"required": ["role","subject_evidence","requirement_results"],"additionalProperties": false},{"type": "object","properties": {"role": {"type": "string","enum": ["reviewer"]},"summary": {"type": "string"},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"requirement_results": {"type": "array","items": {"$ref": "#/$defs/requirement"}},"blocking_findings": {"type": "array","items": {"$ref": "#/$defs/observation"}},"improvements": {"type": "array","items": {"$ref": "#/$defs/observation"}},"learning_candidates": {"type": "array","items": {"$ref": "#/$defs/learning"}}},"required": ["role","summary","subject_evidence","requirement_results","blocking_findings","improvements","learning_candidates"],"additionalProperties": false}]},
-    "request": {"type": "object","properties": {"reason": {"type": "string"},"blocked_verification_units": {"type": "array","items": {"type": "string"}},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"candidate": {"anyOf": [{"type": "object","properties": {"kind": {"type": "string","enum": ["additional-workspace-target"]},"workspace_relative_path": {"type": "string"}},"required": ["kind","workspace_relative_path"],"additionalProperties": false},{"type": "object","properties": {"kind": {"type": "string","enum": ["vault-evidence"]},"repository_relative_path": {"type": "string"}},"required": ["kind","repository_relative_path"],"additionalProperties": false}]}},"required": ["reason","blocked_verification_units","subject_evidence","candidate"],"additionalProperties": false}
+    "request": {"type": "object","properties": {"reason": {"type": "string"},"blocked_verification_units": {"type": "array","items": {"$ref":"#/$defs/verification-unit"}},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"candidate": {"anyOf": [{"type": "object","properties": {"kind": {"type": "string","enum": ["additional-workspace-target"]},"workspace_relative_path": {"type": "string"}},"required": ["kind","workspace_relative_path"],"additionalProperties": false},{"type": "object","properties": {"kind": {"type": "string","enum": ["vault-evidence"]},"repository_relative_path": {"type": "string"}},"required": ["kind","repository_relative_path"],"additionalProperties": false}]}},"required": ["reason","blocked_verification_units","subject_evidence","candidate"],"additionalProperties": false}
   }
 }"##
+}
+
+pub(crate) fn codex_output_schema_for_role(
+    prepared: &PreparedHarnessRun,
+    role: HarnessRole,
+) -> Result<String> {
+    let assigned = prepared.plan.requirements.iter().any(|requirement| {
+        matches!(requirement.owner, VerificationOwner::Role { role: owner } if owner == role)
+    });
+    if assigned || !matches!(role, HarnessRole::Verifier | HarnessRole::Reviewer) {
+        return Ok(codex_output_schema().to_owned());
+    }
+    let mut schema: serde_json::Value = decode_current_json(
+        codex_output_schema().as_bytes(),
+        "built-in Codex output schema",
+    )
+    .map_err(|_| ContextVaultError::invalid_input("invalid built-in Codex output schema"))?;
+    let branches = schema["$defs"]["result"]["anyOf"]
+        .as_array_mut()
+        .ok_or_else(|| ContextVaultError::invalid_input("invalid built-in role schema"))?;
+    let branch = branches
+        .iter_mut()
+        .find(|branch| branch["properties"]["role"]["enum"] == serde_json::json!([role]))
+        .ok_or_else(|| ContextVaultError::invalid_input("missing built-in role schema"))?;
+    branch["properties"]["requirement_results"] = serde_json::json!({
+        "type": "array",
+        "items": {"$ref": "#/$defs/requirement"},
+        "description": "Return exactly []: this role has no assigned verification requirements. Do not invent requirement results."
+    });
+    serde_json::to_string(&schema)
+        .map_err(|_| ContextVaultError::invalid_input("cannot encode Codex role schema"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -279,8 +312,72 @@ impl CodexNativeOutput {
         };
         decode_current_json::<CodexResponse>(text.as_bytes(), "native Codex role response")
             .map(|response| response.outcome)
-            .map_err(|_| "native Codex agent_message is not a strict structured role response")
+            .map_err(|_| codex_response_shape_error(text))
     }
+}
+
+fn codex_response_shape_error(text: &str) -> &'static str {
+    let Ok(value) = decode_current_json::<serde_json::Value>(
+        text.as_bytes(),
+        "native Codex role response diagnostic",
+    ) else {
+        return "native Codex agent_message is not JSON";
+    };
+    let Some(outcome) = value.get("outcome").and_then(serde_json::Value::as_object) else {
+        return "native Codex agent_message has no outcome object";
+    };
+    let Some(status) = outcome.get("status").and_then(serde_json::Value::as_str) else {
+        return "native Codex outcome has no status string";
+    };
+    if status == "completed" {
+        let Some(result) = outcome.get("result").and_then(serde_json::Value::as_object) else {
+            return "native Codex completed outcome has no result object";
+        };
+        if result
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
+            return "native Codex completed result has no role string";
+        }
+        if result.get("role").and_then(serde_json::Value::as_str) == Some("verifier") {
+            let Some(evidence) = result
+                .get("subject_evidence")
+                .and_then(serde_json::Value::as_array)
+            else {
+                return "native Codex verifier has no subject evidence array";
+            };
+            if evidence.iter().any(|item| {
+                serde_json::to_vec(item).ok().is_none_or(|bytes| {
+                    decode_current_json::<ResultEvidenceReference>(
+                        &bytes,
+                        "native Codex verifier evidence",
+                    )
+                    .is_err()
+                })
+            }) {
+                return "native Codex verifier has invalid subject evidence";
+            }
+            let Some(requirements) = result
+                .get("requirement_results")
+                .and_then(serde_json::Value::as_array)
+            else {
+                return "native Codex verifier has no requirement results array";
+            };
+            if requirements.iter().any(|item| {
+                serde_json::to_vec(item).ok().is_none_or(|bytes| {
+                    decode_current_json::<RequirementResult>(
+                        &bytes,
+                        "native Codex verifier requirement",
+                    )
+                    .is_err()
+                })
+            }) {
+                return "native Codex verifier has invalid requirement result";
+            }
+        }
+    }
+    "native Codex role response has incompatible field types, values, or fields outside the exact schema"
 }
 
 pub(crate) fn codex_terminal_state(outcome: &RoleExecutionOutcome) -> RoleTerminalState {
@@ -331,7 +428,9 @@ pub(crate) fn execute_codex_role(
         limits.max_role_grace_millis = limits
             .max_role_grace_millis
             .min(prepared.role_run.runtime_capabilities.max_role_grace_millis);
-        let (lifecycle, outcome) = run_codex_process(binary, &input, invocation.role, &limits)?;
+        let schema = codex_output_schema_for_role(prepared, invocation.role)?;
+        let (lifecycle, outcome) =
+            run_codex_process_with_schema(binary, &input, invocation.role, &limits, &schema)?;
         invocation
             .bind_result(lifecycle, outcome)
             .map_err(|error| ContextVaultError::invalid_input(error.to_string()))
@@ -436,15 +535,27 @@ pub(crate) fn codex_failure_message(
 }
 
 #[cfg(unix)]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one bounded process supervisor owns stdin, native events, deadlines, group termination and reaping"
-)]
+#[cfg(test)]
 pub(crate) fn run_codex_process(
     binary: &Path,
     input: &[u8],
     role: HarnessRole,
     limits: &RoleLifecycleLimits,
+) -> Result<(ReportedRoleLifecycle, RoleExecutionOutcome)> {
+    run_codex_process_with_schema(binary, input, role, limits, codex_output_schema())
+}
+
+#[cfg(unix)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one bounded process supervisor owns stdin, native events, deadlines, group termination and reaping"
+)]
+fn run_codex_process_with_schema(
+    binary: &Path,
+    input: &[u8],
+    role: HarnessRole,
+    limits: &RoleLifecycleLimits,
+    output_schema: &str,
 ) -> Result<(ReportedRoleLifecycle, RoleExecutionOutcome)> {
     use std::os::unix::{
         fs::OpenOptionsExt as _,
@@ -453,7 +564,7 @@ pub(crate) fn run_codex_process(
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     let directory = CodexDirectory::create()?;
     let schema_path = directory.0.join("outcome-schema.json");
-    let schema = codex_output_schema().as_bytes();
+    let schema = output_schema.as_bytes();
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)
