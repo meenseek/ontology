@@ -8,7 +8,7 @@ mod fixtures;
 use ontology::store::Store;
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 #[tokio::test]
-async fn native_role_rejects_writer_frontier_before_launch() {
+async fn native_role_launches_document_writer_and_rejects_missing_native_protocol() {
     let url = std::env::var("TEST_DATABASE_URL").expect("owned test database");
     assert!(
         ontology::config::database_options(&url)
@@ -44,13 +44,20 @@ async fn native_role_rejects_writer_frontier_before_launch() {
             "--prepared-run".into(),
             artifacts.path().join("prepared.json").display().to_string(),
             "--run-id".into(),
-            "native-unsupported-writer".into(),
+            "native-document-writer".into(),
             "--codex-binary".into(),
             binary.display().to_string(),
         ],
     )
     .await;
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported runtime"));
-    assert!(!Path::new(&marker).exists());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("without an observed native thread.started context ID")
+    );
+    assert!(Path::new(&marker).exists());
+    assert_eq!(
+        fs::read_to_string(workspace.join("document.md")).expect("source remains unchanged"),
+        "# Synthetic document"
+    );
 }
