@@ -3505,6 +3505,18 @@ cat "$0.events.$n"
             serde_json::from_value::<VerificationUnit>(value.clone())
                 .expect("every output-schema verification unit must decode in Core");
         }
+        let writer_schema: serde_json::Value = serde_json::from_str(
+            &codex_output_schema_for_role(&prepared, HarnessRole::Writer)
+                .expect("document writer schema"),
+        )
+        .expect("writer schema must be JSON");
+        let writer_statuses: Vec<&str> = writer_schema["properties"]["outcome"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|branch| branch["properties"]["status"]["enum"][0].as_str())
+            .collect();
+        assert_eq!(writer_statuses, ["completed", "failed", "unsupported"]);
         let mut zero_requirement_plan = prepared.clone();
         zero_requirement_plan
             .plan
@@ -3523,9 +3535,23 @@ cat "$0.events.$n"
         )
         .expect("role schema must be JSON");
         assert_eq!(
-            verifier_schema["$defs"]["result"]["anyOf"][1]["properties"]["requirement_results"]["description"],
+            verifier_schema["$defs"]["result"]["anyOf"][0]["properties"]["requirement_results"]["description"],
             "Return exactly []: this role has no assigned verification requirements. Do not invent requirement results."
         );
+        assert_eq!(
+            verifier_schema["$defs"]["result"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let outcome_statuses: Vec<&str> = verifier_schema["properties"]["outcome"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|branch| branch["properties"]["status"]["enum"][0].as_str())
+            .collect();
+        assert_eq!(outcome_statuses, ["completed", "failed", "unsupported"]);
         for index in 0..2 {
             assert!(
                 fs::read_to_string(workspace.join(format!("document-{index}.md")))

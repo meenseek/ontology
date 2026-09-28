@@ -127,26 +127,39 @@ pub(crate) fn codex_output_schema_for_role(
     let assigned = prepared.plan.requirements.iter().any(|requirement| {
         matches!(requirement.owner, VerificationOwner::Role { role: owner } if owner == role)
     });
-    if assigned || !matches!(role, HarnessRole::Verifier | HarnessRole::Reviewer) {
-        return Ok(codex_output_schema().to_owned());
-    }
     let mut schema: serde_json::Value = decode_current_json(
         codex_output_schema().as_bytes(),
         "built-in Codex output schema",
     )
     .map_err(|_| ContextVaultError::invalid_input("invalid built-in Codex output schema"))?;
+    let outcomes = schema["properties"]["outcome"]["anyOf"]
+        .as_array_mut()
+        .ok_or_else(|| ContextVaultError::invalid_input("invalid built-in outcome schema"))?;
+    // Process cancellation and deadline expiry come from the supervisor, not a model claim.
+    // Core permits MissingContext only for a Reviewer with owned requirements.
+    outcomes.retain(|branch| {
+        let status = &branch["properties"]["status"]["enum"];
+        status == &serde_json::json!(["completed"])
+            || status == &serde_json::json!(["failed"])
+            || status == &serde_json::json!(["unsupported"])
+            || (role == HarnessRole::Reviewer
+                && assigned
+                && status == &serde_json::json!(["missing-context"]))
+    });
     let branches = schema["$defs"]["result"]["anyOf"]
         .as_array_mut()
         .ok_or_else(|| ContextVaultError::invalid_input("invalid built-in role schema"))?;
+    branches.retain(|branch| branch["properties"]["role"]["enum"] == serde_json::json!([role]));
     let branch = branches
-        .iter_mut()
-        .find(|branch| branch["properties"]["role"]["enum"] == serde_json::json!([role]))
+        .first_mut()
         .ok_or_else(|| ContextVaultError::invalid_input("missing built-in role schema"))?;
-    branch["properties"]["requirement_results"] = serde_json::json!({
-        "type": "array",
-        "items": {"$ref": "#/$defs/requirement"},
-        "description": "Return exactly []: this role has no assigned verification requirements. Do not invent requirement results."
-    });
+    if !assigned && matches!(role, HarnessRole::Verifier | HarnessRole::Reviewer) {
+        branch["properties"]["requirement_results"] = serde_json::json!({
+            "type": "array",
+            "items": {"$ref": "#/$defs/requirement"},
+            "description": "Return exactly []: this role has no assigned verification requirements. Do not invent requirement results."
+        });
+    }
     serde_json::to_string(&schema)
         .map_err(|_| ContextVaultError::invalid_input("cannot encode Codex role schema"))
 }
