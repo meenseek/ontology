@@ -206,6 +206,16 @@ export function visibleGraph(model: Model, filters: Filters): { nodes: Positione
   const ids = new Set(nodes.map(n => n.id));
   return { nodes, links: model.links.filter(l => ids.has(l.source) && ids.has(l.target)) };
 }
+export function visibleClusterOptions(model: Model, filters: Filters): { listed: Cluster[]; standalone: number } {
+  const visible = new Set(visibleGraph(model, { ...filters, cluster: null }).nodes.map(node => node.id));
+  const nodes = new Map(model.nodes.map(node => [node.id, node]));
+  const present = model.clusters.flatMap(cluster => {
+    const members = cluster.members.filter(id => visible.has(id));
+    return members.length ? [{ ...cluster, members, knowledge: members.filter(id => knowledge(nodes.get(id)!)).length }] : [];
+  });
+  const listed = present.filter(cluster => cluster.members.length > 1 || cluster.id.startsWith("folder:"));
+  return { listed, standalone: present.length - listed.length };
+}
 /** Summarize only components whose hub cannot fit its neighbors in two compact rings. */
 export function denseConstellationCores(nodes: readonly (GraphNode & { cluster?: string })[], links: readonly GraphLink[], threshold = 18) {
   const byId = new Map(nodes.map(node => [node.id, node]));

@@ -70,6 +70,10 @@ test("original detail preview shows the canonical title once without losing auth
   assert.match(footnoted, /data-footnote-ref="true"/);
   const afterIntro = renderToStaticMarkup(<DocumentPreview path="notes.md" content={`소개 문단\n\n# ${title}`} kind="context" title={title} preferTitle />);
   assert.equal([...afterIntro.matchAll(/지원 현황/g)].length, 1);
+  const multiline = renderToStaticMarkup(<DocumentPreview path="notes.md" content={'지원\n현황\n====\n\n본문'} kind="context" title={title} preferTitle />);
+  assert.equal([...multiline.matchAll(/<h1\b/g)].length, 1, "a line break inside the authored title must not add a second H1");
+  assert.match(multiline, /<h1[^>]*>지원\s+현황<\/h1>/, "the remaining H1 keeps the authored title");
+  assert.match(multiline, /<p>본문<\/p>/);
   const distinct = renderToStaticMarkup(<DocumentPreview path="notes.md" content="# 본문 제목" kind="context" title="별도 문서 제목" preferTitle />);
   assert.match(distinct, /<h1>별도 문서 제목<\/h1>/);
   assert.match(distinct, /<h1[^>]*>본문 제목<\/h1>/);

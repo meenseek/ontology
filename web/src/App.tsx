@@ -6,7 +6,7 @@ import Memory from "./Memory";
 import type { Item as MemoryItem } from "./Memory";
 import { Positions } from "./positions";
 import { nodePresentation, starColor } from "./presentation";
-import { graphUrl, isNativeOriginal, kindName, knowledge, linkName, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph } from "./graph";
+import { graphUrl, isNativeOriginal, kindName, knowledge, linkName, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph } from "./graph";
 import type { Filters, GraphNode, Model, Scope, Snapshot } from "./graph";
 const Graph = lazy(() => import("./Graph.tsx"));
 type Session = { csrf: string; areas: { id: string; label: string }[] };
@@ -241,7 +241,8 @@ export default function App() {
     document.addEventListener("keydown", keydown); return () => document.removeEventListener("keydown", keydown);
   }, [panel, narrow, busy]);
   const cluster = data?.model.clusters.find(c => c.id === filters.cluster);
-  const listedClusters = data?.model.clusters.filter(c => c.members.length > 1 || c.id.startsWith("folder:")) ?? [];
+  const clusterOptions = useMemo(() => data ? visibleClusterOptions(data.model, filters) : { listed: [], standalone: 0 }, [data, filters]);
+  const listedClusters = clusterOptions.listed;
   return <div className="app">
     <header className="app-header" inert={!!panel && narrow}>
       <a className="wordmark" href="/">개인 온톨로지</a>
@@ -267,7 +268,7 @@ export default function App() {
         <section className="cluster-list"><h2>원문 폴더와 관계 군집</h2>
           <button className="cluster" aria-pressed={!filters.cluster} disabled={busy} onClick={() => fitView(null)}>전체 보기</button>
           <div className="compact-list">{listedClusters.map(c => <button className="cluster" key={c.id} disabled={busy} aria-pressed={filters.cluster === c.id} onClick={() => fitView(c.id)}><i style={{ background: c.color }} /><strong>{c.label}</strong><small>{c.id.startsWith("folder:") ? `원문 ${c.knowledge}개` : `문서·기록 ${c.knowledge} · 분류 표식 ${c.members.length - c.knowledge}`}</small></button>)}</div>
-          <p className="hint">{listedClusters.length}개 묶음 · 단독 항목 {(data?.model.clusters.length ?? 0) - listedClusters.length}개</p>
+          <p className="hint">{listedClusters.length}개 묶음 · 단독 항목 {clusterOptions.standalone}개</p>
           <p className="hint">원문은 실제 출처 폴더별로 묶고, 그 밖의 자료는 현재 관계로 묶습니다. 연결선은 폴더가 달라도 유지됩니다.</p>
         </section>
         <details className="section"><summary>검색 방법</summary><p className="hint">단어를 띄어 쓰면 순서와 관계없이 모든 단어가 포함된 항목을 찾습니다. 경로와 검색 가능한 원문 내용도 함께 찾습니다. 첨부 파일은 연결된 원문 안에서 내려받습니다. 관계 없는 원문도 출처 폴더에 묶여 보이지만 연결선은 없습니다.</p></details>

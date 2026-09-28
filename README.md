@@ -722,7 +722,7 @@ docker compose exec -T postgres dropdb -U ontology "ontology_restore_출력된_�
 현재 Rust workspace와 native Core, native consumer, Web 검증은 기존 스크립트가 담당한다.
 
 ```bash
-cd "$HOME/Desktop/ontology"
+# 검증할 변경이 있는 ontology 체크아웃의 루트에서 실행
 bash scripts/verify.sh
 ```
 
@@ -741,13 +741,13 @@ consumer와 갱신, Git 커밋 가져오기와 실패·부재 처리, 사용자 
 build·테스트·restore를 다시 실행하거나 성공을 새로 주장하지 않는다. 웹 테스트와 빌드는
 브라우저 전체 동작 시험을 대신하지 않으며, 아래 미수행 화면 시나리오는 별도 검증으로 남는다.
 
-읽기·관리·저장 흐름의 호출 수를 바꿨다면 개발 서버에서 아래 브라우저 검증 페이지도 실행한다. 원문 목록·지도·상세 흐름은 실제 앱 화면에서 확인한다.
+읽기·관리·저장 흐름의 호출 수를 바꿨다면 같은 체크아웃의 개발 서버에서 아래 브라우저 검증 페이지도 실행한다. 원문 목록·지도·상세 흐름은 실제 앱 화면에서 확인한다.
 
 ```bash
 pnpm --dir web exec vite --host 127.0.0.1 --port 47832 --strictPort
 ```
 
 - `http://127.0.0.1:47832/reading-check.html`: 실제 Memory·Documents 컴포넌트에서 0·1·20개 자료의 필요한 시점 조회, 관리·탭 전환 시 입력 보존, 이력 페이지, 실패·취소·명시 재시도를 검사한다.
-- `http://127.0.0.1:47832/app-reading-check.html`: 실제 App에서 기억 1·20개 조건의 초기 조회, 생성·정정 응답 재사용, 범위 이동, 명시 새로고침, 갱신 상태 조회를 검사한다.
+- `http://127.0.0.1:47832/app-reading-check.html`: 실제 App에서 기억 1·20개 조건의 초기 조회, 생성·정정 응답 재사용, 범위 이동, 명시 새로고침, 갱신 상태 조회와 원문 폴더의 표시·필터·클릭·상세 제목을 검사한다.
 
 `reading-check.html`과 `app-reading-check.html`은 합성 응답만 사용하며 API를 실제 서버로 전달하지 않는다. 호출 시도와 성공한 JSON 응답 바이트를 기록하고 상한을 검사한다. 측정 바이트는 HTTP 전송량이 아니다. DB 호출 수와 응답 크기는 `tests/second_brain.rs`의 `detail_and_subject_queries_stay_bounded_across_cardinalities`가 별도 임시 DB에서 검사한다. 브라우저 검증은 `verify.sh`에 자동 포함되지 않으며 각 페이지의 PASS와 실제 앱 화면을 함께 확인한다.
