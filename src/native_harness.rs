@@ -3557,6 +3557,12 @@ cat "$0.events.$n"
                 .expect("reviewer schema"),
         )
         .expect("reviewer schema must be JSON");
+        assert!(
+            reviewer_schema["$defs"]["requirement"]["properties"]["evidence"]["description"]
+                .as_str()
+                .expect("reviewer evidence guidance")
+                .contains("source=produced-artifact")
+        );
         let reviewer_statuses: Vec<&str> = reviewer_schema["properties"]["outcome"]["anyOf"]
             .as_array()
             .unwrap()

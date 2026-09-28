@@ -170,6 +170,11 @@ pub(crate) fn codex_output_schema_for_role(
             }
         }
     }
+    if matches!(role, HarnessRole::Verifier | HarnessRole::Reviewer) {
+        schema["$defs"]["requirement"]["properties"]["evidence"]["description"] = serde_json::json!(
+            "For every requirement, include an evidence reference that binds the evaluated subject. When the invocation subject is produced-artifact, include source=produced-artifact and copy its exact artifact_digest; target and bound-document references alone are insufficient."
+        );
+    }
     let branches = schema["$defs"]["result"]["anyOf"]
         .as_array_mut()
         .ok_or_else(|| ContextVaultError::invalid_input("invalid built-in role schema"))?;
