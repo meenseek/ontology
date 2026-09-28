@@ -83,7 +83,7 @@ const GRAPH_SQL: &str = concat!(
  ORDER BY b.material_id,e.id
 ), nodes AS MATERIALIZED (
  SELECT e.id,'document' AS kind,
- jsonb_build_object('id',e.id,'scope',e.scope,'kind','document','label',s.path,'repository',s.repository,
+ jsonb_build_object('id',e.id,'scope',e.scope,'kind','document','label',s.path,'title',cp.payload->>'title','repository',s.repository,
  'revision',COALESCE(cm.revision,e.revision)::text,'content_digest',COALESCE(cm.content_digest,p.content_digest),'source_revision',p.source_revision,
  'generation',s.generation::text,'status',CASE WHEN cm.material_id IS NULL THEN s.status ELSE 'ok' END,
  'present',CASE WHEN cm.material_id IS NULL THEN p.present ELSE true END,
@@ -101,17 +101,18 @@ const GRAPH_SQL: &str = concat!(
  CROSS JOIN LATERAL (SELECT lower(concat(s.path,' ',cm.path,' ',cm.search_text,' ',CASE WHEN cm.material_id IS NULL THEN p.content ELSE concat(cp.payload->>'title',' ',cp.payload->>'body',' ',cp.payload->>'aliases') END,' ',
    (SELECT string_agg(t.name,' ') FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id WHERE et.scope=e.scope AND et.entity_id=e.id))) AS text) search_text
  LEFT JOIN LATERAL (SELECT strpos(lower(current_body.body),term) AS at FROM terms WHERE strpos(lower(current_body.body),term)>0 ORDER BY ordinality LIMIT 1) excerpt_hit ON true
- WHERE e.scope=$1
+ WHERE e.scope=$1 AND (cm.material_id IS NULL OR cm.path LIKE '%.md')
  UNION ALL
  SELECT 'c_'||m.material_id::text,'document',
  jsonb_build_object('id','c_'||m.material_id::text,'scope',$1,'kind','document',
- 'label',m.path,'repository',m.scope,'source_kind','original','context_scope',m.scope,'context_path',m.path,
+ 'label',m.path,'title',p.payload->>'title','repository',m.scope,'source_kind','original','context_scope',m.scope,'context_path',m.path,
  'revision',m.revision::text,'content_digest',m.content_digest,'status','ok','present',true,'current',true,
  'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(p.payload->>'body' FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END),
  NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(concat(m.path,' ',m.search_text,' ',p.payload->>'title',' ',p.payload->>'body')),term)=0)
  FROM context_materials m LEFT JOIN context_projection_versions p USING(material_id,revision)
  LEFT JOIN LATERAL (SELECT strpos(lower(p.payload->>'body'),term) AS at FROM terms WHERE strpos(lower(p.payload->>'body'),term)>0 ORDER BY ordinality LIMIT 1) excerpt_hit ON true
  WHERE $1='personal' AND NOT m.deleted AND NOT m.restricted
+ AND m.path LIKE '%.md'
  AND NOT EXISTS (SELECT 1 FROM bound_materials b WHERE b.material_id=m.material_id)
  UNION ALL
  SELECT m.id,'memory',jsonb_build_object('id',m.id,'scope',m.scope,'kind','memory',

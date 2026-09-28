@@ -5,9 +5,9 @@ import type { GraphNode } from "./graph";
 import { nodePresentation } from "./presentation";
 
 type Request = <T>(url: string, options?: RequestInit) => Promise<T>;
-type Original = { metadata: { scope: string; path: string; source_path: string; revision: number; origin_kind: "native" | "imported-file"; source_digest: string | null; content_digest: string; byte_len: number }; content: string };
+type Original = { metadata: { scope: string; path: string; source_path: string; revision: number; origin_kind: "native" | "imported-file"; source_digest: string | null; content_digest: string; byte_len: number }; content: string; title: string | null };
 type History = { items: { revision: number; content_digest: string; byte_len: number; recorded_at: number; change_kind: "manual" | "core" | "import" }[]; next_before: number | null };
-type Version = { revision: number; content_digest: string; content: string };
+type Version = { revision: number; content_digest: string; content: string; title: string | null };
 type EditReceipt = { revision: number; content_digest: string; changed: boolean };
 const MAX_ORIGINAL_EDIT_BYTES = 1024 * 1024;
 const url = (kind: "history" | "version", scope: string, path: string, number?: number) => {
@@ -107,7 +107,7 @@ export default function OriginalDetail({ scope, path, request, related = [], onN
     return target && !/\.(md|markdown)$/i.test(target) ? contextUrl("download", scope, target) : undefined;
   };
   return <section className="documents original-detail" aria-label="원문과 이력">
-    <h2>{originalFilename(path)}</h2>
+    <h2>{(selected ? selected.title : original?.title) || originalFilename(path)}</h2>
     <p className="source-identity">{scope === "profile" ? "공통 운영 규칙" : "원문"} · {scope}/{path}</p>
     <p className="hint">{scope === "profile" ? "공통 운영 규칙은 검토된 변경 절차로 수정합니다." : "원문 저장과 조회는 내용을 검증하거나 규칙으로 승인한 뜻이 아닙니다."}</p>
     <a href={contextUrl("download", scope, path)} download={originalFilename(path)}>현재 원본 다운로드</a>

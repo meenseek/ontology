@@ -311,9 +311,9 @@ pub fn parse_markdown_bytes(logical_path: &Path, bytes: &[u8]) -> Result<ParsedM
         || path
             .split('/')
             .any(|part| part.is_empty() || matches!(part, "." | ".."))
-        || !logical_path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        || !logical_path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+        })
     {
         return Err(ContextVaultError::invalid_input(
             "Markdown path must be normalized and nonescaping",
@@ -834,6 +834,17 @@ mod tests {
 
     use super::*;
     use crate::test_support::TempDirectory;
+
+    #[test]
+    fn exact_markdown_title_accepts_the_long_extension() {
+        let content = "---\ntitle: 한국어 제목\n---\n# 다른 제목\n본문\n";
+        let parsed = parse_markdown_bytes(
+            Path::new("personal/notes/example.markdown"),
+            content.as_bytes(),
+        )
+        .expect("valid Markdown original");
+        assert_eq!(parsed.document().title(), "한국어 제목");
+    }
 
     #[test]
     fn reads_markdown_title_from_frontmatter() {

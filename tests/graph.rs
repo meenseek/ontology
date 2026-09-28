@@ -240,6 +240,8 @@ async fn graph_snapshot_contract() {
             b"---\ntitle: Index\nontology: true\nrelated: [personal/ontology/schema.md]\n---\n# Index\n",
         ),
         ("personal/ontology/schema.md", b"# Schema\n"),
+        ("personal/decisions/second.markdown", b"# Second Markdown\n"),
+        ("personal/decisions/THIRD.MD", b"# Third Markdown\n"),
         ("personal/attachments/image.bin", b"\0\xff"),
         ("personal/raw/private.md", b"restricted marker"),
         ("profile/rules/example.md", b"# Profile\n"),
@@ -258,7 +260,7 @@ async fn graph_snapshot_contract() {
         .await
         .expect("store exact originals");
     let originals = fetch(&store, query(Scope::Personal, "", None, 20)).await;
-    assert_eq!(originals["totals"]["documents"], 6);
+    assert_eq!(originals["totals"]["documents"], 5);
     assert_eq!(originals["totals"]["links"], 1);
     assert_eq!(
         originals["nodes"]
@@ -267,7 +269,42 @@ async fn graph_snapshot_contract() {
             .iter()
             .filter(|n| n["source_kind"] == "original")
             .count(),
-        5
+        4
+    );
+    assert!(
+        !originals["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .any(|n| n["context_path"] == "decisions/second.markdown")
+    );
+    assert!(
+        !originals["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .any(|n| n["context_path"] == "decisions/THIRD.MD")
+    );
+    assert!(
+        !originals["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .any(|n| n["context_path"] == "attachments/image.bin")
+    );
+    assert_eq!(
+        fetch(&store, query(Scope::Personal, "image.bin", None, 10)).await["matched"],
+        0
+    );
+    assert_eq!(
+        store
+            .context_history(&scopes[0], "attachments/image.bin", None)
+            .await
+            .expect("attachment remains stored")["items"]
+            .as_array()
+            .expect("attachment history")
+            .len(),
+        1
     );
     assert!(
         !originals["nodes"]
@@ -281,7 +318,22 @@ async fn graph_snapshot_contract() {
     let support = &found["nodes"][0];
     assert_eq!(support["context_path"], "decisions/support.md");
     assert_eq!(support["source_kind"], "original");
+    assert_eq!(support["title"], "Support");
     assert!(support.get("content").is_none());
+    let exact = store
+        .read_context_material(&scopes[0], "decisions/support.md")
+        .await
+        .expect("current original");
+    assert_eq!(exact.title.as_deref(), Some("Support"));
+    assert_eq!(
+        originals["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|node| node["context_path"] == "ontology/index.md")
+            .expect("ontology original")["title"],
+        "Index"
+    );
     let separated = fetch(&store, query(Scope::Personal, "support 지원", None, 10)).await;
     assert_eq!(separated["matched"], 1, "path and body words combine");
     assert!(
@@ -306,6 +358,7 @@ async fn graph_snapshot_contract() {
         .await
         .expect("exact historical text");
     assert_eq!(version["content"], original_support);
+    assert_eq!(version["title"], "Support");
     assert_eq!(
         store
             .read_context_revision(&scopes[0], "raw/private.md", 1)

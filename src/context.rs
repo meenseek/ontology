@@ -3,6 +3,7 @@ use crate::{
     domain::Error,
     store::{Store, digest},
 };
+use context_core::document::parse_markdown_bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder, Row};
@@ -209,6 +210,16 @@ pub struct ContextMaterial {
 pub struct ContextText {
     pub metadata: ContextMetadata,
     pub content: String,
+    pub title: Option<String>,
+}
+
+fn original_title(scope: &ContextScope, path: &str, bytes: &[u8]) -> Option<String> {
+    if !markdown_path(path) {
+        return None;
+    }
+    parse_markdown_bytes(Path::new(&format!("{}/{path}", scope.as_str())), bytes)
+        .ok()
+        .map(|parsed| parsed.document().title().to_owned())
 }
 
 pub(crate) fn validate_path(path: &str) -> Result<(), Error> {
@@ -569,9 +580,11 @@ impl Store {
             MAX_READ_BYTES
         };
         let material = self.context_material(scope, path, false, limit).await?;
+        let title = original_title(scope, path, &material.bytes);
         Ok(ContextText {
             metadata: material.metadata,
             content: String::from_utf8(material.bytes).map_err(|_| Error::Invalid)?,
+            title,
         })
     }
 
@@ -622,8 +635,9 @@ impl Store {
             let bytes=row.get::<Option<Vec<u8>>,_>("content").ok_or(Error::Limit)?;
             let sha:String=row.get("content_digest");
             if row.get::<i64,_>("byte_len") != bytes.len() as i64 || digest(&bytes)!=sha { return Err(Error::Storage); }
+            let title = original_title(scope, path, &bytes);
             let content=String::from_utf8(bytes).map_err(|_|Error::Invalid)?;
-            Ok(json!({"scope":scope,"path":path,"revision":revision,"content_digest":sha,"content":content}))
+            Ok(json!({"scope":scope,"path":path,"revision":revision,"content_digest":sha,"content":content,"title":title}))
         }.await;
         self.finish_context(tx, result).await
     }
