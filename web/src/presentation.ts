@@ -13,9 +13,9 @@ export function repositoryNames(repositories: string[]): Map<string, string> {
     return [repository, repository];
   }));
 }
-export function nodePresentation(node: { kind: string; label: string; repository?: string; repositoryLabel?: string }, compact = false): { title: string; subtitle: string } {
+export function nodePresentation(node: { kind: string; label: string; title?: string | null; repository?: string; repositoryLabel?: string }, compact = false): { title: string; subtitle: string } {
   if (node.kind !== "document") return { title: node.label, subtitle: "" };
-  const title = fileName(node.label);
+  const title = node.title?.trim() || fileName(node.label);
   const repository = compact ? node.repositoryLabel ?? node.repository : node.repository;
   return { title, subtitle: repository ? `${repository} · ${node.label}` : title !== node.label ? node.label : "" };
 }
