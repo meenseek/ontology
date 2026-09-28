@@ -3552,6 +3552,36 @@ cat "$0.events.$n"
             .filter_map(|branch| branch["properties"]["status"]["enum"][0].as_str())
             .collect();
         assert_eq!(outcome_statuses, ["completed", "failed", "unsupported"]);
+        let reviewer_schema: serde_json::Value = serde_json::from_str(
+            &codex_output_schema_for_role(&prepared, HarnessRole::Reviewer)
+                .expect("reviewer schema"),
+        )
+        .expect("reviewer schema must be JSON");
+        let reviewer_statuses: Vec<&str> = reviewer_schema["properties"]["outcome"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|branch| branch["properties"]["status"]["enum"][0].as_str())
+            .collect();
+        assert_eq!(
+            reviewer_statuses,
+            ["completed", "missing-context", "failed", "unsupported"]
+        );
+        let reviewer_outcomes = reviewer_schema["properties"]["outcome"]["anyOf"]
+            .as_array()
+            .unwrap();
+        assert!(
+            reviewer_outcomes[0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("blocking_findings")
+        );
+        assert!(
+            reviewer_outcomes[3]["description"]
+                .as_str()
+                .unwrap()
+                .contains("do not use for correctable candidate findings")
+        );
         for index in 0..2 {
             assert!(
                 fs::read_to_string(workspace.join(format!("document-{index}.md")))

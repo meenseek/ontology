@@ -135,7 +135,9 @@ pub(crate) fn codex_output_schema_for_role(
     let outcomes = schema["properties"]["outcome"]["anyOf"]
         .as_array_mut()
         .ok_or_else(|| ContextVaultError::invalid_input("invalid built-in outcome schema"))?;
-    // Process cancellation and deadline expiry come from the supervisor, not a model claim.
+    // Process cancellation and deadline expiry come from the supervisor, not a
+    // model claim. Reviewer findings belong in the completed result so Core can
+    // request a revision instead of halting the execution.
     // Core permits MissingContext only for a Reviewer with owned requirements.
     outcomes.retain(|branch| {
         let status = &branch["properties"]["status"]["enum"];
@@ -146,6 +148,28 @@ pub(crate) fn codex_output_schema_for_role(
                 && assigned
                 && status == &serde_json::json!(["missing-context"]))
     });
+    if role == HarnessRole::Reviewer {
+        for branch in outcomes.iter_mut() {
+            match branch["properties"]["status"]["enum"][0].as_str() {
+                Some("completed") => {
+                    branch["description"] = serde_json::json!(
+                        "Use for a completed review, including correctable quality findings; report those in blocking_findings and requirement_results."
+                    );
+                }
+                Some("failed") => {
+                    branch["description"] = serde_json::json!(
+                        "Use only when the review itself could not be performed; do not use for findings about a candidate."
+                    );
+                }
+                Some("unsupported") => {
+                    branch["description"] = serde_json::json!(
+                        "Use only when the planned review cannot be completed and no valid MissingContext candidate can be named; do not use for correctable candidate findings."
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
     let branches = schema["$defs"]["result"]["anyOf"]
         .as_array_mut()
         .ok_or_else(|| ContextVaultError::invalid_input("invalid built-in role schema"))?;
