@@ -49,10 +49,35 @@ test("shows one Markdown preview without duplicating source or front matter", ()
   assert.match(html, /aria-label="문서 미리보기"/);
 });
 
-test("original detail preview keeps authored heading without adding another title", () => {
-  const html = renderToStaticMarkup(<DocumentPreview path="notes.md" content="문단만 있는 원문" kind="context" suppressGeneratedTitle />);
-  assert.doesNotMatch(html, /<h1/);
-  assert.match(html, /<p>문단만 있는 원문<\/p>/);
+test("original detail preview shows the canonical title once without losing authored heading content", () => {
+  const title = "지원 현황";
+  const html = renderToStaticMarkup(<DocumentPreview path="notes.md" content={`# ${title}\n\n본문`} kind="context" title={title} preferTitle />);
+  assert.equal([...html.matchAll(/지원 현황/g)].length, 1);
+  assert.match(html, /<h1[^>]*id="[^"]*heading-지원-현황"[^>]*>지원 현황<\/h1>/);
+  assert.match(html, /<p>본문<\/p>/);
+  const { root } = fragmentRoot(html);
+  assert.ok(findDocumentFragment(root, "#지원-현황"));
+  const linked = renderToStaticMarkup(<DocumentPreview path="notes.md" content="# [지원 현황](https://example.com)" kind="context" title={title} preferTitle />);
+  assert.equal([...linked.matchAll(/지원 현황/g)].length, 1);
+  assert.match(linked, /<h1[^>]*><a href="https:\/\/example.com"/);
+  const imported = renderToStaticMarkup(<DocumentPreview path="notes.md" content={`# 지원 현황\n\n# [지원 현황](https://example.com)`} kind="context" title={title} preferTitle />);
+  assert.equal([...imported.matchAll(/지원 현황/g)].length, 1);
+  assert.match(imported, /<h1[^>]*><a href="https:\/\/example.com"/);
+  const struck = renderToStaticMarkup(<DocumentPreview path="notes.md" content="# ~~지원 현황~~" kind="context" title={title} preferTitle />);
+  assert.equal([...struck.matchAll(/지원 현황/g)].length, 1);
+  const footnoted = renderToStaticMarkup(<DocumentPreview path="notes.md" content={`# 지원 현황 [^n]\n\n[^n]: 설명`} kind="context" title={title} preferTitle />);
+  assert.equal([...footnoted.matchAll(/지원 현황/g)].length, 1);
+  assert.match(footnoted, /data-footnote-ref="true"/);
+  const afterIntro = renderToStaticMarkup(<DocumentPreview path="notes.md" content={`소개 문단\n\n# ${title}`} kind="context" title={title} preferTitle />);
+  assert.equal([...afterIntro.matchAll(/지원 현황/g)].length, 1);
+  const distinct = renderToStaticMarkup(<DocumentPreview path="notes.md" content="# 본문 제목" kind="context" title="별도 문서 제목" preferTitle />);
+  assert.match(distinct, /<h1>별도 문서 제목<\/h1>/);
+  assert.match(distinct, /<h1[^>]*>본문 제목<\/h1>/);
+  const withoutHeading = renderToStaticMarkup(<DocumentPreview path="notes.md" content="문단만 있는 원문" kind="context" title={title} preferTitle />);
+  assert.match(withoutHeading, /<h1>지원 현황<\/h1>/);
+  assert.match(withoutHeading, /<p>문단만 있는 원문<\/p>/);
+  const empty = renderToStaticMarkup(<DocumentPreview path="notes.md" content="" kind="context" title={title} preferTitle />);
+  assert.equal([...empty.matchAll(/지원 현황/g)].length, 1);
 });
 
 test("keeps thematic breaks and fenced front matter examples visible", () => {

@@ -10,6 +10,7 @@ autobins = false
 [dependencies]
 errno = { version = "0.3", default-features = false }
 libc = { version = "0.2", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
