@@ -422,6 +422,7 @@ cargo run --locked -- import \
 ```
 
 이번 로컬 초기 데이터 중 Git 자료는 위 `.github` 조직 문서 **2개**다. 로컬 checkout의 고정 커밋 `d00d916635018f5955ab49953bde8c736c732d33`을 기준으로 가져왔으며, 원격 최신 상태를 확인했다는 뜻은 아니다.
+위 파일명은 그 고정 커밋의 경로다. 현재 작업본을 갱신할 때는 아래의 `docs/repository-rules.md` 경로를 사용한다.
 
 다른 문서는 허용 목록, 저장소, 전체 커밋 SHA, 파일을 직접 지정한다. macOS의 복수 저장소 허용 목록은 `:`로 구분한다. `--scope`는 `meenseek` 또는 `personal`이며 앱에서 개인 자료로 분류할 문서는 `personal`을 사용한다. 허용 목록에 들어간 저장소의 하위 디렉터리까지 자동 허용하지 않는다. 브랜치명·축약 SHA·절대 파일 경로·상위 경로·심볼릭 링크는 받지 않는다. 한 번에 중복 없는 `.md`, `.txt`, `.rst` 파일 1~100개, 파일당 최대 64 KiB의 UTF-8 텍스트를 처리한다. 작업 트리의 미커밋 내용과 원격 자료는 가져오지 않는다.
 
@@ -601,7 +602,7 @@ ln -s "$PWD/scripts/sync-local.command" "$HOME/Desktop/온톨로지 자료 갱�
       "root": "/Users/meenseek/Desktop/.github",
       "scope": "meenseek",
       "ref": "HEAD",
-      "paths": ["docs/repository-model.md", "profile/README.md"]
+      "paths": ["docs/repository-rules.md", "profile/README.md"]
     },
     {
       "kind": "context",
