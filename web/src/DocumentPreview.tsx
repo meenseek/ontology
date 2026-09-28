@@ -6,9 +6,10 @@ import remarkFrontmatter from "remark-frontmatter";
 import remarkGfm from "remark-gfm";
 import { fileName } from "./presentation";
 
-type Props = { path: string; content: string | null; kind: "vault" | "context" | "git" | "record"; title?: string; generatedTitle?: boolean; suppressGeneratedTitle?: boolean; resolveInternalLink?: (href: string) => (() => void) | undefined; resolveInternalDownload?: (href: string) => string | undefined };
+type Props = { path: string; content: string | null; kind: "vault" | "context" | "git" | "record"; title?: string; generatedTitle?: boolean; preferTitle?: boolean; resolveInternalLink?: (href: string) => (() => void) | undefined; resolveInternalDownload?: (href: string) => string | undefined };
 type Tree = { type: string; tagName?: string; value?: string; properties?: Record<string, unknown>; children?: Tree[] };
 const text = (node: Tree): string => node.value ?? String(node.properties?.alt ?? (node.children ?? []).map(text).join(""));
+const headingText = (node: Tree): string => node.tagName === "sup" ? "" : node.value ?? String(node.properties?.alt ?? (node.children ?? []).map(headingText).join(""));
 
 function headingIds({ namespace }: { namespace: string }) {
   return (tree: Tree) => {
@@ -27,17 +28,18 @@ function headingIds({ namespace }: { namespace: string }) {
   };
 }
 
-/** Only Context and Vault importers adds a title before the body. Preserve the body and all fragment IDs. */
-function documentHeading({ fallback, kind, generatedTitle, suppressGeneratedTitle }: { fallback: string; kind: Props["kind"]; generatedTitle?: boolean; suppressGeneratedTitle?: boolean }) {
+/** Show a document title once while preserving authored headings and fragment IDs. */
+function documentHeading({ fallback, kind, generatedTitle, preferTitle }: { fallback: string; kind: Props["kind"]; generatedTitle?: boolean; preferTitle?: boolean }) {
   return (tree: Tree) => {
-    if (suppressGeneratedTitle || kind === "record" && generatedTitle) return;
+    if (kind === "record" && generatedTitle) return;
     const children = tree.children ?? [];
     const [first, second] = children.filter(node => node.type !== "text" || node.value?.trim());
-    if (first?.tagName !== "h1" || !text(first).trim() || (kind === "record" && text(first).trim() !== fallback.trim())) {
+    const titleAlreadyPresent = preferTitle && children.some(node => node.tagName === "h1" && headingText(node).trim() === fallback.trim());
+    if (!titleAlreadyPresent && (first?.tagName !== "h1" || !headingText(first).trim() || ((kind === "record" || preferTitle) && headingText(first).trim() !== fallback.trim()))) {
       children.unshift({ type: "element", tagName: "h1", properties: {}, children: [{ type: "text", value: fallback }] });
     } else if ((kind === "vault" || kind === "context") && second?.tagName === "h1"
       && first.children?.every(node => node.type === "text")
-      && text(first).trim() === text(second).trim()) {
+      && headingText(first).trim() === headingText(second).trim()) {
       // Keep the authored heading (including formatting/links). The synthetic title remains an anchor.
       first.tagName = "div";
       first.properties = { ...first.properties, className: ["document-title-anchor"] };
@@ -94,7 +96,7 @@ function Reference({ value }: { value: string }) {
   return <span className="document-reference"> ({value || "주소 없음"} · {relative ? "이 원문 경로는 여기서 열 수 없습니다." : "열 수 없는 주소입니다."})</span>;
 }
 
-export default function DocumentPreview({ path, content, kind, title, generatedTitle, suppressGeneratedTitle, resolveInternalLink, resolveInternalDownload }: Props) {
+export default function DocumentPreview({ path, content, kind, title, generatedTitle, preferTitle, resolveInternalLink, resolveInternalDownload }: Props) {
   const namespace = `document-${useId()}`;
   const fallback = title ?? fileName(path);
   const preview = useRef<HTMLDivElement>(null);
@@ -133,7 +135,7 @@ export default function DocumentPreview({ path, content, kind, title, generatedT
   if (kind !== "record" && !/\.(md|markdown)$/i.test(path)) return <section className="document-content" aria-label="원문"><h1 className="document-title">{fallback}</h1>{content.trim() ? <pre className="source-text">{content}</pre> : <p className="hint">원문이 비어 있습니다.</p>}</section>;
   return <section className="document-content">
     <div className="document-preview" ref={preview} aria-label="문서 미리보기">
-      {content.trim() ? <Markdown remarkPlugins={kind === "record" ? [remarkGfm] : [remarkFrontmatter, remarkGfm]} rehypePlugins={[[headingIds, { namespace }], [documentHeading, { fallback, kind, generatedTitle, suppressGeneratedTitle }]]} remarkRehypeOptions={{ footnoteLabel: "각주", footnoteBackLabel: (index, rereference) => `본문 ${index + 1}번 각주로 돌아가기${rereference > 1 ? ` (${rereference})` : ""}` }} urlTransform={value => value} components={components}>{content}</Markdown> : <><h1>{fallback}</h1><p className="hint">원문이 비어 있습니다.</p></>}
+      {content.trim() ? <Markdown remarkPlugins={kind === "record" ? [remarkGfm] : [remarkFrontmatter, remarkGfm]} rehypePlugins={[[headingIds, { namespace }], [documentHeading, { fallback, kind, generatedTitle, preferTitle }]]} remarkRehypeOptions={{ footnoteLabel: "각주", footnoteBackLabel: (index, rereference) => `본문 ${index + 1}번 각주로 돌아가기${rereference > 1 ? ` (${rereference})` : ""}` }} urlTransform={value => value} components={components}>{content}</Markdown> : <><h1>{fallback}</h1><p className="hint">원문이 비어 있습니다.</p></>}
     </div>
   </section>;
 }

@@ -1588,6 +1588,11 @@ fn validate_completed_reviewer_result(
         ));
     };
     validate_artifact_text("review summary", summary)?;
+    if plan.owner == DataOwner::CommonWork && !learning_candidates.is_empty() {
+        return Err(HarnessError::InvalidSubmission(
+            "common work maintenance does not accept Reviewer learning candidates".to_owned(),
+        ));
+    }
     validate_subject_evidence(plan, role_bundle, invocation_subject, subject_evidence)?;
     validate_requirement_results(
         plan,
@@ -2342,7 +2347,9 @@ const fn owner_scope(owner: &DataOwner) -> &'static str {
         DataOwner::PersonalBusiness | DataOwner::Personal | DataOwner::PersonalProject { .. } => {
             "personal"
         }
-        DataOwner::Company { .. } | DataOwner::CompanyProject { .. } => "work",
+        DataOwner::CommonWork | DataOwner::Company { .. } | DataOwner::CompanyProject { .. } => {
+            "work"
+        }
     }
 }
 
