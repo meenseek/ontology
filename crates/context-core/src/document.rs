@@ -311,9 +311,9 @@ pub fn parse_markdown_bytes(logical_path: &Path, bytes: &[u8]) -> Result<ParsedM
         || path
             .split('/')
             .any(|part| part.is_empty() || matches!(part, "." | ".."))
-        || !logical_path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        || !logical_path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+        })
     {
         return Err(ContextVaultError::invalid_input(
             "Markdown path must be normalized and nonescaping",
@@ -753,11 +753,39 @@ fn scope_from_relative_path(path: &Path) -> Scope {
 }
 
 fn first_heading(body: &str) -> Option<String> {
-    body.lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("# ").map(str::trim))
-        .filter(|title| !title.is_empty())
-        .map(ToOwned::to_owned)
+    use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+    let mut title = String::new();
+    let mut in_heading = false;
+    let mut depth = 0;
+    for event in Parser::new_ext(
+        body,
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES,
+    ) {
+        match event {
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H1,
+                ..
+            }) if depth == 0 => {
+                in_heading = true;
+                title.clear();
+                depth += 1;
+            }
+            Event::Start(_) => depth += 1,
+            Event::Text(text) | Event::Code(text) if in_heading => title.push_str(&text),
+            Event::SoftBreak | Event::HardBreak if in_heading => title.push(' '),
+            Event::End(TagEnd::Heading(HeadingLevel::H1)) if in_heading && depth == 1 => {
+                if !title.trim().is_empty() {
+                    return Some(title.trim().to_owned());
+                }
+                in_heading = false;
+                depth -= 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 fn title_from_path(path: &Path) -> String {
@@ -834,6 +862,34 @@ mod tests {
 
     use super::*;
     use crate::test_support::TempDirectory;
+
+    #[test]
+    fn exact_markdown_title_accepts_the_long_extension() {
+        let content = "---\ntitle: 한국어 제목\n---\n# 다른 제목\n본문\n";
+        let parsed = parse_markdown_bytes(
+            Path::new("personal/notes/example.markdown"),
+            content.as_bytes(),
+        )
+        .expect("valid Markdown original");
+        assert_eq!(parsed.document().title(), "한국어 제목");
+    }
+
+    #[test]
+    fn first_heading_title_uses_visible_markdown_text() {
+        for (source, expected) in [
+            ("# **회의** `결과`\n\n본문\n", "회의 결과"),
+            ("# ~~지원 현황~~\n", "지원 현황"),
+            ("소개 문단\n\n# 지원 현황\n", "지원 현황"),
+            ("```md\n# 코드 예시\n```\n\n실제 제목\n===\n", "실제 제목"),
+            ("> # 인용 제목\n\n# 실제 제목\n", "실제 제목"),
+            ("# 지원 현황 [^n]\n\n[^n]: 설명\n", "지원 현황"),
+        ] {
+            let parsed =
+                parse_markdown_bytes(Path::new("personal/notes/formatted.md"), source.as_bytes())
+                    .expect("valid Markdown original");
+            assert_eq!(parsed.document().title(), expected);
+        }
+    }
 
     #[test]
     fn reads_markdown_title_from_frontmatter() {

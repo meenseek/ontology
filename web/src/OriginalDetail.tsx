@@ -5,9 +5,9 @@ import type { GraphNode } from "./graph";
 import { nodePresentation } from "./presentation";
 
 type Request = <T>(url: string, options?: RequestInit) => Promise<T>;
-type Original = { metadata: { scope: string; path: string; source_path: string; revision: number; origin_kind: "native" | "imported-file"; source_digest: string | null; content_digest: string; byte_len: number }; content: string };
+type Original = { metadata: { scope: string; path: string; source_path: string; revision: number; origin_kind: "native" | "imported-file"; source_digest: string | null; content_digest: string; byte_len: number }; content: string; title: string | null };
 type History = { items: { revision: number; content_digest: string; byte_len: number; recorded_at: number; change_kind: "manual" | "core" | "import" }[]; next_before: number | null };
-type Version = { revision: number; content_digest: string; content: string };
+type Version = { revision: number; content_digest: string; content: string; title: string | null };
 type EditReceipt = { revision: number; content_digest: string; changed: boolean };
 const MAX_ORIGINAL_EDIT_BYTES = 1024 * 1024;
 const url = (kind: "history" | "version", scope: string, path: string, number?: number) => {
@@ -97,6 +97,9 @@ export default function OriginalDetail({ scope, path, request, related = [], onN
     return () => document.removeEventListener("keydown", keydown);
   }, [editing, draft, baseline, saving, csrf]);
   const showing = selected?.content ?? original?.content;
+  const title = (selected ? selected.title : original?.title) || originalFilename(path);
+  const markdown = /(\.md|\.markdown)$/i.test(path);
+  const markdownPreview = !editing && !raw && showing !== undefined && markdown;
   const resolveInternalLink = (href: string) => {
     const target = resolveRelativeContextPath(path, href);
     const match = target && related.find(item => item.context_scope === scope && item.context_path === target);
@@ -107,7 +110,7 @@ export default function OriginalDetail({ scope, path, request, related = [], onN
     return target && !/\.(md|markdown)$/i.test(target) ? contextUrl("download", scope, target) : undefined;
   };
   return <section className="documents original-detail" aria-label="원문과 이력">
-    <h2>{originalFilename(path)}</h2>
+    {!markdownPreview && <h2>{title}</h2>}
     <p className="source-identity">{scope === "profile" ? "공통 운영 규칙" : "원문"} · {scope}/{path}</p>
     <p className="hint">{scope === "profile" ? "공통 운영 규칙은 검토된 변경 절차로 수정합니다." : "원문 저장과 조회는 내용을 검증하거나 규칙으로 승인한 뜻이 아닙니다."}</p>
     <a href={contextUrl("download", scope, path)} download={originalFilename(path)}>현재 원본 다운로드</a>
@@ -117,17 +120,17 @@ export default function OriginalDetail({ scope, path, request, related = [], onN
     {saveError && <p className="error" role="alert">{saveError}</p>}
     {readError && <p className="error" role="alert">{readError} <button onClick={() => setRefresh(value => value + 1)}>다시 불러오기</button></p>}
     {!original && !readError && <p role="status">원문을 불러오는 중…</p>}
-    {original && <><dl className="section"><dt>출처</dt><dd>{original.metadata.source_path}</dd><dt>크기</dt><dd>{original.metadata.byte_len.toLocaleString("ko-KR")} 바이트</dd></dl><details className="section"><summary>기술 정보</summary><dl><dt>현재 내용 SHA-256</dt><dd>{original.metadata.content_digest}</dd><ContextProvenance origin_kind={original.metadata.origin_kind} source_digest={original.metadata.source_digest} />{selected && <><dt>선택한 버전 SHA-256</dt><dd>{selected.content_digest}</dd></>}</dl></details></>}
-    {historyError && <p className="error" role="alert">이력 확인 실패: {historyError} <button onClick={reloadHistory}>다시 확인</button></p>}
-    {history && <section className="section" aria-label="원문 이력"><h3>원문 이력</h3><div className="compact-list">{history.items.map(item => <button key={item.revision} disabled={editing} aria-pressed={(selected?.revision ?? original?.metadata.revision) === item.revision} onClick={() => void version(item.revision)}>버전 {item.revision} · {item.change_kind === "manual" ? "직접 편집" : item.change_kind === "core" ? "검토된 변경" : "최초 보존"} · {new Date(item.recorded_at * 1000).toLocaleString("ko-KR")} · {item.byte_len.toLocaleString("ko-KR")} 바이트</button>)}</div>{history.next_before !== null && <button disabled={editing} onClick={() => void older(history.next_before!)}>이전 이력 더 보기</button>}</section>}
     {loadingVersion && <p role="status">버전 원문을 불러오는 중…</p>}
     {versionError && <p className="error" role="alert">{versionError}</p>}
     {selected && <p className="notice">버전 {selected.revision} 원문</p>}
-    {editing && <section className="section original-editor" aria-label="원문 편집"><label htmlFor="original-draft">원문 전체 편집</label><textarea id="original-draft" value={draft} disabled={saving} onChange={event => setDraft(event.target.value)} spellCheck={false} rows={20} aria-describedby="original-draft-hint" /><p id="original-draft-hint" className="hint">{draftBytes.toLocaleString("ko-KR")} / {MAX_ORIGINAL_EDIT_BYTES.toLocaleString("ko-KR")} 바이트 · ⌘S 또는 Ctrl+S로 저장</p><div className="original-editor-actions"><button className="primary" disabled={!dirty || saving || draftBytes > MAX_ORIGINAL_EDIT_BYTES} onClick={() => void save()}>{saving ? "저장 중…" : "원문 저장"}</button><button disabled={saving} onClick={() => { if (!dirty || window.confirm("저장하지 않은 초안을 버릴까요?")) { setEditing(false); setBaseline(null); setSaveError(""); } }}>편집 취소</button></div></section>}
     {!editing && showing !== undefined && <>
-      {/(\.md|\.markdown)$/i.test(path) && <div className="original-view-switch" role="group" aria-label="원문 보기 방식"><button aria-pressed={!raw} onClick={() => setRaw(false)}>읽기</button><button aria-pressed={raw} onClick={() => setRaw(true)}>원문 텍스트 보기</button></div>}
-      {raw || !/(\.md|\.markdown)$/i.test(path) ? <OriginalText content={showing} /> : <DocumentPreview path={path} content={showing} kind="context" suppressGeneratedTitle resolveInternalLink={resolveInternalLink} resolveInternalDownload={resolveInternalDownload} />}
+      {markdown && <div className="original-view-switch" role="group" aria-label="원문 보기 방식"><button aria-pressed={!raw} onClick={() => setRaw(false)}>읽기</button><button aria-pressed={raw} onClick={() => setRaw(true)}>원문 텍스트 보기</button></div>}
+      {markdownPreview ? <DocumentPreview path={path} content={showing} kind="context" title={title} preferTitle resolveInternalLink={resolveInternalLink} resolveInternalDownload={resolveInternalDownload} /> : <OriginalText content={showing} />}
     </>}
+    {original && <><dl className="section"><dt>출처</dt><dd>{original.metadata.source_path}</dd><dt>크기</dt><dd>{original.metadata.byte_len.toLocaleString("ko-KR")} 바이트</dd></dl><details className="section"><summary>기술 정보</summary><dl><dt>현재 내용 SHA-256</dt><dd>{original.metadata.content_digest}</dd><ContextProvenance origin_kind={original.metadata.origin_kind} source_digest={original.metadata.source_digest} />{selected && <><dt>선택한 버전 SHA-256</dt><dd>{selected.content_digest}</dd></>}</dl></details></>}
+    {historyError && <p className="error" role="alert">이력 확인 실패: {historyError} <button onClick={reloadHistory}>다시 확인</button></p>}
+    {history && <section className="section" aria-label="원문 이력"><h3>원문 이력</h3><div className="compact-list">{history.items.map(item => <button key={item.revision} disabled={editing} aria-pressed={(selected?.revision ?? original?.metadata.revision) === item.revision} onClick={() => void version(item.revision)}>버전 {item.revision} · {item.change_kind === "manual" ? "직접 편집" : item.change_kind === "core" ? "검토된 변경" : "최초 보존"} · {new Date(item.recorded_at * 1000).toLocaleString("ko-KR")} · {item.byte_len.toLocaleString("ko-KR")} 바이트</button>)}</div>{history.next_before !== null && <button disabled={editing} onClick={() => void older(history.next_before!)}>이전 이력 더 보기</button>}</section>}
+    {editing && <section className="section original-editor" aria-label="원문 편집"><label htmlFor="original-draft">원문 전체 편집</label><textarea id="original-draft" value={draft} disabled={saving} onChange={event => setDraft(event.target.value)} spellCheck={false} rows={20} aria-describedby="original-draft-hint" /><p id="original-draft-hint" className="hint">{draftBytes.toLocaleString("ko-KR")} / {MAX_ORIGINAL_EDIT_BYTES.toLocaleString("ko-KR")} 바이트 · ⌘S 또는 Ctrl+S로 저장</p><div className="original-editor-actions"><button className="primary" disabled={!dirty || saving || draftBytes > MAX_ORIGINAL_EDIT_BYTES} onClick={() => void save()}>{saving ? "저장 중…" : "원문 저장"}</button><button disabled={saving} onClick={() => { if (!dirty || window.confirm("저장하지 않은 초안을 버릴까요?")) { setEditing(false); setBaseline(null); setSaveError(""); } }}>편집 취소</button></div></section>}
     {related.length > 0 && <section className="section" aria-label="연결된 자료"><h3>명시적으로 연결된 자료</h3><div className="compact-list">{related.map(item => <button key={item.id} onClick={() => onNavigate?.(item.id)}><strong>{nodePresentation(item).title}</strong><small>{nodePresentation(item).subtitle}</small></button>)}</div></section>}
   </section>;
 }

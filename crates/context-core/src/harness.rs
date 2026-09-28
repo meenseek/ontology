@@ -381,6 +381,7 @@ impl HarnessAction {
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum DataOwner {
     Profile,
+    CommonWork,
     PersonalBusiness,
     Personal,
     PersonalProject { project: String },
@@ -706,7 +707,7 @@ impl DataOwner {
                 validate_company_id(company)?;
                 validate_partition_id("project", project)?;
             }
-            Self::Profile | Self::PersonalBusiness | Self::Personal => {}
+            Self::Profile | Self::CommonWork | Self::PersonalBusiness | Self::Personal => {}
         }
         Ok(())
     }
@@ -715,6 +716,7 @@ impl DataOwner {
     pub fn route_segment(&self) -> String {
         match self {
             Self::Profile => "profile".to_owned(),
+            Self::CommonWork => "common-work".to_owned(),
             Self::PersonalBusiness => "personal-business".to_owned(),
             Self::Personal => "personal".to_owned(),
             Self::PersonalProject { project } => format!("personal-project-{project}"),
@@ -741,6 +743,16 @@ pub struct HarnessRequest {
 impl HarnessRequest {
     fn validate(&self) -> HarnessResult<()> {
         self.owner.validate()?;
+        if self.owner == DataOwner::CommonWork
+            && (self.action != HarnessAction::DocumentWrite
+                || self.curation_kind.is_some()
+                || !self.curation_sources.is_empty()
+                || !self.delete_targets.is_empty())
+        {
+            return Err(HarnessError::InvalidRequest(
+                "common work maintenance only updates existing Markdown documents".to_owned(),
+            ));
+        }
         self.validate_targets()?;
         self.validate_action_target_kinds()?;
         self.validate_curation_sources()?;
@@ -1995,6 +2007,15 @@ impl ResolvedHarnessPlan {
     }
 
     fn validate_learning_source_bindings(&self) -> HarnessResult<()> {
+        if self.owner == DataOwner::CommonWork {
+            return if self.learning_sources.is_empty() {
+                Ok(())
+            } else {
+                Err(HarnessError::InvalidPlan(
+                    "common work maintenance cannot bind learning sources".to_owned(),
+                ))
+            };
+        }
         if self.learning_sources.len() > MAX_LEARNING_SOURCES {
             return Err(HarnessError::InvalidPlan(format!(
                 "learning source bindings must not exceed {MAX_LEARNING_SOURCES} items"
@@ -2252,6 +2273,7 @@ impl ResolvedHarnessPlan {
     pub fn user_summary(&self) -> String {
         let owner = match &self.owner {
             DataOwner::Profile => "공통 운영 규칙".to_owned(),
+            DataOwner::CommonWork => "업무 공통 규칙".to_owned(),
             DataOwner::PersonalBusiness => "개인 사업".to_owned(),
             DataOwner::Personal => "개인 자료".to_owned(),
             DataOwner::PersonalProject { project } => format!("개인 프로젝트: {project}"),
@@ -2634,6 +2656,11 @@ fn validate_intent(
     intent: HarnessIntent,
     context_grants: &[ContextGrant],
 ) -> HarnessResult<()> {
+    if request.owner == DataOwner::CommonWork && intent != HarnessIntent::PolicyMaintenance {
+        return Err(HarnessError::InvalidRequest(
+            "common work maintenance requires policy-maintenance intent".to_owned(),
+        ));
+    }
     let document_or_analysis = matches!(
         request.action,
         HarnessAction::DocumentWrite
@@ -2659,7 +2686,10 @@ fn validate_intent(
         }
         HarnessIntent::PolicyMaintenance => {
             if !context_grants.is_empty()
-                || !matches!(request.owner, DataOwner::Profile | DataOwner::Personal)
+                || !matches!(
+                    request.owner,
+                    DataOwner::Profile | DataOwner::Personal | DataOwner::CommonWork
+                )
                 || !matches!(
                     request.action,
                     HarnessAction::CodeWrite
@@ -3392,7 +3422,9 @@ const fn learning_owner_scope(owner: &DataOwner) -> &'static str {
         DataOwner::PersonalBusiness | DataOwner::Personal | DataOwner::PersonalProject { .. } => {
             "personal"
         }
-        DataOwner::Company { .. } | DataOwner::CompanyProject { .. } => "work",
+        DataOwner::CommonWork | DataOwner::Company { .. } | DataOwner::CompanyProject { .. } => {
+            "work"
+        }
     }
 }
 
@@ -3449,6 +3481,9 @@ impl VaultRepository {
         intent: HarnessIntent,
         requirements: &[VerificationRequirement],
     ) -> HarnessResult<Vec<LearningSourceBinding>> {
+        if owner == &DataOwner::CommonWork {
+            return Ok(Vec::new());
+        }
         let knowledge_root = curation_root(owner, CurationKind::Knowledge)?;
         if !self.source_metadata(Path::new(&knowledge_root))?.exists() {
             return Ok(Vec::new());
@@ -3834,6 +3869,9 @@ impl VaultRepository {
                 ]
             }
             (DataOwner::Profile, _) => vec!["vault/profile".to_owned()],
+            (DataOwner::CommonWork, _) => {
+                vec!["vault/profile".to_owned(), "vault/work/common".to_owned()]
+            }
             (DataOwner::PersonalBusiness, _) => vec![
                 "vault/profile".to_owned(),
                 "vault/personal/index.md".to_owned(),
@@ -4050,6 +4088,7 @@ impl VaultRepository {
         ) && request.curation_kind == Some(CurationKind::Journal);
         let roots = match &request.owner {
             DataOwner::Profile => vec!["vault/personal".to_owned(), "vault/work".to_owned()],
+            DataOwner::CommonWork => vec!["vault/personal".to_owned()],
             DataOwner::PersonalBusiness => {
                 vec!["vault/personal/journal".to_owned(), "vault/work".to_owned()]
             }
@@ -4373,6 +4412,28 @@ impl VaultRepository {
                     stability_policy_roles(request.action),
                 );
             }
+            DataOwner::CommonWork => {
+                add_policy_requirement(
+                    requirements,
+                    PolicyCapability::WorkAgentGuide,
+                    PolicyRoleMask::ALL,
+                );
+                add_policy_requirement(
+                    requirements,
+                    PolicyCapability::WorkAgentOperatingPreferences,
+                    PolicyRoleMask::ALL,
+                );
+                add_policy_requirement(
+                    requirements,
+                    PolicyCapability::WorkCompanyRegistry,
+                    PolicyRoleMask::ALL,
+                );
+                add_policy_requirement(
+                    requirements,
+                    PolicyCapability::ContextDocumentStability,
+                    stability_policy_roles(request.action),
+                );
+            }
             DataOwner::PersonalBusiness => {
                 add_policy_requirement(
                     requirements,
@@ -4523,6 +4584,32 @@ impl VaultRepository {
         workspace_root: &Path,
         intent: HarnessIntent,
     ) -> HarnessResult<()> {
+        if request.owner == DataOwner::CommonWork {
+            if self.store_identity.is_none()
+                || workspace_root != self.root
+                || !context_grants.is_empty()
+            {
+                return Err(HarnessError::InvalidRequest(
+                    "common work maintenance requires the native source workspace without evidence grants"
+                        .to_owned(),
+                ));
+            }
+            for target in &request.targets {
+                let relative = Path::new(target);
+                if !path_is_within(target, "vault/work/common")
+                    || !relative
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+                    || !self.source_metadata(relative)?.is_file()
+                {
+                    return Err(HarnessError::InvalidRequest(format!(
+                        "common work target `{target}` must be an existing Markdown original"
+                    )));
+                }
+                let file = self.open_scoped_file(relative, MAX_POLICY_BYTES)?;
+                read_text_file(file, MAX_POLICY_BYTES, &self.root.join(relative))?;
+            }
+        }
         if workspace_root.starts_with(&self.root) && workspace_root != self.root {
             return Err(HarnessError::InvalidRequest(
                 "the Vault repository must use its repository root as the workspace root"
@@ -4637,6 +4724,7 @@ impl VaultRepository {
 fn primary_vault_write_roots(owner: &DataOwner) -> Vec<String> {
     match owner {
         DataOwner::Profile => vec!["vault/profile".to_owned()],
+        DataOwner::CommonWork => vec!["vault/work/common".to_owned()],
         DataOwner::PersonalBusiness => vec!["vault/personal/business".to_owned()],
         DataOwner::Personal => vec!["vault/personal".to_owned()],
         DataOwner::PersonalProject { project } => vec![

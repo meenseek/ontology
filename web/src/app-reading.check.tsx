@@ -230,11 +230,95 @@ async function check(size: number) {
   }
 }
 
+async function checkOriginalFolders() {
+  const originalFetch = window.fetch;
+  const originalUrl = window.location.href;
+  const root = createRoot(host);
+  const original = (id: string, context_scope: string, context_path: string): GraphNode => ({
+    id, scope: "personal", kind: "document", label: "지원 현황", title: "지원 현황",
+    revision: "1", status: "ok", present: true, current: true, source_kind: "original", context_scope, context_path,
+  });
+  const nodes = [
+    original("folder-a", "personal", "writing/2026/a.md"),
+    { ...original("folder-b", "personal", "writing/2026/b.md"), status: "failed", present: false },
+    original("folder-c", "personal", "writing/2025/c.md"),
+    original("folder-d", "work/common", "writing/2026/d.md"),
+    { id: "unrelated-memory", scope: "personal", kind: "memory", label: "독립 기록", status: "accepted", temporal: "current", supported: true } satisfies GraphNode,
+  ];
+  const snapshot: Snapshot = {
+    scope: "personal", query: "", focus: { id: null, found: false }, nodes, links: [], matched: nodes.length,
+    totals: { documents: 4, memories: 1, markers: 0, links: 0 }, returned: { knowledge: 5, markers: 0, links: 0 },
+    omitted: { nodes: 0, links: 0 }, eligible: { nodes: 5, links: 0 },
+    limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false,
+  };
+  const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+  const folderButtons = () => [...host.querySelectorAll<HTMLButtonElement>(".cluster-list .compact-list > button")];
+  try {
+    window.fetch = async (input, options) => {
+      const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+      if (url.pathname === "/api/session") return json({ csrf: "synthetic-only", areas: [] });
+      if (url.pathname === "/api/graph") {
+        assert(url.searchParams.get("scope") === "personal" && !url.searchParams.get("q") && [null, "folder-c"].includes(url.searchParams.get("focus")), "Graph request stays in the personal scope and selected original");
+        return json(snapshot);
+      }
+      if (url.pathname === "/api/context/read") {
+        assert(url.searchParams.get("scope") === "personal" && url.searchParams.get("path") === "writing/2025/c.md", "Read the selected personal original");
+        return json({
+          metadata: { scope: "personal", path: "writing/2025/c.md", source_path: "synthetic", revision: 1, origin_kind: "native", source_digest: null, content_digest: "synthetic", byte_len: 30 },
+          content: "지원\n현황\n====\n\n본문", title: "지원 현황",
+        });
+      }
+      if (url.pathname === "/api/context/history") {
+        assert(url.searchParams.get("scope") === "personal" && url.searchParams.get("path") === "writing/2025/c.md", "History belongs to the selected personal original");
+        return json({ items: [], next_before: null });
+      }
+      throw new Error(`Unexpected original check request: ${options?.method ?? "GET"} ${url.pathname}`);
+    };
+    window.history.replaceState(null, "", `${window.location.pathname}?scope=personal`);
+    root.render(<App />);
+    await until(() => !!host.querySelector(".map-actions"), "original App controls");
+    button("목록 보기").click();
+    button("필터·묶음").click();
+    await until(() => folderButtons().length === 3, "three original folders");
+    assert(host.querySelector(".cluster-list .hint")?.textContent === "3개 묶음 · 단독 항목 1개", "Unfiltered sidebar counts the standalone memory");
+    const source = host.querySelector<HTMLSelectElement>(".topic-label select")!;
+    source.value = "personal";
+    source.dispatchEvent(new Event("change", { bubbles: true }));
+    await until(() => folderButtons().length === 2, "personal folders only");
+    const folders = folderButtons().map(node => [node.querySelector("strong")?.textContent, node.querySelector("small")?.textContent]);
+    assert(JSON.stringify(folders) === JSON.stringify([
+      ["personal · writing/2025", "원문 1개"],
+      ["personal · writing/2026", "원문 2개"],
+    ]), "Folder names, order and document counts match the visible originals");
+    assert(host.querySelector(".cluster-list .hint")?.textContent === "2개 묶음 · 단독 항목 0개", "Filtered sidebar excludes hidden folders and memory");
+    const state = host.querySelector<HTMLSelectElement>(".filter-row label:nth-child(2) select")!;
+    state.value = "active";
+    state.dispatchEvent(new Event("change", { bubbles: true }));
+    await until(() => folderButtons().find(node => node.querySelector("strong")?.textContent === "personal · writing/2026")?.querySelector("small")?.textContent === "원문 1개", "partially filtered folder count");
+    const singleton = folderButtons().find(node => node.querySelector("strong")?.textContent === "personal · writing/2025");
+    assert(singleton, "Single-document folder remains selectable");
+    singleton.click();
+    await until(() => host.querySelectorAll(".graph-list > button").length === 1, "single original in selected folder");
+    assert(source.value === "personal" && state.value === "active" && folderButtons().length === 2, "Folder click preserves source and state filters and other folder options");
+    host.querySelector<HTMLButtonElement>(".graph-list > button")!.click();
+    await until(() => !!host.querySelector(".original-detail .document-preview"), "original detail preview");
+    assert(host.querySelectorAll(".original-detail h1").length === 1, "Multiline authored H1 is displayed once in the actual detail path");
+    assert(host.querySelector(".original-detail h1")?.textContent?.replace(/\s+/g, " ").trim() === "지원 현황", "The displayed H1 is the selected original's title");
+    assert([...host.querySelectorAll(".original-detail .document-preview p")].some(node => node.textContent === "본문"), "Original body remains visible");
+    return { originalFolders: true, listedFolders: 2, visibleOriginals: 1, titleCount: 1 };
+  } finally {
+    root.unmount();
+    window.fetch = originalFetch;
+    window.history.replaceState(null, "", originalUrl);
+  }
+}
+
 async function run() {
   const results: unknown[] = [];
   try {
     assert(import.meta.env.DEV, "Run this fixture through the development server");
     for (const size of [1, 20]) results.push(await check(size));
+    results.push(await checkOriginalFolders());
     output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
   } catch (error) {
     output.textContent = `FAIL\n${JSON.stringify({ passed: false, error: error instanceof Error ? error.message : String(error), results, active }, null, 2)}`;

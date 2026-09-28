@@ -213,6 +213,9 @@ pub(super) fn curation_root(owner: &DataOwner, kind: CurationKind) -> HarnessRes
     match (owner, kind) {
         (DataOwner::Personal, CurationKind::Idea) => Ok("vault/personal/projects/ideas".to_owned()),
         (DataOwner::Personal, _) => Ok(format!("vault/personal/{category}")),
+        (DataOwner::CommonWork, _) => Err(HarnessError::InvalidRequest(
+            "common work does not support Vault curation".to_owned(),
+        )),
         (
             DataOwner::PersonalBusiness
             | DataOwner::PersonalProject { .. }

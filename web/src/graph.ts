@@ -7,7 +7,7 @@ export type NodeKind = "document" | "memory" | "topic" | "subject" | "area";
 export type LinkKind = "related" | "evidence" | "topic" | "subject" | "area";
 export type Request = <T>(url: string, options?: RequestInit) => Promise<T>;
 export type GraphNode = {
-  id: string; scope: Scope; kind: NodeKind; label: string;
+  id: string; scope: Scope; kind: NodeKind; label: string; title?: string | null;
   revision?: string; relation_digest?: string; content_digest?: string | null; source_revision?: string | null;
   generation?: string; status?: string; present?: boolean; current?: boolean; source_kind?: string; repository?: string;
   temporal?: "future" | "expired" | "current"; supported?: boolean;
@@ -38,13 +38,14 @@ export const linkColor: Record<LinkKind, string> = { related: "#b2c5f0", evidenc
 const colors = ["#91b8ff", "#ba9aef", "#7bd6c2", "#ecc68f", "#df9dbc", "#8accdc", "#cad990"];
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 export const knowledge = (n: GraphNode) => n.kind === "document" || n.kind === "memory";
+export const isNativeOriginal = (n: GraphNode) => n.kind === "document" && !!n.context_scope && !!n.context_path;
 export function active(n: GraphNode): boolean {
   if (n.kind === "document") return n.status === "ok" && n.present === true && n.current === true;
   if (n.kind === "memory") return n.status === "accepted" && n.temporal === "current" && n.supported !== false;
   return true;
 }
 export function stateName(n: GraphNode): string {
-  if (n.source_kind === "original") return "원문 보존";
+  if (isNativeOriginal(n)) return "원문 보존";
   if (n.kind === "document") return n.status === "failed" ? "출처 확인 실패" : n.present ? n.current ? "출처 확인" : "갱신 대기" : "원문 부재";
   if (n.kind !== "memory") return "분류 표식";
   const parts = [{ accepted: "저장됨", proposed: "제안", withdrawn: "철회" }[n.status ?? ""] ?? "기록"];
@@ -92,8 +93,8 @@ export function visualSatellites(model: Pick<Model, "nodes" | "links">): Map<str
 }
 
 // This is the only owner of display memberships, initial positions and refresh reconciliation.
-// Louvain sees current relationships between usable knowledge and explicit classification markers.
-// No labels/text are interpreted as meaning and no membership is persisted.
+// Louvain sees all current relationships. Native originals use their actual source folder
+// for display membership; other nodes retain their Louvain membership. Nothing is persisted.
 export function reconcile(snapshot: Snapshot, previous?: Model): Model {
   const nodes = snapshot.nodes.filter(n => n.scope === snapshot.scope).sort((a, b) => compare(a.id, b.id));
   const byId = new Map(nodes.map(n => [n.id, n]));
@@ -110,14 +111,32 @@ export function reconcile(snapshot: Snapshot, previous?: Model): Model {
   const groups = new Map<number, GraphNode[]>();
   for (const node of nodes) { const group = memberships[node.id]; groups.set(group, [...(groups.get(group) ?? []), node]); }
   const repositories = repositoryNames(nodes.filter(n => n.kind === "document" && n.repository).map(n => n.repository!));
-  const clusters: Cluster[] = [...groups.values()].map(group => {
+  const clusters: Cluster[] = [...groups.values()].flatMap(group => {
+    const members = group.filter(n => !isNativeOriginal(n));
+    if (!members.length) return [];
     const id = `${snapshot.scope}:${group[0].id}`;
-    const markers = group.filter(n => !knowledge(n));
-    const first = markers[0] ?? group[0];
+    const markers = members.filter(n => !knowledge(n));
+    const first = markers[0] ?? members[0];
     const repositoryLabel = repositories.get(first.repository ?? "");
     const label = first.kind === "document" ? [repositoryLabel, nodePresentation(first).title].filter(Boolean).join(" · ") : first.label;
-    return { id, label, color: colors[hash(id) % colors.length], members: group.map(n => n.id), knowledge: group.filter(knowledge).length };
-  }).sort((a, b) => compare(a.id, b.id));
+    return [{ id, label, color: colors[hash(id) % colors.length], members: members.map(n => n.id), knowledge: members.filter(knowledge).length }];
+  });
+  const folders = new Map<string, { scope: string; parent: string; members: string[] }>();
+  for (const node of nodes.filter(isNativeOriginal)) {
+    const path = node.context_path!;
+    const slash = path.lastIndexOf("/");
+    const parent = slash < 0 ? "." : path.slice(0, slash);
+    const scope = node.context_scope!;
+    const id = `folder:${snapshot.scope}:${JSON.stringify([scope, parent])}`;
+    const folder = folders.get(id) ?? { scope, parent, members: [] };
+    folder.members.push(node.id);
+    folders.set(id, folder);
+  }
+  for (const [id, folder] of folders) clusters.push({
+    id, label: `${folder.scope} · ${folder.parent === "." ? "최상위" : folder.parent}`,
+    color: colors[hash(id) % colors.length], members: folder.members, knowledge: folder.members.length,
+  });
+  clusters.sort((a, b) => compare(a.id, b.id));
   const old = new Map((previous?.scope === snapshot.scope ? previous.nodes : []).map(n => [n.id, n]));
   const taxonomyColors = new Map(nodes.filter(n => !knowledge(n)).map(n => [n.id, colors[hash(`${snapshot.scope}|taxonomy|${n.kind}|${n.id}`) % colors.length]]));
   const taxonomyMembership = new Map<string, Set<string>>();
@@ -186,6 +205,16 @@ export function visibleGraph(model: Model, filters: Filters): { nodes: Positione
     (filters.state === "all" || (filters.state === "active" ? active(n) : filters.state === "attention" ? knowledge(n) && !active(n) : n.status === filters.state)));
   const ids = new Set(nodes.map(n => n.id));
   return { nodes, links: model.links.filter(l => ids.has(l.source) && ids.has(l.target)) };
+}
+export function visibleClusterOptions(model: Model, filters: Filters): { listed: Cluster[]; standalone: number } {
+  const visible = new Set(visibleGraph(model, { ...filters, cluster: null }).nodes.map(node => node.id));
+  const nodes = new Map(model.nodes.map(node => [node.id, node]));
+  const present = model.clusters.flatMap(cluster => {
+    const members = cluster.members.filter(id => visible.has(id));
+    return members.length ? [{ ...cluster, members, knowledge: members.filter(id => knowledge(nodes.get(id)!)).length }] : [];
+  });
+  const listed = present.filter(cluster => cluster.members.length > 1 || cluster.id.startsWith("folder:"));
+  return { listed, standalone: present.length - listed.length };
 }
 /** Summarize only components whose hub cannot fit its neighbors in two compact rings. */
 export function denseConstellationCores(nodes: readonly (GraphNode & { cluster?: string })[], links: readonly GraphLink[], threshold = 18) {

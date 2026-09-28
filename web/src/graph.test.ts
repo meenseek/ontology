@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { Positions, compactSlots, fixPosition } from "./positions.ts";
 import { separateDiscs } from "./clearance.ts";
 import { PerspectiveCamera, Vector3 } from "three";
-import { active, constellationView, denseConstellationCores, expandedCoreCameraFrame, graphUrl, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleGraph, visualSatellites } from "./graph.ts";
+import { active, constellationView, denseConstellationCores, expandedCoreCameraFrame, graphUrl, isNativeOriginal, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph, visualSatellites } from "./graph.ts";
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 import type { ProjectedLabel } from "./presentation.ts";
@@ -27,6 +27,51 @@ test("Louvain separates two dense groups across a single bridge and is permutati
   assert.equal(a.nodes.find(n => n.id === "d0")?.cluster, a.nodes.find(n => n.id === "d7")?.cluster);
   assert.notEqual(a.nodes.find(n => n.id === "d7")?.cluster, a.nodes.find(n => n.id === "d8")?.cluster);
   assert.equal(links[0].source, "d0", "input links remain metadata, not renderer objects");
+});
+test("native originals share only their actual parent folder, including bound originals", () => {
+  const original = (id: string, context_scope: string, context_path: string, source_kind = "original") =>
+    ({ ...doc(id), scope: "personal" as const, source_kind, context_scope, context_path });
+  const nodes = [
+    original("a", "personal", "writing/applications/2026/company/a.md", "context"),
+    original("b", "personal", "writing/applications/2026/company/b.md"),
+    original("c", "personal", "writing/applications/2025/company/c.md"),
+    original("d", "work/common", "writing/applications/2026/company/d.md"),
+    original("e", "personal", "root-a.md"),
+    original("f", "personal", "root-b.md"),
+  ];
+  const input = snapshot(nodes, [edge("a", "c")]); input.scope = "personal";
+  const model = reconcile(input);
+  const byId = new Map(model.nodes.map(node => [node.id, node]));
+  assert.equal(isNativeOriginal(nodes[0]), true, "a bound original remains a native original");
+  assert.equal(stateName(nodes[0]), "원문 보존");
+  assert.equal(byId.get("a")!.cluster, byId.get("b")!.cluster);
+  assert.notEqual(byId.get("a")!.cluster, byId.get("c")!.cluster, "different full parent paths stay distinct");
+  assert.notEqual(byId.get("a")!.cluster, byId.get("d")!.cluster, "native scope is part of folder identity");
+  assert.equal(byId.get("e")!.cluster, byId.get("f")!.cluster, "root documents share a scope root");
+  assert.equal(model.links.length, 1, "cross-folder relationships remain visible");
+  assert.match(model.clusters.find(cluster => cluster.id === byId.get("a")!.cluster)!.label, /writing\/applications\/2026\/company/);
+  const personal = visibleClusterOptions(model, { kind: "all", state: "all", cluster: null, sourceScope: "personal" });
+  assert.ok(personal.listed.some(cluster => cluster.members.includes("c")), "single-document folders remain listed");
+  assert.ok(personal.listed.every(cluster => cluster.members.every(id => byId.get(id)?.context_scope === "personal")));
+  assert.equal(personal.listed.some(cluster => cluster.members.includes("d")), false, "a filtered-out folder cannot open an empty map");
+  assert.deepEqual(visibleClusterOptions(model, { kind: "all", state: "all", cluster: byId.get("d")!.cluster, sourceScope: "personal" }), personal, "choosing a different folder stays possible without dropping the source filter");
+  assert.equal(personal.standalone, 0, "hidden folders are not counted as standalone items");
+  assert.deepEqual(visibleClusterOptions(model, { kind: "memory", state: "all", cluster: null }).listed, [], "folders with no visible documents are hidden");
+  assert.deepEqual(model, reconcile({ ...input, nodes: [...nodes].reverse(), links: [...input.links].reverse() }));
+  assert.deepEqual(model.nodes, reconcile(input, model).nodes, "refresh preserves unchanged folder positions");
+});
+test("ordinary Louvain groups keep their membership when originals use folder display groups", () => {
+  const nodes = [doc("ordinary-a"), doc("ordinary-b"), memory("ordinary-c"),
+    { ...doc("original-a"), context_scope: "personal", context_path: "projects/a/one.md", source_kind: "original" },
+    { ...doc("original-b"), context_scope: "personal", context_path: "projects/b/two.md", source_kind: "context" }];
+  const links = [edge("ordinary-a", "original-a"), edge("ordinary-b", "original-a"), edge("ordinary-c", "original-b"), edge("original-a", "original-b")];
+  const baseline = reconcile(snapshot(nodes.map(node => ({ ...node, context_scope: null, context_path: null })), links));
+  const model = reconcile(snapshot(nodes, links));
+  for (const id of ["ordinary-a", "ordinary-b", "ordinary-c"]) {
+    assert.equal(model.nodes.find(node => node.id === id)!.cluster, baseline.nodes.find(node => node.id === id)!.cluster);
+  }
+  assert.notEqual(model.nodes.find(node => node.id === "original-a")!.cluster, model.nodes.find(node => node.id === "original-b")!.cluster);
+  assert.deepEqual(model.links, baseline.links);
 });
 test("one explicit taxonomy marker shares its star color without recoloring ambiguous members", async () => {
   const topicA: GraphNode = { id: "topic-a", scope: "meenseek", kind: "topic", label: "A" };
@@ -186,6 +231,7 @@ test("presentation retains disambiguating paths and never treats a folder as own
   assert.deepEqual(nodePresentation({ kind: "memory", label: "a/b is my literal title" }), { title: "a/b is my literal title", subtitle: "" });
   assert.equal(fileName("C:\\local\\note.md"), "note.md");
   assert.deepEqual(nodePresentation({ kind: "document", label: "meenseek/private/notes.md" }), { title: "notes.md", subtitle: "meenseek/private/notes.md" });
+  assert.deepEqual(nodePresentation({ kind: "document", label: "projects/coupler.md", title: "Coupler 프로젝트" }), { title: "Coupler 프로젝트", subtitle: "projects/coupler.md" });
 });
 test("broad year searches surface a matching filename before deep path and body matches", () => {
   const nodes = [

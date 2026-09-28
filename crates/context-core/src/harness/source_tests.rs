@@ -353,6 +353,67 @@ fn context_request(path: &str) -> HarnessRequest {
 }
 
 #[test]
+fn common_work_maintenance_only_updates_existing_native_markdown() {
+    let fixture = SourceFixture::new();
+    let path = "vault/work/common/router/agent-guide.md";
+    fixture.source.write(path, "# Work agent guide\n", 1);
+    let mut request = SourceFixture::request(DataOwner::CommonWork);
+    request.action = HarnessAction::DocumentWrite;
+    request.targets = vec![path.to_owned()];
+    let engine = fixture.context_engine();
+    let resolved = engine
+        .resolve_with_intent(&request, HarnessIntent::PolicyMaintenance)
+        .expect("existing common work source must resolve");
+    assert_eq!(resolved.plan.owner, DataOwner::CommonWork);
+    assert!(resolved.plan.learning_sources.is_empty());
+    assert!(resolved.plan.source_write_allowed);
+    assert!(!resolved.plan.external_write_allowed);
+    engine
+        .prepare(&resolved, &capabilities(), None)
+        .expect("common work maintenance must prepare independent roles");
+    assert!(
+        engine
+            .resolve_with_intent(&request, HarnessIntent::General)
+            .is_err()
+    );
+
+    for denied in [
+        "vault/work/acme/index.md",
+        "vault/personal/profile.md",
+        "vault/work/common/router/missing.md",
+        "vault/work/common/router/agent-guide.txt",
+    ] {
+        request.targets = vec![denied.to_owned()];
+        assert!(
+            engine
+                .resolve_with_intent(&request, HarnessIntent::PolicyMaintenance)
+                .is_err(),
+            "unexpected common work target: {denied}"
+        );
+    }
+    request.targets = vec![path.to_owned()];
+    assert!(
+        fixture
+            .engine()
+            .resolve_with_intent(&request, HarnessIntent::PolicyMaintenance)
+            .is_err()
+    );
+    request.delete_targets = vec![path.to_owned()];
+    assert!(
+        engine
+            .resolve_with_intent(&request, HarnessIntent::PolicyMaintenance)
+            .is_err()
+    );
+    request.delete_targets.clear();
+    request.action = HarnessAction::DocumentReview;
+    assert!(
+        engine
+            .resolve_with_intent(&request, HarnessIntent::PolicyMaintenance)
+            .is_err()
+    );
+}
+
+#[test]
 fn source_profile_resolution_and_preparation_acquire_only_required_bodies_with_bounded_calls() {
     for unrelated_count in [1, 8] {
         let fixture = SourceFixture::new();

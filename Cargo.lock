@@ -165,6 +165,7 @@ version = "0.1.0"
 dependencies = [
  "errno",
  "libc",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "serde_yaml_ng",
