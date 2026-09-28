@@ -10,6 +10,7 @@ type Props = { path: string; content: string | null; kind: "vault" | "context" |
 type Tree = { type: string; tagName?: string; value?: string; properties?: Record<string, unknown>; children?: Tree[] };
 const text = (node: Tree): string => node.value ?? String(node.properties?.alt ?? (node.children ?? []).map(text).join(""));
 const headingText = (node: Tree): string => node.tagName === "sup" ? "" : node.value ?? String(node.properties?.alt ?? (node.children ?? []).map(headingText).join(""));
+const comparableTitle = (value: string) => value.replace(/\s+/g, " ").trim();
 
 function headingIds({ namespace }: { namespace: string }) {
   return (tree: Tree) => {
@@ -34,12 +35,12 @@ function documentHeading({ fallback, kind, generatedTitle, preferTitle }: { fall
     if (kind === "record" && generatedTitle) return;
     const children = tree.children ?? [];
     const [first, second] = children.filter(node => node.type !== "text" || node.value?.trim());
-    const titleAlreadyPresent = preferTitle && children.some(node => node.tagName === "h1" && headingText(node).trim() === fallback.trim());
-    if (!titleAlreadyPresent && (first?.tagName !== "h1" || !headingText(first).trim() || ((kind === "record" || preferTitle) && headingText(first).trim() !== fallback.trim()))) {
+    const titleAlreadyPresent = preferTitle && children.some(node => node.tagName === "h1" && comparableTitle(headingText(node)) === comparableTitle(fallback));
+    if (!titleAlreadyPresent && (first?.tagName !== "h1" || !comparableTitle(headingText(first)) || ((kind === "record" || preferTitle) && comparableTitle(headingText(first)) !== comparableTitle(fallback)))) {
       children.unshift({ type: "element", tagName: "h1", properties: {}, children: [{ type: "text", value: fallback }] });
     } else if ((kind === "vault" || kind === "context") && second?.tagName === "h1"
       && first.children?.every(node => node.type === "text")
-      && headingText(first).trim() === headingText(second).trim()) {
+      && comparableTitle(headingText(first)) === comparableTitle(headingText(second))) {
       // Keep the authored heading (including formatting/links). The synthetic title remains an anchor.
       first.tagName = "div";
       first.properties = { ...first.properties, className: ["document-title-anchor"] };
