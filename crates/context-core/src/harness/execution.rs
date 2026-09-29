@@ -4617,27 +4617,6 @@ impl DurableRecovery<'_> {
 }
 
 impl HarnessExecutionRecord {
-    /// Loads the authenticated current frontier without advancing it. The
-    /// subsequent durable transition still compares against the latest head.
-    pub fn load_durable_head(
-        engine: &HarnessEngine,
-        run_identifier: &str,
-    ) -> HarnessResult<(PreparedHarnessRun, Self)> {
-        #[cfg(unix)]
-        {
-            let store = DurableRunStore::open_existing(&engine.workspace_root, run_identifier)?;
-            let (_, prepared, head) = store.load(engine)?;
-            Ok((prepared, head))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (engine, run_identifier);
-            Err(HarnessError::UnsupportedRuntime(
-                "durable Harness runs require Unix file locking and permissions".to_owned(),
-            ))
-        }
-    }
-
     pub fn load_durable_prepared(
         workspace_root: &Path,
         run_identifier: &str,
