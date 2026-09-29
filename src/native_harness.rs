@@ -288,16 +288,35 @@ impl Command {
     ) -> Result<()> {
         let paths = required_harness_paths(
             arguments,
-            &["--context-view", "--workspace-root", "--run-id", "--event"],
-            &["--codex-binary"],
+            &["--context-view", "--workspace-root", "--run-id"],
+            &["--event", "--codex-binary"],
         )?;
+        let (engine, run_identifier) = self.durable_harness_context(&paths)?;
+        if let Some(binary) = paths.get("--codex-binary") {
+            validate_codex_binary(binary)?;
+        }
+        if !paths.contains_key("--event") {
+            let binary = paths.get("--codex-binary").ok_or_else(|| {
+                NativeHarnessError::invalid_input(
+                    "advance requires `--event` or `--codex-binary` for the current role frontier",
+                )
+            })?;
+            let (prepared, head) =
+                HarnessExecutionRecord::load_durable_head(&engine, &run_identifier)
+                    .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+            if head.ready_role_invocations.is_empty() || head.ready_tool_invocation.is_some() {
+                return Err(NativeHarnessError::invalid_input(
+                    "advance without an event requires a current ready role frontier without tools",
+                ));
+            }
+            let next = execute_codex_frontier(&engine, &prepared, head, binary)?;
+            return print_json(&next, "advanced Harness execution record");
+        }
         let event: HarnessExecutionEvent =
             read_harness_json(&paths["--event"], "Harness execution event")?;
-        let (engine, run_identifier) = self.durable_harness_context(&paths)?;
         let codex_prepared = paths
             .get("--codex-binary")
-            .map(|binary| {
-                validate_codex_binary(binary)?;
+            .map(|_| {
                 HarnessExecutionRecord::load_durable_prepared(
                     &paths["--workspace-root"],
                     &run_identifier,
@@ -939,7 +958,7 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
         "prepare" => &["--plan", "--runtime-capabilities", "--prepared-output"],
         "replay" => &["--prepared-run"],
         "begin" => &["--prepared-run", "--run-id"],
-        "advance" => &["--run-id", "--event"],
+        "advance" => &["--run-id"],
         "attest-career" => &["--prepared-run", "--execution-record"],
         "compose-career" => &[
             "--career-manifest",
@@ -1087,7 +1106,8 @@ mod tests {
         ReportedRoleLifecycle, RequestSource, RequirementResult, ResolvedTaskContract,
         ResultEvidenceReference, ReviewKind, RoleExecutionOutcome, RoleExecutionResult,
         RoleLifecycleLimits, RoleRuntimeCapabilities, RoleTaskContract, RoleTerminalState,
-        TargetOperation, TargetState, UserConfirmationStatus, UserStatement, WriteKind,
+        TargetOperation, TargetState, UserConfirmationStatus, UserStatement, VerificationUnit,
+        WriteKind,
     };
     #[cfg(unix)]
     use context_core::harness::{
@@ -2910,7 +2930,46 @@ cat "$0.events.$n"
     }
 
     #[cfg(unix)]
-    fn codex_assert_process_isolation(binary: &Path, pid: &str) -> String {
+    fn codex_prepare_document_write_events(
+        engine: &HarnessEngine,
+        prepared: &PreparedHarnessRun,
+        binary: &Path,
+    ) {
+        let mut step = engine
+            .begin_execution(&prepared.plan.resolved_request, &prepared.role_run, &[])
+            .expect("document write fixture must begin");
+        let mut number = 0;
+        while let Some(invocation) = step.ready_role_invocations.first() {
+            number += 1;
+            let outcome = codex_write_scenario_outcome(prepared, invocation, "completed-accepted");
+            codex_test_events(binary, number, outcome.clone());
+            let lifecycle =
+                codex_test_lifecycle(invocation.role, format!("fixture-{number}"), &outcome);
+            let result = invocation
+                .bind_result(lifecycle, outcome)
+                .expect("fixture result must bind");
+            step = engine
+                .advance_execution(
+                    &prepared.plan.resolved_request,
+                    &prepared.role_run,
+                    &[],
+                    &step.record,
+                    HarnessExecutionEvent::RoleResult {
+                        result: Box::new(result),
+                    },
+                )
+                .expect("document write fixture must advance");
+        }
+        assert_eq!(number, 3, "strict document write uses three roles");
+        assert!(step.ready_tool_invocation.is_none());
+    }
+
+    #[cfg(unix)]
+    fn codex_assert_process_isolation(
+        binary: &Path,
+        pid: &str,
+        prepared: &PreparedHarnessRun,
+    ) -> String {
         let cwd = fs::read_to_string(format!("{}.cwd.{pid}", binary.display()))
             .expect("cwd must be captured");
         let mut lines = cwd.lines();
@@ -2947,7 +3006,24 @@ cat "$0.events.$n"
         assert_eq!(Path::new(args[9]).parent(), Some(Path::new(cwd_path)));
         let schema = fs::read(format!("{}.schema.{pid}", binary.display()))
             .expect("schema must be captured");
-        assert_eq!(schema, codex_output_schema().as_bytes());
+        let input: serde_json::Value = serde_json::from_slice(
+            &fs::read(format!("{}.stdin.{pid}", binary.display())).expect("role input"),
+        )
+        .expect("role segments must be JSON");
+        let control: serde_json::Value = serde_json::from_str(
+            input[0]["content"]
+                .as_str()
+                .expect("role control head content"),
+        )
+        .expect("role control head must be JSON");
+        let role: HarnessRole =
+            serde_json::from_value(control["role"].clone()).expect("issued role");
+        assert_eq!(
+            schema,
+            codex_output_schema_for_role(prepared, role)
+                .expect("role schema")
+                .as_bytes()
+        );
         cwd_path.to_owned()
     }
 
@@ -2986,7 +3062,7 @@ cat "$0.events.$n"
             );
             transmitted += actual.len();
             assert!(
-                cwds.insert(codex_assert_process_isolation(binary, pid)),
+                cwds.insert(codex_assert_process_isolation(binary, pid, prepared)),
                 "each role must use a fresh cwd"
             );
             let result = head
@@ -3364,6 +3440,166 @@ cat "$0.events.$n"
 
     #[cfg(unix)]
     #[test]
+    fn codex_document_write_runs_writer_through_core_and_preserves_sources() {
+        use context_core::harness::{HarnessExecutionState, SubjectStatus};
+
+        let temp = TempDirectory::new("codex-document-writer");
+        let (engine, prepared, raw, workspace) =
+            codex_fixture_for_action(&temp, 2, 8, HarnessAction::DocumentWrite);
+        let binary = codex_test_script(&temp, CODEX_CAPTURE);
+        codex_prepare_document_write_events(&engine, &prepared, &binary);
+        let head = HarnessExecutionRecord::begin_durable(
+            &engine,
+            &raw,
+            &prepared,
+            "native-document-writer",
+        )
+        .expect("document write must begin");
+        let writer_input = serde_json::to_vec(&head.ready_role_invocations[0].segments)
+            .expect("writer segments must serialize");
+        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
+            .expect("Writer, Verifier and Reviewer must execute through the current frontier");
+        assert_eq!(evaluated.state, HarnessExecutionState::Evaluated);
+        assert_eq!(
+            evaluated
+                .evaluation
+                .as_ref()
+                .expect("Core evaluation must exist")
+                .subject_status,
+            SubjectStatus::Accepted
+        );
+        assert_eq!(
+            evaluated.role_execution.accepted_role_order,
+            [
+                HarnessRole::Writer,
+                HarnessRole::Verifier,
+                HarnessRole::Reviewer,
+            ]
+        );
+        let calls = codex_calls(&binary);
+        assert_eq!(calls.len(), 3);
+        let actual_writer_input = fs::read(format!("{}.stdin.{}", binary.display(), calls[0]))
+            .expect("native Writer input must be captured");
+        assert_eq!(actual_writer_input, writer_input);
+        for pid in &calls {
+            codex_assert_process_isolation(&binary, pid, &prepared);
+        }
+        let schema: serde_json::Value =
+            serde_json::from_str(codex_output_schema()).expect("native output schema must be JSON");
+        assert_eq!(
+            schema["$defs"]["result"]["anyOf"][0]["properties"]["role"]["enum"],
+            serde_json::json!(["writer"])
+        );
+        assert_eq!(
+            schema["$defs"]["requirement"]["properties"]["unit"]["$ref"],
+            "#/$defs/verification-unit"
+        );
+        assert_eq!(
+            schema["$defs"]["learning"]["properties"]["failed_unit"]["$ref"],
+            "#/$defs/verification-unit"
+        );
+        for value in schema["$defs"]["verification-unit"]["enum"]
+            .as_array()
+            .expect("verification units must be a finite enum")
+        {
+            serde_json::from_value::<VerificationUnit>(value.clone())
+                .expect("every output-schema verification unit must decode in Core");
+        }
+        let writer_schema: serde_json::Value = serde_json::from_str(
+            &codex_output_schema_for_role(&prepared, HarnessRole::Writer)
+                .expect("document writer schema"),
+        )
+        .expect("writer schema must be JSON");
+        let writer_statuses: Vec<&str> = writer_schema["properties"]["outcome"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|branch| branch["properties"]["status"]["enum"][0].as_str())
+            .collect();
+        assert_eq!(writer_statuses, ["completed", "failed", "unsupported"]);
+        let mut zero_requirement_plan = prepared.clone();
+        zero_requirement_plan
+            .plan
+            .requirements
+            .retain(|requirement| {
+                !matches!(
+                    requirement.owner,
+                    VerificationOwner::Role {
+                        role: HarnessRole::Verifier
+                    }
+                )
+            });
+        let verifier_schema: serde_json::Value = serde_json::from_str(
+            &codex_output_schema_for_role(&zero_requirement_plan, HarnessRole::Verifier)
+                .expect("zero-requirement schema"),
+        )
+        .expect("role schema must be JSON");
+        assert_eq!(
+            verifier_schema["$defs"]["result"]["anyOf"][0]["properties"]["requirement_results"]["description"],
+            "Return exactly []: this role has no assigned verification requirements. Do not invent requirement results."
+        );
+        assert_eq!(
+            verifier_schema["$defs"]["result"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let outcome_statuses: Vec<&str> = verifier_schema["properties"]["outcome"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|branch| branch["properties"]["status"]["enum"][0].as_str())
+            .collect();
+        assert_eq!(outcome_statuses, ["completed", "failed", "unsupported"]);
+        let reviewer_schema: serde_json::Value = serde_json::from_str(
+            &codex_output_schema_for_role(&prepared, HarnessRole::Reviewer)
+                .expect("reviewer schema"),
+        )
+        .expect("reviewer schema must be JSON");
+        assert!(
+            reviewer_schema["$defs"]["requirement"]["properties"]["evidence"]["description"]
+                .as_str()
+                .expect("reviewer evidence guidance")
+                .contains("source=produced-artifact")
+        );
+        let reviewer_statuses: Vec<&str> = reviewer_schema["properties"]["outcome"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|branch| branch["properties"]["status"]["enum"][0].as_str())
+            .collect();
+        assert_eq!(
+            reviewer_statuses,
+            ["completed", "missing-context", "failed", "unsupported"]
+        );
+        let reviewer_outcomes = reviewer_schema["properties"]["outcome"]["anyOf"]
+            .as_array()
+            .unwrap();
+        assert!(
+            reviewer_outcomes[0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("blocking_findings")
+        );
+        assert!(
+            reviewer_outcomes[3]["description"]
+                .as_str()
+                .unwrap()
+                .contains("do not use for correctable candidate findings")
+        );
+        for index in 0..2 {
+            assert!(
+                fs::read_to_string(workspace.join(format!("document-{index}.md")))
+                    .expect("frozen source must still exist")
+                    .starts_with(&format!("# 문서 {index}")),
+                "evaluation must not apply the Writer candidate"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn codex_native_protocol_and_strict_outcome_failures_are_terminal() {
         // Allow fixture startup latency; protocol validation is the subject here.
         let limits = RoleLifecycleLimits {
@@ -3429,6 +3665,55 @@ cat "$0.events.$n"
                 "invalid Harness response must not become success"
             );
         }
+        let response = CodexNativeOutput {
+            message: Some("No Findings".to_owned()),
+            terminal: Some((4, true)),
+            ..CodexNativeOutput::default()
+        };
+        assert_eq!(
+            response.outcome(true),
+            Err("native Codex agent_message is not JSON")
+        );
+        let response = CodexNativeOutput {
+            message: Some("{}".to_owned()),
+            terminal: Some((4, true)),
+            ..CodexNativeOutput::default()
+        };
+        assert_eq!(
+            response.outcome(true),
+            Err("native Codex agent_message has no outcome object")
+        );
+        let response = CodexNativeOutput {
+            message: Some("{\"outcome\":{\"status\":\"failed\"}}".to_owned()),
+            terminal: Some((4, true)),
+            ..CodexNativeOutput::default()
+        };
+        assert_eq!(
+            response.outcome(true),
+            Err(
+                "native Codex role response has incompatible field types, values, or fields outside the exact schema"
+            )
+        );
+        let response = CodexNativeOutput {
+            message: Some("{\"outcome\":{\"status\":\"cancelled\",\"extra\":true}}".to_owned()),
+            terminal: Some((4, true)),
+            ..CodexNativeOutput::default()
+        };
+        assert_eq!(
+            response.outcome(true),
+            Err(
+                "native Codex role response has incompatible field types, values, or fields outside the exact schema"
+            )
+        );
+        let response = CodexNativeOutput {
+            message: Some("{\"outcome\":{\"status\":\"completed\",\"result\":{\"role\":\"verifier\",\"subject_evidence\":[],\"requirement_results\":[{\"unit\":\"invented\",\"passed\":true,\"detail\":\"ok\",\"evidence\":[]}]}}}".to_owned()),
+            terminal: Some((4, true)),
+            ..CodexNativeOutput::default()
+        };
+        assert_eq!(
+            response.outcome(true),
+            Err("native Codex verifier has invalid requirement result")
+        );
         let mut duplicate = CodexNativeOutput::default();
         let thread = br#"{"type":"thread.started","thread_id":"observed"}"#;
         duplicate
