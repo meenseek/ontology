@@ -47,6 +47,7 @@ summary:hover { color: #e6edf6; }
 .cluster-list { border-top: 1px solid #2b3542; padding-top: 20px; }
 .cluster-list h2 { font-size: 13px; margin: 0 0 12px; }
 .compact-list { max-height: 40dvh; overflow-y: auto; }
+.management-panel > button + .compact-list { margin-top: 12px; }
 .compact-list > button, .cluster { width: 100%; text-align: left; margin-bottom: 5px; background: transparent; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 9px; }
 .compact-list strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; flex: 1; min-width: 0; }
 .compact-list small, .compact-list span { font-size: 11px; color: #9aabbd; }
