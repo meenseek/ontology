@@ -510,6 +510,7 @@ pub async fn command(
     tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
+        .env("TMPDIR", std::env::temp_dir())
         .env(
             "DATABASE_URL",
             std::env::var("TEST_DATABASE_URL").expect("owned DB"),

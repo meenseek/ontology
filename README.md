@@ -567,6 +567,92 @@ revision을 수정하는 수단으로 쓰지 않는다. `inventory`는 DB 없이
 세부 역할·수락·적용·복구는 native `vault/profile/rules/agent-harness.md`가 단독 소유한다.
 Source view나 DB를 직접 고치거나 별도 protocol·version 축·호환 실행 경로를 만들지 않는다.
 
+`begin`·`advance`의 `--codex-binary /absolute/path/to/codex`는 Core가 발급한
+Reviewer·Verifier 호출만 실행한다. 준비된 `runtime_capabilities.max_concurrent_roles`가
+2 이상이면 현재 독립 호출을 최대 두 개 함께 실행하고, 1이면 순차 실행한다. 각 호출은
+기존 exact 입력과 별도 작업 공간을 사용하며 결과 수락은 부모가 관측한 완료 순서대로
+현재 Core head에 제출한다. Non-completed 결과나 제출 오류가 나면 이미 시작한 다른
+호출을 기존 lifecycle 안에서 종료하고 이후 결과는 제출하지 않는다. 자동 재시도는 없다.
+이 실행 순서 변경은 필수 역할·검증·적용과 복구의 판정을 줄이거나 바꾸지 않는다.
+
+### 하네스 비교 실험
+
+`scripts/compare_harness.py`는 같은 요청을 두 실행 방식에 전달하고, 가린 품질 평가와 비용을
+연결하는 로컬 실험 도구다. Core 역할·판정·적용 계약에 참여하지 않는다. 비교할 실제 작업은
+그 작업의 기존 실행 경로를 사용하고, 각 명령은 **최종 후보만** 출력한다. 모델 API나 새
+라이브러리는 필요 없다. 비교 결과로 정책이나 원문을 자동 변경하지 않는다.
+
+실험 질문·가설·변경 요소·품질 기준을 실행 전에 정한다. 일반 작업의 완료만으로 실험을
+시작하지 않고, 하네스 변경·새 실패·대표 사례 점검에서 필요한 요청과 근거만 선택한다.
+정본 보관 위치는 외장 볼륨의 `ontology/experiments/README.md`가 소유한다. 입력·결과·평가를
+노트북이나 운영 DB에 다시 복제하지 않는다. 필요한 과거 코드·환경은 보관 규칙에 따라
+고정하고, 입력 파일에는 해당 작업이 허용한 원문만 담는다.
+
+계획 JSON은 다음 필드를 사용한다. 명령의 실행 파일과 필요한 파일 인자는 실제 절대경로로
+바꾼다. Case 입력 경로는 계획 파일을 기준으로 해석한다.
+
+```json
+{
+  "question": "같은 품질 기준에서 추가 절차가 필요한가?",
+  "hypothesis": "간소화 후보가 중요한 오류를 늘리지 않고 작업 비용을 줄인다.",
+  "change": "한 가지 절차 차이만 비교한다.",
+  "quality_criteria": ["필수 사실과 요청 조건을 보존한다", "미확인 내용을 사실로 표현하지 않는다"],
+  "timeout_seconds": 300,
+  "conditions": [
+    {"name": "baseline", "command": ["/absolute/path/to/baseline-producer"], "format": "text"},
+    {"name": "candidate", "command": ["/absolute/path/to/candidate-producer"], "format": "text"}
+  ],
+  "cases": [{"id": "representative-case", "input": "input.txt"}],
+  "evaluator": null
+}
+```
+
+출력 형식은 `text` 또는 `codex-jsonl`이다. Codex를 쓸 때는 기존 계정의 절대 실행 경로와
+`exec --ephemeral --json --sandbox read-only -`를 사용한다. stdin이 전체 입력이 되고
+최종 메시지와 관측된 사용량을 분리한다. 모델·추론 설정은 두 방식에서 맞추고 명령에
+명시하며, 기본 설정을 사용했다면 환경 차이를 별도로 확인한다.
+[OpenAI 공식 문서](https://learn.chatgpt.com/docs/non-interactive-mode)는 이 실행·출력 방식을 설명한다.
+
+외장에 이미 존재하는 전용 실험 폴더를 `--root`로 지정한다. 다음 호출은 남은 항목을
+이어가며, 기본 호출 예산 3회에는 평가자도 포함한다. Case별 실행 순서와 A/B 배치는
+교대로 바뀐다. 고정된 소표본의 배치이며 무작위 실험이나 인과 효과를 보장하지 않는다.
+
+```bash
+python3 scripts/compare_harness.py \
+  --plan /absolute/path/on/external-drive/plan.json \
+  --root /absolute/path/on/external-drive/archive \
+  --max-calls 3
+```
+
+각 호출 뒤 `REPORT.md`에 완료·미평가·실패·중단, 재시도를 포함한 시간·관측 사용량과
+평가자의 별도 비용을 기록한다. 같은 입력·명령과 직접 지정한 파일·비교기 코드의 해시가
+달라지면 새 실험 폴더가 필요하다. 실행 파일이 동적으로 읽는 설정·다른 코드·라이브러리까지
+이 해시가 모두 고정하지는 않는다. 완료 근거는 재사용하며 실패·중단은 원자료를 보존하고
+검사 후 `--retry-failed`로만 재시도한다. 이전 프로세스가 살아 있거나 실행 중 기록에 PID가 없으면 재시도하지 않는다.
+PID 미기록 상태는 이전 프로세스의 종료를 확인한 뒤 새 실험 폴더에서 복구한다.
+SIGINT·SIGTERM·SIGHUP 중단은 자식 프로세스 종료와 중단 기록으로 연결한다.
+예약이나 상시 실행은 만들지 않으며, `--report-only`는 새 명령 없이 보고서를 갱신한다.
+
+자동 평가가 필요하면 `evaluator`에 같은 명령 객체를 둔다. 평가 명령은 현재 요청·품질
+기준·A/B 후보만 stdin으로 받고 다음 JSON을 출력한다. 방식 이름·사용량·통과 영수증을
+평가 입력에 추가하지 않는다. 평가자가 실제로 다른 파일·대화를 보지 않았다는 보장은
+별도의 실행 환경에 달려 있으며 비교 판단도 advisory다.
+
+```json
+{"A":{"passed":true,"reason":"요청과 근거를 충족함"},"B":{"passed":false,"reason":"필수 사실 누락"},"preference":"A","reason":"품질 기준을 충족하는 후보를 선택함"}
+```
+
+사람이 평가하면 `cases/<case-id>/evaluation/input.json`을 읽고 같은 폴더의 `manual.json`에
+`input_digest`(보고서에 표시한 SHA-256), `reviewer`, 위 형식의 `judgment`를 저장한다.
+그 뒤 `--report-only`로 반영한다. 잘못된 형식이나 다른 후보에 대한 평가는 거부한다.
+실제 오류·수정량과 사람의 재확인은 판정 근거에 남기며, 모델 평가만으로 실제 정확성이나
+생산성 향상을 확정하지 않는다.
+
+작업 공간과 제어 가능한 임시·캐시 경로는 실험 폴더에 만들고 종료 시 정리한다. 외장
+폴더가 없으면 부모 폴더를 재생성하거나 노트북으로 대체하지 않는다. 실행 도구 자체의
+캐시·설정·내부 저장 위치까지 강제로 바꾸지는 않는다. 임의 명령의 파일 접근을 격리하는
+sandbox가 아니므로 기존 읽기 전용 실행 경로와 권한 경계를 유지한다.
+
 ### 사용자가 직접 작성한 원문 저장
 
 열람 가능한 기존 `personal`·`work/<slug>` Markdown은 현재 revision·SHA를 함께 제출해 직접 저장할 수 있다. 저장은 충돌 시 중단하고 새 버전·이력·조회 사본을 한 transaction에 기록한다. 최초 출처와 digest는 그대로 남으며 Core 검토·수락으로 표시하지 않는다. `profile`, 제한 자료, 새 원문 생성·삭제와 에이전트가 작성·수정한 내용은 이 경로가 아니라 위 Harness 경계를 따른다. CLI의 읽기·검색은 에이전트도 사용할 수 있지만, `context edit`은 사용자가 직접 작성한 내용을 저장할 때만 사용한다.

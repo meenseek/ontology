@@ -11,6 +11,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process,
+    sync::atomic::{AtomicBool, Ordering},
 };
 // This adapter only transports Core-issued segments and observes a native process.
 // It does not select policies, evaluate evidence, or authorize source mutations.
@@ -62,7 +63,7 @@ pub(crate) fn execute_codex_frontier(
                 "unsupported runtime: --codex-binary supports only Reviewer/Verifier frontiers without tools",
             ));
         }
-        let Some(invocation) = record.ready_role_invocations.first() else {
+        if record.ready_role_invocations.is_empty() {
             // A non-completed result also empties the frontier. Core owns the
             // terminal evaluation and may reject evaluation of an incomplete write.
             if prepared.accepted_tool_plan.is_some() {
@@ -70,21 +71,78 @@ pub(crate) fn execute_codex_frontier(
             }
             return HarnessExecutionRecord::evaluate_durable(engine, &record.run_identifier, None)
                 .map_err(|error| ContextVaultError::invalid_input(error.to_string()));
-        };
-        if !executed.insert(invocation.role) {
+        }
+        let invocations = record
+            .ready_role_invocations
+            .iter()
+            .take(
+                prepared
+                    .role_run
+                    .runtime_capabilities
+                    .max_concurrent_roles
+                    .min(2),
+            )
+            .cloned()
+            .collect::<Vec<_>>();
+        if invocations.is_empty() {
             return Err(ContextVaultError::invalid_input(
-                "unsupported runtime: automatic role retries are not supported",
+                "unsupported runtime: no concurrent role capacity",
             ));
         }
-        let result = execute_codex_role(binary, prepared, invocation)?;
-        record = HarnessExecutionRecord::advance_durable(
-            engine,
-            &record.run_identifier,
-            HarnessExecutionEvent::RoleResult {
-                result: Box::new(result),
-            },
-        )
-        .map_err(|error| ContextVaultError::invalid_input(error.to_string()))?;
+        for invocation in &invocations {
+            if !executed.insert(invocation.role) {
+                return Err(ContextVaultError::invalid_input(
+                    "unsupported runtime: automatic role retries are not supported",
+                ));
+            }
+        }
+        let cancelled = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let cancelled = &cancelled;
+            let outcome = (|| {
+                for invocation in &invocations {
+                    let sender = sender.clone();
+                    std::thread::Builder::new()
+                        .spawn_scoped(scope, move || {
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    execute_codex_role(binary, prepared, invocation, cancelled)
+                                }))
+                                .unwrap_or_else(|_| {
+                                    Err(ContextVaultError::invalid_input(
+                                        "Codex role worker panicked",
+                                    ))
+                                });
+                            let _ = sender.send(result);
+                        })
+                        .map_err(|error| ContextVaultError::invalid_input(error.to_string()))?;
+                }
+                drop(sender);
+                // Only the parent submits, in observed completion order, against
+                // Core's current durable head. Independent siblings keep their input.
+                for result in receiver {
+                    let result = result?;
+                    let halted = !matches!(result.outcome, RoleExecutionOutcome::Completed { .. });
+                    record = HarnessExecutionRecord::advance_durable(
+                        engine,
+                        &record.run_identifier,
+                        HarnessExecutionEvent::RoleResult {
+                            result: Box::new(result),
+                        },
+                    )
+                    .map_err(|error| ContextVaultError::invalid_input(error.to_string()))?;
+                    if halted {
+                        break;
+                    }
+                }
+                Ok(())
+            })();
+            // A failed/terminal submission closes running siblings before scope
+            // joins them. Their results are never submitted after the halt.
+            cancelled.store(true, Ordering::Relaxed);
+            outcome
+        })?;
     }
 }
 
@@ -293,6 +351,7 @@ pub(crate) fn execute_codex_role(
     binary: &Path,
     prepared: &PreparedHarnessRun,
     invocation: &RoleInvocationContract,
+    cancelled: &AtomicBool,
 ) -> Result<RoleExecutionResult> {
     if !matches!(
         invocation.role,
@@ -329,14 +388,15 @@ pub(crate) fn execute_codex_role(
         limits.max_role_grace_millis = limits
             .max_role_grace_millis
             .min(prepared.role_run.runtime_capabilities.max_role_grace_millis);
-        let (lifecycle, outcome) = run_codex_process(binary, &input, invocation.role, &limits)?;
+        let (lifecycle, outcome) =
+            run_codex_process(binary, &input, invocation.role, &limits, cancelled)?;
         invocation
             .bind_result(lifecycle, outcome)
             .map_err(|error| ContextVaultError::invalid_input(error.to_string()))
     }
     #[cfg(not(unix))]
     {
-        let _ = (binary, input);
+        let _ = (binary, input, cancelled);
         Err(ContextVaultError::invalid_input(
             "unsupported runtime: Codex requires Unix process groups",
         ))
@@ -443,6 +503,7 @@ pub(crate) fn run_codex_process(
     input: &[u8],
     role: HarnessRole,
     limits: &RoleLifecycleLimits,
+    cancelled: &AtomicBool,
 ) -> Result<(ReportedRoleLifecycle, RoleExecutionOutcome)> {
     use std::os::unix::{
         fs::OpenOptionsExt as _,
@@ -561,6 +622,7 @@ pub(crate) fn run_codex_process(
     let mut killed = false;
     let mut group_termination_error = None;
     let mut timed_out = false;
+    let mut sibling_cancelled = false;
     let now_millis = || {
         started_at_millis
             .saturating_add(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
@@ -672,8 +734,9 @@ pub(crate) fn run_codex_process(
                 terminal = Some(at);
             } else if failure.is_some() || (status.is_some() && stdout.is_none()) {
                 terminal = Some(now_millis());
-            } else if now >= execution_deadline {
-                timed_out = true;
+            } else if now >= execution_deadline || cancelled.load(Ordering::Relaxed) {
+                sibling_cancelled = cancelled.load(Ordering::Relaxed);
+                timed_out = !sibling_cancelled;
                 interrupt = Some(now_millis());
                 let deadline = now
                     .checked_add(grace)
@@ -718,10 +781,10 @@ pub(crate) fn run_codex_process(
                 && close_deadline.is_some_and(|deadline| now < deadline)))
             && (status.is_some()
                 || failure.is_some()
-                || (timed_out && terminal.is_some())
+                || ((timed_out || sibling_cancelled) && terminal.is_some())
                 || kill_deadline.is_some_and(|deadline| now >= deadline))
         {
-            if status.is_none() && failure.is_none() && !timed_out {
+            if status.is_none() && failure.is_none() && !timed_out && !sibling_cancelled {
                 timed_out = true;
             }
             group_termination_error = process.signal(libc::SIGKILL).err();
@@ -765,6 +828,8 @@ pub(crate) fn run_codex_process(
             };
             let outcome = if timed_out {
                 RoleExecutionOutcome::TimedOut
+            } else if sibling_cancelled {
+                RoleExecutionOutcome::Cancelled
             } else if let Some(message) = failure {
                 RoleExecutionOutcome::Failed {
                     message: codex_failure_message(message, exit, &stderr_tail),

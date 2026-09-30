@@ -2410,6 +2410,17 @@ mod tests {
         repetitions: usize,
         action: HarnessAction,
     ) -> (HarnessEngine, PreparedHarnessRun, Vec<u8>, PathBuf) {
+        codex_fixture_with_concurrency(temp, documents, repetitions, action, 1)
+    }
+
+    #[cfg(unix)]
+    fn codex_fixture_with_concurrency(
+        temp: &TempDirectory,
+        documents: usize,
+        repetitions: usize,
+        action: HarnessAction,
+        concurrency: usize,
+    ) -> (HarnessEngine, PreparedHarnessRun, Vec<u8>, PathBuf) {
         let workspace = temp.path().join("workspace");
         fs::create_dir(&workspace).expect("synthetic workspace must be created");
         let extension = if action == HarnessAction::CodeReview {
@@ -2472,7 +2483,8 @@ mod tests {
         };
         let plan = HarnessPlan::from_resolved(resolved, &workspace, lifecycle.clone())
             .expect("synthetic documents must freeze");
-        let capabilities = read_only_harness_capabilities(&plan, lifecycle);
+        let mut capabilities = read_only_harness_capabilities(&plan, lifecycle);
+        capabilities.max_concurrent_roles = concurrency;
         let raw_plan = serde_json::to_vec(&plan).expect("plan must serialize");
         let tool_plan = plan
             .requires_tool_execution()
@@ -3276,6 +3288,216 @@ cat "$0.events.$n"
     }
 
     #[cfg(unix)]
+    const CODEX_CONCURRENT_CAPTURE: &str = r#"cat > "$0.stdin.$$"
+role=$(python3 -c 'import json,sys; print(json.loads(json.load(open(sys.argv[1]))[0]["content"])["role"])' "$0.stdin.$$")
+printf '%s\n' "$$" > "$0.pid.$role"
+printf '{"type":"thread.started","thread_id":"native-%s"}\n' "$$"
+# Both issued siblings must start before either result; a sequential adapter fails this barrier.
+i=0
+while [ ! -f "$0.pid.verifier" ] || [ ! -f "$0.pid.reviewer" ]; do
+  i=$((i + 1)); [ "$i" -lt 300 ] || exit 9
+  sleep 0.01
+done
+sleep "$(cat "$0.delay.$role")" &
+printf '%s\n' "$!" > "$0.descendant.$role"
+wait
+cat "$0.events.$role"
+"#;
+
+    #[cfg(unix)]
+    fn codex_concurrent_fixture(
+        temp: &TempDirectory,
+        prepared: &PreparedHarnessRun,
+        reviewer: RoleExecutionOutcome,
+        verifier: RoleExecutionOutcome,
+        reviewer_delay: &str,
+        verifier_delay: &str,
+    ) -> PathBuf {
+        let binary = codex_test_script(temp, CODEX_CONCURRENT_CAPTURE);
+        for (number, role, outcome, delay) in [
+            (1, "verifier", verifier, verifier_delay),
+            (2, "reviewer", reviewer, reviewer_delay),
+        ] {
+            codex_test_events(&binary, number, outcome);
+            fs::rename(
+                format!("{}.events.{number}", binary.display()),
+                format!("{}.events.{role}", binary.display()),
+            )
+            .expect("role-specific response must be installed");
+            fs::write(format!("{}.delay.{role}", binary.display()), delay)
+                .expect("role delay must be installed");
+        }
+        assert_eq!(
+            prepared.role_run.runtime_capabilities.max_concurrent_roles,
+            2
+        );
+        binary
+    }
+
+    #[cfg(unix)]
+    fn codex_assert_concurrent_processes_closed(binary: &Path) {
+        for role in ["verifier", "reviewer"] {
+            let pid = fs::read_to_string(format!("{}.pid.{role}", binary.display()))
+                .expect("both siblings must launch");
+            let group: i32 = pid.trim().parse().expect("owned PID");
+            // SAFETY: signal zero only observes the positive owned process group.
+            assert_eq!(unsafe { libc::kill(-group, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+            codex_assert_process_isolation(binary, pid.trim());
+        }
+        assert_eq!(
+            codex_calls(binary).len(),
+            2,
+            "no role retry or extra process"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_concurrent_siblings_keep_exact_inputs_and_accept_completion_order() {
+        let temp = TempDirectory::new("codex-concurrent-exact");
+        let (engine, prepared, raw, _) =
+            codex_fixture_with_concurrency(&temp, 2, 8, HarnessAction::DocumentReview, 2);
+        let binary = codex_concurrent_fixture(
+            &temp,
+            &prepared,
+            codex_completed(&prepared, HarnessRole::Reviewer, false),
+            codex_completed(&prepared, HarnessRole::Verifier, false),
+            "0.04",
+            "0.3",
+        );
+        let head =
+            HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "parallel-exact")
+                .expect("run must begin");
+        let issued = head.ready_role_invocations.clone();
+        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
+            .expect("both independent results must evaluate");
+        assert_eq!(
+            evaluated.role_execution.accepted_role_order,
+            [HarnessRole::Reviewer, HarnessRole::Verifier]
+        );
+        assert_eq!(evaluated.role_execution.role_results.len(), 2);
+        for invocation in issued {
+            let role = if invocation.role == HarnessRole::Reviewer {
+                "reviewer"
+            } else {
+                "verifier"
+            };
+            let pid = fs::read_to_string(format!("{}.pid.{role}", binary.display())).expect("PID");
+            let actual =
+                fs::read(format!("{}.stdin.{}", binary.display(), pid.trim())).expect("input");
+            assert_eq!(
+                actual,
+                serde_json::to_vec(&invocation.segments).expect("issued segments")
+            );
+        }
+        evaluated
+            .validate(&prepared, &raw)
+            .expect("Core head must remain valid");
+        codex_assert_concurrent_processes_closed(&binary);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_concurrent_terminal_result_cancels_and_reaps_running_sibling() {
+        let temp = TempDirectory::new("codex-concurrent-halt");
+        let (engine, prepared, raw, _) =
+            codex_fixture_with_concurrency(&temp, 2, 8, HarnessAction::DocumentReview, 2);
+        let failure = RoleExecutionOutcome::Failed {
+            message: "owned terminal fixture".to_owned(),
+        };
+        let binary = codex_concurrent_fixture(
+            &temp,
+            &prepared,
+            failure.clone(),
+            codex_completed(&prepared, HarnessRole::Verifier, false),
+            "0.04",
+            "30",
+        );
+        let head = HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "parallel-halt")
+            .expect("run must begin");
+        let started = std::time::Instant::now();
+        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
+            .expect("first terminal must evaluate after closing sibling");
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert_eq!(evaluated.role_execution.role_results.len(), 1);
+        assert_eq!(evaluated.role_execution.role_results[0].outcome, failure);
+        assert!(evaluated.ready_role_invocations.is_empty());
+        codex_assert_concurrent_processes_closed(&binary);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_concurrent_invalid_submission_stops_sibling_and_preserves_head() {
+        let temp = TempDirectory::new("codex-concurrent-invalid");
+        let (engine, prepared, raw, workspace) =
+            codex_fixture_with_concurrency(&temp, 2, 8, HarnessAction::DocumentReview, 2);
+        let binary = codex_concurrent_fixture(
+            &temp,
+            &prepared,
+            codex_completed(&prepared, HarnessRole::Verifier, false),
+            codex_completed(&prepared, HarnessRole::Verifier, false),
+            "0.04",
+            "30",
+        );
+        let head =
+            HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "parallel-invalid")
+                .expect("run must begin");
+        assert!(execute_codex_frontier(&engine, &prepared, head.clone(), &binary).is_err());
+        let saved: HarnessExecutionRecord = read_harness_json(
+            &workspace.join(".llm-context-vault-harness/runs/parallel-invalid/head.json"),
+            "head",
+        )
+        .expect("head must remain readable");
+        assert_eq!(saved, head);
+        codex_assert_concurrent_processes_closed(&binary);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_concurrent_later_terminal_preserves_the_already_accepted_sibling() {
+        let temp = TempDirectory::new("codex-concurrent-late-halt");
+        let (engine, prepared, raw, _) =
+            codex_fixture_with_concurrency(&temp, 2, 8, HarnessAction::DocumentReview, 2);
+        let binary = codex_concurrent_fixture(
+            &temp,
+            &prepared,
+            codex_completed(&prepared, HarnessRole::Reviewer, false),
+            RoleExecutionOutcome::Failed {
+                message: "late terminal".to_owned(),
+            },
+            "0.04",
+            "0.3",
+        );
+        let head =
+            HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "parallel-late-halt")
+                .expect("run must begin");
+        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
+            .expect("prior successful sibling must persist");
+        assert_eq!(
+            evaluated.role_execution.accepted_role_order,
+            [HarnessRole::Reviewer, HarnessRole::Verifier]
+        );
+        for result in &evaluated.role_execution.role_results {
+            match result.role {
+                HarnessRole::Reviewer => assert!(matches!(
+                    result.outcome,
+                    RoleExecutionOutcome::Completed { .. }
+                )),
+                HarnessRole::Verifier => assert!(matches!(
+                    result.outcome,
+                    RoleExecutionOutcome::Failed { .. }
+                )),
+                _ => panic!("only the issued siblings may be accepted"),
+            }
+        }
+        codex_assert_concurrent_processes_closed(&binary);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn codex_binding_defers_role_and_lifecycle_acceptance_to_core() {
         let temp = TempDirectory::new("codex-role-mismatch");
@@ -3393,7 +3615,13 @@ cat "$0.events.$n"
         ] {
             let temp = TempDirectory::new("codex-native-failure");
             let binary = codex_test_script(&temp, body);
-            let result = run_codex_process(&binary, b"[]", HarnessRole::Reviewer, &limits);
+            let result = run_codex_process(
+                &binary,
+                b"[]",
+                HarnessRole::Reviewer,
+                &limits,
+                &std::sync::atomic::AtomicBool::new(false),
+            );
             if missing_context {
                 let error = result
                     .expect_err("missing native context cannot be invented")
@@ -3478,8 +3706,14 @@ cat "$0.events.$n"
             max_role_close_millis: 1_000,
             max_total_role_millis: 4_300,
         };
-        let error = run_codex_process(&binary, b"[]", HarnessRole::Reviewer, &limits)
-            .expect_err("a stderr-only startup failure cannot invent a native context");
+        let error = run_codex_process(
+            &binary,
+            b"[]",
+            HarnessRole::Reviewer,
+            &limits,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .expect_err("a stderr-only startup failure cannot invent a native context");
         let message = error.to_string();
         assert!(message.contains("thread.started"));
         codex_assert_bounded_stderr_diagnostic(&message, &stderr);
@@ -3512,6 +3746,7 @@ cat "$0.events.$n"
                 b"[]",
                 HarnessRole::Reviewer,
                 &prepared.runtime_capabilities.lifecycle,
+                &std::sync::atomic::AtomicBool::new(false),
             )
             .expect("observed native context must bind the failure or valid result");
             let calls = codex_calls(&binary);
@@ -3842,6 +4077,7 @@ wait
             &vec![b'x'; 1024 * 1024],
             HarnessRole::Reviewer,
             &limits,
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .expect("blocked stdin must terminate as an observed timeout");
         assert_eq!(outcome, RoleExecutionOutcome::TimedOut);
@@ -3960,9 +4196,14 @@ wait
             max_role_close_millis: 500,
             max_total_role_millis: 2_600,
         };
-        let (lifecycle, outcome) =
-            run_codex_process(&binary, b"[]", HarnessRole::Reviewer, &limits)
-                .expect("stuck closing process must be terminated and reaped");
+        let (lifecycle, outcome) = run_codex_process(
+            &binary,
+            b"[]",
+            HarnessRole::Reviewer,
+            &limits,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .expect("stuck closing process must be terminated and reaped");
         assert_eq!(outcome, RoleExecutionOutcome::TimedOut);
         assert!(lifecycle.first_output_at_millis.is_some());
         assert!(
@@ -3985,10 +4226,15 @@ wait
             .runtime_capabilities
             .max_role_invocation_bytes = 1;
         assert!(
-            execute_codex_role(&binary, &prepared, &head.ready_role_invocations[0])
-                .expect_err("over-limit input must be unsupported")
-                .to_string()
-                .contains("input limit")
+            execute_codex_role(
+                &binary,
+                &prepared,
+                &head.ready_role_invocations[0],
+                &std::sync::atomic::AtomicBool::new(false)
+            )
+            .expect_err("over-limit input must be unsupported")
+            .to_string()
+            .contains("input limit")
         );
         assert!(codex_calls(&binary).is_empty());
         assert!(validate_codex_binary(temp.path()).is_err());
