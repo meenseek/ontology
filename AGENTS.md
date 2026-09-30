@@ -32,7 +32,10 @@ installation, recovery, and the expected store ID.
   outages; do not repair or reimport them.
 - Repository-local `AGENTS.md` files still add instructions for their own trees.
   Logical `vault/...` paths identify native scoped materials, not old filesystem
-  files. Reading the baseline alone does not start Harness or grant other scopes.
+  files. For example, read `vault/work/cluml/index.md` with
+  `{"op":"read","scope":"work/cluml","path":"index.md"}`; `path` is relative
+  to the chosen native scope. Reading the baseline alone does not start Harness
+  or grant other scopes.
 - 이 ontology 저장소의 웹 UI·원문 미리보기를 수정하거나 검토할 때 이 저장소
   README의 "개발 검증" 절을 확인한다. 변경된 화면 경로를 실행하지 못했다면
   미검증 범위를 명시한다.

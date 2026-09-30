@@ -124,7 +124,7 @@ fn synthetic_repository() -> TemporaryWorkspace {
         );
     }
     for path in [
-        "vault/profile/preferences/external-workspace-routing.md",
+        "vault/profile/preferences/synthetic-routing-policy.md",
         "vault/personal/profile.md",
         "vault/personal/facts/index.md",
         "vault/personal/knowledge/skills.md",
@@ -6036,7 +6036,7 @@ fn missing_context_contract_rejects_wrong_role_scope_evidence_and_lifecycle() {
     refresh_role_event_digest(&mut denied_scope);
     assert_invalid(denied_scope);
 
-    let no_grant_candidate = "vault/profile/preferences/external-workspace-routing.md";
+    let no_grant_candidate = "vault/profile/preferences/synthetic-routing-policy.md";
     assert!(!prepared.role_bundles.iter().any(|bundle| {
         bundle
             .bound_documents()
@@ -6110,7 +6110,7 @@ fn missing_context_rejects_cross_tag_rebinding_of_the_same_file() {
         Err(HarnessError::InvalidSubmission(_))
     ));
 
-    let target_path = "vault/profile/preferences/external-workspace-routing.md";
+    let target_path = "vault/profile/preferences/synthetic-routing-policy.md";
     let review_request = HarnessRequest {
         action: HarnessAction::DocumentReview,
         owner: DataOwner::Profile,
@@ -6540,7 +6540,7 @@ fn missing_context_rejects_a_candidate_outside_the_profile_source_intent() {
     let request = HarnessRequest {
         action: HarnessAction::DocumentReview,
         owner: DataOwner::Profile,
-        targets: vec!["vault/profile/preferences/external-workspace-routing.md".to_owned()],
+        targets: vec!["vault/profile/preferences/synthetic-routing-policy.md".to_owned()],
         objective: "review one canonical profile policy source".to_owned(),
         curation_kind: None,
         explicit_user_confirmation_reported: false,
