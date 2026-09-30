@@ -10,11 +10,11 @@ pub const SCOPES: [&str; 5] = [
     "work/tmaxcloud",
 ];
 pub const DOCUMENT_COUNT: usize = 55;
-pub const TOTAL_BYTES: u64 = 11337;
+pub const TOTAL_BYTES: u64 = 11335;
 // SHA-256 of the declared sorted path<TAB>byte length<TAB>content SHA-256<LF> records.
 // Deliberate fixture contract changes must update this constant and the byte count.
 pub const CONTRACT_DIGEST: &str =
-    "640c5ae4f7d9a2b059911ac4993c1ac9fb5ccacd02acc436993fd5e767ca3b83";
+    "5c8886a7233a4159156ee7bb9fe7ecc2187570c68ca1dcda6bf323aef4ebe112";
 
 const PATHS: [&str; DOCUMENT_COUNT] = [
     "personal/business/index.md",
@@ -47,7 +47,7 @@ const PATHS: [&str; DOCUMENT_COUNT] = [
     "profile/preferences/agent-operating-preferences.md",
     "profile/preferences/context-scope-routing.md",
     "profile/preferences/context-vault-operating-model.md",
-    "profile/preferences/external-workspace-routing.md",
+    "profile/preferences/synthetic-routing-policy.md",
     "profile/rules/agent-harness.md",
     "profile/rules/common-code-quality.md",
     "profile/rules/common-document-quality.md",
