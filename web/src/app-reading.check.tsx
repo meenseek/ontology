@@ -232,6 +232,7 @@ async function check(size: number) {
 
 async function checkOriginalFolders() {
   const originalFetch = window.fetch;
+  const originalConfirm = window.confirm;
   const originalUrl = window.location.href;
   const root = createRoot(host);
   const original = (id: string, context_scope: string, context_path: string): GraphNode => ({
@@ -305,10 +306,39 @@ async function checkOriginalFolders() {
     assert(host.querySelectorAll(".original-detail h1").length === 1, "Multiline authored H1 is displayed once in the actual detail path");
     assert(host.querySelector(".original-detail h1")?.textContent?.replace(/\s+/g, " ").trim() === "지원 현황", "The displayed H1 is the selected original's title");
     assert([...host.querySelectorAll(".original-detail .document-preview p")].some(node => node.textContent === "본문"), "Original body remains visible");
-    return { originalFolders: true, listedFolders: 2, visibleOriginals: 1, titleCount: 1 };
+    button("편집").click();
+    await until(() => !!host.querySelector("#original-draft"), "original editor");
+    const draft = "지원\n현황\n====\n\n본문\n저장하지 않은 초안";
+    enter(host.querySelector<HTMLTextAreaElement>("#original-draft")!, draft);
+    await settle();
+    button("읽기").click();
+    await until(() => !!host.querySelector(".original-detail .notice"), "unsaved draft in reading mode");
+    const kind = host.querySelector<HTMLSelectElement>(".filter-row label:first-child select")!;
+    kind.value = "subject";
+    kind.dispatchEvent(new Event("change", { bubbles: true }));
+    await until(() => !!host.querySelector(".map-empty"), "empty filtered result with original still open");
+    let prompts = 0;
+    const promptCount = () => prompts;
+    window.confirm = () => { prompts++; return false; };
+    button("기록 남기기", host.querySelector(".map-empty")!).click();
+    await settle();
+    assert(promptCount() === 1 && !!host.querySelector(".original-detail"), "Empty-result record entry respects draft discard refusal");
+    button("기록 남기기", host.querySelector(".app-header")!).click();
+    await settle();
+    assert(promptCount() === 2 && !!host.querySelector(".original-detail"), "Header record entry uses the same draft guard");
+    button("편집").click();
+    await until(() => host.querySelector<HTMLTextAreaElement>("#original-draft")?.value === draft, "draft survives both cancelled entries");
+    button("읽기").click();
+    await settle();
+    window.confirm = () => { prompts++; return true; };
+    button("기록 남기기", host.querySelector(".map-empty")!).click();
+    await until(() => host.querySelector(".management-panel")?.getAttribute("aria-label") === "기록 남기기", "confirmed record entry");
+    assert(promptCount() === 3 && !host.querySelector(".original-detail") && !new URL(window.location.href).searchParams.has("focus"), "Confirmed entry discards the original and clears its selection");
+    return { originalFolders: true, listedFolders: 2, visibleOriginals: 1, titleCount: 1, draftGuard: true };
   } finally {
     root.unmount();
     window.fetch = originalFetch;
+    window.confirm = originalConfirm;
     window.history.replaceState(null, "", originalUrl);
   }
 }

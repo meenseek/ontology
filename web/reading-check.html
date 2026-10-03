@@ -11,10 +11,11 @@
   #result { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, monospace; }
 </style>
 <h1>자료 읽기 호출 검증</h1>
-<p>기존 Vite 개발 서버에서 이 페이지를 열면 실제 Memory·Documents 컴포넌트를 합성 자료로 검사합니다.
+<p>기존 Vite 개발 서버에서 이 페이지를 열면 실제 Memory·Documents·OriginalDetail 컴포넌트를 합성 자료로 검사합니다.
 실제 API 호출은 차단하며 앱 자료를 읽거나 수정하지 않습니다. 다시 검증하려면 이 페이지를 새로고침하세요.</p>
 <p>빈 목록·1개·20개에서 초기 읽기, 관리 전환, 필요한 시점의 묶음 조회, 캐시, 실패 후 재시도,
 취소 후 복귀, 쓰기 응답 재사용과 이력 조회를 확인합니다. 바이트는 성공적으로 전달한 합성 JSON 응답의 UTF-8 크기이며 HTTP 전송량은 아닙니다.
+원문의 읽기·편집 전환, 초안 보존, 저장·충돌과 편집 제한도 확인합니다.
 App의 그래프 갱신·경로 이동·실제 서버 통합은 별도 검증 대상입니다.</p>
 <pre id="result" role="status" data-status="running">RUNNING · 검사 준비 중…</pre>
 <div id="fixture" aria-label="검증 중인 실제 컴포넌트"></div>

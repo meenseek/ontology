@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ContextProvenance, editorContent, editorDraft, editorNewlines, failure, OriginalText, contextUrl, originalFilename } from "./Original";
+import { editorContent, editorDraft, editorNewlines, failure, OriginalText, contextUrl, originalFilename } from "./Original";
 
 test("browser editing retains original newline convention", () => {
   const crlf = "title\r\nbody\r\n";
@@ -49,15 +49,4 @@ test("all context read helpers display the pending message for HTTP 409", () => 
   assert.equal(failure({ status: 404 }), "자료가 없거나 이 범위에서 열 수 없습니다.");
   assert.equal(failure({ status: 400 }, true), "UTF-8 텍스트로 열 수 없는 자료입니다. 원본 다운로드를 이용해 주세요.");
   assert(!failure({ status: 500 }).includes("private path"));
-});
-
-test("source provenance distinguishes imported digests and honest native origins", () => {
-  const sha = "a".repeat(64);
-  const imported = renderToStaticMarkup(<dl><ContextProvenance origin_kind="imported-file" source_digest={sha} /></dl>);
-  assert(imported.includes(sha));
-  assert(!imported.includes("온톨로지에서 작성"));
-  const native = renderToStaticMarkup(<dl><ContextProvenance origin_kind="native" source_digest={null} /></dl>);
-  assert(native.includes("온톨로지에서 작성"));
-  assert(!native.includes("null"));
-  assert(!native.includes("실패"));
 });

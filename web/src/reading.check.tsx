@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import Memory from "./Memory";
 import type { Item } from "./Memory";
 import Documents from "./Documents";
+import OriginalDetail from "./OriginalDetail";
 import type { Request } from "./graph";
 import "./style.css";
 
@@ -93,7 +94,9 @@ class Stub {
   }
   request: Request = <T,>(url: string, options?: RequestInit): Promise<T> => {
     const body = typeof options?.body === "string" ? JSON.parse(options.body) as Record<string, unknown> : {};
-    const op = url === "/api/brain" ? String(body.op) : url === `/api/records/${documentId}?scope=personal` && !options?.method ? "document-read" : `unexpected:${url}`;
+    const context = url.startsWith("/api/context/") ? new URL(url, "http://synthetic.invalid") : null;
+    if (context) context.searchParams.forEach((value, key) => { body[key] = value; });
+    const op = context ? `context-${context.pathname.split("/").at(-1)}` : url === "/api/brain" ? String(body.op) : url === `/api/records/${documentId}?scope=personal` && !options?.method ? "document-read" : `unexpected:${url}`;
     const call: Call = { op, state: "pending", requestBytes: encoder.encode(url + (typeof options?.body === "string" ? options.body : "")).length, responseBytes: 0, signal: !!options?.signal };
     this.calls.push(call);
     this.maxPending = Math.max(this.maxPending, this.calls.filter(item => item.state === "pending").length);
@@ -185,7 +188,87 @@ async function scenario(name: string, size: number, kind: "memory" | "documents"
   publish();
 }
 
+async function originalEditing() {
+  const stub = new Stub(0), startChecks = checks, root = createRoot(host);
+  const saved = "---\r\ntitle: 합성 원문\r\n---\r\n\r\n# 합성 원문\r\n\r\n기존 내용\r\n";
+  let content = saved, revision = 2, digest = "initial", conflict = false, changed = 0, dirty = false;
+  let sourceScope = "personal", bytes: number | null = null;
+  const confirm = window.confirm;
+  let reason: string | undefined;
+  const render = () => flushSync(() => root.render(<div id="fixture-surface"><OriginalDetail scope={sourceScope} path="notes/original.md" request={stub.request} csrf="synthetic-only" onDirtyChange={value => { dirty = value; }} onChange={() => { changed++; }} /></div>));
+  stub.reply = (op, body) => {
+    assert(body.scope === sourceScope && body.path === "notes/original.md", "선택한 범위·원문만 요청");
+    if (op === "context-read") return { metadata: { scope: sourceScope, path: body.path, source_path: "synthetic", revision, origin_kind: "native", source_digest: null, content_digest: digest, byte_len: bytes ?? encoder.encode(content).length }, title: "합성 원문", content };
+    if (op === "context-history") return { items: [revision, 1].map(value => ({ revision: value, content_digest: "synthetic", byte_len: 1, recorded_at: 1, change_kind: "manual" })), next_before: null };
+    if (op === "context-version") return { revision: Number(body.revision), content_digest: "historical", title: "과거 원문", content: "# 과거 원문\n\n이전 내용" };
+    if (op === "context-edit") {
+      assert(body.expected_revision === revision && body.expected_digest === digest, "저장은 편집 시작 시 버전과 내용을 확인");
+      if (conflict) throw { status: 409 };
+      content = String(body.content); revision++; digest = `saved-${revision}`;
+      return { revision, content_digest: digest, changed: true };
+    }
+    throw new Error(`예상하지 않은 원문 요청: ${op}`);
+  };
+  try {
+    render(); await waitFor(() => !!host.querySelector(".document-preview"), "원문 읽기");
+    assert([...host.querySelectorAll(".original-view-switch button")].map(item => item.textContent).join("/") === "읽기/편집", "공통 상세의 두 모드");
+    assert(!host.textContent?.match(/SHA-256|기술 정보|온톨로지에서 작성/), "원문 상세에 진단 정보 없음");
+    const titleBox = () => {
+      const title = element<HTMLElement>(".document-header h1"), box = title.getBoundingClientRect(), style = getComputedStyle(title);
+      return [box.x, box.y, box.width, box.height, style.fontSize, style.lineHeight].join("/");
+    };
+    const readingTitle = titleBox();
+    await button("편집");
+    assert(titleBox() === readingTitle && host.querySelectorAll(".original-detail h1").length === 1, "읽기·편집에서 제목의 위치·크기와 단일 표시 유지");
+    assert(element<HTMLTextAreaElement>("#original-draft").value === saved.replace(/\r\n/g, "\n"), "편집기에서 frontmatter를 포함한 전체 원문을 읽고 수정");
+    const textarea = element<HTMLTextAreaElement>("#original-draft");
+    textarea.focus();
+    const draft = textarea.value.replace("기존 내용", "수정 내용");
+    await type("#original-draft", draft);
+    assert(textarea === host.querySelector("#original-draft") && document.activeElement === textarea, "입력 중 편집기가 재생성되거나 초점을 잃지 않음");
+    assert(dirty, "초안을 바꾸면 이동 보호 활성화");
+    await button("읽기");
+    assert(dirty && host.querySelector(".document-preview")?.textContent?.includes("기존 내용"), "읽기는 저장된 본문을 표시하며 초안을 보존");
+    await button("편집"); assert(element<HTMLTextAreaElement>("#original-draft").value === draft, "편집 복귀 시 같은 초안 유지");
+    counts(stub, { "context-read": 1, "context-history": 1 }, "모드 전환에 추가 조회 없음");
+    stub.next("context-edit", "hold"); await button("저장");
+    assert(element<HTMLButtonElement>(".original-view-switch button", "읽기").disabled, "저장 중 모드 이동 방지");
+    assert(element<HTMLTextAreaElement>("#original-draft").disabled, "저장 중 입력 변경 방지");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true })); await settle();
+    assert(stub.count("context-edit") === 1, "저장 중 단축키가 중복 쓰기를 만들지 않음");
+    stub.release(); await waitFor(() => changed === 1, "저장 후 다시 읽어 검증");
+    assert(content === draft.replace(/\n/g, "\r\n") && !dirty, "줄바꿈 보존과 저장 후 초안 보호 해제");
+    assert(host.querySelector(".document-preview")?.textContent?.includes("수정 내용"), "저장한 본문으로 읽기 복귀");
+    await button("편집"); await type("#original-draft", draft + "실패할 변경");
+    conflict = true; await button("저장");
+    assert(element<HTMLTextAreaElement>("#original-draft").value.endsWith("실패할 변경") && dirty, "충돌 후 초안 보존");
+    assert(host.querySelector(".error")?.textContent?.includes("초안은 유지"), "충돌의 다음 행동 안내");
+    await button("읽기"); await button("편집");
+    assert(element<HTMLTextAreaElement>("#original-draft").value.endsWith("실패할 변경"), "실패한 초안도 모드 전환에 보존");
+    window.confirm = () => false; await button("변경 취소"); assert(dirty, "취소 확인 거부 시 초안 유지");
+    window.confirm = () => true; await button("변경 취소"); assert(!dirty && !host.querySelector("#original-draft"), "명시적 취소 시 초안 해제");
+    await toggle("변경 이력"); await click('.original-detail details button[aria-pressed="false"]');
+    await waitFor(() => host.querySelector(".document-preview h1")?.textContent === "과거 원문", "과거 원문 조회");
+    assert(element<HTMLButtonElement>(".original-view-switch button", "편집").disabled, "과거 버전 편집 금지");
+    for (const state of ["profile", "mixed", "large"] as const) {
+      sourceScope = state === "profile" ? "profile" : "personal";
+      content = state === "mixed" ? "# 합성 원문\r\n본문\n" : saved;
+      bytes = state === "large" ? 1024 * 1024 + 1 : null;
+      // Remount exactly as App does when selecting a different original.
+      flushSync(() => root.render(null)); render();
+      await waitFor(() => !!host.querySelector(".document-preview"), `${state} 원문 읽기`);
+      assert(element<HTMLButtonElement>(".original-view-switch button", "편집").disabled, `${state} 원문의 기존 편집 제한 유지`);
+    }
+    assert(stub.count("context-edit") === 2 && changed === 1, "성공·충돌 외에는 원문 쓰기 없음");
+    assert(networkAttempts === 0, "원문 검사도 실제 fetch 차단");
+  } catch (error) { reason = error instanceof Error ? error.message : String(error); }
+  finally { window.confirm = confirm; flushSync(() => root.unmount()); stub.release(); await settle(); }
+  results.push({ name: "OriginalDetail 두 모드·초안 보존·저장·충돌·읽기 전용", passed: reason === undefined, checks: checks - startChecks, reason, counts: Object.fromEntries([...new Set(stub.calls.map(call => call.op))].map(op => [op, stub.count(op)])), responseBytes: stub.calls.reduce((sum, call) => sum + call.responseBytes, 0), requestBytes: stub.calls.reduce((sum, call) => sum + call.requestBytes, 0), maxPending: stub.maxPending, calls: stub.calls });
+  publish();
+}
+
 async function main() {
+  await originalEditing();
   await scenario("Memory 읽기 화면에서 묶음 변경", 1, "memory", async stub => {
     await waitFor(() => !!host.querySelector(".memory-body"), "기록 읽기");
     counts(stub, { read: 1 }, "초기 읽기에서 묶음 목록을 요청하지 않음");

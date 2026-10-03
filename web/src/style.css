@@ -147,7 +147,7 @@ legend, .topic-label, .facet-filter { display: block; color: #bdcadb; font-size:
 .document-preview h3 { font-size: 17px; }
 .document-preview h4, .document-preview h5, .document-preview h6 { font-size: 14px; }
 .document-preview h1, .document-preview h2, .document-preview h3, .document-preview h4, .document-preview h5, .document-preview h6 { margin: 1.5em 0 .65em; line-height: 1.5; scroll-margin-top: 72px; }
-.document-preview > :first-child, .document-title-anchor + h1 { margin-top: 0; }
+.document-preview > :first-child, .document-title-anchor + h1, .document-header > h1 { margin-top: 0; }
 .document-title-anchor { scroll-margin-top: 72px; }
 .document-preview p, .document-preview ul, .document-preview ol { margin: .8em 0; }
 .document-preview ul, .document-preview ol { padding-left: 1.6em; }
@@ -256,7 +256,6 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 .management-panel[hidden] { display: none; }
 .context-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .original-view-switch { display: flex; gap: 6px; margin: 16px 0; }
-.original-edit-button { margin-left: 12px; }
 .original-editor label { display: block; margin-bottom: 8px; font-size: 13px; color: #bdcadb; }
 .original-editor textarea { min-height: 45dvh; font: 13px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
 .original-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

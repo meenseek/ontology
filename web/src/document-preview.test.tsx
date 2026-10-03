@@ -92,6 +92,24 @@ test("keeps thematic breaks and fenced front matter examples visible", () => {
   assert.match(preview('---\n\n# 제목'), /<hr\/>/);
 });
 
+test("a shared title keeps authored formatting and anchors when its body becomes an editor", () => {
+  const content = "소개 문단\n\n# **지원 현황** [^n]\n\n[제목으로](#지원-현황)\n\n## 본문 제목\n\n[^n]: 설명";
+  const props = { path: "notes.md", content, kind: "context" as const, title: "지원 현황", preferTitle: true, afterTitle: <button>편집</button> };
+  const read = renderToStaticMarkup(<DocumentPreview {...props} />);
+  const edit = renderToStaticMarkup(<DocumentPreview {...props} bodyOverride={<textarea defaultValue={content} />} />);
+  const headingKey = attributes(read.match(/<h1\b[^>]*>/)![0])["data-heading-key"];
+  for (const html of [read, edit]) {
+    assert.match(html, /<header class="document-header"><h1[^>]*><strong>지원 현황<\/strong>/);
+    assert.match(html, /data-footnote-ref="true"/);
+    assert.ok(findDocumentFragment(fragmentRoot(html).root, `#${headingKey}`));
+    assert.equal([...html.matchAll(/<header\b/g)].length, 1);
+  }
+  assert.ok(read.indexOf("</header>") < read.indexOf("<p>소개 문단</p>"));
+  assert.match(read, /<h2[^>]*>본문 제목<\/h2>/);
+  assert.match(edit, /<div class="document-body"><textarea>/);
+  assert.doesNotMatch(edit, /<p>소개 문단<\/p>|<h2[^>]*>본문 제목<\/h2>/);
+});
+
 test("recognizes only Markdown extensions, case insensitively", () => {
   for (const path of ["docs/notes.md", "docs/notes.MD", "notes.MarkDown"]) assert.match(preview("# 제목", path), /<h1/);
   for (const path of ["notes.txt", "notes.json", "notes.md.txt", "README"]) {
