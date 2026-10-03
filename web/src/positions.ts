@@ -466,13 +466,15 @@ const graphStructure = (nodes: readonly PositionedNode[], links: readonly GraphL
   nodes.map(node => JSON.stringify([node.id, node.cluster, node.kind, node.status, node.current, node.present, node.temporal, node.supported])).sort(),
   links.map(link => JSON.stringify([link.source, link.target, link.kind, link.current])).sort(),
 ]);
-function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonly GraphLink[]): Map<string, Point> {
+const layoutKey = (core: string, page: number | undefined, visible: string, scope: string) => `${core}:${page ?? "all"}:${visible}:${scope}`;
+function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonly GraphLink[], footprints?: ReadonlyMap<string, number>): Map<string, Point> {
   const byId = new Map(nodes.map(node => [node.id, node]));
   const adjacency = new Map(nodes.map(node => [node.id, new Set<string>()]));
   for (const link of links) {
     adjacency.get(link.source)?.add(link.target); adjacency.get(link.target)?.add(link.source);
   }
   const spacing = 31;
+  const radiusFor = (id: string) => footprints?.get(id) ?? spacing / 2;
   const visited = new Set<string>();
   const components: { root: string; coordinates: Map<string, Slot>; radius: number }[] = [];
   for (const root of [...byId.keys()].sort()) {
@@ -489,25 +491,38 @@ function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonl
       return [id, { x: node.x - origin.x, y: node.y - origin.y }] as const;
     }));
     const slots = compactSlots(root, members, adjacency) ?? packedSlots(root, members, adjacency, projected);
+    const radii = ids.map(radiusFor).sort((a, b) => b - a);
+    const componentSpacing = footprints ? 24 : spacing;
     const coordinates = new Map<string, Slot>([[root, { x: 0, y: 0 }], ...slots]);
     const average = [...coordinates.values()].reduce((sum, value) => ({ x: sum.x + value.x / ids.length, y: sum.y + value.y / ids.length }), { x: 0, y: 0 });
-    let radius = spacing / 2;
+    let radius = radii[0];
     for (const [id, value] of coordinates) {
-      const centered = { x: (value.x - average.x) * spacing, y: (value.y - average.y) * spacing };
+      const centered = { x: (value.x - average.x) * componentSpacing, y: (value.y - average.y) * componentSpacing };
       coordinates.set(id, centered);
-      radius = Math.max(radius, Math.hypot(centered.x, centered.y) + spacing / 2);
+      radius = Math.max(radius, Math.hypot(centered.x, centered.y) + radiusFor(id));
+    }
+    if (footprints && coordinates.size > 1) {
+      const discs = [...coordinates].map(([id, value]) => ({ id, ...value, radius: radiusFor(id) }));
+      const clear = separateDiscs(discs, root, new Set(ids), 0);
+      for (const [id, value] of clear) {
+        coordinates.set(id, value);
+        radius = Math.max(radius, Math.hypot(value.x, value.y) + radiusFor(id));
+      }
     }
     components.push({ root, coordinates, radius });
   }
   components.sort((a, b) => b.radius - a.radius || a.root.localeCompare(b.root));
   const step = spacing * .55, goldenAngle = Math.PI * (3 - Math.sqrt(5));
-  const cells = new Map<string, Slot[]>();
+  const cells = new Map<string, (Slot & { radius: number })[]>();
+  const largest = Math.max(0, ...nodes.map(node => radiusFor(node.id)));
   const cell = (x: number, y: number) => `${Math.floor(x / spacing)},${Math.floor(y / spacing)}`;
-  const free = (x: number, y: number) => {
-    const column = Math.floor(x / spacing), row = Math.floor(y / spacing);
-    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
-      for (const other of cells.get(`${column + dx},${row + dy}`) ?? []) {
-        if (Math.hypot(x - other.x, y - other.y) < spacing - 1e-8) return false;
+  const free = (x: number, y: number, radius: number) => {
+    const reach = radius + largest;
+    for (let column = Math.floor((x - reach) / spacing); column <= Math.floor((x + reach) / spacing); column++) {
+      for (let row = Math.floor((y - reach) / spacing); row <= Math.floor((y + reach) / spacing); row++) {
+        for (const other of cells.get(`${column},${row}`) ?? []) {
+          if (Math.hypot(x - other.x, y - other.y) < radius + other.radius - 1e-8) return false;
+        }
       }
     }
     return true;
@@ -518,14 +533,13 @@ function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonl
   const nextCandidate = new Map<string, number>();
   for (const [index, component] of components.entries()) {
     let center: Slot = { x: 0, y: 0 };
-    const points = [...component.coordinates.values()];
     if (index) {
-      const shape = points.map(value => `${value.x},${value.y}`).sort().join(";");
+      const shape = [...component.coordinates].map(([id, value]) => `${value.x},${value.y},${radiusFor(id)}`).sort().join(";");
       let candidate = nextCandidate.get(shape) ?? 1;
       for (;; candidate++) {
         const distance = step * Math.sqrt(candidate), angle = candidate * goldenAngle;
         center = { x: Math.cos(angle) * distance, y: Math.sin(angle) * distance };
-        if (points.every(value => free(value.x + center.x, value.y + center.y))) break;
+        if ([...component.coordinates].every(([id, value]) => free(value.x + center.x, value.y + center.y, radiusFor(id)))) break;
       }
       nextCandidate.set(shape, candidate + 1);
     }
@@ -533,7 +547,7 @@ function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonl
       const x = value.x + center.x, y = value.y + center.y;
       result.set(id, { x, y, z: constellationDepth(x, y, spacing) });
       const key = cell(x, y), bucket = cells.get(key) ?? [];
-      bucket.push({ x, y }); cells.set(key, bucket);
+      bucket.push({ x, y, radius: radiusFor(id) }); cells.set(key, bucket);
     }
   }
   return result;
@@ -597,7 +611,7 @@ export class Positions {
   private coreLayout(core: string, page?: number, visibleMembers?: ReadonlySet<string>, scope?: LayoutScope): Map<string, Point> {
     const visibleKey = visibleMembers ? [...visibleMembers].sort().join("|") : "";
     const scopeKey = scope ? graphStructure(scope.nodes, scope.links) : "";
-    const key = `${core}:${page ?? "all"}:${visibleKey}:${scopeKey}`;
+    const key = layoutKey(core, page, visibleKey, scopeKey);
     const cached = this.layouts.get(key);
     if (cached) return cached;
     const source = this.source!;
@@ -668,6 +682,31 @@ export class Positions {
     this.activeScopeKey = scopeKey;
     this.layoutNeedsRefresh = false;
     if (reduced) this.advance(now, true);
+  }
+  /** Pack the visible overview, translating each hidden cohort with its representative. */
+  packOverview(discs: readonly (ScreenPoint & { id: string; radius: number })[], links: readonly GraphLink[], cohorts: ReadonlyMap<string, readonly string[]>,
+    plane: { right: Point; up: Point; worldPerPixel: (depth: number) => number }, now: number, reduced: boolean): boolean {
+    if (this.dragging || this.settling || this.layoutMoving || this.activeCore || this.activeScopeKey || discs.length < 2) return false;
+    const valid = discs.filter(disc => this.nodes.has(disc.id) && [disc.x, disc.y, disc.depth, disc.radius].every(Number.isFinite) && disc.depth > 0 && disc.radius > 0);
+    if (valid.length !== discs.length) return false;
+    const projected = valid.map(disc => ({ ...this.nodes.get(disc.id)!, x: disc.x, y: disc.y, z: 0 }));
+    const footprint = new Map(valid.map(disc => [disc.id, disc.radius + 3]));
+    const visible = new Set(valid.map(disc => disc.id));
+    const packed = packInitialCoordinates(projected, links.filter(link => visible.has(link.source) && visible.has(link.target)), footprint);
+    const actual = new Map([...this.nodes].map(([id, node]) => [id, point(node)])), target = new Map(actual);
+    for (const disc of valid) {
+      const at = packed.get(disc.id)!, scale = plane.worldPerPixel(disc.depth);
+      if (!Number.isFinite(scale) || scale <= 0) return false;
+      const delta = add(add(zero(), plane.right, (at.x - disc.x) * scale), plane.up, (at.y - disc.y) * scale);
+      target.set(disc.id, add(actual.get(disc.id)!, delta));
+      for (const id of cohorts.get(disc.id) ?? []) {
+        if (id !== disc.id && !visible.has(id) && actual.has(id)) target.set(id, add(actual.get(id)!, delta));
+      }
+    }
+    this.layouts.set(layoutKey("", undefined, "", ""), target);
+    this.layoutMotion = { from: actual, to: target, actual, start: now };
+    if (reduced) this.advance(now, true);
+    return true;
   }
   private clearedPositions(clearance: Clearance, desired: Map<string, Point>, linked: ReadonlySet<string>, gap = COLLISION_GAP): Map<string, Point> {
     const { right, up } = clearance.basis?.() ?? clearance;

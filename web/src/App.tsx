@@ -6,7 +6,7 @@ import Memory from "./Memory";
 import type { Item as MemoryItem } from "./Memory";
 import { Positions } from "./positions";
 import { nodePresentation, starColor } from "./presentation";
-import { graphUrl, isNativeOriginal, kindName, knowledge, linkName, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph } from "./graph";
+import { graphUrl, isNativeOriginal, kindName, knowledge, linkName, nativeFolders, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph } from "./graph";
 import type { Filters, GraphNode, Model, Scope, Snapshot } from "./graph";
 const Graph = lazy(() => import("./Graph.tsx"));
 type Session = { csrf: string; areas: { id: string; label: string }[] };
@@ -61,6 +61,8 @@ export default function App() {
   const data = stored?.snapshot.scope === route.scope && stored.snapshot.query === route.q ? stored : null;
   const [input, setInput] = useState(route.q), [refresh, setRefresh] = useState(0), [panelEpoch, setPanelEpoch] = useState(0);
   const [filters, setFilters] = useState<Filters>(initialFilters);
+  const [showFolders, setShowFolders] = useState(false);
+  const showFoldersRef = useRef(false);
   const [panel, setPanel] = useState<"node" | "manage" | null>(route.focus ? "node" : null);
   const [managing, setManaging] = useState(false);
   // One write response is handed to its new detail view; this is not a cross-document cache.
@@ -81,6 +83,7 @@ export default function App() {
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 900px)").matches);
   const selected = data?.model.nodes.find(n => n.id === route.focus) ?? null;
   const relatedOriginals: GraphNode[] = selected ? data?.model.links.flatMap(link => {
+    if (link.kind === "parent") return [];
     const id = link.source === selected.id ? link.target : link.target === selected.id ? link.source : null;
     const node = data.model.nodes.find(candidate => candidate.id === id);
     return node ? [node] : [];
@@ -122,7 +125,7 @@ export default function App() {
     request<Snapshot>(`/api/graph?${params}`, { signal: controller.signal }).then(snapshot => {
       if (controller.signal.aborted || !sameGraphLocation(current, routeRef.current)) return;
       const responseMs = performance.now() - startedAt;
-      const model = reconcile(snapshot, previous.current);
+      const model = reconcile(snapshot, previous.current, showFoldersRef.current);
       positions.install(model, true);
       previous.current = { ...model, nodes: model.nodes.map(node => ({ ...node })) };
       pendingTiming.current = { location: current, startedAt, responseMs };
@@ -171,7 +174,8 @@ export default function App() {
   function choose(id: string) {
     if (busy || !confirmDiscard()) return;
     const node = data?.model.nodes.find(n => n.id === id);
-    setNotice(""); setManaging(false); setSavedMemory(null); setFilters(f => ({ ...initialFilters, cluster: f.cluster === node?.cluster ? f.cluster : null }));
+    if (node?.kind === "folder") { fitFolder(id); return; }
+    setNotice(""); setManaging(false); setSavedMemory(null); setFilters(f => ({ ...initialFilters, cluster: f.cluster === node?.cluster ? f.cluster : null, folder: shown.nodes.some(value => value.id === id) ? f.folder : null }));
     syncRoute({ ...route, focus: id }); openPanel("node");
     if (!node) setRefresh(v => v + 1);
   }
@@ -200,8 +204,24 @@ export default function App() {
   }
   function fitView(cluster = filters.cluster) {
     if (busy || !confirmDiscard()) return;
-    setFilters(f => ({ ...f, cluster }));
+    setFilters(f => ({ ...f, cluster, folder: null }));
     closePanel(); setFit(v => v + 1);
+  }
+  function fitFolder(folder: string | null) {
+    if (busy || !confirmDiscard()) return;
+    setFilters(f => ({ ...f, folder, cluster: null }));
+    closePanel(); setFit(v => v + 1);
+  }
+  function toggleFolders(value: boolean) {
+    showFoldersRef.current = value; setShowFolders(value);
+    if (data) {
+      const model = reconcile(data.snapshot, data.model, value);
+      positions.install(model, true);
+      previous.current = { ...model, nodes: model.nodes.map(node => ({ ...node })) };
+      setStored({ snapshot: data.snapshot, model });
+    }
+    setFilters(f => f.kind === "folder" && !value ? { ...f, kind: "all" } : f);
+    setFit(v => v + 1);
   }
   function closePanel(): boolean {
     if (busy || !confirmDiscard()) return false;
@@ -247,6 +267,8 @@ export default function App() {
   const cluster = data?.model.clusters.find(c => c.id === filters.cluster);
   const clusterOptions = useMemo(() => data ? visibleClusterOptions(data.model, filters) : { listed: [], standalone: 0 }, [data, filters]);
   const listedClusters = clusterOptions.listed;
+  const folders = useMemo(() => data ? nativeFolders(visibleGraph(data.model, { ...filters, cluster: null, folder: null }).nodes) : [], [data, filters]);
+  const folder = data && filters.folder ? nativeFolders(data.model.nodes).find(value => value.id === filters.folder) : null;
   return <div className="app">
     <header className="app-header" inert={!!panel && narrow}>
       <a className="wordmark" href="/">개인 온톨로지</a>
@@ -265,20 +287,22 @@ export default function App() {
       {explore && <aside className="map-sidebar" aria-label="지식 탐색" inert={!!panel && narrow}>
         <div className="sidebar-heading"><h2>탐색 조건</h2><button className="quiet" aria-label="탐색 조건 닫기" onClick={() => { setExplore(false); filterButton.current?.focus(); }}>닫기</button></div>
         <div className="filter-row">
-          <label>표시 종류<select value={filters.kind} disabled={busy} onChange={e => setFilters(f => ({ ...f, kind: e.target.value as Filters["kind"] }))}><option value="all">모두</option><option value="knowledge">문서와 기록</option>{Object.entries(kindName).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
+          <label>표시 종류<select value={filters.kind} disabled={busy} onChange={e => setFilters(f => ({ ...f, kind: e.target.value as Filters["kind"] }))}><option value="all">모두</option><option value="knowledge">문서와 기록</option>{Object.entries(kindName).filter(([id]) => id !== "folder" || showFolders).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
           <label>표시 상태<select value={filters.state} disabled={busy} onChange={e => setFilters(f => ({ ...f, state: e.target.value as Filters["state"] }))}><option value="all">모든 상태</option><option value="active">현재 사용 가능</option><option value="proposed">제안</option><option value="withdrawn">철회</option><option value="attention">확인 필요·제외</option></select></label>
         </div>
-        {route.scope === "personal" && <label className="topic-label">원문 출처 범위<select value={filters.sourceScope ?? ""} onChange={event => setFilters(value => ({ ...value, sourceScope: event.target.value || null, cluster: null }))}><option value="">모든 출처</option>{[...new Set(data?.model.nodes.flatMap(node => node.context_scope ? [node.context_scope] : []) ?? [])].sort().map(value => <option key={value} value={value}>{value}</option>)}</select></label>}
-        <section className="cluster-list"><h2>원문 폴더와 관계 군집</h2>
-          <button className="cluster" aria-pressed={!filters.cluster} disabled={busy} onClick={() => fitView(null)}>전체 보기</button>
-          <div className="compact-list">{listedClusters.map(c => <button className="cluster" key={c.id} disabled={busy} aria-pressed={filters.cluster === c.id} onClick={() => fitView(c.id)}><i style={{ background: c.color }} /><strong>{c.label}</strong><small>{c.id.startsWith("folder:") ? `원문 ${c.knowledge}개` : `문서·기록 ${c.knowledge} · 분류 표식 ${c.members.length - c.knowledge}`}</small></button>)}</div>
+        {route.scope === "personal" && <label className="topic-label">원문 출처 범위<select value={filters.sourceScope ?? ""} onChange={event => setFilters(value => ({ ...value, sourceScope: event.target.value || null, cluster: null, folder: null }))}><option value="">모든 출처</option>{[...new Set(data?.model.nodes.flatMap(node => node.context_scope ? [node.context_scope] : []) ?? [])].sort().map(value => <option key={value} value={value}>{value}</option>)}</select></label>}
+        <label className="topic-label"><input type="checkbox" checked={showFolders} disabled={busy} onChange={event => toggleFolders(event.target.checked)} /> 폴더 연결 표시</label>
+        <section className="cluster-list"><h2>관계 군집</h2>
+          <button className="cluster" aria-pressed={!filters.cluster && !filters.folder} disabled={busy} onClick={() => fitView(null)}>전체 보기</button>
+          <div className="compact-list">{listedClusters.map(c => <button className="cluster" key={c.id} disabled={busy} aria-pressed={filters.cluster === c.id} onClick={() => fitView(c.id)}><i style={{ background: c.color }} /><strong>{c.label}</strong><small>문서·기록 {c.knowledge} · 분류 표식 {c.members.length - c.knowledge}</small></button>)}</div>
           <p className="hint">{listedClusters.length}개 묶음 · 단독 항목 {clusterOptions.standalone}개</p>
-          <p className="hint">원문은 실제 출처 폴더별로 묶고, 그 밖의 자료는 현재 관계로 묶습니다. 연결선은 폴더가 달라도 유지됩니다.</p>
+          <p className="hint">원문을 포함한 모든 자료는 현재 관계로 묶습니다. 폴더 소속은 문서 사이의 관련 관계와 구분합니다.</p>
         </section>
-        <details className="section"><summary>검색 방법</summary><p className="hint">단어를 띄어 쓰면 순서와 관계없이 모든 단어가 포함된 항목을 찾습니다. 경로와 검색 가능한 원문 내용도 함께 찾습니다. 첨부 파일은 연결된 원문 안에서 내려받습니다. 관계 없는 원문도 출처 폴더에 묶여 보이지만 연결선은 없습니다.</p></details>
+        <section className="folder-list"><h2>상위 폴더</h2><div className="compact-list">{folders.map(value => <button className="cluster" key={value.id} disabled={busy} aria-pressed={filters.folder === value.id} onClick={() => fitFolder(value.id)}><strong>{value.label}</strong><small>하위 원문 {value.members.length}개</small></button>)}</div><p className="hint">조회된 원문 경로에서 계산한 부모·소속 구조입니다. 폴더를 누르면 하위 자료를 봅니다.</p></section>
+        <details className="section"><summary>검색 방법</summary><p className="hint">단어를 띄어 쓰면 순서와 관계없이 모든 단어가 포함된 항목을 찾습니다. 경로와 검색 가능한 원문 내용도 함께 찾습니다. 첨부 파일은 연결된 원문 안에서 내려받습니다. 폴더 연결은 경로에서 계산하며 내용의 유사성을 뜻하지 않습니다.</p></details>
       </aside>}
       <section className="galaxy" aria-label="지식 지도" aria-busy={loading} inert={!!panel && narrow}>
-        <div className="map-toolbar"><div className="map-title"><h1>{cluster ? cluster.label : route.q ? `“${route.q}” 검색` : "지식 지도"}</h1><p className="count-breakdown">표시 중 · 문서 {data ? displayed.filter(n => n.kind === "document").length : "—"} · 기록 {data ? displayed.filter(n => n.kind === "memory").length : "—"} · 관계 {data ? shown.links.length : "—"}</p>{timing && data && !loading && sameGraphLocation(timing.location, route) && <p className="count-breakdown load-timing" title="응답은 자료 요청부터 JSON 수신까지, 목록 표시는 요청부터 목록의 첫 화면이 그려질 때까지입니다. 앱 실행·접속 시간은 제외합니다.">최근 조회 · 응답 {Math.round(timing.responseMs)}ms{timing.list && fallback && <> · 목록 표시 {Math.round(timing.displayMs)}ms</>}</p>}</div>
+        <div className="map-toolbar"><div className="map-title"><h1>{folder ? folder.label : cluster ? cluster.label : route.q ? `“${route.q}” 검색` : "지식 지도"}</h1><p className="count-breakdown">표시 중 · 문서 {data ? displayed.filter(n => n.kind === "document").length : "—"} · 기록 {data ? displayed.filter(n => n.kind === "memory").length : "—"} · 관계 {data ? shown.links.filter(link => link.kind !== "parent").length : "—"}{showFolders && data && <> · 부모·소속 {shown.links.filter(link => link.kind === "parent").length}</>}</p>{timing && data && !loading && sameGraphLocation(timing.location, route) && <p className="count-breakdown load-timing" title="응답은 자료 요청부터 JSON 수신까지, 목록 표시는 요청부터 목록의 첫 화면이 그려질 때까지입니다. 앱 실행·접속 시간은 제외합니다.">최근 조회 · 응답 {Math.round(timing.responseMs)}ms{timing.list && fallback && <> · 목록 표시 {Math.round(timing.displayMs)}ms</>}</p>}</div>
           <div className="map-actions">
             <button ref={filterButton} disabled={busy} aria-expanded={explore} onClick={() => setExplore(v => !v)}>필터·묶음</button>
             <button disabled={busy} aria-pressed={fallback} onClick={() => { if (webglFailed) { setWebglFailed(false); setListMode(false); } else setListMode(v => !v); }}>{fallback ? "3D 보기" : "목록 보기"}</button>
@@ -294,14 +318,14 @@ export default function App() {
           {notice && <p className="notice">{notice}</p>}
           {loading && !data && <p className="loading" role="status">지식을 불러오는 중…</p>}
           {webglFailed && <p className="warning">3D 화면을 표시할 수 없어 같은 조회 결과를 목록으로 보여드립니다.</p>}
-          {(route.q || cluster) && <div className="active-filters">{route.q && <button className="quiet" disabled={busy} onClick={() => search("")}>검색 해제</button>}{cluster && <button className="quiet" disabled={busy} onClick={() => fitView(null)}>묶음 해제</button>}</div>}
+          {(route.q || cluster || folder) && <div className="active-filters">{route.q && <button className="quiet" disabled={busy} onClick={() => search("")}>검색 해제</button>}{cluster && <button className="quiet" disabled={busy} onClick={() => fitView(null)}>묶음 해제</button>}{folder && <button className="quiet" disabled={busy} onClick={() => fitFolder(null)}>폴더 해제</button>}</div>}
           {route.q && data && <p className="hint">일치 구절은 원문의 일부입니다. 적용 여부는 현재 내용과 근거에서 확인하세요.</p>}
           {data?.snapshot.truncated && <p className="warning">자료가 많아 일부만 표시합니다. 검색으로 범위를 좁히면 다른 자료를 찾을 수 있습니다.</p>}
           {data && shown.nodes.length > 0 && !shown.links.length && <p className="hint no-relations">{data.snapshot.totals.links === 0 ? "아직 등록된 관계가 없습니다." : "현재 표시한 항목 사이에는 조회된 관계가 없습니다."}</p>}
           {selected && !shown.nodes.some(n => n.id === selected.id) && <p className="notice">선택한 자료가 현재 필터 밖에 있습니다. <button onClick={() => setFilters(initialFilters)}>필터 해제</button></p>}
         </div>
         {data && !loading && !displayed.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{route.q || filters.kind !== "all" || filters.state !== "all" ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 저장한 기록이 이곳에 나타납니다."}</p><button disabled={!session || busy} onClick={startRecord}>기록 남기기</button></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{displayed.map(n => { const label = nodePresentation(n); return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} style={{ color: knowledge(n) ? starColor(n) : n.taxonomyColor ?? n.color }} aria-hidden="true">{knowledge(n) ? "·" : "○"}</span><span><small>{kindName[n.kind]} · {stateName(n)}</small><strong>{label.title}</strong>{label.subtitle && <span className="node-location">{label.subtitle}</span>}{route.q && n.historical_match && <small className="warning">이전 내용에서 일치 · 현재 상태를 확인하세요</small>}{route.q && n.excerpt && <span className="search-excerpt">{n.excerpt}</span>}</span>{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph key={`${route.scope}:${route.q}`} positions={positions} snapshot={data.model} nodes={shown.nodes} links={shown.links} selected={route.focus} rotate={rotating} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onClearSelection={closePanel} onFailure={failed} /></Suspense></GraphBoundary>)}
-        <div className="map-legend"><span><i className="legend-star document" />문서</span><span><i className="legend-star memory" />기록</span><span>○ 분류 표식</span><details><summary>관계·상태 읽기</summary><p>‘연결된 항목’은 한 별에 현재 연결된 이웃이 19개 이상인 묶음입니다. ‘가까운 항목’은 멀리서 볼 때 화면상 가까운 관계 없는 문서·기록 6개 이상을 잠시 합쳐 보인 것입니다. 가까운 항목은 내용의 유사성이나 관계를 뜻하지 않으며, 확대하거나 누르면 개별 별이 보입니다. 가는 원은 선택, 바깥 점선 원은 이전 조회 이후의 기록·관계 변경입니다. 흐린 점은 제안·철회·유효기간·출처 확인 상태를 살펴보세요. 같은 분류 표식 하나에 속한 별은 표식과 색을 공유하고, 여러 분류에 속한 별은 고유색을 유지합니다. {Object.values(linkName).join(" · ")} 관계만 선으로 표시하며 선택하면 연결된 선을 강조합니다. 과거 출처 근거는 갈색의 가는 선이며 군집에서 제외합니다. 단독 항목은 연결된 자료 곁에 배치될 수 있습니다. ‘저장’은 사실 검증을 뜻하지 않습니다. 출처 확인 시각만 바뀌면 변경으로 표시하지 않습니다.</p></details></div>
+        <div className="map-legend"><span><i className="legend-star document" />문서</span><span><i className="legend-star memory" />기록</span><span>○ 분류 표식{showFolders ? " · 폴더" : ""}</span><details><summary>관계·상태 읽기</summary><p>‘관계 묶음’은 한 별에 현재 연결된 이웃이 19개 이상인 묶음입니다. ‘근접 묶음’은 멀리서 볼 때 화면상 가까운 관계 없는 문서·기록 6개 이상을 잠시 합쳐 보인 것입니다. 근접 묶음은 내용의 유사성이나 관계를 뜻하지 않으며, 확대하거나 누르면 개별 별이 보입니다. 묶음 크기는 항목 수가 10·30·50·100개 이상인 구간에 따라 커집니다. 접힌 지도는 보이는 별과 묶음의 실제 크기에 맞춰 간격을 줄이며, 펼치면 구성원을 다시 봅니다. 가는 원은 선택, 바깥 점선 원은 이전 조회 이후의 기록·관계 변경입니다. 흐린 점은 제안·철회·유효기간·출처 확인 상태를 살펴보세요. 같은 분류 표식 하나에 속한 별은 표식과 색을 공유하고, 여러 분류에 속한 별은 고유색을 유지합니다. {Object.values(linkName).join(" · ")} 관계를 선으로 표시하며 선택하면 연결된 선을 강조합니다. 부모·소속은 조회된 경로에서 계산하며 관계 군집을 바꾸지 않습니다. ‘폴더 묶음’은 같은 폴더 바로 아래에서 다른 관계가 없는 원문 19개 이상을 접어 표시합니다. 다른 관계가 있는 원문과 하위 폴더는 계속 보이며, 묶음을 누르면 개별 부모 연결을 확인합니다. 폴더를 누르면 하위 자료를 봅니다. 접힌 묶음의 폴더 연결은 개별 항목을 펼쳐 확인할 수 있습니다. 과거 출처 근거는 갈색의 가는 선이며 군집에서 제외합니다. 단독 항목은 연결된 자료 곁에 배치될 수 있습니다. ‘저장’은 사실 검증을 뜻하지 않습니다. 출처 확인 시각만 바뀌면 변경으로 표시하지 않습니다.</p></details></div>
       </section>
       {panel && session && <aside ref={panelElement} className="management-panel" role="dialog" aria-modal={narrow || undefined} aria-label={panel === "manage" ? "기록 남기기" : "선택한 자료 상세"}>
         <div className="panel-heading"><span>{panel === "manage" ? "기록 남기기" : selected ? kindName[selected.kind] : memorySeed ? "기록" : "자료 상세"}</span><div className="panel-actions">{panel === "node" && (memorySeed || selected && knowledge(selected) && !isNativeOriginal(selected)) && <button disabled={busy} aria-expanded={managing} onClick={toggleManagement}>{managing ? "읽기로 돌아가기" : "관리"}</button>}<button ref={closeButton} disabled={busy} aria-label="관리 패널 닫기" onClick={closePanel}>닫기 ×</button></div></div>

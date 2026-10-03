@@ -10,12 +10,13 @@ import type { NucleusView } from "./nuclei";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
-import { MAX_VISIBLE_LABELS, SUMMARY_GLYPH_PIXELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
+import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
 type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFailure: () => void };
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
+const coreLabel = (node: PositionedNode | undefined, count: number) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : `관계 묶음 · ${count}개`;
 function spatialCameraFrame(camera: PerspectiveCamera, controls: OrbitControls, group: { center: { x: number; y: number; z: number }; radius: number }, size: { width: number; height: number }) {
   const vertical = camera.fov * Math.PI / 180;
   const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
@@ -215,6 +216,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const dragged = useRef<string | null>(null);
   const draggedSummary = useRef<{ id: string; members: readonly string[]; level: number; epoch: number } | null>(null);
   const summaryHalo = useRef<SummaryHaloMotion | null>(null);
+  const packedOverview = useRef("");
+  const overviewZoom = useRef({ scale: 0, changedAt: 0, checkedScale: 0, checkedFootprints: "" });
   const frozenSpatial = useRef<NucleusView | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [expandedCore, setExpandedCore] = useState<string | null>(null);
@@ -241,12 +244,18 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const spatial = useMemo(() => frozenSpatial.current ?? nucleusView(semanticNodes, snapshot.links,
     spatialLevel, selected, spatialReveal?.members, spatialLocks), [semanticNodes, snapshot.links, spatialLevel, selected, settledRevision, spatialReveal, spatialLocks]);
   const { nodes: displayNodes, counts: spatialCounts, groups: spatialGroups } = spatial;
+  const changedFootprints = useMemo(() => JSON.stringify(displayNodes.filter(node => node.changed).map(node => node.id).sort()), [displayNodes]);
+  const summaryCounts = useMemo(() => {
+    const counts = new Map(spatialCounts), byId = new Map(nodes.map(node => [node.id, node]));
+    for (const [id, count] of collapsedCounts) counts.set(id, count - Number(byId.get(id)?.kind === "folder"));
+    return counts;
+  }, [nodes, collapsedCounts, spatialCounts]);
   const glyphMembers = useMemo(() => {
     const byId = new Map(nodes.map(node => [node.id, node]));
     const members = new Map<string, PositionedNode[]>();
     for (const id of collapsedCounts.keys()) {
       const core = cores.find(candidate => candidate.hub === id);
-      if (core) members.set(id, [...core.members].map(memberId => byId.get(memberId)).filter((node): node is PositionedNode => Boolean(node)));
+      if (core) members.set(id, [...core.members].map(memberId => byId.get(memberId)).filter((node): node is PositionedNode => Boolean(node) && !(node!.id === id && node!.kind === "folder")));
     }
     for (const [id, group] of spatialGroups) members.set(id, group.members.map(memberId => byId.get(memberId)).filter((node): node is PositionedNode => Boolean(node)));
     return members;
@@ -412,7 +421,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const offset = hadCamera && !fitChanged ? camera.position.clone().sub((instance.controls() as OrbitControls).target) : new Vector3(0, 0, 1);
     if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
     offset.normalize().multiplyScalar(distance);
-    instance.cameraPosition({ x: lookAt.x + offset.x, y: lookAt.y + offset.y, z: lookAt.z + offset.z }, lookAt, reduced ? 0 : 650);
+    // Establish the overview before packing fixed-size glyphs in its screen plane.
+    instance.cameraPosition({ x: lookAt.x + offset.x, y: lookAt.y + offset.y, z: lookAt.z + offset.z }, lookAt, 0);
   }, [ready, cameraKey, nodes, semanticNodes, links, selected, activeExpandedCore, cores, disclosure, reduced, size, positions, fit, snapshot.nodes.length, spatialReveal, exposesHiddenMembers]);
   useEffect(() => {
     let second = 0;
@@ -480,7 +490,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         radius: (value: PositionedNode, atDepth: number) => {
           const isSummary = collapsedCounts.has(value.id) || spatialCounts.has(value.id);
           const pixels = nodeScreenSize(value.kind, atDepth, viewport().height, camera.projectionMatrix.elements[5]);
-          return nodeVisualRadius(pixels, value.id === selected, value.changed, isSummary);
+          return nodeVisualRadius(pixels, value.id === selected, value.changed, isSummary ? summaryCounts.get(value.id) : 0);
         },
         project: (value: { x: number; y: number; z: number }) => {
           camera.updateMatrixWorld();
@@ -523,7 +533,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const summary = collapsedCounts.has(id) || spatialCounts.has(id);
       element.dataset.nodeId = id;
       element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive" : ""}`;
-      element.children[0].textContent = collapsedCounts.has(id) ? `연결된 항목 · ${collapsedCounts.get(id)}개` : spatialCounts.has(id) ? `가까운 항목 · ${spatialCounts.get(id)}개` : label.title;
+      element.children[0].textContent = collapsedCounts.has(id) ? coreLabel(label.node, collapsedCounts.get(id)!) : spatialCounts.has(id) ? `근접 묶음 · ${spatialCounts.get(id)}개` : label.title;
       const subtitle = element.children[1] as HTMLElement;
       subtitle.textContent = summary ? "별 끌기 · 눌러 펼치기" : label.subtitle; subtitle.hidden = !subtitle.textContent;
       element.children[2].textContent = summary ? "" : label.status;
@@ -590,13 +600,53 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const camera = instance?.camera();
       if (camera) {
         camera.updateMatrixWorld();
+        const distance = camera.position.distanceTo((instance!.controls() as OrbitControls).target);
+        const scale = size.height * camera.projectionMatrix.elements[5] / (2 * distance);
+        const zoom = overviewZoom.current;
+        if (Number.isFinite(scale) && scale > 0 && Math.abs(scale - zoom.scale) > Math.max(scale, zoom.scale) * 1e-5) {
+          zoom.scale = scale; zoom.changedAt = performance.now();
+        }
         if (!positions.dragging && !positions.layoutMoving && size.height > 0) {
-          const controls = instance!.controls() as OrbitControls;
-          const distance = camera.position.distanceTo(controls.target);
-          const spacing = 31 * size.height * camera.projectionMatrix.elements[5] / (2 * distance);
-          const next = nucleusLevel(spacing, lodLevelRef.current);
+          const next = nucleusLevel(31 * scale, lodLevelRef.current);
           if (next !== lodLevelRef.current) {
             lodLevelRef.current = next; hoveredId.current = null; setHover(null); setLodLevel(next);
+          }
+        }
+        if (selected || activeExpandedCore || spatialReveal?.members.size) packedOverview.current = "";
+        else if (summaryCounts.size && spatialLevel === lodLevelRef.current && appliedCamera.current === cameraKey &&
+          !positions.dragging && !positions.settling && !positions.layoutMoving && performance.now() - zoom.changedAt >= 150) {
+          const cohorts = new Map([...glyphMembers].map(([id, members]) => [id, members.map(member => member.id)]));
+          const packingKey = JSON.stringify([positions.structureEpoch, viewKey, fit, size, spatialLevel,
+            [...cohorts].map(([id, members]) => [id, [...members].sort()]).sort(([a], [b]) => String(a).localeCompare(String(b)))]);
+          const overviewChanged = packedOverview.current !== packingKey;
+          if (overviewChanged || zoom.checkedScale !== zoom.scale || zoom.checkedFootprints !== changedFootprints) {
+            const discs = displayNodes.map(node => {
+              projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
+              const depth = -projected.z, pixels = nodeScreenSize(node.kind, depth, size.height, camera.projectionMatrix.elements[5]);
+              const radius = nodeVisualRadius(pixels, false, node.changed, summaryCounts.get(node.id));
+              projected.applyMatrix4(camera.projectionMatrix);
+              return { id: node.id, x: projected.x * size.width / 2, y: -projected.y * size.height / 2, depth, radius };
+            });
+            // Zoom and content-only changes keep the layout unless their bodies need clearance.
+            const overlap = discs.some((a, index) => discs.slice(index + 1).some(b =>
+              Math.hypot(a.x - b.x, a.y - b.y) < a.radius + b.radius + 6 - .01));
+            const packed = (overviewChanged || overlap) && positions.packOverview(discs, displayLinks, cohorts, {
+              right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
+              up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1).multiplyScalar(-1),
+              worldPerPixel: depth => 2 * depth / (size.height * camera.projectionMatrix.elements[5]),
+            }, performance.now(), reduced);
+            if (packed || !overlap) {
+              zoom.checkedScale = zoom.scale;
+              zoom.checkedFootprints = changedFootprints;
+            }
+            if (packed) {
+              packedOverview.current = packingKey;
+              setMovedGroups(previous => {
+                const next = new Map(previous);
+                for (const [id, group] of spatialGroups) next.set(id, { members: group.members, level: spatialLevel, epoch: positions.groupEpoch });
+                return next;
+              });
+            }
           }
         }
         const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}|${focusedSummary}|${dragged.current}|${positions.revision}`;
@@ -606,7 +656,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
             const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
             const pixels = nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]);
-            const radius = nodeVisualRadius(pixels, node.id === selected, node.changed, summary);
+            const radius = nodeVisualRadius(pixels, node.id === selected, node.changed, summaryCounts.get(node.id));
             projected.applyMatrix4(camera.projectionMatrix);
             return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)! };
           });
@@ -638,7 +688,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       frame = requestAnimationFrame(draw);
     };
     draw(); return () => cancelAnimationFrame(frame);
-  }, [ready, nodes, displayNodes, collapsedCounts, spatialCounts, spatialGroups, spatialLevel, selected, size, visible, positions, data, reduced, rotate, positionCamera]);
+  }, [ready, nodes, displayNodes, displayLinks, collapsedCounts, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;
@@ -655,6 +705,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const color = node.kind === "document" || node.kind === "memory" ? starColor(node) : node.taxonomyColor ?? node.color;
     const isSelected = node.id === selected;
     const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
+    const summaryPixels = summaryAppearance(summaryCounts.get(node.id) ?? 0).pixels;
     const haloScale = summary ? () => summaryHaloScale(summaryHalo.current, node.id, performance.now(), motionReduced.current) : undefined;
     const contactMotion = () => positions.collisionReaction(node.id, performance.now(), motionReduced.current);
     const members = glyphMembers.get(node.id);
@@ -674,7 +725,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         glyph.signature = signature;
         previous.dispose();
       }
-      group.add(screenSprite(glyph.material, node, "body", false, 0, SUMMARY_GLYPH_PIXELS,
+      group.add(screenSprite(glyph.material, node, "body", false, 0, summaryPixels,
         haloScale && (() => 1 + (haloScale() - 1) * .35),
         () => (contactMotion()?.pulse ?? 0) * .09));
     } else group.add(isKnowledge
@@ -682,12 +733,13 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected, 0, undefined,
         () => (1 + ((haloScale?.() ?? 1) - 1) * 2) * (1 + (contactMotion()?.pulse ?? 0) * .05)));
     if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .7), node, "body", false, 0, 18));
-    if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected));
-    if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected));
+    const summaryMetrics = summaryPixels ? nodeScreenMetrics(summaryPixels, isSelected, node.changed) : null;
+    if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected, 0, summaryMetrics?.selection));
+    if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected, 0, summaryMetrics?.change));
     // The invisible plane follows the star and status rings, with a 36px minimum.
-    group.add(screenSprite(material("hit", "#ffffff", 0), node, "hit", isSelected));
+    group.add(screenSprite(material("hit", "#ffffff", 0), node, "hit", isSelected, 0, summaryMetrics?.hit));
     return group;
-  }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal, glyphMembers, positions]);
+  }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal, glyphMembers, summaryCounts, positions]);
   const chooseNode = (id: string) => {
     hoveredId.current = null; setHover(null);
     if (disabled || performance.now() < suppressClickUntil.current) return;
@@ -771,7 +823,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         return focus && endpoint(link.source) !== focus && endpoint(link.target) !== focus ? "#35404b" : link.current ? linkColor[link.kind] : "#947867";
       }}
       linkWidth={0}
-      linkOpacity={.65} linkDirectionalArrowLength={link => link.kind === "evidence" ? 2 : 0} linkDirectionalArrowRelPos={.8}
+      linkOpacity={.65} linkDirectionalArrowLength={link => link.kind === "evidence" || link.kind === "parent" ? 2 : 0} linkDirectionalArrowRelPos={.8}
       enableNodeDrag={!disabled}
       onNodeDrag={dragNode}
       onNodeDragEnd={node => {
@@ -825,8 +877,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       }} enablePointerInteraction={!disabled}
       cooldownTicks={0} warmupTicks={0} onEngineStop={positionCamera}
       onNodeClick={node => chooseNode(node.id)}
-      onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: `연결된 항목 · ${collapsedCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `가까운 항목 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
-      onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
+      onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: coreLabel(node, collapsedCounts.get(node.id)!), detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `근접 묶음 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
+      onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.kind === "parent" ? "경로에서 계산 · 화살표는 상위 폴더 방향" : link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
     />}
     <div className="node-labels" ref={labelLayer}
       onClick={event => { const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { if (event.detail === 0) suppressClickUntil.current = 0; chooseNode(label.dataset.nodeId); } }}
@@ -837,14 +889,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       <button type="button" ref={coreCloseButton} onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); setExpandedCore(null); }}>묶음 접기</button>
       {disclosure?.hub === activeExpandedCore && <>
         <button type="button" disabled={disclosure.index === 0} onClick={() => setCorePage(disclosure.index - 1)}>이전</button>
-        <span>연결된 항목 {disclosure.total}개 · {disclosure.index + 1}/{disclosure.pages}</span>
+        <span>{coreLabel(nodes.find(node => node.id === disclosure.hub), disclosure.total)} · {disclosure.index + 1}/{disclosure.pages}</span>
         <button type="button" disabled={disclosure.index + 1 === disclosure.pages} onClick={() => setCorePage(disclosure.index + 1)}>다음</button>
         <button type="button" onClick={() => setShowAllCore(true)}>전체 보기</button>
       </>}
       {showAllCore && cores.find(core => core.hub === activeExpandedCore && core.count > 36) &&
         <button type="button" onClick={() => setShowAllCore(false)}>나눠 보기</button>}
     </div>}
-    {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>가까운 항목 {spatialReveal.members.size}개 접기</button>}
+    {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>근접 묶음 {spatialReveal.members.size}개 접기</button>}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
     <div className="graph-instructions" aria-hidden="true">묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · 빈 공간 회전 · 스크롤 확대·축소</div>
   </div>;

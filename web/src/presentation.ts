@@ -88,7 +88,15 @@ export function spriteScale(pixels: number, viewportHeight: number, projectionY:
 // 26px floor turned a fitted dense constellation into a solid white disc.
 export const MIN_KNOWLEDGE_STAR_PIXELS = 10;
 export const FOCUSED_KNOWLEDGE_STAR_PIXELS = 72;
-export const SUMMARY_GLYPH_PIXELS = 36;
+/** Count controls one bounded visual scale, shared by glyphs, hit areas and packing. */
+export function summaryAppearance(count: number): { pixels: number; samples: number } {
+  if (!Number.isFinite(count) || count <= 0) return { pixels: 0, samples: 0 };
+  if (count >= 100) return { pixels: 64, samples: 24 };
+  if (count >= 50) return { pixels: 50, samples: 20 };
+  if (count >= 30) return { pixels: 40, samples: 16 };
+  if (count >= 10) return { pixels: 32, samples: 12 };
+  return { pixels: 24, samples: 10 };
+}
 const KNOWLEDGE_STAR_WORLD_SIZE = 14;
 /** Perspective diameter in CSS pixels, shared by rendering, picking and projected labels. */
 export function nodeScreenSize(kind: string, depth: number, viewportHeight: number, projectionY: number): number {
@@ -109,11 +117,10 @@ export function nodeScreenMetrics(size: number, selected: boolean, changed: bool
   const extent = changed ? change : selected ? selection : size;
   return { body: size, selection, change, hit: Math.max(36, extent), radius: extent / 2 };
 }
-/** Summary glyphs stay screen-sized; selection and change rings still grow on approach. */
-export function nodeVisualRadius(size: number, selected: boolean, changed: boolean, summary: boolean): number {
-  const radius = nodeScreenMetrics(size, selected, changed).radius;
-  if (!summary || radius <= 0) return radius;
-  return selected || changed ? Math.max(SUMMARY_GLYPH_PIXELS / 2, radius) : SUMMARY_GLYPH_PIXELS / 2;
+/** A summary's body, rings and labels all use its count-based screen footprint. */
+export function nodeVisualRadius(size: number, selected: boolean, changed: boolean, summaryCount = 0): number {
+  if (!Number.isFinite(size) || size <= 0) return 0;
+  return nodeScreenMetrics(summaryCount > 0 ? summaryAppearance(summaryCount).pixels : size, selected, changed).radius;
 }
 /** A summary's ring responds to a grab and settles after release without moving its stars or hit area. */
 export type SummaryHaloMotion = { id: string; startedAt: number; releasedAt: number | null; releaseScale: number };

@@ -1,5 +1,5 @@
 import { CanvasTexture, SRGBColorSpace } from "three";
-import { starColor, starPhase, starShape } from "./presentation";
+import { starColor, starPhase, starShape, summaryAppearance } from "./presentation";
 
 type Member = { id: string; kind: string; taxonomyColor?: string; opacity?: number };
 export type GlyphStar = { x: number; y: number; depth: number; color: string; opacity: number; shape: number; glint: boolean };
@@ -8,7 +8,7 @@ export type GlyphStar = { x: number; y: number; depth: number; color: string; op
 export function summaryGlyphStars(groupId: string, members: readonly Member[]): GlyphStar[] {
   const chosen = [...members]
     .sort((a, b) => starPhase(`${a.id}|glyph`) - starPhase(`${b.id}|glyph`) || a.id.localeCompare(b.id))
-    .slice(0, 14);
+    .slice(0, summaryAppearance(members.length).samples);
   const turn = Math.PI * 2;
   const rotation = starPhase(`${groupId}|cloud`);
   return chosen.map((member, index) => {
