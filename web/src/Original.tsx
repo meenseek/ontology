@@ -1,5 +1,4 @@
 export type ContextItem = { scope: string; path: string; source_path: string; content_digest: string; byte_len: number };
-type ContextRead = { metadata: ContextItem & { material_id: string; revision: number; origin_kind: "imported-file" | "native"; source_digest: string | null }; content: string };
 export function contextUrl(kind: "search" | "read" | "download", scope: string, value: string, after: string | null = null): string {
   const params = new URLSearchParams({ scope });
   if (kind === "search") {
@@ -28,8 +27,4 @@ export function failure(error: unknown, reading = false): string {
   if (status === 413) return reading ? "열람 가능한 크기를 넘었습니다. 원본 다운로드를 이용해 주세요." : "조회 또는 다운로드 한도를 넘었습니다.";
   if (status === 400 && reading) return "UTF-8 텍스트로 열 수 없는 자료입니다. 원본 다운로드를 이용해 주세요.";
   return "요청을 완료하지 못했습니다. 다시 시도해 주세요.";
-}
-
-export function ContextProvenance({ origin_kind, source_digest }: { origin_kind: ContextRead["metadata"]["origin_kind"]; source_digest: string | null }) {
-  return <><dt>{origin_kind === "native" ? "출처" : "출처 SHA-256"}</dt><dd>{origin_kind === "native" ? "온톨로지에서 작성" : source_digest}</dd></>;
 }

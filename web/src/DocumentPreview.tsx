@@ -1,16 +1,27 @@
-import { useId, useRef } from "react";
-import type { MouseEvent } from "react";
+import { createContext, useContext, useId, useMemo, useRef } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkFrontmatter from "remark-frontmatter";
 import remarkGfm from "remark-gfm";
 import { fileName } from "./presentation";
 
-type Props = { path: string; content: string | null; kind: "vault" | "context" | "git" | "record"; title?: string; generatedTitle?: boolean; preferTitle?: boolean; resolveInternalLink?: (href: string) => (() => void) | undefined; resolveInternalDownload?: (href: string) => string | undefined };
+type Props = { path: string; content: string | null; kind: "vault" | "context" | "git" | "record"; title?: string; generatedTitle?: boolean; preferTitle?: boolean; afterTitle?: ReactNode; bodyOverride?: ReactNode; resolveInternalLink?: (href: string) => (() => void) | undefined; resolveInternalDownload?: (href: string) => string | undefined };
 type Tree = { type: string; tagName?: string; value?: string; properties?: Record<string, unknown>; children?: Tree[] };
 const text = (node: Tree): string => node.value ?? String(node.properties?.alt ?? (node.children ?? []).map(text).join(""));
 const headingText = (node: Tree): string => node.tagName === "sup" ? "" : node.value ?? String(node.properties?.alt ?? (node.children ?? []).map(headingText).join(""));
 const comparableTitle = (value: string) => value.replace(/\s+/g, " ").trim();
+// Stable renderers preserve the editor's focus while its draft changes.
+const DocumentLayoutContext = createContext<Pick<Props, "afterTitle" | "bodyOverride">>({});
+const DocumentHeader: Components["header"] = ({ node: _node, children, ...props }) => {
+  const { afterTitle } = useContext(DocumentLayoutContext);
+  return <header {...props}>{children}{afterTitle}</header>;
+};
+const DocumentBody: Components["div"] = ({ node, children, ...props }) => {
+  const { bodyOverride } = useContext(DocumentLayoutContext);
+  const body = Array.isArray(node?.properties.className) && node.properties.className.includes("document-body");
+  return <div {...props}>{body && bodyOverride !== undefined ? bodyOverride : children}</div>;
+};
 
 function headingIds({ namespace }: { namespace: string }) {
   return (tree: Tree) => {
@@ -47,6 +58,21 @@ function documentHeading({ fallback, kind, generatedTitle, preferTitle }: { fall
       first.children = [];
     }
     tree.children = children;
+  };
+}
+
+/** Keep the authored title and its anchors while the document body changes modes. */
+function documentLayout({ fallback, enabled }: { fallback: string; enabled: boolean }) {
+  return (tree: Tree) => {
+    if (!enabled) return;
+    const children = tree.children ?? [];
+    const index = children.findIndex(node => node.tagName === "h1" && comparableTitle(headingText(node)) === comparableTitle(fallback));
+    if (index < 0) return;
+    const [title] = children.splice(index, 1);
+    tree.children = [
+      { type: "element", tagName: "header", properties: { className: ["document-header"] }, children: [title] },
+      { type: "element", tagName: "div", properties: { className: ["document-body"] }, children },
+    ];
   };
 }
 
@@ -97,7 +123,7 @@ function Reference({ value }: { value: string }) {
   return <span className="document-reference"> ({value || "주소 없음"} · {relative ? "이 원문 경로는 여기서 열 수 없습니다." : "열 수 없는 주소입니다."})</span>;
 }
 
-export default function DocumentPreview({ path, content, kind, title, generatedTitle, preferTitle, resolveInternalLink, resolveInternalDownload }: Props) {
+export default function DocumentPreview({ path, content, kind, title, generatedTitle, preferTitle, afterTitle, bodyOverride, resolveInternalLink, resolveInternalDownload }: Props) {
   const namespace = `document-${useId()}`;
   const fallback = title ?? fileName(path);
   const preview = useRef<HTMLDivElement>(null);
@@ -106,37 +132,43 @@ export default function DocumentPreview({ path, content, kind, title, generatedT
     const href = event.currentTarget.getAttribute("href");
     if (preview.current && href) findDocumentFragment(preview.current, href)?.scrollIntoView({ block: "nearest" });
   };
-  const components: Components = {
-    a({ node, href = "", children, ...props }) {
-      const external = externalHref(href), fragment = href.startsWith("#");
-      const internal = kind === "context" && !external && !fragment ? resolveInternalLink?.(href) : undefined;
-      const download = kind === "context" && !external && !fragment && !internal ? resolveInternalDownload?.(href) : undefined;
-      if (!external && !fragment && !internal && !download) return <span>{children}<Reference value={href} /></span>;
-      // Formatted images and footnotes produce their own controls at any depth.
-      // Keep the parent's destination beside those controls, never around them.
-      const separate = node && hasInteractiveDescendant(node);
-      const link = internal
-        ? <button type="button" className="document-internal-link" onClick={internal}>{separate ? "연결된 문서 열기" : children}</button>
-        : download
-        ? <a href={download} download>{separate ? "첨부 파일 다운로드" : children}</a>
-        : <a {...props} href={href} rel={external ? "noreferrer" : undefined} target={external ? "_blank" : undefined} onClick={fragment ? followFragment : undefined}>{separate ? "연결된 문서 열기" : children}</a>;
-      return separate ? <span>{children} · {link}</span> : link;
-    },
-    img({ src, alt, title: imageTitle }) {
-      const value = typeof src === "string" ? src : "";
-      const external = externalHref(value);
-      const download = kind === "context" && !external ? resolveInternalDownload?.(value) : undefined;
-      return <span className="document-image-reference" title={imageTitle}>이미지: {alt || "설명 없음"}{external ? <> · <a href={external} target="_blank" rel="noreferrer">이미지 열기</a></> : download ? <> · <a href={download} download>이미지 다운로드</a></> : <Reference value={value} />}</span>;
-    },
-    table({ node: _node, ...props }) {
-      return <div className="document-table" role="region" aria-label="문서 표" tabIndex={0}><table {...props} /></div>;
-    },
-  };
+  const hasLayout = afterTitle !== undefined;
+  const rendered = useMemo(() => {
+    const components: Components = {
+      header: DocumentHeader,
+      div: DocumentBody,
+      a({ node, href = "", children, ...props }) {
+        const external = externalHref(href), fragment = href.startsWith("#");
+        const internal = kind === "context" && !external && !fragment ? resolveInternalLink?.(href) : undefined;
+        const download = kind === "context" && !external && !fragment && !internal ? resolveInternalDownload?.(href) : undefined;
+        if (!external && !fragment && !internal && !download) return <span>{children}<Reference value={href} /></span>;
+        // Formatted images and footnotes produce their own controls at any depth.
+        // Keep the parent's destination beside those controls, never around them.
+        const separate = node && hasInteractiveDescendant(node);
+        const link = internal
+          ? <button type="button" className="document-internal-link" onClick={internal}>{separate ? "연결된 문서 열기" : children}</button>
+          : download
+          ? <a href={download} download>{separate ? "첨부 파일 다운로드" : children}</a>
+          : <a {...props} href={href} rel={external ? "noreferrer" : undefined} target={external ? "_blank" : undefined} onClick={fragment ? followFragment : undefined}>{separate ? "연결된 문서 열기" : children}</a>;
+        return separate ? <span>{children} · {link}</span> : link;
+      },
+      img({ src, alt, title: imageTitle }) {
+        const value = typeof src === "string" ? src : "";
+        const external = externalHref(value);
+        const download = kind === "context" && !external ? resolveInternalDownload?.(value) : undefined;
+        return <span className="document-image-reference" title={imageTitle}>이미지: {alt || "설명 없음"}{external ? <> · <a href={external} target="_blank" rel="noreferrer">이미지 열기</a></> : download ? <> · <a href={download} download>이미지 다운로드</a></> : <Reference value={value} />}</span>;
+      },
+      table({ node: _node, ...props }) {
+        return <div className="document-table" role="region" aria-label="문서 표" tabIndex={0}><table {...props} /></div>;
+      },
+    };
+    return <Markdown remarkPlugins={kind === "record" ? [remarkGfm] : [remarkFrontmatter, remarkGfm]} rehypePlugins={[[headingIds, { namespace }], [documentHeading, { fallback, kind, generatedTitle, preferTitle }], [documentLayout, { fallback, enabled: hasLayout }]]} remarkRehypeOptions={{ footnoteLabel: "각주", footnoteBackLabel: (index, rereference) => `본문 ${index + 1}번 각주로 돌아가기${rereference > 1 ? ` (${rereference})` : ""}` }} urlTransform={value => value} components={components}>{content ?? ""}</Markdown>;
+  }, [content, kind, namespace, fallback, generatedTitle, preferTitle, hasLayout, resolveInternalLink, resolveInternalDownload]);
   if (content === null) return <section className="document-content"><h1 className="document-title">{fallback}</h1><p className="hint">이 경로에서 성공적으로 읽은 원문이 없습니다.</p></section>;
   if (kind !== "record" && !/\.(md|markdown)$/i.test(path)) return <section className="document-content" aria-label="원문"><h1 className="document-title">{fallback}</h1>{content.trim() ? <pre className="source-text">{content}</pre> : <p className="hint">원문이 비어 있습니다.</p>}</section>;
   return <section className="document-content">
     <div className="document-preview" ref={preview} aria-label="문서 미리보기">
-      {content.trim() ? <Markdown remarkPlugins={kind === "record" ? [remarkGfm] : [remarkFrontmatter, remarkGfm]} rehypePlugins={[[headingIds, { namespace }], [documentHeading, { fallback, kind, generatedTitle, preferTitle }]]} remarkRehypeOptions={{ footnoteLabel: "각주", footnoteBackLabel: (index, rereference) => `본문 ${index + 1}번 각주로 돌아가기${rereference > 1 ? ` (${rereference})` : ""}` }} urlTransform={value => value} components={components}>{content}</Markdown> : <><h1>{fallback}</h1><p className="hint">원문이 비어 있습니다.</p></>}
+      {content.trim() ? <DocumentLayoutContext.Provider value={{ afterTitle, bodyOverride }}>{rendered}</DocumentLayoutContext.Provider> : hasLayout ? <><header className="document-header"><h1>{fallback}</h1>{afterTitle}</header>{bodyOverride ?? <p className="hint">원문이 비어 있습니다.</p>}</> : <><h1>{fallback}</h1><p className="hint">원문이 비어 있습니다.</p></>}
     </div>
   </section>;
 }
