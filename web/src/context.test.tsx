@@ -14,7 +14,7 @@ test("browser editing retains original newline convention", () => {
 
 test("context URLs retain exact scope, Unicode and query delimiters without changing endpoint", () => {
   const scope = "work/alpha", path = "attachments/한글 &?#%=+\".html";
-  for (const kind of ["read", "download"] as const) {
+  for (const kind of ["read", "download", "preview"] as const) {
     const url = new URL(contextUrl(kind, scope, path), "http://127.0.0.1:47831");
     assert.equal(url.origin, "http://127.0.0.1:47831");
     assert.equal(url.pathname, `/api/context/${kind}`);

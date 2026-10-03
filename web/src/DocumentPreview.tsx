@@ -5,8 +5,9 @@ import type { Components } from "react-markdown";
 import remarkFrontmatter from "remark-frontmatter";
 import remarkGfm from "remark-gfm";
 import { fileName } from "./presentation";
+import AttachmentPreview, { type AttachmentMedia } from "./AttachmentPreview";
 
-type Props = { path: string; content: string | null; kind: "vault" | "context" | "git" | "record"; title?: string; generatedTitle?: boolean; preferTitle?: boolean; afterTitle?: ReactNode; bodyOverride?: ReactNode; resolveInternalLink?: (href: string) => (() => void) | undefined; resolveInternalDownload?: (href: string) => string | undefined };
+type Props = { path: string; content: string | null; kind: "vault" | "context" | "git" | "record"; title?: string; generatedTitle?: boolean; preferTitle?: boolean; afterTitle?: ReactNode; bodyOverride?: ReactNode; resolveInternalLink?: (href: string) => (() => void) | undefined; resolveInternalDownload?: (href: string) => string | undefined; resolveInternalMedia?: (href: string) => AttachmentMedia | undefined };
 type Tree = { type: string; tagName?: string; value?: string; properties?: Record<string, unknown>; children?: Tree[] };
 const text = (node: Tree): string => node.value ?? String(node.properties?.alt ?? (node.children ?? []).map(text).join(""));
 const headingText = (node: Tree): string => node.tagName === "sup" ? "" : node.value ?? String(node.properties?.alt ?? (node.children ?? []).map(headingText).join(""));
@@ -123,7 +124,7 @@ function Reference({ value }: { value: string }) {
   return <span className="document-reference"> ({value || "주소 없음"} · {relative ? "이 원문 경로는 여기서 열 수 없습니다." : "열 수 없는 주소입니다."})</span>;
 }
 
-export default function DocumentPreview({ path, content, kind, title, generatedTitle, preferTitle, afterTitle, bodyOverride, resolveInternalLink, resolveInternalDownload }: Props) {
+export default function DocumentPreview({ path, content, kind, title, generatedTitle, preferTitle, afterTitle, bodyOverride, resolveInternalLink, resolveInternalDownload, resolveInternalMedia }: Props) {
   const namespace = `document-${useId()}`;
   const fallback = title ?? fileName(path);
   const preview = useRef<HTMLDivElement>(null);
@@ -145,6 +146,11 @@ export default function DocumentPreview({ path, content, kind, title, generatedT
         // Formatted images and footnotes produce their own controls at any depth.
         // Keep the parent's destination beside those controls, never around them.
         const separate = node && hasInteractiveDescendant(node);
+        const media = download ? resolveInternalMedia?.(href) : undefined;
+        if (media) {
+          const link = <AttachmentPreview key={media.url} media={media} download={download!} label={separate ? "첨부 파일" : children} description={node ? text(node) : "첨부 파일"} />;
+          return separate ? <span>{children} · {link}</span> : link;
+        }
         const link = internal
           ? <button type="button" className="document-internal-link" onClick={internal}>{separate ? "연결된 문서 열기" : children}</button>
           : download
@@ -156,6 +162,8 @@ export default function DocumentPreview({ path, content, kind, title, generatedT
         const value = typeof src === "string" ? src : "";
         const external = externalHref(value);
         const download = kind === "context" && !external ? resolveInternalDownload?.(value) : undefined;
+        const media = download ? resolveInternalMedia?.(value) : undefined;
+        if (media) return <AttachmentPreview key={media.url} media={media} download={download!} label={`이미지: ${alt || "설명 없음"}`} description={alt || "첨부 이미지"} />;
         return <span className="document-image-reference" title={imageTitle}>이미지: {alt || "설명 없음"}{external ? <> · <a href={external} target="_blank" rel="noreferrer">이미지 열기</a></> : download ? <> · <a href={download} download>이미지 다운로드</a></> : <Reference value={value} />}</span>;
       },
       table({ node: _node, ...props }) {
@@ -163,7 +171,7 @@ export default function DocumentPreview({ path, content, kind, title, generatedT
       },
     };
     return <Markdown remarkPlugins={kind === "record" ? [remarkGfm] : [remarkFrontmatter, remarkGfm]} rehypePlugins={[[headingIds, { namespace }], [documentHeading, { fallback, kind, generatedTitle, preferTitle }], [documentLayout, { fallback, enabled: hasLayout }]]} remarkRehypeOptions={{ footnoteLabel: "각주", footnoteBackLabel: (index, rereference) => `본문 ${index + 1}번 각주로 돌아가기${rereference > 1 ? ` (${rereference})` : ""}` }} urlTransform={value => value} components={components}>{content ?? ""}</Markdown>;
-  }, [content, kind, namespace, fallback, generatedTitle, preferTitle, hasLayout, resolveInternalLink, resolveInternalDownload]);
+  }, [content, kind, namespace, fallback, generatedTitle, preferTitle, hasLayout, resolveInternalLink, resolveInternalDownload, resolveInternalMedia]);
   if (content === null) return <section className="document-content"><h1 className="document-title">{fallback}</h1><p className="hint">이 경로에서 성공적으로 읽은 원문이 없습니다.</p></section>;
   if (kind !== "record" && !/\.(md|markdown)$/i.test(path)) return <section className="document-content" aria-label="원문"><h1 className="document-title">{fallback}</h1>{content.trim() ? <pre className="source-text">{content}</pre> : <p className="hint">원문이 비어 있습니다.</p>}</section>;
   return <section className="document-content">

@@ -3,6 +3,7 @@ import { OriginalText, contextUrl, editorContent, editorDraft, editorNewlines, f
 import DocumentPreview, { resolveRelativeContextFilePath, resolveRelativeContextPath } from "./DocumentPreview";
 import type { GraphNode, Request } from "./graph";
 import { nodePresentation } from "./presentation";
+import { attachmentMediaKind } from "./AttachmentPreview";
 
 type Original = { metadata: ContextItem & { revision: number; origin_kind: "native" | "imported-file"; source_digest: string | null }; content: string; title: string | null };
 type History = { items: { revision: number; content_digest: string; byte_len: number; recorded_at: number; change_kind: "manual" | "core" | "import" }[]; next_before: number | null };
@@ -122,6 +123,13 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
     const target = resolveRelativeContextFilePath(path, href);
     return target && !/\.(md|markdown)$/i.test(target) ? contextUrl("download", scope, target) : undefined;
   }, [path, scope]);
+  const resolveInternalMedia = useCallback((href: string) => {
+    // Historical text does not imply a historical attachment revision.
+    if (selected) return;
+    const target = resolveRelativeContextFilePath(path, href);
+    const kind = target && attachmentMediaKind(target);
+    return target && kind ? { kind, url: contextUrl("preview", scope, target) } : undefined;
+  }, [path, scope, selected]);
   const controls = <>
     {scope === "profile" && <p className="hint">공통 운영 규칙은 검토된 변경 절차로 수정합니다.</p>}
     <a href={contextUrl("download", scope, path)} download={originalFilename(path)}>현재 원본 다운로드</a>
@@ -135,11 +143,11 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
     {!original && !readError && <p role="status">원문을 불러오는 중…</p>}
     {loadingVersion && <p role="status">버전 원문을 불러오는 중…</p>}
     {versionError && <p className="error" role="alert">{versionError}</p>}
-    {selected && <p className="notice">버전 {selected.revision} 원문 · 이전 버전은 읽기만 가능합니다.</p>}
+    {selected && <p className="notice">버전 {selected.revision} 원문 · 이전 버전은 읽기만 가능합니다. 첨부 링크는 현재 원본을 다운로드합니다.</p>}
   </>;
   const editor = <section className="section original-editor" aria-label="원문 편집"><label htmlFor="original-draft">원문 전체</label><textarea id="original-draft" value={draft} disabled={saving} onChange={event => setDraft(event.target.value)} spellCheck={false} rows={20} aria-describedby="original-draft-hint" /><p id="original-draft-hint" className="hint">{draftBytes.toLocaleString("ko-KR")} / {MAX_ORIGINAL_EDIT_BYTES.toLocaleString("ko-KR")} 바이트 · ⌘S 또는 Ctrl+S로 저장</p><div className="original-editor-actions"><button className="primary" disabled={!dirty || saving || draftBytes > MAX_ORIGINAL_EDIT_BYTES} onClick={() => void save()}>{saving ? "저장 중…" : "저장"}</button><button disabled={saving} onClick={cancel}>변경 취소</button></div></section>;
   return <section className="documents original-detail" aria-label="원문과 이력">
-    {markdown && showing !== undefined ? <DocumentPreview path={path} content={showing} kind="context" title={title} preferTitle afterTitle={controls} bodyOverride={editing ? editor : undefined} resolveInternalLink={resolveInternalLink} resolveInternalDownload={resolveInternalDownload} /> : <><h2>{title}</h2>{controls}{showing !== undefined && <OriginalText content={showing} />}</>}
+    {markdown && showing !== undefined ? <DocumentPreview path={path} content={showing} kind="context" title={title} preferTitle afterTitle={controls} bodyOverride={editing ? editor : undefined} resolveInternalLink={resolveInternalLink} resolveInternalDownload={resolveInternalDownload} resolveInternalMedia={resolveInternalMedia} /> : <><h2>{title}</h2>{controls}{showing !== undefined && <OriginalText content={showing} />}</>}
     {historyError && <p className="error" role="alert">이력 확인 실패: {historyError} <button onClick={reloadHistory}>다시 확인</button></p>}
     {history && <details className="section" aria-label="원문 이력"><summary>변경 이력</summary><div className="compact-list">{history.items.map(item => <button key={item.revision} disabled={baseline !== null} aria-pressed={(selected?.revision ?? original?.metadata.revision) === item.revision} onClick={() => void version(item.revision)}>버전 {item.revision} · {new Date(item.recorded_at * 1000).toLocaleString("ko-KR")}</button>)}</div>{history.next_before !== null && <button disabled={baseline !== null} onClick={() => void older(history.next_before!)}>이전 이력 더 보기</button>}</details>}
     {related.length > 0 && <section className="section" aria-label="연결된 자료"><h3>명시적으로 연결된 자료</h3><div className="compact-list">{related.map(item => <button key={item.id} onClick={() => onNavigate?.(item.id)}><strong>{nodePresentation(item).title}</strong><small>{nodePresentation(item).subtitle}</small></button>)}</div></section>}

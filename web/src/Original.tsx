@@ -1,5 +1,5 @@
 export type ContextItem = { scope: string; path: string; source_path: string; content_digest: string; byte_len: number };
-export function contextUrl(kind: "search" | "read" | "download", scope: string, value: string, after: string | null = null): string {
+export function contextUrl(kind: "search" | "read" | "download" | "preview", scope: string, value: string, after: string | null = null): string {
   const params = new URLSearchParams({ scope });
   if (kind === "search") {
     params.set("q", value); params.set("limit", "20");

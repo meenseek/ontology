@@ -167,6 +167,13 @@ legend, .topic-label, .facet-filter { display: block; color: #bdcadb; font-size:
 .document-preview .document-reference { color: #9cacbf; font-size: 12px; }
 .document-preview .document-internal-link { display: inline; padding: 0; border: 0; background: transparent; color: #b7d0ea; font: inherit; text-decoration: underline; text-align: inherit; }
 .document-preview .document-image-reference { color: #bacadd; }
+.attachment-actions { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; }
+.attachment-actions button { font: inherit; font-size: 12px; padding: 3px 8px; }
+.attachment-actions a { font-size: 12px; }
+.attachment-media:not([hidden]) { display: block; margin: 10px 0 16px; }
+.attachment-media img, .attachment-media video { display: block; width: auto; max-width: 100%; max-height: 65vh; border: 1px solid #303f52; border-radius: 6px; background: #0e1621; object-fit: contain; }
+.attachment-media video { width: 100%; }
+.attachment-error { color: #f3b6a8; font-size: 12px; }
 .document-preview [data-footnotes] { border-top: 1px solid #303b4b; margin-top: 24px; font-size: 12px; }
 .document-preview [data-footnotes] li { scroll-margin-top: 72px; }
 .memory-body { font-size: 16px; }

@@ -8,7 +8,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{
         DefaultBodyLimit, Path, Query, Request, State,
         rejection::{JsonRejection, QueryRejection},
@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/context/history", get(context_history))
         .route("/api/context/version", get(context_version))
         .route("/api/context/download", get(context_download))
+        .route("/api/context/preview", get(context_preview))
         .route(
             "/api/context/edit",
             post(context_edit).layer(DefaultBodyLimit::max(
@@ -161,7 +162,7 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
     );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    headers.insert("content-security-policy",HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
+    headers.insert("content-security-policy",HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
     headers.insert("cache-control", HeaderValue::from_static("no-store"));
     response
 }
@@ -455,6 +456,130 @@ async fn context_download(
     headers.insert("content-length", length);
     Ok(response)
 }
+async fn context_preview(
+    State(state): State<AppState>,
+    query: Result<Query<ContextSelection>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, Error> {
+    let Query(query) = query.map_err(|_| Error::Invalid)?;
+    // Use the same scope, restriction, integrity and size boundary as downloads.
+    let material = state
+        .store
+        .download_context(&query.scope, &query.path)
+        .await?;
+    let Some(content_type) = media_type(&material.metadata.path, &material.bytes) else {
+        return Ok((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(json!({"error":"미리보기를 지원하지 않는 사진·영상 형식입니다."})),
+        )
+            .into_response());
+    };
+    let bytes = Bytes::from(material.bytes);
+    let size = bytes.len();
+    // Without a validator an If-Range request must receive the complete representation.
+    let range = if headers.contains_key("if-range") {
+        ByteRange::Full
+    } else {
+        byte_range(one_header(&headers, "range"), size)
+    };
+    let (status, body, content_range) = match range {
+        ByteRange::Full => (StatusCode::OK, bytes, None),
+        ByteRange::Partial(range) => (
+            StatusCode::PARTIAL_CONTENT,
+            bytes.slice(range.clone()),
+            Some(format!("bytes {}-{}/{size}", range.start, range.end - 1)),
+        ),
+        ByteRange::Unsatisfiable => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            Bytes::new(),
+            Some(format!("bytes */{size}")),
+        ),
+    };
+    let length = HeaderValue::from_str(&body.len().to_string()).map_err(|_| Error::Storage)?;
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    let headers = response.headers_mut();
+    headers.insert("content-type", HeaderValue::from_static(content_type));
+    headers.insert("content-disposition", HeaderValue::from_static("inline"));
+    headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
+    headers.insert("content-length", length);
+    if let Some(value) = content_range {
+        headers.insert(
+            "content-range",
+            HeaderValue::from_str(&value).map_err(|_| Error::Storage)?,
+        );
+    }
+    Ok(response)
+}
+
+// Only browser media formats with matching file signatures are served inline.
+// SVG, HTML and other active documents keep the download-only boundary.
+fn media_type(path: &str, bytes: &[u8]) -> Option<&'static str> {
+    let extension = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => Some("image/png"),
+        "jpg" | "jpeg" if bytes.starts_with(b"\xff\xd8\xff") => Some("image/jpeg"),
+        "gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => Some("image/gif"),
+        "webp" if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") => {
+            Some("image/webp")
+        }
+        "mp4" | "m4v" if bytes.get(4..8) == Some(b"ftyp") => Some("video/mp4"),
+        "webm" if bytes.starts_with(b"\x1a\x45\xdf\xa3") => Some("video/webm"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum ByteRange {
+    Full,
+    Partial(std::ops::Range<usize>),
+    Unsatisfiable,
+}
+
+fn byte_range(value: Option<&str>, size: usize) -> ByteRange {
+    let Some(value) = value.and_then(|value| value.strip_prefix("bytes=")) else {
+        return ByteRange::Full;
+    };
+    let Some((first, last)) = value.split_once('-') else {
+        return ByteRange::Full;
+    };
+    // Ignore malformed or multiple ranges; multipart responses are unnecessary for playback.
+    let number = |value: &str| {
+        (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| value.parse::<usize>().ok())
+            .flatten()
+    };
+    if first.is_empty() {
+        let Some(suffix) = number(last) else {
+            return ByteRange::Full;
+        };
+        return if size == 0 || suffix == 0 {
+            ByteRange::Unsatisfiable
+        } else {
+            ByteRange::Partial(size.saturating_sub(suffix)..size)
+        };
+    }
+    let Some(start) = number(first) else {
+        return ByteRange::Full;
+    };
+    let end = if last.is_empty() {
+        size.saturating_sub(1)
+    } else {
+        let Some(end) = number(last) else {
+            return ByteRange::Full;
+        };
+        if end < start {
+            return ByteRange::Full;
+        }
+        end.min(size.saturating_sub(1))
+    };
+    if start >= size {
+        ByteRange::Unsatisfiable
+    } else {
+        ByteRange::Partial(start..end + 1)
+    }
+}
+
 fn attachment_disposition(filename: &str) -> Result<HeaderValue, Error> {
     use std::fmt::Write;
     let mut fallback = String::new();
@@ -524,6 +649,57 @@ fn bounded_context_json<T: Serialize>(value: &T, limit: usize) -> Result<Respons
 #[cfg(test)]
 mod context_response_tests {
     use super::*;
+    #[test]
+    fn playback_ranges_are_bounded_and_malformed_ranges_are_ignored() {
+        for (value, expected) in [
+            (None, ByteRange::Full),
+            (Some("bytes=0-0"), ByteRange::Partial(0..1)),
+            (Some("bytes=2-"), ByteRange::Partial(2..10)),
+            (Some("bytes=2-999"), ByteRange::Partial(2..10)),
+            (Some("bytes=-3"), ByteRange::Partial(7..10)),
+            (Some("bytes=-99"), ByteRange::Partial(0..10)),
+            (Some("bytes=10-"), ByteRange::Unsatisfiable),
+            (Some("bytes=-0"), ByteRange::Unsatisfiable),
+            (Some("bytes=4-2"), ByteRange::Full),
+            (Some("bytes=0-1,4-5"), ByteRange::Full),
+            (Some("bytes=+1-2"), ByteRange::Full),
+            (Some("bytes=0-999999999999999999999999"), ByteRange::Full),
+            (Some("other=1-2"), ByteRange::Full),
+        ] {
+            assert_eq!(byte_range(value, 10), expected, "{value:?}");
+        }
+        assert_eq!(byte_range(Some("bytes=0-"), 0), ByteRange::Unsatisfiable);
+    }
+    #[test]
+    fn inline_media_requires_a_supported_extension_and_matching_signature() {
+        for (path, bytes, expected) in [
+            (
+                "photo.PNG",
+                b"\x89PNG\r\n\x1a\n".as_slice(),
+                Some("image/png"),
+            ),
+            ("photo.jpg", b"\xff\xd8\xff".as_slice(), Some("image/jpeg")),
+            ("photo.gif", b"GIF89a".as_slice(), Some("image/gif")),
+            ("photo.webp", b"RIFF0000WEBP".as_slice(), Some("image/webp")),
+            (
+                "movie.mp4",
+                b"\0\0\0\x18ftypisom".as_slice(),
+                Some("video/mp4"),
+            ),
+            (
+                "movie.webm",
+                b"\x1a\x45\xdf\xa3".as_slice(),
+                Some("video/webm"),
+            ),
+            ("active.svg", b"<svg/>".as_slice(), None),
+            ("page.png", b"<html/>".as_slice(), None),
+            ("page.html", b"\x89PNG\r\n\x1a\n".as_slice(), None),
+            ("movie.mp4", b"ftyp".as_slice(), None),
+            ("empty.png", b"".as_slice(), None),
+        ] {
+            assert_eq!(media_type(path, bytes), expected, "{path}");
+        }
+    }
     #[test]
     fn context_serialization_stops_at_its_own_limit() {
         assert!(bounded_context_json(&"\0".repeat(100), 602).is_ok());
