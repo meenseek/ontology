@@ -670,9 +670,37 @@ export class Positions {
     const scopeKey = scope ? graphStructure(scope.nodes, scope.links) : "";
     if (key === this.activeCore && page === this.activePage && visibleKey === this.activeVisibleKey && scopeKey === this.activeScopeKey && !this.layoutNeedsRefresh) return;
     this.cancel(false);
-    const target = this.coreLayout(key, page, visibleMembers, scope);
+    let target = this.coreLayout(key, page, visibleMembers, scope);
     const actual = new Map([...this.nodes].map(([id, node]) => [id, point(node)]));
     const from = new Map([...actual].map(([id, value]) => [id, this.canonical.get(id) ?? value]));
+    if (core && core !== "*" && !scope) {
+      const view = constellationView(this.source.nodes, this.source.links, null, core, page);
+      const group = view.cores.find(candidate => candidate.hub === core);
+      const origin = target.get(core), anchor = from.get(core);
+      // Explicit full expansion still needs space for a large fan. Normal pages
+      // and small cores stay local; filtered views retain their separate layout.
+      if (group && origin && anchor && (view.disclosure || group.count <= 36)) {
+        // Expand only this core around its current canonical hub. Preserve session
+        // drag offsets through the same actual/from interpolation used below.
+        const local = new Map(from);
+        for (const id of group.members) {
+          if (id === core || view.disclosure?.pinned.has(id)) continue;
+          const value = target.get(id);
+          if (value) local.set(id, add(anchor, add(value, origin, -1)));
+        }
+        // Resolve against the actual fixed background, including session drag
+        // offsets. Only revealed members may move to clear an occupied slot.
+        const movable = new Set(view.nodes.filter(node => group.members.has(node.id) && node.id !== core && !view.disclosure?.pinned.has(node.id)).map(node => node.id));
+        const desired = new Map(view.nodes.map(node => [node.id, add(actual.get(node.id)!, add(local.get(node.id)!, from.get(node.id)!, -1))]));
+        const discs = [...desired].map(([id, value]) => ({ id, x: value.x, y: value.y, radius: 15 }));
+        const cleared = separateDiscs(discs, core, movable, COLLISION_GAP, new Set(view.nodes.filter(node => !movable.has(node.id)).map(node => node.id)));
+        for (const id of movable) {
+          const value = desired.get(id)!, clear = cleared.get(id)!;
+          local.set(id, add(local.get(id)!, { x: clear.x - value.x, y: clear.y - value.y, z: 0 }));
+        }
+        target = local;
+      }
+    }
     this.layoutMotion = { from, to: target, actual, start: now };
     this.activeCore = key;
     this.activePage = page;

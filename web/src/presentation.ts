@@ -133,6 +133,11 @@ export function summaryHaloScale(motion: SummaryHaloMotion | null, id: string, n
   const elapsed = Math.max(0, now - motion.startedAt);
   return 1 + .08 * (1 - Math.exp(-elapsed / 120)) + .025 * Math.sin(elapsed / 70);
 }
+/** At most one CSS pixel of hover sway; coordinates, rings and hit targets stay still. */
+export function summaryHoverOffset(hovered: boolean, phase: number, seconds: number, reduced: boolean): { x: number; y: number } {
+  if (!hovered || reduced || !Number.isFinite(phase) || !Number.isFinite(seconds)) return { x: 0, y: 0 };
+  return { x: .8 * Math.sin(seconds * 7 + phase), y: .6 * Math.cos(seconds * 6 + phase) };
+}
 /** Cosmetic motion is independent of graph status, identity, layout and hit bounds. */
 export function starPhase(id: string): number {
   let hash = 2166136261;

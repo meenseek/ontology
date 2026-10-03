@@ -10,7 +10,7 @@ import type { NucleusView } from "./nuclei";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
-import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
+import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryAppearance, summaryHaloScale, summaryHoverOffset, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
@@ -169,12 +169,18 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
   };
   return mesh;
 }
-function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, minimumPixels = 0, fixedPixels?: number, scaleMotion?: () => number, rotationMotion?: () => number) {
+function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, minimumPixels = 0, fixedPixels?: number, scaleMotion?: () => number, rotationMotion?: () => number, hoverOffset?: () => { x: number; y: number }) {
   const sprite = new Sprite(material), viewport = new Vector2(), position = new Vector3(), cursor = new Vector3();
   const resize = (camera: Camera) => {
     sprite.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
     const pixels = Math.max(minimumPixels, nodeScreenSize(node.kind, -position.z, viewport.y, camera.projectionMatrix.elements[5]));
-    sprite.scale.setScalar(spriteScale((fixedPixels ?? nodeScreenMetrics(pixels, selected, node.changed)[part]) * (scaleMotion?.() ?? 1), viewport.y, camera.projectionMatrix.elements[5]));
+    const renderedPixels = (fixedPixels ?? nodeScreenMetrics(pixels, selected, node.changed)[part]) * (scaleMotion?.() ?? 1);
+    sprite.scale.setScalar(spriteScale(renderedPixels, viewport.y, camera.projectionMatrix.elements[5]));
+    if (hoverOffset && renderedPixels > 0) {
+      const offset = hoverOffset();
+      // Move only the luminous drawing inside its fixed picking/layout footprint.
+      sprite.center.set(.5 - offset.x / renderedPixels, .5 - offset.y / renderedPixels);
+    }
     sprite.updateMatrixWorld();
   };
   sprite.onBeforeRender = (renderer, _scene, camera) => {
@@ -217,7 +223,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const draggedSummary = useRef<{ id: string; members: readonly string[]; level: number; epoch: number } | null>(null);
   const summaryHalo = useRef<SummaryHaloMotion | null>(null);
   const packedOverview = useRef("");
-  const overviewZoom = useRef({ scale: 0, changedAt: 0, checkedScale: 0, checkedFootprints: "" });
+  const overviewZoom = useRef({ scale: 0, changedAt: 0, checkedFootprints: "" });
   const frozenSpatial = useRef<NucleusView | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [expandedCore, setExpandedCore] = useState<string | null>(null);
@@ -244,7 +250,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const spatial = useMemo(() => frozenSpatial.current ?? nucleusView(semanticNodes, snapshot.links,
     spatialLevel, selected, spatialReveal?.members, spatialLocks), [semanticNodes, snapshot.links, spatialLevel, selected, settledRevision, spatialReveal, spatialLocks]);
   const { nodes: displayNodes, counts: spatialCounts, groups: spatialGroups } = spatial;
-  const changedFootprints = useMemo(() => JSON.stringify(displayNodes.filter(node => node.changed).map(node => node.id).sort()), [displayNodes]);
+  // Camera detail bands change visibility, not the content/status of the snapshot.
+  const changedFootprints = useMemo(() => JSON.stringify(nodes.filter(node => node.changed).map(node => node.id).sort()), [nodes]);
   const summaryCounts = useMemo(() => {
     const counts = new Map(spatialCounts), byId = new Map(nodes.map(node => [node.id, node]));
     for (const [id, count] of collapsedCounts) counts.set(id, count - Number(byId.get(id)?.kind === "folder"));
@@ -563,6 +570,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const instance = graph.current;
       instance?.camera().updateMatrixWorld();
       positions.advance(performance.now(), reduced);
+      advanceStarClock(motionClock.current, performance.now(), reduced);
       if (positions.settling) settleMovingRef.current = true;
       if (positions.layoutMoving || positions.settling || positions.dragging) movingRef.current = true;
       else if (movingRef.current) {
@@ -612,14 +620,18 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             lodLevelRef.current = next; hoveredId.current = null; setHover(null); setLodLevel(next);
           }
         }
-        if (selected || activeExpandedCore || spatialReveal?.members.size) packedOverview.current = "";
-        else if (summaryCounts.size && spatialLevel === lodLevelRef.current && appliedCamera.current === cameraKey &&
-          !positions.dragging && !positions.settling && !positions.layoutMoving && performance.now() - zoom.changedAt >= 150) {
+        if (!selected && !activeExpandedCore && !spatialReveal?.members.size &&
+          spatialLevel === lodLevelRef.current && appliedCamera.current === cameraKey &&
+          !positions.dragging && !positions.settling && !positions.layoutMoving) {
           const cohorts = new Map([...glyphMembers].map(([id, members]) => [id, members.map(member => member.id)]));
-          const packingKey = JSON.stringify([positions.structureEpoch, viewKey, fit, size, spatialLevel,
-            [...cohorts].map(([id, members]) => [id, [...members].sort()]).sort(([a], [b]) => String(a).localeCompare(String(b)))]);
+          // Compact a new view once. Zoom/LOD only reveals the existing world positions.
+          const packingKey = JSON.stringify([positions.structureEpoch, viewKey, fit, size]);
           const overviewChanged = packedOverview.current !== packingKey;
-          if (overviewChanged || zoom.checkedScale !== zoom.scale || zoom.checkedFootprints !== changedFootprints) {
+          if (!summaryCounts.size) {
+            // An initially ungrouped view must not repack when zoom first forms a nucleus.
+            packedOverview.current = packingKey;
+            zoom.checkedFootprints = changedFootprints;
+          } else if (performance.now() - zoom.changedAt >= 150 && (overviewChanged || zoom.checkedFootprints !== changedFootprints)) {
             const discs = displayNodes.map(node => {
               projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
               const depth = -projected.z, pixels = nodeScreenSize(node.kind, depth, size.height, camera.projectionMatrix.elements[5]);
@@ -627,7 +639,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
               projected.applyMatrix4(camera.projectionMatrix);
               return { id: node.id, x: projected.x * size.width / 2, y: -projected.y * size.height / 2, depth, radius };
             });
-            // Zoom and content-only changes keep the layout unless their bodies need clearance.
+            // Only real content/status changes can require clearance in an existing view.
             const overlap = discs.some((a, index) => discs.slice(index + 1).some(b =>
               Math.hypot(a.x - b.x, a.y - b.y) < a.radius + b.radius + 6 - .01));
             const packed = (overviewChanged || overlap) && positions.packOverview(discs, displayLinks, cohorts, {
@@ -636,7 +648,6 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
               worldPerPixel: depth => 2 * depth / (size.height * camera.projectionMatrix.elements[5]),
             }, performance.now(), reduced);
             if (packed || !overlap) {
-              zoom.checkedScale = zoom.scale;
               zoom.checkedFootprints = changedFootprints;
             }
             if (packed) {
@@ -727,7 +738,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       }
       group.add(screenSprite(glyph.material, node, "body", false, 0, summaryPixels,
         haloScale && (() => 1 + (haloScale() - 1) * .35),
-        () => (contactMotion()?.pulse ?? 0) * .09));
+        () => (contactMotion()?.pulse ?? 0) * .09,
+        () => summaryHoverOffset(hoveredId.current === node.id && !!cursor.current && !positions.dragging,
+          starPhase(node.id), motionClock.current.seconds, motionReduced.current)));
     } else group.add(isKnowledge
       ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged, summary ? 22 : 0, haloScale, contactMotion)
       : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected, 0, undefined,
