@@ -10,7 +10,7 @@ import type { NucleusView } from "./nuclei";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
-import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryAppearance, summaryHaloScale, summaryHoverOffset, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
+import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
@@ -169,22 +169,18 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
   };
   return mesh;
 }
-function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, minimumPixels = 0, fixedPixels?: number, scaleMotion?: () => number, rotationMotion?: () => number, hoverOffset?: () => { x: number; y: number }) {
+function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "body" | "selection" | "change" | "hit", selected: boolean, minimumPixels = 0, fixedPixels?: number, scaleMotion?: () => number, rotationMotion?: () => number, paint?: () => void) {
   const sprite = new Sprite(material), viewport = new Vector2(), position = new Vector3(), cursor = new Vector3();
   const resize = (camera: Camera) => {
     sprite.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
     const pixels = Math.max(minimumPixels, nodeScreenSize(node.kind, -position.z, viewport.y, camera.projectionMatrix.elements[5]));
     const renderedPixels = (fixedPixels ?? nodeScreenMetrics(pixels, selected, node.changed)[part]) * (scaleMotion?.() ?? 1);
     sprite.scale.setScalar(spriteScale(renderedPixels, viewport.y, camera.projectionMatrix.elements[5]));
-    if (hoverOffset && renderedPixels > 0) {
-      const offset = hoverOffset();
-      // Move only the luminous drawing inside its fixed picking/layout footprint.
-      sprite.center.set(.5 - offset.x / renderedPixels, .5 - offset.y / renderedPixels);
-    }
     sprite.updateMatrixWorld();
   };
   sprite.onBeforeRender = (renderer, _scene, camera) => {
     renderer.getSize(viewport); resize(camera);
+    paint?.();
     if (rotationMotion) material.rotation = rotationMotion();
   };
   // Draw luminous bodies over native relation lines while retaining their positions.
@@ -285,7 +281,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: displayLinks.map(l => ({ ...l })) }), [displayNodes, displayLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
-  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), ring: texture("ring"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>(), summaries: new Map<string, { signature: string; texture: CanvasTexture; material: SpriteMaterial }>() }), []);
+  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), ring: texture("ring"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>(), summaries: new Map<string, ReturnType<typeof summaryGlyphTexture> & { signature: string; material: SpriteMaterial }>() }), []);
   useEffect(() => {
     const element = container.current;
     if (!element) return;
@@ -726,11 +722,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       let glyph = resources.summaries.get(node.id);
       if (!glyph) {
         const image = summaryGlyphTexture(node.id, samples);
-        glyph = { signature, texture: image, material: new SpriteMaterial({ map: image, color: "#ffffff", transparent: true, opacity: 1, depthWrite: false, depthTest: true, sizeAttenuation: false }) };
+        glyph = { signature, ...image, material: new SpriteMaterial({ map: image.texture, color: "#ffffff", transparent: true, opacity: 1, depthWrite: false, depthTest: true, sizeAttenuation: false }) };
         resources.summaries.set(node.id, glyph);
       } else if (glyph.signature !== signature) {
         const previous = glyph.texture;
-        glyph.texture = summaryGlyphTexture(node.id, samples);
+        const image = summaryGlyphTexture(node.id, samples);
+        glyph.texture = image.texture; glyph.updateMotion = image.updateMotion;
         glyph.material.map = glyph.texture;
         glyph.material.needsUpdate = true;
         glyph.signature = signature;
@@ -739,8 +736,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       group.add(screenSprite(glyph.material, node, "body", false, 0, summaryPixels,
         haloScale && (() => 1 + (haloScale() - 1) * .35),
         () => (contactMotion()?.pulse ?? 0) * .09,
-        () => summaryHoverOffset(hoveredId.current === node.id && !!cursor.current && !positions.dragging,
-          starPhase(node.id), motionClock.current.seconds, motionReduced.current)));
+        () => glyph.updateMotion(hoveredId.current === node.id && !!cursor.current && !positions.dragging,
+          motionClock.current.seconds, motionReduced.current)));
     } else group.add(isKnowledge
       ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged, summary ? 22 : 0, haloScale, contactMotion)
       : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected, 0, undefined,
