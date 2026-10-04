@@ -7,6 +7,8 @@ DB-only callers. Both print JSON and return nonzero on failure. `alert` runs the
 same check and opens the installed launcher on failure. `repair` is the explicit
 Terminal equivalent of 연결 복구. An installed login service stays running;
 without one, keep this Terminal open and use Ctrl-C to stop its server.
+`repair --target database` prepares only the existing DB and exits with JSON;
+it reuses a healthy DB and never starts, builds or restarts the HTTP app.
 Recovery never creates a DB/container or applies a missing SQL migration. An
 upgrade mismatch requires the existing README backup/upgrade procedure first.
 """
@@ -229,13 +231,13 @@ def _app_health(url, session):
         raise Failure("app", "graph_invalid", "앱의 지도 응답 형식이 예상과 다릅니다.")
 
 
-def check(target):
+def check(target, root=ROOT):
     try:
         docker = docker_ready()
         info = inspect_container(docker)
-        env = server_environment()
+        env = server_environment(root, target=target)
         database_health(docker, info, env)
-        verify_schema(docker, info, sql_manifest(), env)
+        verify_schema(docker, info, sql_manifest(root), env)
         if target == "app":
             app_health()
         return dict(ok=True, target=target, layer=target, code="ready",
@@ -283,7 +285,7 @@ def unchanged(manifest, root=ROOT):
         raise Failure("recovery", "schema_drift", "복구 중 SQL 소스가 변경되어 서버 시작을 중단했습니다.")
 
 
-def server_environment(root=ROOT):
+def server_environment(root=ROOT, *, target="app"):
     # The existing .env is trusted executable shell configuration, as in brain.sh.
     # Drop inherited enablement so only the .env's exact sync setting is retained.
     inherited = dict(os.environ)
@@ -305,7 +307,7 @@ def server_environment(root=ROOT):
     if not valid:
         raise Failure("recovery", "password_invalid", "기존 DB 비밀번호 설정의 형식을 확인해야 합니다.")
     env["DATABASE_URL"] = "postgresql://ontology:" + env["ONTOLOGY_DB_PASSWORD"] + "@127.0.0.1:55432/ontology"
-    if env.get("ONTOLOGY_PORT", "47831") != "47831":
+    if target == "app" and env.get("ONTOLOGY_PORT", "47831") != "47831":
         raise Failure("recovery", "app_port_mismatch", "앱 포트 설정이 기존 로컬 연결 주소와 다릅니다.")
     return env
 
@@ -422,7 +424,13 @@ def run_server(env, root=ROOT, session=None, binary=None):
             signal.signal(sig, handler)
 
 
-def repair(root=ROOT):
+def repair(root=ROOT, target="app"):
+    if target == "database":
+        result = check("database", root)
+        if result["ok"]:
+            return result
+        if result["code"] not in ("docker_unavailable", "database_stopped"):
+            raise Failure(result["layer"], result["code"], result["message"])
     with recovery_lock(root):
         try:
             docker = docker_ready()
@@ -439,10 +447,14 @@ def repair(root=ROOT):
             command([docker, "start", info["id"]], "database", "database_start_failed",
                     "기존 DB 컨테이너를 시작할 수 없습니다.", timeout=15)
             info = inspect_container(docker)
-        env = server_environment(root)
+        env = server_environment(root, target=target)
         retry(lambda: database_health(docker, info, env), START_ATTEMPTS)
         manifest = sql_manifest(root)
         verify_schema(docker, info, manifest, env)
+        if target == "database":
+            unchanged(manifest, root)
+            return dict(ok=True, target="database", layer="database", code="ready",
+                        message="DB 조회가 정상입니다.", impact="")
         session = app_session()
         if existing_app(session):
             print("기존 앱의 DB 기반 지도 조회가 정상입니다. 실행 중인 서버를 그대로 사용합니다.")
@@ -514,7 +526,8 @@ def main(argv=None):
     for name in ("check", "alert"):
         sub = actions.add_parser(name, help="연결 상태 JSON 출력" if name == "check" else "실패 시 설치된 복구 창 열기")
         sub.add_argument("--target", choices=("app", "database"), default="app")
-    actions.add_parser("repair", help="기존 연결 복구 후 이 터미널에서 앱 유지")
+    sub = actions.add_parser("repair", help="기존 연결 복구; DB 전용 준비는 JSON 출력 후 종료")
+    sub.add_argument("--target", choices=("app", "database"), default="app")
     args = parser.parse_args(argv)
     try:
         if args.action in ("check", "alert"):
@@ -527,7 +540,11 @@ def main(argv=None):
             result = check("app")
             if not dialog(result, recover=not result["ok"]):
                 return 0
-        repair()
+        if args.action == "repair" and args.target == "database":
+            result = repair(target="database")
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            repair()
         return 0
     except Failure as error:
         result = error.result(getattr(args, "target", "app"))
