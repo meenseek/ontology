@@ -312,6 +312,10 @@ impl Store {
                 "012-context-projection-refresh.sql",
                 include_str!("../schema/migrations/012-context-projection-refresh.sql"),
             ),
+            (
+                "013-knowledge-taxonomy.sql",
+                include_str!("../schema/migrations/013-knowledge-taxonomy.sql"),
+            ),
         ];
         if migrations.len() > expected.len() {
             return Err(Error::Baseline);
@@ -546,18 +550,23 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
         if records.len() > 100 {
             return Err(Error::Limit);
         }
-        let value = serde_json::to_value(records).map_err(|_| Error::Invalid)?;
+        let mut value = serde_json::to_value(records).map_err(|_| Error::Invalid)?;
+        for (row, record) in value.as_array_mut().ok_or(Error::Invalid)?.iter_mut().zip(records) {
+            row["reference_paths"] = json!(if record.kind == SourceKind::Git {
+                record.content.as_deref().map(|body| crate::source_references::paths(&record.path,body,false)).unwrap_or_default()
+            } else { Vec::new() });
+        }
         self.count(1);
         sqlx::query(r#"
-WITH input AS MATERIALIZED (SELECT * FROM jsonb_to_recordset($1) AS x(source_id text,entity_id text,scope text,repository text,path text,kind text,source_revision text,digest text,content text)),
+WITH input AS MATERIALIZED (SELECT * FROM jsonb_to_recordset($1) AS x(source_id text,entity_id text,scope text,repository text,path text,kind text,source_revision text,digest text,content text,reference_paths text[])),
 s AS (INSERT INTO sources(id,scope,repository,path,kind,status,last_success_at,verified_revision)
  SELECT source_id,scope,repository,path,kind,CASE WHEN content IS NULL THEN 'missing' ELSE 'ok' END,now(),source_revision FROM input
  ON CONFLICT(id) DO UPDATE SET generation=sources.generation+CASE WHEN sources.status IS DISTINCT FROM EXCLUDED.status OR sources.verified_revision IS DISTINCT FROM EXCLUDED.verified_revision OR ((SELECT content FROM input WHERE source_id=EXCLUDED.id) IS NOT NULL AND (SELECT content_digest FROM source_records WHERE entity_id=(SELECT entity_id FROM input WHERE source_id=EXCLUDED.id)) IS DISTINCT FROM (SELECT digest FROM input WHERE source_id=EXCLUDED.id)) THEN 1 ELSE 0 END,status=EXCLUDED.status,last_attempt_at=now(),last_success_at=now(),verified_revision=EXCLUDED.verified_revision,failure_code=NULL RETURNING id),
 e AS (INSERT INTO entities(id,scope,source_id) SELECT i.entity_id,i.scope,i.source_id FROM input i JOIN s ON s.id=i.source_id
  ON CONFLICT(id) DO UPDATE SET source_id=EXCLUDED.source_id RETURNING id)
-INSERT INTO source_records(entity_id,scope,content,content_digest,source_revision,present,absence_revision)
- SELECT i.entity_id,i.scope,i.content,i.digest,CASE WHEN i.content IS NULL THEN NULL ELSE i.source_revision END,i.content IS NOT NULL,CASE WHEN i.content IS NULL THEN i.source_revision ELSE NULL END FROM input i JOIN e ON e.id=i.entity_id
- ON CONFLICT(entity_id) DO UPDATE SET content=COALESCE(EXCLUDED.content,source_records.content),content_digest=COALESCE(EXCLUDED.content_digest,source_records.content_digest),source_revision=COALESCE(EXCLUDED.source_revision,source_records.source_revision),observed_at=now(),present=EXCLUDED.present,absence_revision=EXCLUDED.absence_revision
+INSERT INTO source_records(entity_id,scope,content,content_digest,source_revision,present,absence_revision,reference_paths)
+ SELECT i.entity_id,i.scope,i.content,i.digest,CASE WHEN i.content IS NULL THEN NULL ELSE i.source_revision END,i.content IS NOT NULL,CASE WHEN i.content IS NULL THEN i.source_revision ELSE NULL END,i.reference_paths FROM input i JOIN e ON e.id=i.entity_id
+ ON CONFLICT(entity_id) DO UPDATE SET content=COALESCE(EXCLUDED.content,source_records.content),content_digest=COALESCE(EXCLUDED.content_digest,source_records.content_digest),source_revision=COALESCE(EXCLUDED.source_revision,source_records.source_revision),observed_at=now(),present=EXCLUDED.present,absence_revision=EXCLUDED.absence_revision,reference_paths=CASE WHEN EXCLUDED.content IS NULL THEN source_records.reference_paths ELSE EXCLUDED.reference_paths END
 "#).bind(value).execute(&mut *conn).await.map_err(|_| Error::Storage)?;
         Ok(())
 

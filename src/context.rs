@@ -103,6 +103,10 @@ pub enum ContextCommand {
     ProjectionStatus {
         scopes: Vec<ContextScope>,
     },
+    RefreshImportedReferences {
+        scope: crate::domain::Scope,
+        sources: Vec<crate::source_references::ImportedReferenceSource>,
+    },
     Project {
         scopes: Vec<ContextScope>,
         manifest_digest: String,
@@ -323,6 +327,9 @@ impl Store {
             }
             ContextCommand::Identity => self.context_identity().await?,
             ContextCommand::ProjectionStatus { scopes } => self.projection_status(&scopes).await?,
+            ContextCommand::RefreshImportedReferences { scope, sources } => {
+                self.refresh_imported_references(scope, &sources).await?
+            }
             ContextCommand::Project {
                 scopes,
                 manifest_digest,

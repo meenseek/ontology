@@ -11,13 +11,29 @@ type Version = { revision: number; content_digest: string; content: string; titl
 type EditReceipt = { revision: number; content_digest: string; changed: boolean };
 const MAX_ORIGINAL_EDIT_BYTES = 1024 * 1024;
 const noRelated: GraphNode[] = [];
+// Match only returned outgoing reference targets; this grants no new read scope.
+function referenceTarget(scope: string, path: string, href: string): string | null {
+  const raw = href.split("#", 1)[0];
+  if (!raw || raw.includes("?") || raw.split("/")[0].includes(":")) return null;
+  let decoded: string;
+  try { decoded = decodeURIComponent(raw); } catch { return null; }
+  if (decoded.startsWith("/") || /[\\\u0000-\u001f\u007f]/.test(decoded)) return null;
+  const parts = `${scope}/${path}`.split("/"); parts.pop();
+  for (const part of decoded.split("/")) {
+    if (!part) return null;
+    if (part === ".") continue;
+    if (part === "..") { if (parts.pop() === undefined) return null; }
+    else parts.push(part);
+  }
+  return parts.join("/");
+}
 const url = (kind: "history" | "version", scope: string, path: string, number?: number) => {
   const params = new URLSearchParams({ scope, path });
   if (number !== undefined) params.set(kind === "history" ? "before" : "revision", String(number));
   return `/api/context/${kind}?${params}`;
 };
 
-export default function OriginalDetail({ scope, path, request, related = noRelated, onNavigate, csrf, onBusy, onChange, onDirtyChange }: { scope: string; path: string; request: Request; related?: GraphNode[]; onNavigate?: (id: string) => void; csrf?: string; onBusy?: (busy: boolean) => void; onChange?: () => void; onDirtyChange?: (dirty: boolean) => void }) {
+export default function OriginalDetail({ scope, path, request, related = noRelated, references = noRelated, onNavigate, csrf, onBusy, onChange, onDirtyChange }: { scope: string; path: string; request: Request; related?: GraphNode[]; references?: GraphNode[]; onNavigate?: (id: string) => void; csrf?: string; onBusy?: (busy: boolean) => void; onChange?: () => void; onDirtyChange?: (dirty: boolean) => void }) {
   const [original, setOriginal] = useState<Original | null>(null), [readError, setReadError] = useState("");
   const [history, setHistory] = useState<History | null>(null), [historyError, setHistoryError] = useState("");
   const [selected, setSelected] = useState<Version | null>(null), [versionError, setVersionError] = useState("");
@@ -116,9 +132,11 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
   const markdown = /(\.md|\.markdown)$/i.test(path);
   const resolveInternalLink = useCallback((href: string) => {
     const target = resolveRelativeContextPath(path, href);
-    const match = target && related.find(item => item.context_scope === scope && item.context_path === target);
+    const canonical = referenceTarget(scope, path, href);
+    const match = references.find(item => canonical === `${item.context_scope}/${item.context_path}`)
+      ?? (target && related.find(item => item.context_scope === scope && item.context_path === target));
     return match && onNavigate ? () => onNavigate(match.id) : undefined;
-  }, [path, related, scope, onNavigate]);
+  }, [path, related, references, scope, onNavigate]);
   const resolveInternalDownload = useCallback((href: string) => {
     const target = resolveRelativeContextFilePath(path, href);
     return target && !/\.(md|markdown)$/i.test(target) ? contextUrl("download", scope, target) : undefined;

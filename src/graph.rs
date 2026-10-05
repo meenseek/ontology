@@ -81,7 +81,14 @@ const GRAPH_SQL: &str = concat!(
  JOIN entities e ON e.scope=s.scope AND e.source_id=s.id
  JOIN source_records r ON r.scope=e.scope AND r.entity_id=e.id
  ORDER BY b.material_id,e.id
-), nodes AS MATERIALIZED (
+), imported_references AS MATERIALIZED (
+ SELECT source.id,source.scope,s.repository,reference.target_path
+ FROM entities source JOIN sources s ON s.scope=source.scope AND s.id=source.source_id
+ JOIN source_records r ON r.scope=source.scope AND r.entity_id=source.id
+ CROSS JOIN LATERAL unnest(r.reference_paths) reference(target_path)
+ WHERE source.scope=$1 AND s.kind='git' AND s.status='ok' AND r.present AND r.source_revision=s.verified_revision
+ AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=s.id)
+), source_nodes AS MATERIALIZED (
  SELECT e.id,'document' AS kind,
  jsonb_build_object('id',e.id,'scope',e.scope,'kind','document','label',s.path,'title',cp.payload->>'title','repository',s.repository,
  'revision',COALESCE(cm.revision,e.revision)::text,'content_digest',COALESCE(cm.content_digest,p.content_digest),'source_revision',p.source_revision,
@@ -89,7 +96,8 @@ const GRAPH_SQL: &str = concat!(
  'present',CASE WHEN cm.material_id IS NULL THEN p.present ELSE true END,
  'current',CASE WHEN cm.material_id IS NULL THEN (s.status='ok' AND p.present AND p.source_revision=s.verified_revision) ELSE true END,'source_kind',s.kind,
  'last_success_at',s.last_success_at,'observed_at',p.observed_at,
- 'context_scope',cm.scope,'context_path',cm.path,
+ 'context_scope',cm.scope,'context_path',cm.path,'material_id',cm.material_id,
+ 'purpose_source_revision',CASE WHEN cm.material_id IS NULL THEN p.source_revision ELSE cm.revision::text END,
  'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(current_body.body FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END) AS value,
  NOT EXISTS(SELECT 1 FROM terms WHERE strpos(search_text.text,term)=0) AS matched
  FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id
@@ -101,18 +109,20 @@ const GRAPH_SQL: &str = concat!(
  CROSS JOIN LATERAL (SELECT lower(concat(s.path,' ',cm.path,' ',cm.search_text,' ',CASE WHEN cm.material_id IS NULL THEN p.content ELSE concat(cp.payload->>'title',' ',cp.payload->>'body',' ',cp.payload->>'aliases') END,' ',
    (SELECT string_agg(t.name,' ') FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id WHERE et.scope=e.scope AND et.entity_id=e.id))) AS text) search_text
  LEFT JOIN LATERAL (SELECT strpos(lower(current_body.body),term) AS at FROM terms WHERE strpos(lower(current_body.body),term)>0 ORDER BY ordinality LIMIT 1) excerpt_hit ON true
- WHERE e.scope=$1 AND (cm.material_id IS NULL OR cm.path LIKE '%.md')
+ WHERE e.scope=$1 AND (cb.source_id IS NULL OR (cm.material_id IS NOT NULL AND cm.path LIKE '%.md'
+ AND cp.payload->>'status' IN ('searchable','unavailable') AND cp.payload->>'source_digest'=cm.content_digest))
  UNION ALL
  SELECT 'c_'||m.material_id::text,'document',
  jsonb_build_object('id','c_'||m.material_id::text,'scope',$1,'kind','document',
  'label',m.path,'title',p.payload->>'title','repository',m.scope,'source_kind','original','context_scope',m.scope,'context_path',m.path,
- 'revision',m.revision::text,'content_digest',m.content_digest,'status','ok','present',true,'current',true,
+ 'revision',m.revision::text,'content_digest',m.content_digest,'material_id',m.material_id,'purpose_source_revision',m.revision::text,'status','ok','present',true,'current',true,
  'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(p.payload->>'body' FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END),
  NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(concat(m.path,' ',m.search_text,' ',p.payload->>'title',' ',p.payload->>'body')),term)=0)
  FROM context_materials m LEFT JOIN context_projection_versions p USING(material_id,revision)
  LEFT JOIN LATERAL (SELECT strpos(lower(p.payload->>'body'),term) AS at FROM terms WHERE strpos(lower(p.payload->>'body'),term)>0 ORDER BY ordinality LIMIT 1) excerpt_hit ON true
  WHERE $1='personal' AND NOT m.deleted AND NOT m.restricted
- AND m.path LIKE '%.md'
+ AND m.path LIKE '%.md' AND p.payload->>'status' IN ('searchable','unavailable')
+ AND p.payload->>'source_digest'=m.content_digest
  AND NOT EXISTS (SELECT 1 FROM bound_materials b WHERE b.material_id=m.material_id)
  UNION ALL
  SELECT m.id,'memory',jsonb_build_object('id',m.id,'scope',m.scope,'kind','memory',
@@ -141,18 +151,37 @@ const GRAPH_SQL: &str = concat!(
  NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(t.name),term)=0)
  FROM topics t WHERE t.scope=$1 AND EXISTS(SELECT 1 FROM entity_topics et WHERE et.scope=t.scope AND et.topic_id=t.id)
  UNION ALL
- SELECT p.id,'subject',jsonb_build_object('id',p.id,'scope',p.scope,'kind','subject','label',p.name),
+ SELECT p.id,'subject',jsonb_build_object('id',p.id,'scope',p.scope,'kind','subject','label',p.name,'revision',p.revision::text,'definition',p.definition),
  NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(p.name),term)=0) FROM subjects p WHERE p.scope=$1
  UNION ALL
  SELECT 'a_'||a.id,'area',jsonb_build_object('id','a_'||a.id,'scope',$1,'kind','area','label',a.label),
  NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(a.label),term)=0) FROM areas a
  WHERE $1='meenseek' AND EXISTS(SELECT 1 FROM entity_areas ea WHERE ea.scope=$1 AND ea.area=a.id)
+), classified_nodes AS MATERIALIZED (
+ SELECT n.id,n.kind,n.matched,n.value ||
+ CASE WHEN n.kind='document' THEN jsonb_build_object('subject_id',d.subject_id,'classification_revision',COALESCE(d.revision,0),
+ 'classification_review_needed',d.source_id IS NOT NULL AND (d.source_revision IS DISTINCT FROM n.value->>'purpose_source_revision'
+ OR d.content_digest IS DISTINCT FROM n.value->>'content_digest' OR (d.subject_id IS NOT NULL AND d.subject_revision IS DISTINCT FROM s.revision))) ELSE '{}'::jsonb END ||
+ CASE WHEN s.id IS NOT NULL THEN jsonb_build_object('subject_name',s.name,'subject_revision',s.revision) ELSE '{}'::jsonb END AS value
+ FROM source_nodes n
+ LEFT JOIN document_subjects d ON n.kind='document' AND d.scope=$1 AND d.source_id=
+ CASE WHEN n.value->>'material_id' IS NOT NULL AND n.value->>'context_path' NOT LIKE 'journal/%' THEN n.value->>'material_id'
+ WHEN n.value->>'material_id' IS NULL AND n.value->>'source_kind'='git' THEN n.id END
+ LEFT JOIN subjects s ON s.scope=$1 AND s.id=COALESCE(d.subject_id,CASE WHEN n.kind='memory' THEN n.value->>'subject_id' WHEN n.kind='subject' THEN n.id END)
+), purpose_counts AS MATERIALIZED (
+ SELECT value->>'subject_id' AS subject_id,count(*) AS total FROM classified_nodes
+ WHERE kind IN ('document','memory') AND value->>'subject_id' IS NOT NULL GROUP BY value->>'subject_id'
+), nodes AS MATERIALIZED (
+ SELECT n.id,n.kind,n.matched,n.value || CASE WHEN c.subject_id IS NOT NULL OR n.kind='subject'
+ THEN jsonb_build_object('purpose_total',COALESCE(c.total,0)) ELSE '{}'::jsonb END AS value
+ FROM classified_nodes n LEFT JOIN purpose_counts c ON c.subject_id=CASE WHEN n.kind='subject' THEN n.id ELSE n.value->>'subject_id' END
 ), links AS MATERIALIZED (
  SELECT left_id AS source,right_id AS target,'related' AS kind,true AS current
  FROM related_materials WHERE scope=$1
  UNION ALL SELECT memory_id,entity_id,'evidence',current FROM evidence
  UNION ALL SELECT et.entity_id,'t_'||et.topic_id,'topic',true FROM entity_topics et WHERE et.scope=$1
  UNION ALL SELECT m.id,m.subject_id,'subject',true FROM memories m WHERE m.scope=$1 AND m.subject_id IS NOT NULL
+ UNION ALL SELECT id,value->>'subject_id','subject',true FROM nodes WHERE kind='document' AND value->>'subject_id' IS NOT NULL
  UNION ALL SELECT ea.entity_id,'a_'||ea.area,'area',true FROM entity_areas ea WHERE ea.scope=$1
  UNION ALL SELECT COALESCE(source_bound.id,'c_'||m.material_id::text),COALESCE(target_bound.id,'c_'||target.material_id::text),'related',true
  FROM context_materials m JOIN context_projection_versions p USING(material_id,revision)
@@ -161,6 +190,21 @@ const GRAPH_SQL: &str = concat!(
  LEFT JOIN bound_materials source_bound ON source_bound.material_id=m.material_id
  LEFT JOIN bound_materials target_bound ON target_bound.material_id=target.material_id
  WHERE $1='personal' AND NOT m.deleted AND NOT m.restricted AND NOT target.deleted AND NOT target.restricted
+ UNION ALL SELECT COALESCE(source_bound.id,'c_'||m.material_id::text),COALESCE(target_bound.id,'c_'||target.material_id::text),'reference',true
+ FROM context_materials m JOIN context_projection_versions p USING(material_id,revision)
+ CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(p.payload->'source_references','[]'::jsonb)) reference(target_path)
+ JOIN context_materials target ON target.scope||'/'||target.path=reference.target_path
+ LEFT JOIN bound_materials source_bound ON source_bound.material_id=m.material_id
+ LEFT JOIN bound_materials target_bound ON target_bound.material_id=target.material_id
+ WHERE NOT m.deleted AND NOT m.restricted AND NOT target.deleted AND NOT target.restricted
+ AND p.payload->>'status'='searchable' AND p.payload->>'source_digest'=m.content_digest
+ UNION ALL SELECT reference.id,target.id,'reference',true
+ FROM imported_references reference
+ JOIN sources t ON t.scope=reference.scope AND t.repository=reference.repository AND t.path=reference.target_path AND t.kind='git'
+ JOIN entities target ON target.scope=t.scope AND target.source_id=t.id
+ JOIN source_records tr ON tr.scope=target.scope AND tr.entity_id=target.id
+ WHERE t.status='ok' AND tr.present AND tr.source_revision=t.verified_revision
+ AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=t.id)
 ), scoped_links AS MATERIALIZED (
  SELECT l.* FROM links l JOIN nodes s ON s.id=l.source JOIN nodes t ON t.id=l.target
 ), relation_tokens AS (

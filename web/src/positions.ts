@@ -1,5 +1,5 @@
-import { constellationView, visualSatellites } from "./graph";
-import type { GraphLink, Model, PositionedNode } from "./graph";
+import { constellationView, diagramLinks, visualSatellites } from "./graph";
+import type { GraphLink, GraphView, Model, PositionedNode } from "./graph";
 import { COLLISION_GAP, separateDiscs } from "./clearance";
 import { DEFAULT_LINK_PIXELS, LAYOUT_WORLD_SPACING } from "./presentation";
 
@@ -529,7 +529,7 @@ function springStep(value: number, target: number, velocity: number, dt: number,
 }
 type PendingLayout = { token: number; root: string; right: Point; up: Point; spacing: number; clearance: Clearance | null; reduced: boolean };
 type LayoutMotion = { from: Map<string, Point>; to: Map<string, Point>; actual: Map<string, Point>; start: number };
-type LayoutScope = { nodes: PositionedNode[]; links: GraphLink[] };
+type LayoutScope = { nodes: PositionedNode[]; links: GraphLink[]; view?: GraphView };
 export type LayoutPlane = Pick<Clearance, "visible" | "right" | "up" | "project" | "radius" | "worldPerPixel" | "isVisible">;
 export type LayoutView = { key: string; resolve: (desired: ReadonlyMap<string, Point>, movable: ReadonlySet<string>, hub: string) => Map<string, Point> };
 const layoutDuration = 650;
@@ -639,7 +639,7 @@ export class Positions {
   private gesture: Pull | null = null;
   private settle: Settle | null = null;
   private collisionReactions = new Map<string, CollisionReaction>();
-  private source: { nodes: PositionedNode[]; links: GraphLink[]; structure: string } | null = null;
+  private source: LayoutScope & { structure: string } | null = null;
   private layouts = new Map<string, Map<string, Point>>();
   private canonical = new Map<string, Point>();
   private activeCore = "";
@@ -689,7 +689,7 @@ export class Positions {
     if (cached) return cached;
     const source = scope ?? this.source!;
     if (visibleMembers && core && core !== "*") {
-      const templateView = constellationView(source.nodes, source.links, null, core, 0);
+      const templateView = constellationView(source.nodes, source.links, null, core, 0, source.view);
       const group = templateView.cores.find(candidate => candidate.hub === core);
       if (templateView.disclosure && group) {
         const template = this.coreLayout(core, 0, undefined, scope);
@@ -710,7 +710,7 @@ export class Positions {
       this.layouts.set(key, full);
       return full;
     }
-    const view = constellationView(source.nodes, source.links, null, core || null, page);
+    const view = constellationView(source.nodes, source.links, null, core || null, page, source.view);
     const visible = packInitialCoordinates(view.nodes, view.links);
     const shown = new Set(view.nodes.map(node => node.id));
     for (const group of view.cores) {
@@ -743,7 +743,7 @@ export class Positions {
     let target = changed ? this.coreLayout(key, page, visibleMembers, scope) : new Map(from);
     if (core && core !== "*") {
       const source = scope ?? this.source;
-      const view = constellationView(source.nodes, source.links, null, core, page);
+      const view = constellationView(source.nodes, source.links, null, core, page, source.view);
       const group = view.cores.find(candidate => candidate.hub === core);
       const origin = target.get(core), anchor = from.get(core);
       if (changed && group && origin && anchor && (!scope || scopeKey === this.activeScopeKey) &&
@@ -974,7 +974,8 @@ export class Positions {
       }
     }
   }
-  install(model: Model, compactInitial = false) {
+  install(input: Model, compactInitial = false) {
+    const model = { ...input, links: diagramLinks(input) };
     this.cancel();
     const retained = this.nodes, priorSatellites = this.satellites;
     this.satellites = visualSatellites(model);
@@ -989,7 +990,7 @@ export class Positions {
         this.structureEpoch++;
         this.groupEpoch++;
         const nodes = model.nodes.map(node => ({ ...node })), links = model.links.map(link => ({ ...link }));
-        this.source = { nodes, links, structure };
+        this.source = { nodes, links, structure, view: model.view };
         this.layouts.clear();
         this.activeCore = "";
         this.activePage = undefined;

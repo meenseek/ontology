@@ -15,6 +15,8 @@ pub mod memory;
 pub mod native_context;
 pub mod native_harness;
 mod native_role;
+pub mod purpose;
 mod source_process;
+pub mod source_references;
 pub mod store;
 pub mod sync;
