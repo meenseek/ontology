@@ -104,6 +104,12 @@ export function nodeScreenSize(kind: string, depth: number, viewportHeight: numb
   if (kind !== "document" && kind !== "memory") return 10;
   return Math.min(140, Math.max(MIN_KNOWLEDGE_STAR_PIXELS, KNOWLEDGE_STAR_WORLD_SIZE * (viewportHeight / depth) * projectionY / 2));
 }
+export const LAYOUT_WORLD_SPACING = 31;
+export const DEFAULT_LINK_PIXELS = 24;
+/** Default core framing keeps the canonical step at the ordinary screen scale. */
+export function coreCameraDistance(fitDistance: number, viewportHeight: number, projectionY: number): number {
+  return Math.max(fitDistance, LAYOUT_WORLD_SPACING * viewportHeight * projectionY / (2 * DEFAULT_LINK_PIXELS));
+}
 /** Keep an already close camera; otherwise reach the visible surface on selection. */
 export function focusedCameraDistance(currentDistance: number, viewportHeight: number, projectionY: number): number {
   if (![currentDistance, viewportHeight, projectionY].every(Number.isFinite) || currentDistance <= 0 || viewportHeight <= 0 || projectionY <= 0) return currentDistance;

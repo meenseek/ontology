@@ -10,23 +10,14 @@ import type { NucleusView } from "./nuclei";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, Model, PositionedNode } from "./graph";
-import { MAX_VISIBLE_LABELS, advanceStarClock, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
+import { LAYOUT_WORLD_SPACING, MAX_VISIBLE_LABELS, advanceStarClock, coreCameraDistance, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
+import { planCoreView, screenPlane, spatialCameraFrame } from "./view-layout";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
 type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFailure: () => void };
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
 const coreLabel = (node: PositionedNode | undefined, count: number) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : `관계 묶음 · ${count}개`;
-function spatialCameraFrame(camera: PerspectiveCamera, controls: OrbitControls, group: { center: { x: number; y: number; z: number }; radius: number }, size: { width: number; height: number }) {
-  const vertical = camera.fov * Math.PI / 180;
-  const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
-  const fitDistance = group.radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2);
-  const readableDistance = 31 * size.height * camera.projectionMatrix.elements[5] / (2 * 28);
-  const offset = camera.position.clone().sub(controls.target);
-  if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
-  offset.normalize().multiplyScalar(Math.max(50, Math.min(fitDistance, readableDistance)));
-  return { position: { x: group.center.x + offset.x, y: group.center.y + offset.y, z: group.center.z + offset.z }, target: group.center };
-}
 function texture(kind: "ring" | "selection" | "change") {
   const canvas = document.createElement("canvas"); canvas.width = canvas.height = 128;
   const context = canvas.getContext("2d");
@@ -273,11 +264,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const visible = new Set(overview.nodes.map(node => node.id));
     return displayNodes.some(node => !visible.has(node.id));
   }, [nodes, snapshot, displayNodes]);
-  const layoutCore = exposesHiddenMembers && !disclosure ? "*" : activeExpandedCore ?? cores.find(core => selected && core.members.has(selected))?.hub ?? null;
+  const layoutCore = activeExpandedCore ?? cores.find(core => selected && core.members.has(selected))?.hub ?? (exposesHiddenMembers ? "*" : null);
   useEffect(() => { if (expandedCore && !activeExpandedCore) setExpandedCore(null); }, [expandedCore, activeExpandedCore]);
-  useEffect(() => { positions.showCore(layoutCore, performance.now(), reduced, disclosure?.index, disclosure?.visible,
-    disclosure && nodes.length !== snapshot.nodes.length ? { nodes, links } : undefined); },
-  [positions, layoutCore, disclosure, nodes, links, snapshot.nodes.length, reduced]);
   const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: displayLinks.map(l => ({ ...l })) }), [displayNodes, displayLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
@@ -353,6 +341,37 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${disclosure?.index ?? "all"}:${fit}:${size.width}:${size.height}:${expandedRelationKey}:${spatialCameraKey}`;
   const appliedCamera = useRef("");
   const appliedFit = useRef(fit);
+  const plannedCamera = useRef<{ key: string; camera: PerspectiveCamera; target: { x: number; y: number; z: number } } | null>(null);
+  const renderKey = JSON.stringify([cameraKey, changedFootprints, positions.groupEpoch]);
+  useEffect(() => {
+    const instance = graph.current;
+    if (!ready || !instance) return;
+    const group = cores.find(core => core.hub === layoutCore);
+    positions.showCore(layoutCore, performance.now(), reduced, disclosure?.index, disclosure?.visible,
+      nodes.length !== snapshot.nodes.length ? { nodes, links } : undefined, group ? {
+        key: renderKey,
+        resolve: (desired, movable, hub) => {
+          const automatic = appliedCamera.current !== cameraKey;
+          const plan = planCoreView(desired, movable, hub, {
+            camera: instance.camera() as PerspectiveCamera, cameraTarget: (instance.controls() as OrbitControls).target,
+            size, automatic, nodes: semanticNodes, links: snapshot.links, counts: collapsedCounts,
+            members: disclosure?.hub === hub ? disclosure.visible : group.members, selected, lod: lodLevelRef.current,
+            cohorts: new Map(cores.filter(core => collapsedCounts.has(core.hub)).map(core => [core.hub, [...core.members]])),
+            spatial: spatialReveal, locks: new Map([...movedGroups].filter(([, value]) => value.epoch === positions.groupEpoch)),
+          }, (desired, movable, held, plane) => positions.clearLayout(desired, movable, held, plane));
+          if (automatic) plannedCamera.current = { key: cameraKey, camera: plan.camera, target: plan.target };
+          // The committed view keeps the exact cohorts whose footprints were
+          // cleared, even when their translation crosses a spatial cell boundary.
+          if (plan.memberships.size) setMovedGroups(previous => {
+            const next = new Map(previous);
+            for (const [id, members] of plan.memberships) next.set(id, { members, level: plan.level, epoch: positions.groupEpoch });
+            return next;
+          });
+          return plan.positions;
+        },
+      } : undefined);
+  }, [positions, layoutCore, disclosure, nodes, links, snapshot.nodes.length, snapshot.links, reduced, ready, semanticNodes,
+    cores, collapsedCounts, renderKey, cameraKey, size, selected, spatialReveal, movedGroups]);
   const positionCamera = useCallback(() => {
     const instance = graph.current;
     if (!ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
@@ -369,6 +388,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const cameraNodes = nodes.map(node => ({ ...node, ...(positions.layoutTarget(node.id) ?? {}) }));
     const cameraDisplayNodes = semanticNodes.map(node => ({ ...node, ...(positions.layoutTarget(node.id) ?? {}) }));
     const target = fitChanged ? null : cameraNodes.find(n => n.id === (selected ?? activeExpandedCore));
+    const planned = plannedCamera.current;
+    if (target && !fitChanged && planned?.key === cameraKey) {
+      instance.cameraPosition({ x: planned.camera.position.x, y: planned.camera.position.y, z: planned.camera.position.z }, planned.target, reduced ? 0 : 650);
+      return;
+    }
     if (target && selected) {
       // Selection reveals the rotating surface while preserving any closer
       // user zoom and the current viewing direction, including deep links.
@@ -386,7 +410,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       if (members.length) {
         const center = members.reduce((sum, node) => ({ x: sum.x + node.x / members.length, y: sum.y + node.y / members.length, z: sum.z + node.z / members.length }), { x: 0, y: 0, z: 0 });
         const radius = Math.max(...members.map(node => Math.hypot(node.x - center.x, node.y - center.y, node.z - center.z))) + 6;
-        const frame = spatialCameraFrame(instance.camera() as PerspectiveCamera, instance.controls() as OrbitControls, { center, radius }, size);
+        const frame = spatialCameraFrame(instance.camera() as PerspectiveCamera, (instance.controls() as OrbitControls).target, { center, radius }, size);
         instance.cameraPosition(frame.position, frame.target, reduced ? 0 : 650);
         return;
       }
@@ -400,7 +424,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         const controls = instance.controls() as OrbitControls;
         const vertical = camera.fov * Math.PI / 180;
         const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * size.width / size.height);
-        const distance = radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2);
+        // Fit large cores, but do not magnify a compact page until ordinary
+        // 31-unit layout steps look like stretched links. Manual zoom stays free.
+        const distance = coreCameraDistance(radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2),
+          size.height, camera.projectionMatrix.elements[5]);
         const offset = camera.position.clone().sub(controls.target);
         if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
         offset.normalize().multiplyScalar(distance);
@@ -471,7 +498,6 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const origin = nodes.find(n => n.id === node.id)!;
       const depth = -new Vector3(origin.x, origin.y, origin.z).applyMatrix4(camera.matrixWorldInverse).z;
       const projectionY = camera.projectionMatrix.elements[5];
-      const dragProjection = new Vector3();
       const unitsPerPixel = 2 * Math.max(.001, depth) / (size.height * projectionY);
       const viewport = () => ({ width: container.current?.clientWidth || size.width, height: container.current?.clientHeight || size.height });
       const group = spatialGroups.get(node.id);
@@ -481,29 +507,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       ]);
       summaryHalo.current = group || collapsedCounts.has(node.id)
         ? { id: node.id, startedAt: performance.now(), releasedAt: null, releaseScale: 1 } : null;
-      const plane = {
-        right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
-        up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1), spacingPixels: 24,
-        visible: displayNodes.map(value => value.id),
-        cohorts,
-        basis: () => { camera.updateMatrixWorld(); return { right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1) }; },
-        viewKey: () => { camera.updateMatrixWorld(); const { width, height } = viewport(); return `${width}|${height}|${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}`; },
-        worldPerPixel: (atDepth: number) => 2 * atDepth / (viewport().height * camera.projectionMatrix.elements[5]),
-        isVisible: (at: { x: number; y: number }, radius: number) => { const { width, height } = viewport(); return Math.abs(at.x) <= width / 2 + radius && Math.abs(at.y) <= height / 2 + radius; },
-        radius: (value: PositionedNode, atDepth: number) => {
-          const isSummary = collapsedCounts.has(value.id) || spatialCounts.has(value.id);
-          const pixels = nodeScreenSize(value.kind, atDepth, viewport().height, camera.projectionMatrix.elements[5]);
-          return nodeVisualRadius(pixels, value.id === selected, value.changed, isSummary ? summaryCounts.get(value.id) : 0);
-        },
-        project: (value: { x: number; y: number; z: number }) => {
-          camera.updateMatrixWorld();
-          dragProjection.set(value.x, value.y, value.z).applyMatrix4(camera.matrixWorldInverse);
-          const depth = camera.projectionMatrix.elements[11] === -1 ? -dragProjection.z : 1;
-          dragProjection.applyMatrix4(camera.projectionMatrix);
-          const { width, height } = viewport();
-          return { x: dragProjection.x * width / 2, y: dragProjection.y * height / 2, depth };
-        },
-      };
+      const plane = { ...screenPlane(camera, viewport, selected, summaryCounts),
+        visible: displayNodes.map(value => value.id), cohorts };
       if (group) {
         draggedSummary.current = { id: node.id, members: group.members, level: spatialLevel, epoch: positions.groupEpoch };
         frozenSpatial.current = spatial;
@@ -611,7 +616,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           zoom.scale = scale; zoom.changedAt = performance.now();
         }
         if (!positions.dragging && !positions.layoutMoving && size.height > 0) {
-          const next = nucleusLevel(31 * scale, lodLevelRef.current);
+          const next = nucleusLevel(LAYOUT_WORLD_SPACING * scale, lodLevelRef.current);
           if (next !== lodLevelRef.current) {
             lodLevelRef.current = next; hoveredId.current = null; setHover(null); setLodLevel(next);
           }
@@ -770,7 +775,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         members: new Set(group.members), level: Math.max(lodLevelRef.current, previous?.level ?? 0),
         camera: previous?.camera ?? { ...camera.position }, target: previous?.target ?? { ...controls.target },
       });
-      const frame = spatialCameraFrame(camera, controls, group, size);
+      const frame = spatialCameraFrame(camera, controls.target, group, size);
       instance.cameraPosition(frame.position, frame.target, reduced ? 0 : 650);
     } else {
       if (!spatialReveal?.members.has(id)) setSpatialReveal(null);

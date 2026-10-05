@@ -1,6 +1,7 @@
 import { constellationView, visualSatellites } from "./graph";
 import type { GraphLink, Model, PositionedNode } from "./graph";
 import { COLLISION_GAP, separateDiscs } from "./clearance";
+import { DEFAULT_LINK_PIXELS, LAYOUT_WORLD_SPACING } from "./presentation";
 
 export type Point = { x: number; y: number; z: number };
 const point = ({ x, y, z }: Point): Point => ({ x, y, z });
@@ -380,6 +381,74 @@ function ringSlots(count: number, extraRing = false): Slot[] {
   if (extraRing) addRing(ring);
   return slots;
 }
+/** Uniform angles within every ring; choose the smaller outer radius of one ring or concentric rings. */
+function circularSlots(count: number, minimumRadius = 1, separation = 1): Slot[] {
+  if (!count) return [];
+  const rings: { count: number; radius: number }[] = [];
+  let remaining = count, radius = minimumRadius;
+  while (remaining) {
+    const capacity = Math.max(1, Math.floor(Math.PI / Math.asin(Math.min(1, separation / (2 * radius))) + 1e-9));
+    const placed = Math.min(remaining, capacity);
+    rings.push({ count: placed, radius }); remaining -= placed; radius += separation;
+  }
+  const singleRadius = count < 2 ? minimumRadius : Math.max(minimumRadius, separation / (2 * Math.sin(Math.PI / count)));
+  if (singleRadius <= rings.at(-1)!.radius + 1e-9) rings.splice(0, rings.length, { count, radius: singleRadius });
+  else if (rings.at(-1)!.count === 1) {
+    // A lone outer star biases the centroid. Borrow one slot from the preceding ring.
+    rings.at(-2)!.count--; rings.at(-1)!.count++;
+  }
+  return rings.flatMap((ring, index) => Array.from({ length: ring.count }, (_, at) => {
+    const angle = 2 * Math.PI * at / ring.count + (index % 2 ? Math.PI / ring.count : 0);
+    return { x: ring.radius * Math.cos(angle), y: ring.radius * Math.sin(angle) };
+  }));
+}
+/** Identify one visible hub-and-leaf cohort without absorbing unrelated background. */
+export function starCohort(root: string, visible: ReadonlySet<string>, adjacency: ReadonlyMap<string, ReadonlySet<string>>) {
+  const neighbors = (id: string) => [...(adjacency.get(id) ?? [])].filter(other => visible.has(other) && other !== id);
+  const adjacent = neighbors(root), hub = adjacent.length === 1 ? adjacent[0] : root;
+  const leaves = neighbors(hub).sort();
+  return leaves.length > 1 && leaves.every(id => neighbors(id).length === 1) ? { hub, leaves } : null;
+}
+/** A true hub-and-leaf component has no competing edge constraints. */
+function starSlots(root: string, members: string[], adjacency: Map<string, Set<string>>, radii?: ReadonlyMap<string, number>, spacing = 1): Map<string, Slot> | null {
+  const ids = [root, ...members], cohort = starCohort(root, new Set(ids), adjacency);
+  if (!cohort || cohort.leaves.length !== members.length) return null;
+  const { hub, leaves } = cohort;
+  const leafRadius = Math.max(...leaves.map(id => radii?.get(id) ?? spacing / 2));
+  const minimumRadius = Math.max(1, ((radii?.get(hub) ?? spacing / 2) + leafRadius) / spacing);
+  const slots = circularSlots(leaves.length, minimumRadius, 2 * leafRadius / spacing);
+  const placed = new Map<string, Slot>([[hub, { x: 0, y: 0 }], ...leaves.map((id, index) => [id, slots[index]] as const)]);
+  const origin = placed.get(root)!;
+  return new Map([...placed].filter(([id]) => id !== root).map(([id, at]) => [id, { x: at.x - origin.x, y: at.y - origin.y }]));
+}
+/** Find a collision-free radial scale while preserving the entire supplied shape. */
+function clearRadialSlots(slots: readonly Slot[], radii: readonly number[], obstacles: readonly (Slot & { radius: number })[],
+  minimumScale = 1, initialAngle = 0, period = 2 * Math.PI) {
+  let best: { slots: Slot[]; scale: number } | null = null;
+  for (let phase = 0; phase < 96; phase++) {
+    const angle = initialAngle + period * phase / 96, cosine = Math.cos(angle), sine = Math.sin(angle);
+    const rotated = slots.map(slot => ({ x: slot.x * cosine - slot.y * sine, y: slot.x * sine + slot.y * cosine }));
+    const intervals: { start: number; end: number }[] = [];
+    for (const [index, slot] of rotated.entries()) for (const obstacle of obstacles) {
+      const squared = slot.x * slot.x + slot.y * slot.y;
+      if (squared < 1e-12) continue;
+      const dot = slot.x * obstacle.x + slot.y * obstacle.y;
+      const distance = radii[index] + obstacle.radius + COLLISION_GAP;
+      const discriminant = dot * dot - squared * (obstacle.x * obstacle.x + obstacle.y * obstacle.y - distance * distance);
+      if (discriminant <= 0) continue;
+      const reach = Math.sqrt(discriminant), start = (dot - reach) / squared, end = (dot + reach) / squared;
+      if (end >= minimumScale) intervals.push({ start, end });
+    }
+    let scale = minimumScale;
+    for (const interval of intervals.sort((a, b) => a.start - b.start)) {
+      if (interval.start > scale) break;
+      if (interval.end >= scale) scale = interval.end + 1e-7;
+    }
+    if (!best || scale < best.scale - 1e-9) best = { slots: rotated, scale };
+    if (scale === minimumScale) break;
+  }
+  return best!;
+}
 function packedSlots(root: string, members: string[], adjacency: Map<string, Set<string>>, projected: Map<string, Slot>): Map<string, Slot> {
   const ids = [root, ...members], allowed = new Set(ids);
   const degree = (id: string) => [...(adjacency.get(id) ?? [])].filter(other => allowed.has(other)).length;
@@ -396,7 +465,7 @@ function packedSlots(root: string, members: string[], adjacency: Map<string, Set
     for (const id of neighbors) { seen.add(id); order.push(id); }
   }
   for (const id of ids.filter(id => !seen.has(id)).sort((a, b) => distance(a) - distance(b) || a.localeCompare(b))) order.push(id);
-  const slots = ringSlots(ids.length - 1), placed = new Map<string, Slot>([[pivot, { x: 0, y: 0 }]]);
+  const slots = circularSlots(ids.length - 1), placed = new Map<string, Slot>([[pivot, { x: 0, y: 0 }]]);
   for (const [index, id] of order.slice(1).entries()) placed.set(id, slots[index]);
   const origin = placed.get(root)!;
   return new Map([...placed].filter(([id]) => id !== root).map(([id, at]) => [id, { x: at.x - origin.x, y: at.y - origin.y }]));
@@ -404,7 +473,7 @@ function packedSlots(root: string, members: string[], adjacency: Map<string, Set
 export function compactSlots(root: string, members: string[], adjacency: Map<string, Set<string>>, timeoutMs = 24, limit = Math.min(10000, 8000 + (members.length + 1) * 10)): Map<string, Slot> | null {
   const allowed = new Set([root, ...members]);
   if ([...allowed].every(id => ![...(adjacency.get(id) ?? [])].some(other => allowed.has(other)))) {
-    const slots = ringSlots(members.length);
+    const slots = circularSlots(members.length);
     return new Map(members.map((id, index) => [id, slots[index]]));
   }
   const deadline = performance.now() + timeoutMs;
@@ -461,6 +530,8 @@ function springStep(value: number, target: number, velocity: number, dt: number,
 type PendingLayout = { token: number; root: string; right: Point; up: Point; spacing: number; clearance: Clearance | null; reduced: boolean };
 type LayoutMotion = { from: Map<string, Point>; to: Map<string, Point>; actual: Map<string, Point>; start: number };
 type LayoutScope = { nodes: PositionedNode[]; links: GraphLink[] };
+export type LayoutPlane = Pick<Clearance, "visible" | "right" | "up" | "project" | "radius" | "worldPerPixel" | "isVisible">;
+export type LayoutView = { key: string; resolve: (desired: ReadonlyMap<string, Point>, movable: ReadonlySet<string>, hub: string) => Map<string, Point> };
 const layoutDuration = 650;
 const graphStructure = (nodes: readonly PositionedNode[], links: readonly GraphLink[]) => JSON.stringify([
   nodes.map(node => JSON.stringify([node.id, node.cluster, node.kind, node.status, node.current, node.present, node.temporal, node.supported])).sort(),
@@ -473,7 +544,7 @@ function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonl
   for (const link of links) {
     adjacency.get(link.source)?.add(link.target); adjacency.get(link.target)?.add(link.source);
   }
-  const spacing = 31;
+  const spacing = LAYOUT_WORLD_SPACING;
   const radiusFor = (id: string) => footprints?.get(id) ?? spacing / 2;
   const visited = new Set<string>();
   const components: { root: string; coordinates: Map<string, Slot>; radius: number }[] = [];
@@ -490,9 +561,10 @@ function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonl
       const node = byId.get(id)!;
       return [id, { x: node.x - origin.x, y: node.y - origin.y }] as const;
     }));
-    const slots = compactSlots(root, members, adjacency) ?? packedSlots(root, members, adjacency, projected);
+    const componentSpacing = footprints ? DEFAULT_LINK_PIXELS : spacing;
+    const slots = starSlots(root, members, adjacency, footprints, componentSpacing) ??
+      compactSlots(root, members, adjacency) ?? packedSlots(root, members, adjacency, projected);
     const radii = ids.map(radiusFor).sort((a, b) => b - a);
-    const componentSpacing = footprints ? 24 : spacing;
     const coordinates = new Map<string, Slot>([[root, { x: 0, y: 0 }], ...slots]);
     const average = [...coordinates.values()].reduce((sum, value) => ({ x: sum.x + value.x / ids.length, y: sum.y + value.y / ids.length }), { x: 0, y: 0 });
     let radius = radii[0];
@@ -576,6 +648,7 @@ export class Positions {
   private activeVisibleKey = "";
   private activeScope: LayoutScope | undefined;
   private activeScopeKey = "";
+  private activeRenderKey = "";
   private layoutMotion: LayoutMotion | null = null;
   private layoutNeedsRefresh = false;
   private worker: Worker | null = null;
@@ -614,19 +687,12 @@ export class Positions {
     const key = layoutKey(core, page, visibleKey, scopeKey);
     const cached = this.layouts.get(key);
     if (cached) return cached;
-    const source = this.source!;
+    const source = scope ?? this.source!;
     if (visibleMembers && core && core !== "*") {
-      const basis = scope ?? source;
-      const templateView = constellationView(basis.nodes, basis.links, null, core, 0);
+      const templateView = constellationView(source.nodes, source.links, null, core, 0);
       const group = templateView.cores.find(candidate => candidate.hub === core);
       if (templateView.disclosure && group) {
-        const template = scope ? packInitialCoordinates(templateView.nodes, templateView.links) : this.coreLayout(core, 0);
-        const shown = new Set(templateView.nodes.map(node => node.id));
-        if (scope) for (const collapsed of templateView.cores) {
-          if (!templateView.counts.has(collapsed.hub)) continue;
-          const center = template.get(collapsed.hub)!;
-          for (const id of collapsed.members) if (!shown.has(id)) template.set(id, point(center));
-        }
+        const template = this.coreLayout(core, 0, undefined, scope);
         const hub = template.get(core)!;
         const pinned = templateView.disclosure.pinned;
         const slots = [...templateView.disclosure.visible].filter(id => id !== core && !pinned.has(id)).sort().map(id => template.get(id)!);
@@ -664,41 +730,45 @@ export class Positions {
     this.layouts.set(key, visible);
     return visible;
   }
-  showCore(core: string | null, now: number, reduced: boolean, page?: number, visibleMembers?: ReadonlySet<string>, scope?: LayoutScope) {
+  showCore(core: string | null, now: number, reduced: boolean, page?: number, visibleMembers?: ReadonlySet<string>, scope?: LayoutScope, render?: LayoutView) {
     if (!this.source || !Number.isFinite(now)) return;
     const key = core ?? "", visibleKey = visibleMembers ? [...visibleMembers].sort().join("|") : "";
     const scopeKey = scope ? graphStructure(scope.nodes, scope.links) : "";
-    if (key === this.activeCore && page === this.activePage && visibleKey === this.activeVisibleKey && scopeKey === this.activeScopeKey && !this.layoutNeedsRefresh) return;
+    const changed = key !== this.activeCore || page !== this.activePage || visibleKey !== this.activeVisibleKey ||
+      scopeKey !== this.activeScopeKey || this.layoutNeedsRefresh;
+    if (!changed && (render?.key ?? "") === this.activeRenderKey) return;
     this.cancel(false);
-    let target = this.coreLayout(key, page, visibleMembers, scope);
     const actual = new Map([...this.nodes].map(([id, node]) => [id, point(node)]));
     const from = new Map([...actual].map(([id, value]) => [id, this.canonical.get(id) ?? value]));
-    if (core && core !== "*" && !scope) {
-      const view = constellationView(this.source.nodes, this.source.links, null, core, page);
+    let target = changed ? this.coreLayout(key, page, visibleMembers, scope) : new Map(from);
+    if (core && core !== "*") {
+      const source = scope ?? this.source;
+      const view = constellationView(source.nodes, source.links, null, core, page);
       const group = view.cores.find(candidate => candidate.hub === core);
       const origin = target.get(core), anchor = from.get(core);
-      // Explicit full expansion still needs space for a large fan. Normal pages
-      // and small cores stay local; filtered views retain their separate layout.
-      if (group && origin && anchor && (view.disclosure || group.count <= 36)) {
-        // Expand only this core around its current canonical hub. Preserve session
-        // drag offsets through the same actual/from interpolation used below.
+      if (changed && group && origin && anchor && (!scope || scopeKey === this.activeScopeKey) &&
+        (view.disclosure || group.count <= 36)) {
+        // Pages open around the current hub; other stars and session offsets stay fixed.
         const local = new Map(from);
         for (const id of group.members) {
           if (id === core || view.disclosure?.pinned.has(id)) continue;
           const value = target.get(id);
           if (value) local.set(id, add(anchor, add(value, origin, -1)));
         }
-        // Resolve against the actual fixed background, including session drag
-        // offsets. Only revealed members may move to clear an occupied slot.
-        const movable = new Set(view.nodes.filter(node => group.members.has(node.id) && node.id !== core && !view.disclosure?.pinned.has(node.id)).map(node => node.id));
-        const desired = new Map(view.nodes.map(node => [node.id, add(actual.get(node.id)!, add(local.get(node.id)!, from.get(node.id)!, -1))]));
-        const discs = [...desired].map(([id, value]) => ({ id, x: value.x, y: value.y, radius: 15 }));
-        const cleared = separateDiscs(discs, core, movable, COLLISION_GAP, new Set(view.nodes.filter(node => !movable.has(node.id)).map(node => node.id)));
-        for (const id of movable) {
-          const value = desired.get(id)!, clear = cleared.get(id)!;
-          local.set(id, add(local.get(id)!, { x: clear.x - value.x, y: clear.y - value.y, z: 0 }));
-        }
         target = local;
+      }
+      if (group) {
+        const movable = new Set(view.nodes.filter(node => group.members.has(node.id) && node.id !== core &&
+          !view.disclosure?.pinned.has(node.id)).map(node => node.id));
+        const desired = new Map([...actual].map(([id, value]) => [id, add(value, add(target.get(id) ?? from.get(id)!, from.get(id)!, -1))]));
+        // A renderer resolves its immutable final view. Headless callers use the canonical plane.
+        const resolved = render ? render.resolve(desired, movable, core) : this.clearLayout(desired, movable, core, {
+          visible: view.nodes.map(node => node.id), right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 },
+          project: value => ({ x: value.x, y: value.y, depth: 1 }),
+          radius: () => (LAYOUT_WORLD_SPACING - COLLISION_GAP) / 2, worldPerPixel: () => 1, isVisible: () => true,
+        });
+        target = new Map(target);
+        for (const [id, value] of resolved) target.set(id, add(from.get(id)!, add(value, actual.get(id)!, -1)));
       }
     }
     this.layoutMotion = { from, to: target, actual, start: now };
@@ -708,13 +778,76 @@ export class Positions {
     this.activeVisibleKey = visibleKey;
     this.activeScope = scope;
     this.activeScopeKey = scopeKey;
+    this.activeRenderKey = render?.key ?? "";
     this.layoutNeedsRefresh = false;
     if (reduced) this.advance(now, true);
+  }
+  /** One projected clearance calculation for an immutable static view or a live drag. */
+  clearLayout(desired: ReadonlyMap<string, Point>, movable: ReadonlySet<string>, held: string, plane: LayoutPlane): Map<string, Point> {
+    const fixed = new Set(plane.visible.filter(id => !movable.has(id)));
+    const next = new Map(desired);
+    const cohort = starCohort(held, new Set(plane.visible), this.adjacency);
+    if (cohort && (cohort.hub === held || movable.has(cohort.hub)) && cohort.leaves.every(id => id === held || movable.has(id))) {
+      const { hub, leaves } = cohort, allowed = new Set([hub, ...leaves]);
+      const center = plane.project(desired.get(hub)!);
+      const body = (id: string) => {
+        const at = plane.project(desired.get(id)!);
+        return { id, at, radius: plane.radius(this.nodes.get(id)!, at.depth) };
+      };
+      const bodies = leaves.map(body), hubBody = body(hub), discs = plane.visible.map(body);
+      const crowded = discs.some((a, index) => discs.slice(index + 1).some(b =>
+        (allowed.has(a.id) && (allowed.has(b.id) || fixed.has(b.id)) || allowed.has(b.id) && fixed.has(a.id)) &&
+        a.at.depth > 0 && b.at.depth > 0 && Math.hypot(a.at.x - b.at.x, a.at.y - b.at.y) < a.radius + b.radius + COLLISION_GAP - 1e-6));
+      const validFan = [hubBody, ...bodies].every(body => body.at.depth > 0 && Number.isFinite(body.radius) && body.radius > 0);
+      if (crowded && validFan) {
+        const largest = Math.max(...bodies.map(body => body.radius));
+        const slots = circularSlots(leaves.length, Math.max(DEFAULT_LINK_PIXELS, hubBody.radius + largest + COLLISION_GAP), 2 * largest + COLLISION_GAP);
+        const obstacles = discs.filter(body => !allowed.has(body.id) && fixed.has(body.id) && body.at.depth > 0 && body.radius > 0);
+        const place = (body: typeof hubBody, x: number, y: number) => {
+          if (body.id === held) return;
+          const world = plane.worldPerPixel(body.at.depth);
+          next.set(body.id, add(add(desired.get(body.id)!, plane.right, (x - body.at.x) * world), plane.up, (y - body.at.y) * world));
+        };
+        if (hub !== held) {
+          // A selected leaf is the sole anchor. Moving its hub as part of the
+          // same shape preserves focus and every ring instead of pushing peers.
+          const anchorIndex = leaves.indexOf(held), anchor = bodies[anchorIndex].at, anchorSlot = slots[anchorIndex];
+          const shape = [{ x: -anchorSlot.x, y: -anchorSlot.y }, ...slots.map(slot => ({ x: slot.x - anchorSlot.x, y: slot.y - anchorSlot.y }))];
+          const initialAngle = Math.atan2(anchor.y - center.y, anchor.x - center.x) - Math.atan2(anchorSlot.y, anchorSlot.x);
+          const fit = clearRadialSlots(shape, [hubBody.radius, ...bodies.map(body => body.radius)],
+            obstacles.map(body => ({ x: body.at.x - anchor.x, y: body.at.y - anchor.y, radius: body.radius })), 1, initialAngle);
+          for (const [index, body] of [hubBody, ...bodies].entries()) place(body, anchor.x + fit.slots[index].x * fit.scale, anchor.y + fit.slots[index].y * fit.scale);
+        } else {
+          const blockers = obstacles.map(body => ({ x: body.at.x - center.x, y: body.at.y - center.y, radius: body.radius }));
+          const rings = new Map<number, number[]>();
+          for (const [index, slot] of slots.entries()) {
+            const radius = Math.round(Math.hypot(slot.x, slot.y) * 1e9) / 1e9;
+            const members = rings.get(radius) ?? []; members.push(index); rings.set(radius, members);
+          }
+          let previousRadius = 0;
+          for (const [radius, indices] of rings) {
+            const minimumScale = previousRadius ? Math.max(1, (previousRadius + 2 * largest + COLLISION_GAP) / radius) : 1;
+            const radii = indices.map(index => bodies[index].radius);
+            const period = radii.every(value => Math.abs(value - radii[0]) < 1e-9) ? 2 * Math.PI / indices.length : 2 * Math.PI;
+            const fit = clearRadialSlots(indices.map(index => slots[index]), radii, blockers, minimumScale, 0, period);
+            previousRadius = radius * fit.scale;
+            for (const [at, index] of indices.entries()) {
+              const x = fit.slots[at].x * fit.scale, y = fit.slots[at].y * fit.scale;
+              place(bodies[index], center.x + x, center.y + y);
+              blockers.push({ x, y, radius: bodies[index].radius });
+            }
+          }
+        }
+      }
+      // Keep the resolved fan intact while movable background bodies yield.
+      if (validFan) for (const id of allowed) fixed.add(id);
+    }
+    return this.clearedPositions({ ...plane, held, fixed }, next, movable);
   }
   /** Pack the visible overview, translating each hidden cohort with its representative. */
   packOverview(discs: readonly (ScreenPoint & { id: string; radius: number })[], links: readonly GraphLink[], cohorts: ReadonlyMap<string, readonly string[]>,
     plane: { right: Point; up: Point; worldPerPixel: (depth: number) => number }, now: number, reduced: boolean): boolean {
-    if (this.dragging || this.settling || this.layoutMoving || this.activeCore || this.activeScopeKey || discs.length < 2) return false;
+    if (this.dragging || this.settling || this.layoutMoving || (this.activeCore && this.activeCore !== "*") || discs.length < 2) return false;
     const valid = discs.filter(disc => this.nodes.has(disc.id) && [disc.x, disc.y, disc.depth, disc.radius].every(Number.isFinite) && disc.depth > 0 && disc.radius > 0);
     if (valid.length !== discs.length) return false;
     const projected = valid.map(disc => ({ ...this.nodes.get(disc.id)!, x: disc.x, y: disc.y, z: 0 }));
@@ -731,7 +864,7 @@ export class Positions {
         if (id !== disc.id && !visible.has(id) && actual.has(id)) target.set(id, add(actual.get(id)!, delta));
       }
     }
-    this.layouts.set(layoutKey("", undefined, "", ""), target);
+    this.layouts.set(layoutKey(this.activeCore, this.activePage, this.activeVisibleKey, this.activeScopeKey), target);
     this.layoutMotion = { from: actual, to: target, actual, start: now };
     if (reduced) this.advance(now, true);
     return true;
@@ -864,6 +997,7 @@ export class Positions {
         this.activeVisibleKey = "";
         this.activeScope = undefined;
         this.activeScopeKey = "";
+        this.activeRenderKey = "";
         if (!retained.size) {
           const overview = this.coreLayout("");
           for (const node of model.nodes) fixPosition(node, overview.get(node.id)!);
@@ -894,13 +1028,14 @@ export class Positions {
   reset() {
     this.cancel();
     this.groupEpoch++;
+    this.activeRenderKey = "";
     const layout = this.source ? this.coreLayout(this.activeCore, this.activePage, this.activeVisible, this.activeScope) : this.baseline;
     for (const [id, value] of layout) fixPosition(this.nodes.get(id)!, value);
     if (this.source) this.canonical = new Map(layout);
     this.observed = new Map([...this.nodes].map(([id, node]) => [id, point(node)]));
     this.revision++;
   }
-  begin(id: string, unitsPerPixel: number, plane: DragPlane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24 }) {
+  begin(id: string, unitsPerPixel: number, plane: DragPlane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: DEFAULT_LINK_PIXELS }) {
     this.cancel();
     const node = this.nodes.get(id);
     if (!node || !Number.isFinite(unitsPerPixel) || unitsPerPixel <= 0) return;
@@ -924,7 +1059,7 @@ export class Positions {
     const members = [...included].filter(other => other !== id).sort();
     const followers = new Map<string, Follower>();
     // Link slack starts the pull; screen footprints can require longer visible edges.
-    const slackPixels = Math.max(24, plane.spacingPixels);
+    const slackPixels = Math.max(DEFAULT_LINK_PIXELS, plane.spacingPixels);
     const project = plane.project ?? ((value: Point) => ({
       x: (value.x * plane.right.x + value.y * plane.right.y + value.z * plane.right.z) / unitsPerPixel,
       y: (value.x * plane.up.x + value.y * plane.up.y + value.z * plane.up.z) / unitsPerPixel,
@@ -977,7 +1112,7 @@ export class Positions {
     // exact layout arrives; a speculative packed layout can stretch linked nodes.
     const defer = typeof Worker !== "undefined" && (included.size >= 128 || (included.size >= 32 && edgeCount > included.size));
     const exact = overfull ? null : validSlots(id, members, this.adjacency, prior) ? prior : defer && edgeCount > 0 ? null : compactSlots(id, members, this.adjacency);
-    const layout = dense ? null : exact ?? (overfull ? packedSlots(id, members, this.adjacency, projected) : null);
+    const layout = dense ? null : starSlots(id, members, this.adjacency) ?? exact ?? (overfull ? packedSlots(id, members, this.adjacency, projected) : null);
     for (const member of members) {
       const target = layout?.get(member);
       const offset = target ? add(add(zero(), plane.right, target.x * spacing), plane.up, target.y * spacing) : add(point(this.nodes.get(member)!), start, -1);
@@ -1021,10 +1156,10 @@ export class Positions {
     const initialIds = new Set([...included, ...(activeClearance?.visible ?? []), ...[...(activeClearance?.cohorts?.values() ?? [])].flat()]);
     const initial = new Map([...initialIds].filter(member => this.nodes.has(member)).map(member => [member, point(this.nodes.get(member)!)] as const));
     this.gesture = { id, start, initial, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance: activeClearance, rigid: null, velocities: new Map(), moved: false, last: null };
-    if (!exact && !overfull && members.length) this.searchLater(id, members, included, plane, spacing, unitsPerPixel * .05);
+    if (!layout && !overfull && members.length) this.searchLater(id, members, included, plane, spacing, unitsPerPixel * .05);
   }
   /** A spatial summary owns real, unlinked members; translate that exact cohort as one gesture. */
-  beginGroup(id: string, members: readonly string[], unitsPerPixel: number, plane: DragPlane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24 }) {
+  beginGroup(id: string, members: readonly string[], unitsPerPixel: number, plane: DragPlane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: DEFAULT_LINK_PIXELS }) {
     this.cancel();
     if (!this.nodes.has(id) || !Number.isFinite(unitsPerPixel) || unitsPerPixel <= 0) return;
     const rigid = new Set(members.filter(member => this.nodes.has(member)));

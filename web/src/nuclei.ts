@@ -63,10 +63,12 @@ export function nucleusView(nodes: readonly PositionedNode[], allLinks: readonly
     counts.set(id, stable.length); groups.set(id, nucleus);
     for (const node of stable) { reserved.add(node.id); if (node.id !== id) hidden.add(node.id); }
   };
-  // A moved group stays intact across hex-cell boundaries until its camera band changes.
+  // A committed display membership stays intact within its camera band.
+  // A singleton reserves its ordinary body without inventing a summary.
   for (const [representative, ids] of locked) {
-    if (ids.length < 6 || !ids.includes(representative) || ids.some(id => !byId.has(id) || !knowledge(byId.get(id)!) || linked.has(id) || expanded.has(id) || id === selected || reserved.has(id))) continue;
-    summarize(ids.map(id => byId.get(id)!), representative);
+    if ((ids.length !== 1 && ids.length < 6) || !ids.includes(representative) || ids.some(id => !byId.has(id) || !knowledge(byId.get(id)!) || linked.has(id) || expanded.has(id) || id === selected || reserved.has(id))) continue;
+    if (ids.length === 1) reserved.add(representative);
+    else summarize(ids.map(id => byId.get(id)!), representative);
   }
   const cells = new Map<string, PositionedNode[]>();
   for (const node of nodes) {
