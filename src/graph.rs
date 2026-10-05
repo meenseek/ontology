@@ -1,7 +1,7 @@
 //! Read-only, bounded graph projection. Every request observes one PostgreSQL snapshot.
 use crate::{
     domain::{AREAS, Error, MAX_RESPONSE_BYTES, Scope, validate_id, validate_search},
-    memory::evidence_current,
+    memory::{evidence_current, memory_content_updated_at},
     store::Store,
 };
 use serde::Deserialize;
@@ -60,6 +60,12 @@ impl GraphQuery {
     }
 }
 
+// Original revision timestamps are distinct from consumer refresh timestamps.
+macro_rules! original_content_updated_at {
+    ($alias:literal) => {
+        concat!("(SELECT v.recorded_at FROM context_material_versions v LEFT JOIN context_material_versions previous ON previous.material_id=v.material_id AND previous.revision=v.revision-1 WHERE v.material_id=", $alias, ".material_id AND v.content_digest IS DISTINCT FROM previous.content_digest ORDER BY v.revision DESC LIMIT 1)")
+    };
+}
 const GRAPH_SQL: &str = concat!(
     r#"WITH terms AS MATERIALIZED (
  SELECT lower(word) AS term,ordinality FROM regexp_split_to_table(btrim($2),'[[:space:]]+') WITH ORDINALITY AS words(word,ordinality)
@@ -90,6 +96,9 @@ const GRAPH_SQL: &str = concat!(
  'current',CASE WHEN cm.material_id IS NULL THEN (s.status='ok' AND p.present AND p.source_revision=s.verified_revision) ELSE true END,'source_kind',s.kind,
  'last_success_at',s.last_success_at,'observed_at',p.observed_at,
  'context_scope',cm.scope,'context_path',cm.path,
+ 'created_at',cm.created_at,'content_updated_at',"#,
+    original_content_updated_at!("cm"),
+    r#",
  'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(current_body.body FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END) AS value,
  NOT EXISTS(SELECT 1 FROM terms WHERE strpos(search_text.text,term)=0) AS matched
  FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id
@@ -107,6 +116,9 @@ const GRAPH_SQL: &str = concat!(
  jsonb_build_object('id','c_'||m.material_id::text,'scope',$1,'kind','document',
  'label',m.path,'title',p.payload->>'title','repository',m.scope,'source_kind','original','context_scope',m.scope,'context_path',m.path,
  'revision',m.revision::text,'content_digest',m.content_digest,'status','ok','present',true,'current',true,
+ 'created_at',m.created_at,'content_updated_at',"#,
+    original_content_updated_at!("m"),
+    r#",
  'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(p.payload->>'body' FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END),
  NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(concat(m.path,' ',m.search_text,' ',p.payload->>'title',' ',p.payload->>'body')),term)=0)
  FROM context_materials m LEFT JOIN context_projection_versions p USING(material_id,revision)
@@ -118,6 +130,9 @@ const GRAPH_SQL: &str = concat!(
  SELECT m.id,'memory',jsonb_build_object('id',m.id,'scope',m.scope,'kind','memory',
  'label',m.document->>'title','revision',m.revision::text,'status',m.status,
  'memory_kind',m.document->>'kind','subject_id',m.subject_id,
+ 'created_at',m.created_at,'content_updated_at',"#,
+    memory_content_updated_at!(),
+    r#",
  'temporal',CASE WHEN (m.document->>'effective_from')::bigint>extract(epoch FROM now()) THEN 'future'
  WHEN (m.document->>'effective_until')::bigint<=extract(epoch FROM now()) THEN 'expired' ELSE 'current' END,
  'supported',stale.memory_id IS NULL,
@@ -179,7 +194,7 @@ const GRAPH_SQL: &str = concat!(
 ), selected AS MATERIALIZED (
  SELECT eligible.*,COALESCE(d.digest,md5('')) AS relation_digest
  FROM eligible LEFT JOIN relation_digests d ON d.id=eligible.id
- ORDER BY focused DESC,neighbor DESC,kind IN ('document','memory') DESC,eligible.id LIMIT $4
+ ORDER BY focused DESC,neighbor DESC,kind IN ('document','memory') DESC,CASE WHEN $2='' THEN (value->>'content_updated_at')::timestamptz END DESC NULLS LAST,(CASE WHEN $2='' THEN COALESCE(value->>'title',value->>'label') END) COLLATE "C",eligible.id LIMIT $4
 ), eligible_links AS MATERIALIZED (
  SELECT l.* FROM scoped_links l JOIN eligible s ON s.id=l.source JOIN eligible t ON t.id=l.target
 ), selected_links AS (
