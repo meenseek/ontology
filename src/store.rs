@@ -308,6 +308,10 @@ impl Store {
                 "011-personal-memory-grouping.sql",
                 include_str!("../schema/migrations/011-personal-memory-grouping.sql"),
             ),
+            (
+                "012-context-projection-refresh.sql",
+                include_str!("../schema/migrations/012-context-projection-refresh.sql"),
+            ),
         ];
         if migrations.len() > expected.len() {
             return Err(Error::Baseline);
