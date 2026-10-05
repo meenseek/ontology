@@ -69,10 +69,7 @@ impl GitReader {
                 || !unique.insert(path)
                 || p.components().any(|c| !matches!(c, Component::Normal(_)))
                 || p.components().any(|c| c.as_os_str() == ".git")
-                || !matches!(
-                    p.extension().and_then(|e| e.to_str()),
-                    Some("md" | "txt" | "rst")
-                )
+                || p.extension().and_then(|e| e.to_str()) != Some("md")
             {
                 return Err(Error::Invalid);
             }
