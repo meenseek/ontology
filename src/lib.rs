@@ -7,6 +7,7 @@ mod context_history;
 pub mod context_importer;
 pub mod context_projection;
 pub mod curation;
+pub mod document_grouping;
 pub mod domain;
 pub mod graph;
 pub mod grouping;

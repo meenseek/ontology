@@ -316,6 +316,18 @@ impl Store {
                 "013-knowledge-taxonomy.sql",
                 include_str!("../schema/migrations/013-knowledge-taxonomy.sql"),
             ),
+            (
+                "014-grouping-claim-ownership.sql",
+                include_str!("../schema/migrations/014-grouping-claim-ownership.sql"),
+            ),
+            (
+                "015-document-grouping.sql",
+                include_str!("../schema/migrations/015-document-grouping.sql"),
+            ),
+            (
+                "016-memory-grouping-history.sql",
+                include_str!("../schema/migrations/016-memory-grouping-history.sql"),
+            ),
         ];
         if migrations.len() > expected.len() {
             return Err(Error::Baseline);

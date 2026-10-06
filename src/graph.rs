@@ -176,13 +176,15 @@ const GRAPH_SQL: &str = concat!(
  SELECT n.id,n.kind,n.matched,n.value ||
  CASE WHEN n.kind='document' THEN jsonb_build_object('subject_id',d.subject_id,'classification_revision',COALESCE(d.revision,0),
  'classification_review_needed',d.source_id IS NOT NULL AND (d.source_revision IS DISTINCT FROM n.value->>'purpose_source_revision'
- OR d.content_digest IS DISTINCT FROM n.value->>'content_digest' OR (d.subject_id IS NOT NULL AND d.subject_revision IS DISTINCT FROM s.revision))) ELSE '{}'::jsonb END ||
+ OR d.content_digest IS DISTINCT FROM n.value->>'content_digest' OR (d.subject_id IS NOT NULL AND (d.subject_revision IS DISTINCT FROM s.revision
+ OR COALESCE(g.mode='auto' AND g.state IN ('pending','processing','suggested','unmatched','error','ineligible'),false))))) ELSE '{}'::jsonb END ||
  CASE WHEN s.id IS NOT NULL THEN jsonb_build_object('subject_name',s.name,'subject_revision',s.revision) ELSE '{}'::jsonb END AS value
  FROM source_nodes n
  LEFT JOIN document_subjects d ON n.kind='document' AND d.scope=$1 AND d.source_id=
  CASE WHEN n.value->>'material_id' IS NOT NULL AND n.value->>'context_path' NOT LIKE 'journal/%' THEN n.value->>'material_id'
  WHEN n.value->>'material_id' IS NULL AND n.value->>'source_kind'='git' THEN n.id END
  LEFT JOIN subjects s ON s.scope=$1 AND s.id=COALESCE(d.subject_id,CASE WHEN n.kind='memory' THEN n.value->>'subject_id' WHEN n.kind='subject' THEN n.id END)
+ LEFT JOIN document_grouping g ON g.scope=d.scope AND g.source_id=d.source_id
 ), purpose_counts AS MATERIALIZED (
  SELECT value->>'subject_id' AS subject_id,count(*) AS total FROM classified_nodes
  WHERE kind IN ('document','memory') AND value->>'subject_id' IS NOT NULL GROUP BY value->>'subject_id'

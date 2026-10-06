@@ -37,7 +37,7 @@ pub struct DocumentIdentity {
     pub entity_id: Option<String>,
 }
 impl DocumentIdentity {
-    fn key(&self) -> Result<String, Error> {
+    pub(crate) fn key(&self) -> Result<String, Error> {
         match (&self.material_id, &self.entity_id) {
             (Some(id), None) => Uuid::parse_str(id)
                 .map(|id| id.to_string())
@@ -119,7 +119,7 @@ impl Store {
 
     // Importers hold the source row before changing Git content. Native writes
     // lock the material; classification takes that same source's shared lock.
-    async fn purpose_source(
+    pub(crate) async fn purpose_source(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         scope: Scope,
@@ -128,7 +128,8 @@ impl Store {
         identity.key()?;
         self.count(1);
         if let Some(material) = &identity.material_id {
-            let row = sqlx::query("SELECT m.material_id::text,m.scope,m.path,m.revision::text AS source_revision,m.content_digest,m.restricted FROM context_materials m WHERE m.material_id=$1::uuid AND NOT m.deleted AND NOT m.restricted AND m.path LIKE '%.md' AND ($2='personal' OR EXISTS(SELECT 1 FROM context_source_bindings b JOIN sources s ON s.id=b.source_id WHERE b.material_id=m.material_id AND s.scope=$2)) FOR SHARE OF m")
+            self.context_gate_in(tx, false).await?;
+            let row = sqlx::query("SELECT m.material_id::text,m.scope,m.path,m.revision::text AS source_revision,m.content_digest,m.restricted FROM context_materials m JOIN context_projection_versions p USING(material_id,revision) WHERE m.material_id=$1::uuid AND NOT m.deleted AND NOT m.restricted AND m.path LIKE '%.md' AND p.payload->>'status' IN ('searchable','unavailable') AND p.payload->>'source_digest'=m.content_digest AND ($2='personal' OR EXISTS(SELECT 1 FROM context_source_bindings b JOIN sources s ON s.id=b.source_id WHERE b.material_id=m.material_id AND s.scope=$2)) FOR SHARE OF m,p")
                 .bind(material).bind(scope.as_str()).fetch_optional(&mut **tx).await.map_err(|_|Error::Storage)?.ok_or(Error::NotFound)?;
             let native_scope: ContextScope = row
                 .get::<String, _>("scope")
@@ -175,6 +176,28 @@ impl Store {
             value["review_needed"] = json!(true);
         }
         value["current_source"] = source;
+        self.count(1);
+        let grouping:Option<Value>=sqlx::query_scalar("SELECT jsonb_build_object('mode',mode,'state',state,'suggestions',suggestions,'reason',reason) FROM document_grouping WHERE scope=$1 AND source_id=$2")
+            .bind(scope.as_str()).bind(key).fetch_optional(&mut **tx).await.map_err(|_|Error::Storage)?;
+        if value["subject_id"].is_string()
+            && grouping.as_ref().is_some_and(|g| {
+                g["mode"] == "auto"
+                    && matches!(
+                        g["state"].as_str(),
+                        Some(
+                            "pending"
+                                | "processing"
+                                | "suggested"
+                                | "unmatched"
+                                | "error"
+                                | "ineligible"
+                        )
+                    )
+            })
+        {
+            value["review_needed"] = json!(true);
+        }
+        value["grouping"] = json!(grouping);
         Ok(value)
     }
 
@@ -253,10 +276,20 @@ impl Store {
         if !same {
             self.count(1);
             sqlx::query("INSERT INTO document_subjects(scope,material_id,entity_id,subject_id,subject_revision,revision,source_revision,content_digest,reason) VALUES($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(scope,source_id) DO UPDATE SET subject_id=EXCLUDED.subject_id,subject_revision=EXCLUDED.subject_revision,revision=EXCLUDED.revision,source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,reason=EXCLUDED.reason,updated_at=now()")
-                .bind(scope.as_str()).bind(input.identity.material_id).bind(&input.identity.entity_id).bind(&input.subject_id).bind(input.subject_revision).bind(input.revision+1).bind(&input.source_revision).bind(&input.content_digest).bind(&input.reason).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+                .bind(scope.as_str()).bind(&input.identity.material_id).bind(&input.identity.entity_id).bind(&input.subject_id).bind(input.subject_revision).bind(input.revision+1).bind(&input.source_revision).bind(&input.content_digest).bind(&input.reason).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
             self.append_document_subject_history(&mut tx, scope, &key)
                 .await?;
         }
+        // Even an identical null membership explicitly cancels a pending judge.
+        self.manual_document_grouping(
+            &mut tx,
+            scope,
+            &input.identity,
+            &source,
+            input.revision + i64::from(!same),
+            input.subject_id.is_some(),
+        )
+        .await?;
         let value = self
             .purpose_membership_value(&mut tx, scope, &key, source)
             .await?;

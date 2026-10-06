@@ -6,6 +6,7 @@ type Page<T> = { items: T[]; next_after?: string | null; next_before_revision?: 
 type Identity = { material_id?: string; entity_id?: string };
 type Membership = { revision: number; subject_id: string | null; subject_revision: number | null; current_subject_revision?: number;
   subject_name?: string | null; definition?: SubjectDefinition | null; reason: string | null; review_needed: boolean;
+  grouping?: { mode: string; state: string; suggestions: { candidate_ids?: string[]; candidate_names?: Record<string, string> }; reason: string | null } | null;
   current_source: { source_revision: string; content_digest: string } };
 type History = { revision: number; subject_name: string | null; reason: string; changed_at: string; definition: SubjectDefinition | null };
 type Props = { node: GraphNode; scope: Scope; csrf: string; request: Request; visible: boolean; disabled: boolean;
@@ -103,9 +104,20 @@ export function DocumentPurpose(props: Props) {
     if (!mounted.current) return;
     setHistory(items => cursor ? [...(items ?? []), ...page.items] : page.items); setBefore(page.next_before_revision ?? null);
   }
+  async function retry() {
+    if (!value || dirty) return;
+    const current = await command<Membership>({ op: "document-grouping-retry", document: { identity, revision: value.revision, ...value.current_source } });
+    if (!mounted.current) return;
+    setValue(current); onChange();
+  }
+  const groupingLabel: Record<string, string> = { pending: "분류 대기", processing: "분류 중", assigned: "자동 배정", suggested: "후보 검토 필요", unmatched: "적합한 목적 없음", error: "수동 검토 필요", manual: "수동 소속", off: "자동 분류 제외", ineligible: "현재 원문 확인 필요" };
   return <section className="section document-purpose"><h3>목적 소속</h3>
     <p>{value ? value.subject_name ?? "미분류" : node.subject_name ?? "미분류"}</p>
     {(value?.review_needed || node.classification_review_needed) && <p className="warning">원문 또는 목적 정의가 바뀌었습니다. 현재 내용을 읽고 소속을 재확인해 주세요.</p>}
+    {value?.grouping && <div className="hint"><p>{groupingLabel[value.grouping.state] ?? "분류 상태 확인 필요"}</p>
+      {value.grouping.reason && <p>{value.grouping.reason}</p>}
+      {!!value.grouping.suggestions.candidate_ids?.length && <p>후보: {value.grouping.suggestions.candidate_ids.map(id => value.grouping?.suggestions.candidate_names?.[id] ?? "목적 그룹").join(", ")}</p>}
+    </div>}
     {value && !editing && <><Definition value={value.definition} />{value.reason && <p className="hint">분류 이유: {value.reason}</p>}</>}
     {!editing ? <button disabled={disabled} onClick={() => void run(read)}>목적 소속 관리</button> : value && <form onSubmit={event => { event.preventDefault(); void run(save); }}><fieldset disabled={disabled}>
       <Definition value={chosen?.definition ?? (value.subject_id === subject ? value.definition : null)} />
@@ -120,6 +132,7 @@ export function DocumentPurpose(props: Props) {
       <button type="button" onClick={() => { setEditing(false); setError(""); }}>취소</button><button type="button" onClick={() => void run(read)}>현재 소속 다시 읽기</button>
     </fieldset></form>}
     <button disabled={disabled} onClick={() => void run(() => past())}>소속 이력</button>
+    {value && <button disabled={disabled || dirty || ["pending", "processing"].includes(value.grouping?.state ?? "")} onClick={() => void run(retry)}>목적 자동 재검토</button>}
     {history && <><ol>{history.map(item => <li key={item.revision}><strong>{item.subject_name ?? "미분류"}</strong> · {new Date(item.changed_at).toLocaleString("ko-KR")}<p>{item.reason}</p><details><summary>당시 목적 정의</summary><Definition value={item.definition} /></details></li>)}</ol>{before && <button disabled={disabled} onClick={() => void run(() => past(before))}>이력 더 보기</button>}</>}
     {error && <p className="error" role="alert">{error}</p>}
   </section>;

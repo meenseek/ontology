@@ -119,6 +119,7 @@ async fn run() -> Result<(), Error> {
         return Ok(());
     }
     if let Some(command) = brain {
+        let wake_documents = matches!(&command, BrainCommand::DocumentGroupingRetry { .. });
         let curation_apply = matches!(
             &command,
             BrainCommand::Curation {
@@ -154,6 +155,17 @@ async fn run() -> Result<(), Error> {
             return Err(Error::Limit);
         }
         println!("{}", String::from_utf8(bytes).map_err(|_| Error::Storage)?);
+        if wake_documents
+            && value["grouping"]["state"] == "pending"
+            && let Ok(binary) = std::env::current_exe()
+        {
+            let _ = std::process::Command::new(binary)
+                .arg("document-grouping-drain")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
         if ((wake_grouping && value["grouping"]["state"] == "pending")
             || (curation_apply && matches!(value["outcome"].as_str(), Some("created" | "updated"))))
             && let Ok(binary) = std::env::current_exe()
@@ -169,6 +181,19 @@ async fn run() -> Result<(), Error> {
     }
     if args.first().map(String::as_str) == Some("grouping-drain") && args.len() == 1 {
         while store.grouping_once().await? {}
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("document-grouping-drain") && args.len() == 1 {
+        loop {
+            store.discover_document_grouping().await?;
+            let mut worked = false;
+            while store.document_grouping_once().await? {
+                worked = true;
+            }
+            if !worked {
+                break;
+            }
+        }
         return Ok(());
     }
     if let Some(path) = sync_path {
@@ -235,6 +260,10 @@ async fn serve(store: Store) -> Result<(), Error> {
     println!("Open {}", config.origin());
     let state = AppState::new(store.clone(), config);
     let grouping_task = tokio::spawn(ontology::grouping::run_loop(store.clone()));
+    let document_discovery_task = tokio::spawn(ontology::document_grouping::run_discovery_loop(
+        store.clone(),
+    ));
+    let document_grouping_task = tokio::spawn(ontology::document_grouping::run_loop(store.clone()));
     let sync_task = std::env::var_os("ONTOLOGY_SYNC_CONFIG").map(|path| {
         tokio::spawn(ontology::sync::run_loop(
             store,
@@ -254,6 +283,10 @@ async fn serve(store: Store) -> Result<(), Error> {
     }
     grouping_task.abort();
     let _ = grouping_task.await;
+    document_discovery_task.abort();
+    let _ = document_discovery_task.await;
+    document_grouping_task.abort();
+    let _ = document_grouping_task.await;
     result
 }
 

@@ -592,7 +592,8 @@ impl Store {
                             crate::grouping::on_capture(&mut tx, scope, &memory_id, &input).await?;
                             (memory_id, "created")
                         };
-                        self.append_history(&mut tx, scope, &memory_id).await?;
+                        self.append_history(&mut tx, scope, &memory_id, false)
+                            .await?;
                         self.pin_evidence(&mut tx, scope, &memory_id, None).await?;
                         json!({"outcome":outcome,"review_id":id,"memory_id":memory_id})
                     }
