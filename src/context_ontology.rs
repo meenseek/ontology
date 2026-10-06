@@ -21,11 +21,11 @@ impl Store {
         paths: &[String],
         definitions: Option<&[RelationDefinition]>,
     ) -> Result<Value, Error> {
-        let mut paths = normalize_paths(scope, paths)?;
-        paths.sort();
         if paths.is_empty() || paths.iter().any(|path| !path.ends_with(".md")) {
             return Err(Error::Invalid);
         }
+        let mut paths = normalize_paths(scope, paths)?;
+        paths.sort();
         if let Some(definitions) = definitions {
             RelationDefinition::validate_all(definitions).map_err(|_| Error::Invalid)?;
         }
