@@ -5,6 +5,7 @@ mod context_commit;
 mod context_edit;
 mod context_history;
 pub mod context_importer;
+mod context_ontology;
 pub mod context_projection;
 pub mod curation;
 pub mod document_grouping;

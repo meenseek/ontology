@@ -41,6 +41,55 @@ native의 다른 분류 축도 관계와 구분한다. `ontology: true`인 원�
 
 원문의 `status`·`confidence`를 앱의 출처 확인 상태, 기록 저장 상태, 근거 검증 결과로 바꾸어 해석하지 않는다. `type`이나 `domain`만으로 같은 목적 소속을 추론하지 않는다. 앱의 `personal`·`meenseek` 조회 범위와 원문의 native scope도 별개이며, 조회 위치가 원문의 소속을 바꾸지 않는다.
 
+## 의미 관계를 추가하기 전 진단
+
+Native `context`의 `ontology-audit`는 지정한 원문과 이번 호출에 제공한 관계 정의를 대조하는 읽기 전용 진단이다. 원문·관계·분류·이력·검색 projection을 변경하지 않으며 관계 수락·진실 판단을 수행하지 않는다. DB 준비와 store identity 확인은 README의 native 시작 경계를 따른다.
+
+```json
+{"op":"ontology-audit","scope":"personal","paths":["<실제 원문의 상대 경로>.md"]}
+```
+
+하나의 native scope에서 정확한 소문자 `.md` 경로 1~100개를 지정한다. 파일당 64 KiB, 전체 원문 bytes와 최종 JSON 응답 각각 1 MiB 상한을 적용한다. bytes와 store·material identity·revision·digest는 같은 SQL snapshot에서 읽는다. 기존 shared gate가 pending apply·복구를 막으며, 자료 하나라도 없거나 삭제·제한 상태, 형식 오류, 선언 scope 불일치이면 전체 선택이 실패한다. 일부 원문을 생략한 검사를 전체 결과로 반환하지 않는다. 검색 projection의 준비·재작성은 필요하지 않다.
+
+`definitions` 생략 또는 `null`은 개체 목록·관계 종류·출처 조사다. 관계 정의를 제공했을 때만 그 기준의 방향별 대상 종류·자기 연결 조건을 검사한다. 빈 `definitions: []`는 정의가 하나도 없다는 기준을 명시적으로 제공한 경우다. 정의는 이번 호출의 진단 기준이며 새 정책·관계 사전으로 자동 저장하지 않는다.
+
+| 정의 필드 | 뜻·제한 |
+| --- | --- |
+| `id` | 기존 소문자 kebab-case 관계 종류. 입력에서 중복할 수 없다. |
+| `definition` | 관계 성립 조건을 설명하는 비어 있지 않은 한 줄, 최대 4,096 UTF-8 bytes. |
+| `from_kinds`, `to_kinds` | 각 방향에서 허용하는 `kind:name`의 `kind` 목록 1~32개, 중복 없이 지정한다. |
+| `allow_self` | 같은 개체를 양 끝점에 쓸 수 있는지 명시하는 boolean. |
+
+정의는 최대 32개이며 기존 CLI의 32 KiB 요청 상한도 적용한다. 아래는 합성 예시이며 `depends-on`을 실제 관계 사전으로 채택한 결과가 아니다.
+
+```json
+{
+  "op":"ontology-audit","scope":"personal",
+  "paths":["<실제 원문의 상대 경로>.md"],
+  "definitions":[{
+    "id":"depends-on",
+    "definition":"출발 프로젝트의 운영에 대상 시스템의 제공 또는 상태가 필요하다.",
+    "from_kinds":["project"],"to_kinds":["system"],"allow_self":false
+  }]
+}
+```
+
+결과의 `sources`는 원문별 store ID, scope, 정확한 상대 경로, material ID, 현재 revision·content digest·byte length를 반환한다. 동일한 `from/type/to`는 한 관계로 모으되 모든 출처 경로를 보존한다. `assertions`·종류별 건수는 출처별 관계 항목 수이고 `relations`는 선택 안에서 중복을 모은 literal triple 목록이다. 비슷한 개체 이름·관계 동의어는 합치지 않는다.
+
+`selection_digest`와 `criteria_digest`는 선택과 기준의 재현용 지문이다. 관계·개체·기준 문자열에는 기존 secret redaction을 적용하며 값이 바뀌면 `redacted: true`다. 호출자가 선택한 출처 경로와 그 참조는 정확히 유지해 `sources`의 원문 근거와 연결한다. 지문은 redaction 전 값에 결합되고, 가려진 출력만으로 개체 동일성을 판단하지 않는다. 원문 본문은 출력하지 않는다.
+
+| 진단 코드 | 해석 |
+| --- | --- |
+| `endpoint-not-listed-in-selected-entities` | 끝점이 선택한 원문들의 `entities` 목록에 없다. 이 목록은 다루는 개체를 뜻하며, 누락 자체는 원문 오류나 전역 개체 부재 판정이 아니다. |
+| `duplicate-entity-declaration` | 같은 원문의 `entities` 목록에 같은 ID가 반복된다. |
+| `relation-type-not-defined-in-input` | 제공한 정의 목록에 관계 종류가 없다. 기존 관계를 잘못됐다고 확정하지 않는다. |
+| `source-kind-not-allowed`, `target-kind-not-allowed` | 정의의 방향별 대상 종류와 끝점의 종류가 다르다. |
+| `self-relation-not-allowed` | 정의는 자기 연결을 허용하지 않지만 양 끝점이 같다. |
+
+결과는 의미 검토의 시작점이다. 정의의 타당성, 원문이 관계를 실제로 주장하는지, 반대 근거·적용 조건·기간은 전체 원문과 함께 별도 검토한다. 문장 함의·인과성·모순·전역 개체 존재는 판정하지 않는다. 진단이 비었다는 이유로 관계를 확정하지 않는다.
+
+새 자료는 기존 개체 ID와 관계 종류부터 확인한다. 새 관계가 필요하면 실제 포함·제외 사례와 변경 이유를 검토하며, 자료 추가만으로 기존 ID·의미를 바꾸거나 전체 자료를 재분류하지 않는다. 현재 `kind:name` ID를 표시 이름에 맞춰 자동 변경하지 않는다. 확인된 정의·관계의 원문 변경은 기존 native 쓰기·독립 검토 경계를 따른다. DB를 읽지 못한 실행에서는 합성 입력 검증과 실제 의미 검증을 구분해 보고한다.
+
 ## 서로 다른 묶음
 
 | 묶음 | 기준·소유자 | 안정성의 의미 |

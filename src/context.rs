@@ -123,6 +123,11 @@ pub enum ContextCommand {
         #[serde(default = "default_limit")]
         limit: usize,
     },
+    OntologyAudit {
+        scope: ContextScope,
+        paths: Vec<String>,
+        definitions: Option<Vec<context_core::ontology::RelationDefinition>>,
+    },
     Inventory {
         root: PathBuf,
         scopes: Vec<ContextScope>,
@@ -344,6 +349,14 @@ impl Store {
                 query,
                 limit,
             } => self.semantic_context(&scopes, &query, limit, true).await?,
+            ContextCommand::OntologyAudit {
+                scope,
+                paths,
+                definitions,
+            } => {
+                self.audit_context_ontology(&scope, &paths, definitions.as_deref())
+                    .await?
+            }
             ContextCommand::Inventory { root, scopes } => {
                 serde_json::to_value(inventory(&root, &scopes)?).map_err(|_| Error::Storage)?
             }

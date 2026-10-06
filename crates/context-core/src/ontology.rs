@@ -7,6 +7,12 @@ use serde::Deserialize;
 
 use crate::{ContextVaultError, Result, frontmatter::ParsedFrontmatter};
 
+mod audit;
+pub use audit::{
+    AuditDocument, AuditFinding, AuditPredicateCount, AuditRelation, AuditReport,
+    RelationDefinition, audit,
+};
+
 const MAX_ONTOLOGY_VALUE_BYTES: usize = 4_096;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
