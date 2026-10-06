@@ -10,7 +10,7 @@ without one, keep this Terminal open and use Ctrl-C to stop its server.
 `repair --target database` prepares only the existing DB and exits with JSON;
 it reuses a healthy DB and never starts, builds or restarts the HTTP app.
 Recovery never creates a DB/container or applies a missing SQL migration. An
-upgrade mismatch requires the existing README backup/upgrade procedure first.
+upgrade mismatch requires the existing AGENTS.md backup/upgrade procedure first.
 """
 
 import argparse
@@ -277,7 +277,7 @@ def verify_schema(docker, info, manifest, env):
         actual = None
     if actual != expected:
         raise Failure("database", "schema_mismatch",
-                      "DB에 기록된 SQL과 현재 소스가 다릅니다. README의 백업·업그레이드 절차를 먼저 확인하세요.")
+                      "DB에 기록된 SQL과 현재 소스가 다릅니다. AGENTS.md의 백업·업그레이드 절차를 먼저 확인하세요.")
 
 
 def unchanged(manifest, root=ROOT):

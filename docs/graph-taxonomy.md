@@ -43,7 +43,7 @@ native의 다른 분류 축도 관계와 구분한다. `ontology: true`인 원�
 
 ## 의미 관계를 추가하기 전 진단
 
-Native `context`의 `ontology-audit`는 지정한 원문과 이번 호출에 제공한 관계 정의를 대조하는 읽기 전용 진단이다. 원문·관계·분류·이력·검색 projection을 변경하지 않으며 관계 수락·진실 판단을 수행하지 않는다. DB 준비와 store identity 확인은 README의 native 시작 경계를 따른다.
+Native `context`의 `ontology-audit`는 지정한 원문과 이번 호출에 제공한 관계 정의를 대조하는 읽기 전용 진단이다. 원문·관계·분류·이력·검색 projection을 변경하지 않으며 관계 수락·진실 판단을 수행하지 않는다. DB 준비와 store identity 확인은 [AGENTS.md의 공통 시작](../AGENTS.md#공통-시작)을 따른다.
 
 ```json
 {"op":"ontology-audit","scope":"personal","paths":["<실제 원문의 상대 경로>.md"]}
@@ -160,9 +160,7 @@ native 갱신은 기존 `projection-status`/`project`의 현재 manifest 검증�
 
 지도에서 native 문서는 현재 revision·원문 digest에 일치하는 projection이 `searchable` 또는 `unavailable`일 때만 표시한다. 제외·삭제·미준비 projection은 집계·검색·초점·간선에서도 제외한다. 기존 binding이 있으면 과거 수입 사본으로 되돌아가지 않는다. 목적 소속 API도 같은 원문 경로 eligibility를 확인한다. 원문과 이력은 계속 보존한다.
 
-`013-knowledge-taxonomy.sql`은 이미 적용된 001~011 데이터와 공유된 012 이후 목표 schema로 옮기는 이 저장소 소유의 migration이다. 기존 subject ID와 모든 원문·기억·근거·이력을 보존하고 정의·문서 소속 이력과 Git 파생 경로를 추가한다. 아직 적용하지 않은 최초 코드 초안은 하나의 013으로 정리했다. 운영 전환은 전체 backup 복원, 기존 열/bytes/history 보존, 원문별 후보의 currency, 독립 리뷰와 실제 화면 검증을 거친다. 운영 적용·검증 기록은 해당 실행의 기존 작업 기록이 소유한다.
-
-추가 후보 `014-grouping-claim-ownership.sql`은 기억 작업의 claim 소유권을, `015-document-grouping.sql`은 문서의 자동·수동 의도와 처리 상태를 보존한다. 문서 소속과 이력의 원장은 기존 `document_subjects`다. 015는 모든 기존 native UUID를 양 앱 범위에서, 기존 Git ID도 metadata baseline으로 `manual/off`에 둔다. 과거 미분류나 늦은 binding을 신규 자동 요청으로 해석하지 않는다. 기존 migration은 변경하지 않는다. 구버전 writer를 모두 종료한 뒤 별도 복원 DB의 기존 열·원문 bytes·소속·이력 보존과 반복 초기화를 확인해야 한다. 코드 후보와 운영 적용 완료를 구분한다.
+문서 소속과 이력의 원장은 기존 `document_subjects`다. 과거 미분류나 늦은 binding을 신규 자동 요청으로 해석하지 않는다. 스키마 변경 이력과 DB별 적용 확인·업그레이드 절차는 [AGENTS.md의 백업과 복원 확인](../AGENTS.md#백업과-복원-확인)을 따른다.
 
 | 검증 상황 | 통과 기준 |
 | --- | --- |
@@ -183,6 +181,6 @@ native 갱신은 기존 `projection-status`/`project`의 현재 manifest 검증�
 
 이 문서는 저장·조회·표시 계약이다. 개별 원문 분류의 검토 결과와 적용 여부는 해당 실행의 digest-bound 증거로 확인한다. 본문이 부족한 자료와 주된 목적이 불명확한 자료는 이유를 남기고 미분류로 유지한다. 관계가 없는 자료에도 임의의 연결을 만들지 않는다. 기능 검증과 실제 운영 적용은 각각 확인한 범위로 기록한다.
 
-기록을 다른 기록의 근거로 선택한 경우, 소속만 바뀐 revision은 근거 내용 변경이 아니다. 고정한 revision 이후의 모든 이력이 명시적인 소속 변경이고 전체 document와 accepted 상태가 같을 때만 기존 근거를 현재로 유지한다. `016-memory-grouping-history.sql`은 해당 이력에만 grouping_only를 기록하며 기존 이력은 false로 보존한다. 내용이 같은 correct도 기존대로 과거 generation을 무효화한다. 본문·제목·종류·적용 기간·근거·정제 provenance의 변경, 철회 또는 이력 누락은 재확인이 필요하다. 내용을 바꿨다가 원래대로 복원해도 과거 연결을 현재로 되살리지 않는다. 조회·지도·새 저장은 같은 판정을 쓰며 과거 pin과 bytes는 그대로 보존한다. 정제 후보 token은 소속을 포함한 입력의 변경을 따로 확인한다.
+기록을 다른 기록의 근거로 선택한 경우, 소속만 바뀐 revision은 근거 내용 변경이 아니다. 고정한 revision 이후의 모든 이력이 명시적인 소속 변경이고 전체 document와 accepted 상태가 같을 때만 기존 근거를 현재로 유지한다. 이력의 `grouping_only` 표식으로 이를 구분하며, 표식이 없는 과거 이력까지 소속 변경으로 추정하지 않는다. 내용이 같은 correct도 기존대로 과거 generation을 무효화한다. 본문·제목·종류·적용 기간·근거·정제 provenance의 변경, 철회 또는 이력 누락은 재확인이 필요하다. 내용을 바꿨다가 원래대로 복원해도 과거 연결을 현재로 되살리지 않는다. 조회·지도·새 저장은 같은 판정을 쓰며 과거 pin과 bytes는 그대로 보존한다. 정제 후보 token은 소속을 포함한 입력의 변경을 따로 확인한다.
 
 기록의 목적 소속 변경은 두 앱 범위에서 기존 `grouping-set`의 metadata transaction을 사용한다. 회사 범위는 manual/off만 허용하고 자동 분류 큐를 만들지 않는다. 내용이 같은 회사 기록 저장도 이 경로로 처리해 같은 소속은 CAS 확인 후 no-op이 된다. 기록 document JSON·검토 provenance·이전 근거 bytes는 재작성하지 않고 기존 이력·근거 pin을 이어간다.
