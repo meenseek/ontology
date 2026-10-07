@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::{OntologyMetadata, validate_identifier, validate_value};
-use crate::{ContextVaultError, Result};
+use crate::{ContextError, Result};
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -20,7 +20,7 @@ pub struct RelationDefinition {
 impl RelationDefinition {
     pub fn validate_all(definitions: &[Self]) -> Result<()> {
         if definitions.len() > 32 {
-            return Err(ContextVaultError::invalid_input(
+            return Err(ContextError::invalid_input(
                 "at most 32 relation definitions are allowed",
             ));
         }
@@ -29,13 +29,13 @@ impl RelationDefinition {
             validate_identifier("definition.id", &definition.id)?;
             validate_value("definition.definition", &definition.definition)?;
             if !ids.insert(&definition.id) {
-                return Err(ContextVaultError::invalid_input(
+                return Err(ContextError::invalid_input(
                     "relation definition IDs must be unique",
                 ));
             }
             for kinds in [&definition.from_kinds, &definition.to_kinds] {
                 if kinds.is_empty() || kinds.len() > 32 {
-                    return Err(ContextVaultError::invalid_input(
+                    return Err(ContextError::invalid_input(
                         "allowed entity kinds must contain 1 to 32 values",
                     ));
                 }
@@ -43,7 +43,7 @@ impl RelationDefinition {
                 for kind in kinds {
                     validate_identifier("definition.entity_kind", kind)?;
                     if !unique.insert(kind) {
-                        return Err(ContextVaultError::invalid_input(
+                        return Err(ContextError::invalid_input(
                             "allowed entity kinds must be unique",
                         ));
                     }
@@ -107,7 +107,7 @@ pub fn audit(
     let mut findings = BTreeSet::new();
     for document in documents {
         if !paths.insert(document.path) {
-            return Err(ContextVaultError::invalid_input(
+            return Err(ContextError::invalid_input(
                 "audit source paths must be unique",
             ));
         }

@@ -3,7 +3,7 @@ use std::fmt::Display;
 use serde::de::DeserializeOwned;
 use serde_yaml_ng::{Mapping, Value};
 
-use crate::{ContextVaultError, Result};
+use crate::{ContextError, Result};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ParsedFrontmatter {
@@ -17,13 +17,13 @@ impl ParsedFrontmatter {
             return Ok(None);
         };
         let value = serde_yaml_ng::from_str::<Value>(raw).map_err(|error| {
-            ContextVaultError::invalid_input(format!("invalid Markdown frontmatter YAML: {error}"))
+            ContextError::invalid_input(format!("invalid Markdown frontmatter YAML: {error}"))
         })?;
         let mapping = match value {
             Value::Mapping(mapping) => mapping,
             Value::Null => Mapping::new(),
             _ => {
-                return Err(ContextVaultError::invalid_input(
+                return Err(ContextError::invalid_input(
                     "Markdown frontmatter must be a YAML mapping",
                 ));
             }
@@ -37,7 +37,7 @@ impl ParsedFrontmatter {
     pub(crate) fn from_markdown(markdown: &str) -> Result<Option<Self>> {
         let (raw, _) = split_markdown_frontmatter(markdown);
         if raw.is_none() && markdown.starts_with("---\n") {
-            return Err(ContextVaultError::invalid_input(
+            return Err(ContextError::invalid_input(
                 "Markdown frontmatter is missing its closing delimiter",
             ));
         }
@@ -88,19 +88,9 @@ impl ParsedFrontmatter {
         }
     }
 
-    pub(crate) fn optional_scalar_text(&self, field: &str) -> Result<Option<String>> {
-        match self.value(field) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::String(value)) => Ok(Some(value.clone())),
-            Some(Value::Bool(value)) => Ok(Some(value.to_string())),
-            Some(Value::Number(value)) => Ok(Some(value.to_string())),
-            Some(_) => Err(field_type_error(field, "a scalar value")),
-        }
-    }
-
     pub(crate) fn deserialize<T: DeserializeOwned>(&self) -> Result<T> {
         serde_yaml_ng::from_value(Value::Mapping(self.mapping.clone())).map_err(|error| {
-            ContextVaultError::invalid_input(format!("invalid Markdown frontmatter: {error}"))
+            ContextError::invalid_input(format!("invalid Markdown frontmatter: {error}"))
         })
     }
 
@@ -121,8 +111,8 @@ pub(crate) fn split_markdown_frontmatter(content: &str) -> (Option<&str>, &str) 
     (Some(frontmatter), body)
 }
 
-fn field_type_error(field: &str, expected: impl Display) -> ContextVaultError {
-    ContextVaultError::invalid_input(format!(
+fn field_type_error(field: &str, expected: impl Display) -> ContextError {
+    ContextError::invalid_input(format!(
         "Markdown frontmatter field `{field}` must be {expected}"
     ))
 }

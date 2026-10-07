@@ -2,13 +2,13 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod atomic_file;
+pub mod context;
 pub mod document;
 mod frontmatter;
 pub mod harness;
 pub mod ontology;
 pub mod redaction;
 pub mod search_text;
-pub mod vault;
 pub mod verification;
 
 use std::{
@@ -18,14 +18,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub use document::{Document, Scope, read_markdown_documents};
-pub use vault::{
+pub use context::{
     ContextMetadata, SearchScope, delete_context, export_context, read_context, save_context,
     save_context_with_metadata,
 };
+pub use document::{Document, Scope, read_markdown_documents};
 
 #[derive(Debug)]
-pub enum ContextVaultError {
+pub enum ContextError {
     InvalidInput(String),
     Io {
         operation: &'static str,
@@ -34,7 +34,7 @@ pub enum ContextVaultError {
     },
 }
 
-impl ContextVaultError {
+impl ContextError {
     #[must_use]
     pub fn invalid_input(message: impl Into<String>) -> Self {
         Self::InvalidInput(message.into())
@@ -50,7 +50,7 @@ impl ContextVaultError {
     }
 }
 
-impl Display for ContextVaultError {
+impl Display for ContextError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidInput(message) => write!(formatter, "{message}"),
@@ -67,7 +67,7 @@ impl Display for ContextVaultError {
     }
 }
 
-impl Error for ContextVaultError {
+impl Error for ContextError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidInput(_) => None,
@@ -76,9 +76,9 @@ impl Error for ContextVaultError {
     }
 }
 
-pub type Result<T> = std::result::Result<T, ContextVaultError>;
+pub type Result<T> = std::result::Result<T, ContextError>;
 
-pub fn init_vault(root: impl AsRef<Path>) -> Result<()> {
+pub fn init_context(root: impl AsRef<Path>) -> Result<()> {
     let root = root.as_ref();
     for directory in [
         "profile/preferences",
@@ -98,7 +98,7 @@ pub fn init_vault(root: impl AsRef<Path>) -> Result<()> {
     ] {
         let path = root.join(directory);
         fs::create_dir_all(&path)
-            .map_err(|source| ContextVaultError::io("create directory", path, source))?;
+            .map_err(|source| ContextError::io("create directory", path, source))?;
     }
     Ok(())
 }
@@ -111,7 +111,7 @@ mod tests {
     fn init_creates_expected_directories() {
         let temp = test_support::TempDirectory::new("init");
 
-        init_vault(temp.path()).expect("vault directories should be created");
+        init_context(temp.path()).expect("context directories should be created");
 
         for directory in [
             "profile/preferences",
@@ -157,7 +157,7 @@ pub(crate) mod test_support {
                 .expect("system clock should be after the Unix epoch")
                 .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "llm-context-vault-{name}-{}-{timestamp}",
+                "native-context-{name}-{}-{timestamp}",
                 process::id()
             ));
             fs::create_dir_all(&path).expect("temporary directory should be created");

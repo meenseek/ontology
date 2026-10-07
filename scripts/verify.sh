@@ -28,8 +28,9 @@ CHILD
   cmp "$wrapper_fixture/input" "$WRAPPER_CAPTURE/stdin"
   [[ "$(cat "$WRAPPER_CAPTURE/database")" == postgresql://dummy-from-env ]]
   for command in context harness; do
-    env DATABASE_URL=postgresql://dummy-explicit bash "$wrapper" "$command" 'argument with spaces' '--option' 'two words' < "$wrapper_fixture/input"
+    env DATABASE_URL=postgresql://dummy-explicit ONTOLOGY_POLICY_CONFIG="$wrapper_fixture/owner policy.json" bash "$wrapper" "$command" 'argument with spaces' '--option' 'two words' < "$wrapper_fixture/input"
     printf '%s\0' "$command" 'argument with spaces' '--option' 'two words' > "$wrapper_fixture/expected"
+    if [[ "$command" == harness ]]; then printf '%s\0' '--policy-config' "$wrapper_fixture/owner policy.json" >> "$wrapper_fixture/expected"; fi
     cmp "$wrapper_fixture/expected" "$WRAPPER_CAPTURE/argv"
     cmp "$wrapper_fixture/input" "$WRAPPER_CAPTURE/stdin"
   done
@@ -39,8 +40,17 @@ CHILD
   [[ ! -e "$wrapper_fixture/sourced" ]]
   [[ "$(cat "$WRAPPER_CAPTURE/database")" == postgresql://dummy-explicit ]]
   wrapper_status=0
-  env DATABASE_URL=postgresql://dummy-explicit WRAPPER_EXIT=37 bash "$wrapper" harness < /dev/null || wrapper_status=$?
+  env DATABASE_URL=postgresql://dummy-explicit WRAPPER_EXIT=37 ONTOLOGY_POLICY_CONFIG="$wrapper_fixture/policy.json" bash "$wrapper" harness < /dev/null || wrapper_status=$?
   [[ "$wrapper_status" -eq 37 ]]
+  env DATABASE_URL=postgresql://dummy-explicit ONTOLOGY_POLICY_CONFIG="$wrapper_fixture/unselected.json" bash "$wrapper" harness resolve --policy-config "$wrapper_fixture/explicit policy.json" < "$wrapper_fixture/input"
+  printf '%s\0' harness resolve --policy-config "$wrapper_fixture/explicit policy.json" > "$wrapper_fixture/expected"
+  cmp "$wrapper_fixture/expected" "$WRAPPER_CAPTURE/argv"
+  cmp "$wrapper_fixture/input" "$WRAPPER_CAPTURE/stdin"
+  rm -f "$WRAPPER_CAPTURE/argv"
+  if env -u ONTOLOGY_POLICY_CONFIG DATABASE_URL=postgresql://dummy-explicit bash "$wrapper" harness resolve < /dev/null > "$wrapper_fixture/stdout" 2> "$wrapper_fixture/stderr"; then
+    echo 'Wrapper accepted missing Harness policy configuration' >&2; exit 1
+  fi
+  [[ ! -e "$WRAPPER_CAPTURE/argv" ]]
   printf 'ONTOLOGY_DB_PASSWORD=dummy_password_123456\n' > "$wrapper_fixture/.env"
   env -u DATABASE_URL -u ONTOLOGY_DB_PASSWORD bash "$wrapper" < /dev/null
   [[ "$(cat "$WRAPPER_CAPTURE/database")" == postgresql://ontology:dummy_password_123456@127.0.0.1:55432/ontology ]]

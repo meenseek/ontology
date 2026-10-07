@@ -108,9 +108,13 @@ async fn verify_independent_cli_frontier(
     let preview = prepared.clone();
     let invocations = store
         .with_native_context(owned_root, move |source| {
-            let engine =
-                HarnessEngine::with_source(source.view_root(), &owned_workspace, source.clone())
-                    .expect("owned native engine");
+            let engine = HarnessEngine::with_source(
+                source.view_root(),
+                &owned_workspace,
+                source.clone(),
+                fixtures::context_fixture::configuration(),
+            )
+            .expect("owned native engine");
             Ok(engine
                 .begin_execution(&preview.plan.resolved_request, &preview.role_run, &[])
                 .expect("Core-issued preview")

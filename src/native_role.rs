@@ -1,5 +1,5 @@
 use crate::native_harness::{
-    MAX_HARNESS_JSON_BYTES, NativeHarnessError as ContextVaultError, NativeHarnessResult as Result,
+    MAX_HARNESS_JSON_BYTES, NativeHarnessError, NativeHarnessResult as Result,
 };
 use context_core::harness::{
     HarnessEngine, HarnessExecutionEvent, HarnessExecutionRecord, HarnessRole, PreparedHarnessRun,
@@ -17,12 +17,12 @@ use std::{
 // It does not select policies, evaluate evidence, or authorize source mutations.
 pub(crate) fn validate_codex_binary(binary: &Path) -> Result<()> {
     if !binary.is_absolute() {
-        return Err(ContextVaultError::invalid_input(
+        return Err(NativeHarnessError::invalid_input(
             "--codex-binary requires an absolute executable path",
         ));
     }
     let metadata = fs::metadata(binary)
-        .map_err(|error| ContextVaultError::io("inspect Codex executable", binary, error))?;
+        .map_err(|error| NativeHarnessError::io("inspect Codex executable", binary, error))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -31,7 +31,7 @@ pub(crate) fn validate_codex_binary(binary: &Path) -> Result<()> {
         }
     }
     let _ = metadata;
-    Err(ContextVaultError::invalid_input(
+    Err(NativeHarnessError::invalid_input(
         "unsupported runtime: Codex execution requires a Unix executable file",
     ))
 }
@@ -47,7 +47,7 @@ pub(crate) fn execute_codex_frontier(
     let mut executed = std::collections::BTreeSet::new();
     loop {
         if record.prepared_run_digest != prepared.prepared_run_digest {
-            return Err(ContextVaultError::invalid_input(
+            return Err(NativeHarnessError::invalid_input(
                 "Core frontier and Codex lifecycle preparation differ",
             ));
         }
@@ -59,7 +59,7 @@ pub(crate) fn execute_codex_frontier(
                 )
             })
         {
-            return Err(ContextVaultError::invalid_input(
+            return Err(NativeHarnessError::invalid_input(
                 "unsupported runtime: --codex-binary supports only Reviewer/Verifier frontiers without tools",
             ));
         }
@@ -70,7 +70,7 @@ pub(crate) fn execute_codex_frontier(
                 return Ok(record);
             }
             return HarnessExecutionRecord::evaluate_durable(engine, &record.run_identifier, None)
-                .map_err(|error| ContextVaultError::invalid_input(error.to_string()));
+                .map_err(|error| NativeHarnessError::invalid_input(error.to_string()));
         }
         let invocations = record
             .ready_role_invocations
@@ -85,13 +85,13 @@ pub(crate) fn execute_codex_frontier(
             .cloned()
             .collect::<Vec<_>>();
         if invocations.is_empty() {
-            return Err(ContextVaultError::invalid_input(
+            return Err(NativeHarnessError::invalid_input(
                 "unsupported runtime: no concurrent role capacity",
             ));
         }
         for invocation in &invocations {
             if !executed.insert(invocation.role) {
-                return Err(ContextVaultError::invalid_input(
+                return Err(NativeHarnessError::invalid_input(
                     "unsupported runtime: automatic role retries are not supported",
                 ));
             }
@@ -110,13 +110,13 @@ pub(crate) fn execute_codex_frontier(
                                     execute_codex_role(binary, prepared, invocation, cancelled)
                                 }))
                                 .unwrap_or_else(|_| {
-                                    Err(ContextVaultError::invalid_input(
+                                    Err(NativeHarnessError::invalid_input(
                                         "Codex role worker panicked",
                                     ))
                                 });
                             let _ = sender.send(result);
                         })
-                        .map_err(|error| ContextVaultError::invalid_input(error.to_string()))?;
+                        .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
                 }
                 drop(sender);
                 // Only the parent submits, in observed completion order, against
@@ -131,7 +131,7 @@ pub(crate) fn execute_codex_frontier(
                             result: Box::new(result),
                         },
                     )
-                    .map_err(|error| ContextVaultError::invalid_input(error.to_string()))?;
+                    .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
                     if halted {
                         break;
                     }
@@ -234,7 +234,7 @@ impl CodexDirectory {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| ContextVaultError::invalid_input(error.to_string()))?
+            .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?
             .as_nanos();
         let path = env::temp_dir().join(format!(
             "ontology-role-{}-{nonce}-{}",
@@ -244,10 +244,10 @@ impl CodexDirectory {
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
-            .map_err(|error| ContextVaultError::io("create private Codex cwd", &path, error))?;
+            .map_err(|error| NativeHarnessError::io("create private Codex cwd", &path, error))?;
         let mut directory = Self(path);
         directory.0 = directory.0.canonicalize().map_err(|error| {
-            ContextVaultError::io("resolve private Codex cwd", &directory.0, error)
+            NativeHarnessError::io("resolve private Codex cwd", &directory.0, error)
         })?;
         Ok(directory)
     }
@@ -357,14 +357,14 @@ pub(crate) fn execute_codex_role(
         invocation.role,
         HarnessRole::Reviewer | HarnessRole::Verifier
     ) {
-        return Err(ContextVaultError::invalid_input(
+        return Err(NativeHarnessError::invalid_input(
             "unsupported runtime: only Reviewer/Verifier may execute",
         ));
     }
     // Serialize the exact typed segments once: no wrapper, prompt preamble, target
     // reread, summary, content replacement or argument-length-dependent transport.
     let input = serde_json::to_vec(&invocation.segments)
-        .map_err(|error| ContextVaultError::invalid_input(error.to_string()))?;
+        .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
     if input.len()
         > prepared
             .role_run
@@ -372,7 +372,7 @@ pub(crate) fn execute_codex_role(
             .max_role_invocation_bytes
         || input.len() as u64 > MAX_HARNESS_JSON_BYTES
     {
-        return Err(ContextVaultError::invalid_input(
+        return Err(NativeHarnessError::invalid_input(
             "unsupported runtime: Codex stdin exceeds the finite input limit",
         ));
     }
@@ -392,12 +392,12 @@ pub(crate) fn execute_codex_role(
             run_codex_process(binary, &input, invocation.role, &limits, cancelled)?;
         invocation
             .bind_result(lifecycle, outcome)
-            .map_err(|error| ContextVaultError::invalid_input(error.to_string()))
+            .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))
     }
     #[cfg(not(unix))]
     {
         let _ = (binary, input, cancelled);
-        Err(ContextVaultError::invalid_input(
+        Err(NativeHarnessError::invalid_input(
             "unsupported runtime: Codex requires Unix process groups",
         ))
     }
@@ -519,14 +519,16 @@ pub(crate) fn run_codex_process(
         .mode(0o600)
         .open(&schema_path)
         .and_then(|mut file| file.write_all(schema))
-        .map_err(|error| ContextVaultError::io("write Codex output schema", &schema_path, error))?;
+        .map_err(|error| {
+            NativeHarnessError::io("write Codex output schema", &schema_path, error)
+        })?;
     let started_at_millis = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|error| ContextVaultError::invalid_input(error.to_string()))?
+            .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?
             .as_millis(),
     )
-    .map_err(|_| ContextVaultError::invalid_input("Codex start time overflow"))?;
+    .map_err(|_| NativeHarnessError::invalid_input("Codex start time overflow"))?;
     let started = Instant::now();
     // Reserve one polling quantum for scheduling and at most half the close
     // budget for forced group termination/reaping. All reported times are actual
@@ -540,17 +542,17 @@ pub(crate) fn run_codex_process(
         .saturating_sub(quantum);
     let total_deadline = started
         .checked_add(total)
-        .ok_or_else(|| ContextVaultError::invalid_input("Codex total deadline overflow"))?;
+        .ok_or_else(|| NativeHarnessError::invalid_input("Codex total deadline overflow"))?;
     let execution_deadline = started
         .checked_add(execution)
-        .ok_or_else(|| ContextVaultError::invalid_input("Codex execution deadline overflow"))?;
+        .ok_or_else(|| NativeHarnessError::invalid_input("Codex execution deadline overflow"))?;
     if execution.is_zero()
         || close.is_zero()
         || started_at_millis
             .checked_add(limits.max_total_role_millis)
             .is_none()
     {
-        return Err(ContextVaultError::invalid_input(
+        return Err(NativeHarnessError::invalid_input(
             "unsupported runtime: insufficient finite Codex lifecycle budget",
         ));
     }
@@ -574,7 +576,7 @@ pub(crate) fn run_codex_process(
         .stdout(process::Stdio::piped())
         .stderr(process::Stdio::piped())
         .spawn()
-        .map_err(|error| ContextVaultError::io("start Codex role", binary, error))?;
+        .map_err(|error| NativeHarnessError::io("start Codex role", binary, error))?;
     let group =
         i32::try_from(child.id()).expect("a Unix child PID must fit the native signed pid_t");
     let mut process = CodexProcess {
@@ -630,7 +632,7 @@ pub(crate) fn run_codex_process(
     loop {
         let now = Instant::now();
         if now >= total_deadline {
-            return Err(ContextVaultError::invalid_input(
+            return Err(NativeHarnessError::invalid_input(
                 "Codex exceeded the total lifecycle limit; group termination requested",
             ));
         }
@@ -812,7 +814,7 @@ pub(crate) fn run_codex_process(
                     || "Codex process group termination was not requested".to_owned(),
                     |error| format!("cannot confirm Codex process group termination: {error}"),
                 );
-                return Err(ContextVaultError::invalid_input(codex_failure_message(
+                return Err(NativeHarnessError::invalid_input(codex_failure_message(
                     &detail,
                     exit,
                     &stderr_tail,
@@ -820,7 +822,7 @@ pub(crate) fn run_codex_process(
             }
             process.cleaned = true;
             let Some((context_id, context_ready_at_millis)) = native.context.clone() else {
-                return Err(ContextVaultError::invalid_input(codex_failure_message(
+                return Err(NativeHarnessError::invalid_input(codex_failure_message(
                     "Codex execution failed without an observed native thread.started context ID",
                     exit,
                     &stderr_tail,
@@ -877,14 +879,14 @@ pub(crate) fn run_codex_process(
                     > limits.max_role_execution_millis
                 || grace_deadline_at_millis.is_some_and(|deadline| terminal_at_millis > deadline)
             {
-                return Err(ContextVaultError::invalid_input(
+                return Err(NativeHarnessError::invalid_input(
                     "observed Codex lifecycle exceeded prepared limits",
                 ));
             }
             return Ok((lifecycle, outcome));
         }
         if close_deadline.is_some_and(|deadline| now >= deadline) {
-            return Err(ContextVaultError::invalid_input(
+            return Err(NativeHarnessError::invalid_input(
                 "Codex group did not close and reap within the prepared close limit",
             ));
         }

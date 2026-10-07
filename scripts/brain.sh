@@ -14,4 +14,14 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
   fi
 fi
 if [[ "$#" -eq 0 ]]; then set -- brain; fi
+if [[ "${1:-}" == harness ]]; then
+  policy_flag=false
+  for argument in "$@"; do
+    if [[ "$argument" == --policy-config ]]; then policy_flag=true; break; fi
+  done
+  if [[ "$policy_flag" == false ]]; then
+    : "${ONTOLOGY_POLICY_CONFIG:?Set ONTOLOGY_POLICY_CONFIG or pass --policy-config for harness}"
+    set -- "$@" --policy-config "$ONTOLOGY_POLICY_CONFIG"
+  fi
+fi
 exec target/debug/ontology "$@"

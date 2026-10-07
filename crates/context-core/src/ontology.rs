@@ -5,7 +5,7 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::{ContextVaultError, Result, frontmatter::ParsedFrontmatter};
+use crate::{ContextError, Result, frontmatter::ParsedFrontmatter};
 
 mod audit;
 pub use audit::{
@@ -195,7 +195,7 @@ impl OntologyMetadata {
                 relation.relation_type.as_str(),
                 relation.to.as_str(),
             )) {
-                return Err(ContextVaultError::invalid_input(
+                return Err(ContextError::invalid_input(
                     "ontology relations must not contain duplicate edges",
                 ));
             }
@@ -219,14 +219,14 @@ impl OntologyMetadata {
                         )
                     })
                 {
-                    return Err(ContextVaultError::invalid_input(
+                    return Err(ContextError::invalid_input(
                         "ontology related_link_prefix must be a vault-relative directory",
                     ));
                 }
             }
             (false, None) => {}
             _ => {
-                return Err(ContextVaultError::invalid_input(
+                return Err(ContextError::invalid_input(
                     "ontology related_from_links requires a vault-relative related_link_prefix",
                 ));
             }
@@ -237,7 +237,7 @@ impl OntologyMetadata {
 
 fn validate_optional_vocabulary(field: &str, value: Option<&str>, allowed: &[&str]) -> Result<()> {
     if value.is_some_and(|value| !allowed.contains(&value)) {
-        return Err(ContextVaultError::invalid_input(format!(
+        return Err(ContextError::invalid_input(format!(
             "ontology field `{field}` is not in the supported vocabulary"
         )));
     }
@@ -252,7 +252,7 @@ fn validate_identifier(field: &str, value: &str) -> Result<()> {
             character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
         })
     {
-        return Err(ContextVaultError::invalid_input(format!(
+        return Err(ContextError::invalid_input(format!(
             "ontology field `{field}` must be a lowercase kebab-case identifier"
         )));
     }
@@ -262,7 +262,7 @@ fn validate_identifier(field: &str, value: &str) -> Result<()> {
 fn validate_entity_id(field: &str, value: &str) -> Result<()> {
     validate_value(field, value)?;
     let Some((kind, name)) = value.split_once(':') else {
-        return Err(ContextVaultError::invalid_input(format!(
+        return Err(ContextError::invalid_input(format!(
             "ontology field `{field}` must use `kind:name` entity IDs"
         )));
     };
@@ -282,7 +282,7 @@ fn validate_related_path(value: &str) -> Result<()> {
             )
         })
     {
-        return Err(ContextVaultError::invalid_input(
+        return Err(ContextError::invalid_input(
             "ontology field `related` must be a vault-relative Markdown path",
         ));
     }
@@ -311,7 +311,7 @@ fn validate_value(field: &str, value: &str) -> Result<()> {
         || value.contains(['\n', '\r'])
         || value.len() > MAX_ONTOLOGY_VALUE_BYTES
     {
-        return Err(ContextVaultError::invalid_input(format!(
+        return Err(ContextError::invalid_input(format!(
             "ontology field `{field}` must be a non-empty single-line value no larger than {MAX_ONTOLOGY_VALUE_BYTES} bytes"
         )));
     }
@@ -330,13 +330,13 @@ mod tests {
     #[test]
     fn parses_ontology_projection_fields() {
         let metadata = parse(
-            "ontology: true\ntype: project\ndomain: engineering\nstatus: active\nconfidence: high\nentities:\n  - project:llm-context-vault\nrelations:\n  - from: project:llm-context-vault\n    type: supports\n    to: knowledge:context-retrieval\napplies_to:\n  - writing\nrelated:\n  - personal/projects/llm-context-vault.md",
+            "ontology: true\ntype: project\ndomain: engineering\nstatus: active\nconfidence: high\nentities:\n  - project:native-context\nrelations:\n  - from: project:native-context\n    type: supports\n    to: knowledge:context-retrieval\napplies_to:\n  - writing\nrelated:\n  - personal/projects/native-context.md",
         )
         .expect("ontology metadata should parse");
 
         assert_eq!(metadata.document_type(), Some("project"));
         assert_eq!(metadata.domain(), Some("engineering"));
-        assert_eq!(metadata.entities(), ["project:llm-context-vault"]);
+        assert_eq!(metadata.entities(), ["project:native-context"]);
         assert_eq!(metadata.relations()[0].relation_type(), "supports");
         assert!(
             metadata

@@ -1,0 +1,278 @@
+{
+  "documents": [
+    {
+      "key": "control",
+      "id": "control",
+      "path": "vault/profile/rules/control.md",
+      "project_entrypoint": false,
+      "dependencies": []
+    },
+    {
+      "key": "foundation",
+      "id": "foundation",
+      "path": "vault/profile/rules/foundation.md",
+      "project_entrypoint": false,
+      "dependencies": []
+    },
+    {
+      "key": "authoring",
+      "id": "authoring",
+      "path": "vault/profile/rules/authoring.md",
+      "project_entrypoint": false,
+      "dependencies": [
+        "foundation"
+      ]
+    },
+    {
+      "key": "checks",
+      "id": "checks",
+      "path": "vault/profile/rules/checks.md",
+      "project_entrypoint": false,
+      "dependencies": [
+        "foundation"
+      ]
+    },
+    {
+      "key": "directory",
+      "id": "directory",
+      "path": "vault/work/common/router/directory.md",
+      "project_entrypoint": false,
+      "dependencies": []
+    },
+    {
+      "key": "route",
+      "id": "route",
+      "path": "vault/work/{company}/preferences/routes.md",
+      "project_entrypoint": false,
+      "dependencies": [
+        "directory"
+      ]
+    },
+    {
+      "key": "project-evidence",
+      "id": "project-evidence",
+      "path": "vault/personal/projects/{project}",
+      "project_entrypoint": true,
+      "dependencies": []
+    },
+    {
+      "key": "company-evidence",
+      "id": "company-evidence",
+      "path": "vault/work/{company}/index.md",
+      "project_entrypoint": false,
+      "dependencies": [
+        "directory"
+      ]
+    },
+    {
+      "key": "language",
+      "id": "language",
+      "path": "vault/profile/rules/language.md",
+      "project_entrypoint": false,
+      "dependencies": [
+        "foundation"
+      ]
+    }
+  ],
+  "orchestrator": [
+    "control"
+  ],
+  "rules": [
+    {
+      "selector": {
+        "actions": [],
+        "owners": [],
+        "intents": [],
+        "surfaces": [],
+        "curation_kinds": [],
+        "target_kind": "any"
+      },
+      "owner_source": "primary",
+      "documents": [
+        "foundation"
+      ],
+      "roles": [
+        "writer",
+        "verifier",
+        "reviewer",
+        "specialist"
+      ]
+    },
+    {
+      "selector": {
+        "actions": [
+          "code-write",
+          "code-review",
+          "document-write",
+          "document-review"
+        ],
+        "owners": [],
+        "intents": [],
+        "surfaces": [],
+        "curation_kinds": [],
+        "target_kind": "any"
+      },
+      "owner_source": "primary",
+      "documents": [
+        "authoring"
+      ],
+      "roles": [
+        "writer",
+        "reviewer"
+      ]
+    },
+    {
+      "selector": {
+        "actions": [],
+        "owners": [],
+        "intents": [],
+        "surfaces": [],
+        "curation_kinds": [],
+        "target_kind": "any"
+      },
+      "owner_source": "primary",
+      "documents": [
+        "checks"
+      ],
+      "roles": [
+        "verifier",
+        "reviewer"
+      ]
+    },
+    {
+      "selector": {
+        "actions": [],
+        "owners": [
+          "personal-project"
+        ],
+        "intents": [],
+        "surfaces": [],
+        "curation_kinds": [],
+        "target_kind": "any"
+      },
+      "owner_source": "grant",
+      "documents": [
+        "project-evidence"
+      ],
+      "roles": [
+        "writer",
+        "verifier",
+        "reviewer",
+        "specialist"
+      ]
+    },
+    {
+      "selector": {
+        "actions": [],
+        "owners": [
+          "company",
+          "company-project"
+        ],
+        "intents": [],
+        "surfaces": [],
+        "curation_kinds": [],
+        "target_kind": "any"
+      },
+      "owner_source": "grant",
+      "documents": [
+        "company-evidence"
+      ],
+      "roles": [
+        "writer",
+        "verifier",
+        "reviewer",
+        "specialist"
+      ]
+    },
+    {
+      "selector": {
+        "actions": [
+          "code-write",
+          "code-review"
+        ],
+        "owners": [],
+        "intents": [],
+        "surfaces": [],
+        "curation_kinds": [],
+        "target_kind": "rust"
+      },
+      "owner_source": "primary",
+      "documents": [
+        "language"
+      ],
+      "roles": [
+        "writer",
+        "verifier",
+        "reviewer"
+      ]
+    }
+  ],
+  "defaults": [
+    {
+      "rule": "general-intent",
+      "document": "control"
+    },
+    {
+      "rule": "standard-execution-profile",
+      "document": "control"
+    },
+    {
+      "rule": "non-journal-read-confirmation-not-required",
+      "document": "control"
+    }
+  ],
+  "target_constraints": [
+    {
+      "selector": {
+        "actions": [],
+        "owners": [],
+        "intents": [
+          "solo-mvp-ideation"
+        ],
+        "surfaces": [],
+        "curation_kinds": [],
+        "target_kind": "any"
+      },
+      "path": "vault/personal/projects/ideas/tracker.md",
+      "allow_curation_source": false
+    },
+    {
+      "selector": {
+        "actions": [
+          "vault-curation"
+        ],
+        "owners": [
+          "personal"
+        ],
+        "intents": [],
+        "surfaces": [],
+        "curation_kinds": [
+          "idea"
+        ],
+        "target_kind": "any"
+      },
+      "path": "vault/personal/projects/ideas/tracker.md",
+      "allow_curation_source": true
+    }
+  ],
+  "context_exclusions": [
+    {
+      "intent": "career-artifact",
+      "paths": [
+        "vault/personal/projects/ideas"
+      ]
+    }
+  ],
+  "company": {
+    "registry": "directory",
+    "routing": "route",
+    "leaf_dependencies": [
+      "route",
+      "foundation"
+    ],
+    "leaf_id_prefix": "leaf-",
+    "shared_documents": [
+      "authoring"
+    ]
+  }
+}

@@ -307,6 +307,7 @@ impl VaultRepository {
     pub(super) fn with_source(
         root: impl AsRef<Path>,
         source: Arc<dyn ContextSource>,
+        policy_configuration: PolicyConfiguration,
     ) -> HarnessResult<Self> {
         let root = canonical_directory(root.as_ref(), "Vault repository root")?;
         if source.view_root() != root {
@@ -322,6 +323,7 @@ impl VaultRepository {
             root,
             source,
             store_identity,
+            policy_configuration,
         };
         if repository.source_metadata(Path::new("vault"))?.kind != SourcePathKind::Directory {
             return Err(HarnessError::InvalidRepository(format!(
@@ -558,12 +560,14 @@ impl HarnessEngine {
         vault_repository_root: impl AsRef<Path>,
         workspace_root: impl AsRef<Path>,
         source: Arc<dyn ContextSource>,
+        policy_configuration: PolicyConfiguration,
     ) -> HarnessResult<Self> {
         Self::with_source_and_router(
             vault_repository_root,
             workspace_root,
             source,
             HarnessRouter::default(),
+            policy_configuration,
         )
     }
 
@@ -572,18 +576,29 @@ impl HarnessEngine {
         workspace_root: impl AsRef<Path>,
         source: Arc<dyn ContextSource>,
         router: HarnessRouter,
+        policy_configuration: PolicyConfiguration,
     ) -> HarnessResult<Self> {
         #[cfg(unix)]
         {
             Ok(Self {
                 router,
-                vault: VaultRepository::with_source(vault_repository_root, source)?,
+                vault: VaultRepository::with_source(
+                    vault_repository_root,
+                    source,
+                    policy_configuration,
+                )?,
                 workspace_root: canonical_directory(workspace_root.as_ref(), "workspace root")?,
             })
         }
         #[cfg(not(unix))]
         {
-            let _ = (vault_repository_root, workspace_root, source, router);
+            let _ = (
+                vault_repository_root,
+                workspace_root,
+                source,
+                router,
+                policy_configuration,
+            );
             Err(invalid_source(
                 "the Harness source port currently requires Unix file safety",
             ))
