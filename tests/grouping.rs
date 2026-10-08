@@ -864,10 +864,137 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
         curation_processed,
         "CLI curation must wake the detached grouping worker"
     );
+    model_input_and_temporary_directory_cleanup(&store, &binary, temp.path()).await;
     unsafe {
         std::env::remove_var("ONTOLOGY_CODEX_BINARY");
     }
     metadata_only_memory_changes_preserve_downstream_evidence(&store).await;
+}
+
+async fn model_input_and_temporary_directory_cleanup(store: &Store, binary: &Path, temp: &Path) {
+    assert!(!store.grouping_once().await.unwrap());
+    let definition = json!({
+        "purpose":"password: synthetic-purpose",
+        "include":"학습 sk-synthetic123456789 검토",
+        "exclude":"cookie=synthetic-exclusion"
+    });
+    let subject = call(store, json!({"op":"subject-create","scope":"personal","idempotency_key":"redaction-defined-subject","name":"API_KEY: synthetic-subject","definition":definition})).await;
+    let fallback = call(store, json!({"op":"subject-create","scope":"personal","idempotency_key":"redaction-fallback-subject","name":"합성 예시 묶음"})).await;
+    call(store, json!({"op":"remember","scope":"personal","idempotency_key":"redaction-example","memory":{"title":"secret: synthetic-example","body":"합성 예시","subject_id":fallback["id"]}})).await;
+    let before: Value = sqlx::query_scalar("SELECT to_jsonb(s) FROM subjects s WHERE id=$1")
+        .bind(subject["id"].as_str().unwrap())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+
+    for outcome in ["success", "failure", "cancel"] {
+        let capture = temp.join(format!("judgment-{outcome}"));
+        std::fs::create_dir(&capture).unwrap();
+        let output = json!({"type":"item.completed","item":{"type":"agent_message","text":judgment("assign",subject["id"].as_str(),vec![],None).to_string()}}).to_string();
+        let finish = match outcome {
+            "failure" => "exit 1".to_owned(),
+            "cancel" => "exec /bin/sleep 60".to_owned(),
+            _ => format!("printf '%s\\n' '{output}'"),
+        };
+        let script = format!(
+            "#!/bin/sh\ncat >{}\npwd >{}\nprintf '%s' \"$$\" >{}\ntouch {}\n{finish}\n",
+            quoted_path(&capture.join("input")),
+            quoted_path(&capture.join("directory")),
+            quoted_path(&capture.join("pid")),
+            quoted_path(&capture.join("started")),
+        );
+        std::fs::write(binary, script).unwrap();
+        std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let memory = json!({"title":"token: synthetic-title","body":"일반 내용\npassword=synthetic-body\n끝"});
+        let saved = call(store, json!({"op":"remember","scope":"personal","idempotency_key":format!("redaction-record-{outcome}"),"memory":memory})).await;
+        let worker = {
+            let store = store.clone();
+            tokio::spawn(async move { store.grouping_once().await.unwrap() })
+        };
+        wait_marker(&capture.join("started")).await;
+        let directory = std::path::PathBuf::from(
+            std::fs::read_to_string(capture.join("directory"))
+                .unwrap()
+                .trim(),
+        );
+        if outcome == "cancel" {
+            assert_eq!(
+                std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            worker.abort();
+            assert!(worker.await.unwrap_err().is_cancelled());
+            let pid: i32 = std::fs::read_to_string(capture.join("pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while unsafe { libc::kill(pid, 0) } == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("cancelled fake provider was stopped");
+        } else {
+            assert!(worker.await.unwrap());
+        }
+        assert!(
+            !directory.exists(),
+            "judgment directory must be removed after {outcome}"
+        );
+        if outcome == "success" {
+            let prompt = std::fs::read_to_string(capture.join("input")).unwrap();
+            let input: Value =
+                serde_json::from_str(prompt.split("입력 JSON:\n").nth(1).unwrap()).unwrap();
+            assert_eq!(input["record"]["title"], "token: [REDACTED]");
+            assert_eq!(
+                input["record"]["body"],
+                "일반 내용\npassword= [REDACTED]\n끝"
+            );
+            let candidates = input["subjects"].as_array().unwrap();
+            let defined = candidates
+                .iter()
+                .find(|s| s["id"] == subject["id"])
+                .unwrap();
+            assert_eq!(defined["revision"], subject["revision"]);
+            assert_eq!(defined["name"], "API_KEY: [REDACTED]");
+            assert_eq!(
+                defined["definition"],
+                json!({"purpose":"password: [REDACTED]","include":"학습 [REDACTED] 검토","exclude":"cookie= [REDACTED]"})
+            );
+            let fallback = candidates
+                .iter()
+                .find(|s| s["id"] == fallback["id"])
+                .unwrap();
+            assert_eq!(fallback["name"], "합성 예시 묶음");
+            assert!(fallback["definition"].is_null());
+            assert_eq!(fallback["example_titles"], json!(["secret: [REDACTED]"]));
+            let current = call(
+                store,
+                json!({"op":"read","scope":"personal","id":saved["id"]}),
+            )
+            .await;
+            assert_eq!(current["subject_id"], subject["id"]);
+            assert_eq!(current["title"], memory["title"]);
+            assert_eq!(current["body"], memory["body"]);
+        } else if outcome == "failure" {
+            let current = call(
+                store,
+                json!({"op":"read","scope":"personal","id":saved["id"]}),
+            )
+            .await;
+            assert_eq!(current["grouping"]["state"], "error");
+        }
+    }
+    let after: Value = sqlx::query_scalar("SELECT to_jsonb(s) FROM subjects s WHERE id=$1")
+        .bind(subject["id"].as_str().unwrap())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "redaction must not change stored definitions"
+    );
 }
 
 async fn metadata_only_memory_changes_preserve_downstream_evidence(store: &Store) {
