@@ -457,15 +457,16 @@ impl NativeContextSource {
         self.store.count(1);
         self.metadata_queries.fetch_add(1, Ordering::Relaxed);
         let rows=self.handle.block_on(sqlx::query("SELECT source_path,material_id::text,revision,content_digest,byte_len,deleted FROM context_materials WHERE source_path=ANY($1) ORDER BY source_path COLLATE \"C\"").bind(&logical).fetch_all(&mut *conn)).map_err(|_|source_error(Error::Storage))?;
-        paths
+        let states = rows
             .iter()
-            .zip(logical)
-            .map(|(_path, logical)| {
-                let state = rows
-                    .iter()
-                    .find(|r| r.get::<String, _>("source_path") == logical)
-                    .map(stored_state)
-                    .transpose()?
+            .map(|row| Ok((row.get::<String, _>("source_path"), stored_state(row)?)))
+            .collect::<HarnessResult<std::collections::BTreeMap<_, _>>>()?;
+        logical
+            .into_iter()
+            .map(|logical| {
+                let state = states
+                    .get(&logical)
+                    .cloned()
                     .unwrap_or(StoredSourceState::Missing);
                 Ok(SourceVersion {
                     logical_path: format!("vault/{logical}"),
@@ -705,9 +706,13 @@ impl Store {
         Ok(conn)
     }
     async fn open_context_connection(&self, exclusive: bool) -> Result<PgConnection, Error> {
-        let mut conn = PgConnection::connect_with(&self.database_options)
-            .await
-            .map_err(|_| Error::Storage)?;
+        let mut conn = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            PgConnection::connect_with(&self.database_options),
+        )
+        .await
+        .map_err(|_| Error::Storage)?
+        .map_err(|_| Error::Storage)?;
         self.count(1);
         sqlx::raw_sql("SET statement_timeout='5s'; SET lock_timeout='3s'")
             .execute(&mut conn)
@@ -779,6 +784,9 @@ pub struct NativeContextSession {
     pub(crate) preserved_targets: std::collections::BTreeSet<String>,
 }
 impl NativeContextSession {
+    pub(crate) fn view_root(&self) -> &Path {
+        &self.view.root
+    }
     pub(crate) fn recovery_source_factory(
         &self,
     ) -> impl FnOnce(
@@ -869,5 +877,39 @@ impl Store {
         })
         .await
         .map_err(|_| Error::Storage)?
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_connection_timeout_is_bounded_without_opening_the_pool() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stall = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let store = Store::for_native(&format!(
+            "postgresql://ontology:synthetic_password_only@127.0.0.1:{port}/ontology_test_timeout"
+        ))
+        .unwrap();
+        assert_eq!(store.calls(), 0);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            store.open_context_connection(false),
+        )
+        .await
+        .expect("dedicated connect must time out");
+        stall.abort();
+        assert!(matches!(result, Err(Error::Storage)));
+        assert_eq!(
+            store.calls(),
+            0,
+            "failed handshake runs no SQL and opens no unused pool"
+        );
     }
 }

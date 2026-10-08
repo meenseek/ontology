@@ -8,7 +8,7 @@ mod fixtures;
 use ontology::store::Store;
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 #[tokio::test]
-async fn native_role_rejects_writer_and_executes_independent_review_frontier() {
+async fn native_role_executes_independent_review_frontier() {
     let url = std::env::var("TEST_DATABASE_URL").expect("owned test database");
     assert!(
         ontology::config::database_options(&url)
@@ -25,34 +25,6 @@ async fn native_role_rejects_writer_and_executes_independent_review_frontier() {
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace = workspace.path().canonicalize().expect("external workspace");
     fs::write(workspace.join("document.md"), "# Synthetic document").expect("target");
-    let request = fixtures::envelope(&policy, vec!["document.md".into()], vec![], false);
-    let (artifacts, _) = fixtures::cli_prepared(&store, &root, &workspace, request).await;
-    let binary = artifacts.path().join("fake-codex");
-    let marker = artifacts.path().join("launched");
-    fs::write(
-        &binary,
-        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
-    )
-    .expect("synthetic executable");
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).expect("mode");
-    let output = fixtures::command(
-        &store,
-        &root,
-        &workspace,
-        "begin",
-        &[
-            "--prepared-run".into(),
-            artifacts.path().join("prepared.json").display().to_string(),
-            "--run-id".into(),
-            "native-unsupported-writer".into(),
-            "--codex-binary".into(),
-            binary.display().to_string(),
-        ],
-    )
-    .await;
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported runtime"));
-    assert!(!Path::new(&marker).exists());
     verify_independent_cli_frontier(&store, &root, &workspace, &policy).await;
 }
 

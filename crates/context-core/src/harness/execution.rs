@@ -13,6 +13,7 @@ const RUNS_RELATIVE_DIRECTORY: &str = ".llm-context-vault-harness/runs";
 const RUN_PREPARED_FILE: &str = "prepared.json";
 const RUN_HEAD_FILE: &str = "head.json";
 const RUN_APPLY_ATTEMPT_FILE: &str = "apply-attempt.json";
+const RUN_PRE_APPLY_CLOSE_FILE: &str = "pre-apply-close.json";
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum EvaluationSubject {
@@ -2895,6 +2896,7 @@ pub enum HarnessExecutionState {
     Evaluated,
     Validated,
     Finalized,
+    ClosedBeforeApply,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2921,6 +2923,110 @@ pub struct HarnessExecutionRecord {
     pub finalization_digest: Option<String>,
     pub batch_receipt_digest: Option<String>,
     pub record_digest: String,
+}
+
+/// Administrative termination, not a role result, evaluation or apply receipt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessPreApplyCloseReceipt {
+    pub version: u32,
+    pub run_identifier: String,
+    pub prepared_run_digest: String,
+    pub prepared_run_raw_digest: String,
+    pub store_identity: SourceStoreIdentity,
+    pub original_state: HarnessExecutionState,
+    pub original_sequence: u64,
+    pub original_predecessor_record_digest: Option<String>,
+    pub original_record_digest: String,
+    pub resulting_record_digest: String,
+    pub policy_configuration_digest: String,
+    pub reason: String,
+    pub verified_at_millis: u64,
+    pub receipt_digest: String,
+}
+
+impl HarnessPreApplyCloseReceipt {
+    fn digest(&self) -> HarnessResult<String> {
+        let mut value = self.clone();
+        value.receipt_digest.clear();
+        serialized_digest(&value)
+    }
+
+    fn original_head(
+        &self,
+        prepared: &PreparedHarnessRun,
+        raw: &[u8],
+        head: &HarnessExecutionRecord,
+    ) -> HarnessResult<HarnessExecutionRecord> {
+        require_version(
+            "pre-apply close receipt",
+            self.version,
+            HARNESS_SCHEMA_VERSION,
+        )?;
+        validate_single_line("pre-apply close reason", &self.reason, 16 * 1024)?;
+        validate_digest(
+            "pre-apply close policy configuration",
+            &self.policy_configuration_digest,
+        )?;
+        if self.receipt_digest != self.digest()?
+            || self.verified_at_millis == 0
+            || self.run_identifier != head.run_identifier
+            || self.prepared_run_digest != prepared.prepared_run_digest
+            || self.prepared_run_raw_digest != byte_digest(raw)
+            || prepared
+                .plan
+                .resolved_request
+                .plan
+                .source_versions
+                .store_identity
+                .as_ref()
+                != Some(&self.store_identity)
+            || !matches!(
+                self.original_state,
+                HarnessExecutionState::Begun | HarnessExecutionState::Executing
+            )
+        {
+            return Err(HarnessError::InvalidSubmission(
+                "pre-apply closure proof differs from its exact run".to_owned(),
+            ));
+        }
+        let mut original = head.clone();
+        if head.state == HarnessExecutionState::ClosedBeforeApply {
+            original.state = self.original_state;
+            original.sequence = self.original_sequence;
+            original
+                .predecessor_record_digest
+                .clone_from(&self.original_predecessor_record_digest);
+            let step = execution_step(
+                &prepared.plan.resolved_request.plan,
+                &prepared.role_run,
+                &original.revision_history,
+                original.role_execution.clone(),
+            )?;
+            original.ready_role_invocations = step.ready_role_invocations;
+            original.ready_tool_invocation = step.ready_tool_invocation;
+            original.record_digest = original.calculate_digest()?;
+        }
+        original.validate(prepared, raw)?;
+        let closed = original.closed_before_apply()?;
+        if original.state != self.original_state
+            || original.sequence != self.original_sequence
+            || original.predecessor_record_digest != self.original_predecessor_record_digest
+            || original.record_digest != self.original_record_digest
+            || closed.record_digest != self.resulting_record_digest
+            || (head.state == HarnessExecutionState::ClosedBeforeApply && *head != closed)
+            || original
+                .role_execution
+                .role_results
+                .iter()
+                .any(|r| r.lifecycle.closed_at_millis > self.verified_at_millis)
+        {
+            return Err(HarnessError::InvalidSubmission(
+                "pre-apply closure does not preserve its exact predecessor".to_owned(),
+            ));
+        }
+        Ok(original)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3475,7 +3581,44 @@ impl DurableRunStore {
             ));
         }
         head.validate(&prepared, &raw_prepared_run)?;
+        self.validate_pre_apply_close_boundary(&prepared, &raw_prepared_run, &head)?;
         Ok((raw_prepared_run, prepared, head))
+    }
+
+    fn validate_pre_apply_close_boundary(
+        &self,
+        prepared: &PreparedHarnessRun,
+        raw: &[u8],
+        head: &HarnessExecutionRecord,
+    ) -> HarnessResult<()> {
+        let path = self.run_directory.join(RUN_PRE_APPLY_CLOSE_FILE);
+        match fs::symlink_metadata(&path) {
+            Ok(_) if head.state == HarnessExecutionState::ClosedBeforeApply => {
+                let receipt = read_owner_only_json::<HarnessPreApplyCloseReceipt>(
+                    &path,
+                    "pre-apply close receipt",
+                )?;
+                receipt.original_head(prepared, raw, head)?;
+                Ok(())
+            }
+            Ok(_) => Err(HarnessError::InvalidSubmission(
+                "persisted pre-apply closure must finish through explicit closure recovery"
+                    .to_owned(),
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if head.state == HarnessExecutionState::ClosedBeforeApply {
+                    Err(HarnessError::InvalidSubmission(
+                        "closed pre-apply run requires its exact termination proof".to_owned(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            Err(error) => Err(HarnessError::FileRead {
+                path,
+                message: error.to_string(),
+            }),
+        }
     }
 
     fn load_prepared(&self) -> HarnessResult<(Vec<u8>, PreparedHarnessRun)> {
@@ -4813,6 +4956,188 @@ impl HarnessExecutionRecord {
         }
     }
 
+    /// Close a stopped native-only run without replaying source or policy bindings.
+    /// The retained run/store locks protect the actual no-effect proof and CAS.
+    pub fn close_durable_before_apply(
+        workspace: &Path,
+        run: &str,
+        reason: &str,
+        policy_configuration_digest: &str,
+        session: &mut dyn ContextCommitSession,
+    ) -> HarnessResult<(Self, HarnessPreApplyCloseReceipt)> {
+        Self::close_durable_before_apply_with_hook(
+            workspace,
+            run,
+            reason,
+            policy_configuration_digest,
+            session,
+            || Ok(()),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "source-free closure keeps proof validation, effect checking and predecessor CAS in one locked boundary"
+    )]
+    pub(super) fn close_durable_before_apply_with_hook(
+        workspace: &Path,
+        run: &str,
+        reason: &str,
+        policy_configuration_digest: &str,
+        session: &mut dyn ContextCommitSession,
+        after_proof: impl FnOnce() -> HarnessResult<()>,
+    ) -> HarnessResult<(Self, HarnessPreApplyCloseReceipt)> {
+        #[cfg(unix)]
+        {
+            validate_single_line("pre-apply close reason", reason, 16 * 1024)?;
+            validate_digest(
+                "pre-apply close policy configuration",
+                policy_configuration_digest,
+            )?;
+            let store = DurableRunStore::open_existing(workspace, run)?;
+            let (raw, prepared) = store.load_prepared()?;
+            if prepared.plan.workspace_root_identity
+                != requirements::workspace_root_identity(&store.workspace_root)?
+            {
+                return Err(HarnessError::InvalidSubmission(
+                    "pre-apply closure belongs to another workspace root".to_owned(),
+                ));
+            }
+            let head = read_owner_only_json::<Self>(
+                &store.run_directory.join(RUN_HEAD_FILE),
+                "durable Harness head",
+            )?;
+            head.validate(&prepared, &raw)?;
+            if head.run_identifier != run {
+                return Err(HarnessError::InvalidSubmission(
+                    "pre-apply closure run differs from its directory".to_owned(),
+                ));
+            }
+            match fs::symlink_metadata(store.run_directory.join(RUN_APPLY_ATTEMPT_FILE)) {
+                Ok(_) => {
+                    return Err(HarnessError::InvalidSubmission(
+                        "pre-apply closure cannot replace apply recovery".to_owned(),
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(HarnessError::FileRead {
+                        path: store.run_directory.clone(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+            repository::ensure_no_pending_batch_recovery(&store.workspace_root)?;
+            let contract = ContextPreApplyCloseContract::from_durable(&prepared, &head)?;
+            if session.store_identity() != contract.store_identity() {
+                return Err(HarnessError::InvalidSubmission(
+                    "pre-apply closure store differs from its locked session".to_owned(),
+                ));
+            }
+            let proof_path = store.run_directory.join(RUN_PRE_APPLY_CLOSE_FILE);
+            let existing = match fs::symlink_metadata(&proof_path) {
+                Ok(_) => Some(read_owner_only_json::<HarnessPreApplyCloseReceipt>(
+                    &proof_path,
+                    "pre-apply close receipt",
+                )?),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(HarnessError::FileRead {
+                        path: proof_path.clone(),
+                        message: error.to_string(),
+                    });
+                }
+            };
+            let has_receipt = existing.is_some();
+            let (original, mut receipt) = if let Some(receipt) = existing {
+                if receipt.reason != reason
+                    || receipt.policy_configuration_digest != policy_configuration_digest
+                {
+                    return Err(HarnessError::InvalidSubmission("pre-apply closure retry differs from its persisted reason or caller policy".to_owned()));
+                }
+                let original = receipt.original_head(&prepared, &raw, &head)?;
+                (original, receipt)
+            } else {
+                let closed = head.closed_before_apply()?;
+                let mut receipt = HarnessPreApplyCloseReceipt {
+                    version: HARNESS_SCHEMA_VERSION,
+                    run_identifier: run.to_owned(),
+                    prepared_run_digest: prepared.prepared_run_digest.clone(),
+                    prepared_run_raw_digest: byte_digest(&raw),
+                    store_identity: contract.store_identity().clone(),
+                    original_state: head.state,
+                    original_sequence: head.sequence,
+                    original_predecessor_record_digest: head.predecessor_record_digest.clone(),
+                    original_record_digest: head.record_digest.clone(),
+                    resulting_record_digest: closed.record_digest,
+                    policy_configuration_digest: policy_configuration_digest.to_owned(),
+                    reason: reason.to_owned(),
+                    verified_at_millis: durable_now_millis()?,
+                    receipt_digest: String::new(),
+                };
+                receipt.receipt_digest = receipt.digest()?;
+                receipt.original_head(&prepared, &raw, &head)?;
+                (head.clone(), receipt)
+            };
+            session.verify_pre_apply_close(&contract)?;
+            if !has_receipt {
+                receipt.verified_at_millis = durable_now_millis()?;
+                receipt.receipt_digest = receipt.digest()?;
+                receipt.original_head(&prepared, &raw, &head)?;
+            }
+            if head.state == HarnessExecutionState::ClosedBeforeApply {
+                return Ok((head, receipt));
+            }
+            if !has_receipt {
+                atomic_replace_owner_only_json(&proof_path, &receipt, &store.run_directory)?;
+            }
+            let persisted = read_owner_only_json::<HarnessPreApplyCloseReceipt>(
+                &proof_path,
+                "persisted pre-apply close receipt",
+            )?;
+            if persisted != receipt {
+                return Err(HarnessError::InvalidSubmission(
+                    "persisted pre-apply closure proof changed".to_owned(),
+                ));
+            }
+            after_proof()?;
+            let next = original.closed_before_apply()?;
+            store.compare_and_swap_head(&prepared, &raw, &head, &next)?;
+            Ok((next, receipt))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (
+                workspace,
+                run,
+                reason,
+                policy_configuration_digest,
+                session,
+                after_proof,
+            );
+            Err(HarnessError::UnsupportedRuntime(
+                "durable pre-apply closure requires Unix".to_owned(),
+            ))
+        }
+    }
+
+    fn closed_before_apply(&self) -> HarnessResult<Self> {
+        if !matches!(
+            self.state,
+            HarnessExecutionState::Begun | HarnessExecutionState::Executing
+        ) {
+            return Err(HarnessError::InvalidSubmission(
+                "pre-apply closure requires an unevaluated stopped run".to_owned(),
+            ));
+        }
+        let mut next = self.successor()?;
+        next.state = HarnessExecutionState::ClosedBeforeApply;
+        next.ready_role_invocations.clear();
+        next.ready_tool_invocation = None;
+        next.record_digest = next.calculate_digest()?;
+        Ok(next)
+    }
+
     /// Source-free recovery acquires and retains the durable run lock before any provider callback.
     pub fn open_durable_recovery<'a>(
         workspace: &Path,
@@ -4840,6 +5165,7 @@ impl HarnessExecutionRecord {
                     "durable head run differs from its directory".to_owned(),
                 ));
             }
+            store.validate_pre_apply_close_boundary(&prepared, &raw, &head)?;
             let attempt = store.read_apply_attempt(&prepared)?.ok_or_else(|| {
                 HarnessError::InvalidSubmission(
                     "the durable Harness run has no apply attempt to recover".to_owned(),
@@ -5660,8 +5986,12 @@ impl HarnessExecutionRecord {
             &self.revision_history,
             self.role_execution.clone(),
         )?;
-        if step.ready_role_invocations != self.ready_role_invocations
-            || step.ready_tool_invocation != self.ready_tool_invocation
+        let closed = self.state == HarnessExecutionState::ClosedBeforeApply;
+        if (closed
+            && (!self.ready_role_invocations.is_empty() || self.ready_tool_invocation.is_some()))
+            || (!closed
+                && (step.ready_role_invocations != self.ready_role_invocations
+                    || step.ready_tool_invocation != self.ready_tool_invocation))
         {
             return Err(HarnessError::InvalidSubmission(
                 "current ready invocations are not the exact current Harness engine execution step"
@@ -5670,7 +6000,9 @@ impl HarnessExecutionRecord {
         }
         let active = matches!(
             self.state,
-            HarnessExecutionState::Begun | HarnessExecutionState::Executing
+            HarnessExecutionState::Begun
+                | HarnessExecutionState::Executing
+                | HarnessExecutionState::ClosedBeforeApply
         );
         if active {
             if self.evaluation.is_some()

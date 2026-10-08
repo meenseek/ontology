@@ -51,18 +51,18 @@ pub(crate) fn execute_codex_frontier(
                 "Core frontier and Codex lifecycle preparation differ",
             ));
         }
-        if record.ready_tool_invocation.is_some()
-            || record.ready_role_invocations.iter().any(|invocation| {
-                !matches!(
-                    invocation.role,
-                    HarnessRole::Reviewer | HarnessRole::Verifier
-                )
-            })
-        {
+        if record.ready_tool_invocation.is_some() {
             return Err(NativeHarnessError::invalid_input(
-                "unsupported runtime: --codex-binary supports only Reviewer/Verifier frontiers without tools",
+                "unsupported runtime: a ready tool invocation requires its existing tool executor",
             ));
         }
+        validate_codex_producer_frontier(
+            prepared,
+            record
+                .ready_role_invocations
+                .iter()
+                .map(|invocation| invocation.role),
+        )?;
         if record.ready_role_invocations.is_empty() {
             // A non-completed result also empties the frontier. Core owns the
             // terminal evaluation and may reject evaluation of an incomplete write.
@@ -124,6 +124,7 @@ pub(crate) fn execute_codex_frontier(
                 for result in receiver {
                     let result = result?;
                     let halted = !matches!(result.outcome, RoleExecutionOutcome::Completed { .. });
+                    let submitted = result.clone();
                     record = HarnessExecutionRecord::advance_durable(
                         engine,
                         &record.run_identifier,
@@ -131,7 +132,13 @@ pub(crate) fn execute_codex_frontier(
                             result: Box::new(result),
                         },
                     )
-                    .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+                    .map_err(|error| {
+                        NativeHarnessError::submission_error(
+                            error,
+                            &record.run_identifier,
+                            submitted,
+                        )
+                    })?;
                     if halted {
                         break;
                     }
@@ -146,6 +153,22 @@ pub(crate) fn execute_codex_frontier(
     }
 }
 
+pub(crate) fn validate_codex_producer_frontier(
+    prepared: &PreparedHarnessRun,
+    roles: impl IntoIterator<Item = HarnessRole>,
+) -> Result<()> {
+    if prepared.accepted_tool_plan.is_some()
+        && roles
+            .into_iter()
+            .any(|role| matches!(role, HarnessRole::Writer | HarnessRole::Specialist))
+    {
+        return Err(NativeHarnessError::invalid_input(
+            "unsupported runtime: automatic producers require a tool-free plan; use the existing explicit tool execution flow",
+        ));
+    }
+    Ok(())
+}
+
 // The native output schema needs an object at its root. This transport envelope
 // contains exactly the existing outcome; the entire envelope is decoded strictly.
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -157,16 +180,26 @@ pub(crate) struct CodexResponse {
 pub(crate) fn codex_output_schema() -> &'static str {
     r##"{
   "type": "object",
-  "properties": {"outcome": {"anyOf": [{"type": "object","properties": {"status": {"type": "string","enum": ["completed"]},"result": {"$ref": "#/$defs/result"}},"required": ["status","result"],"additionalProperties": false},{"type": "object","properties": {"status": {"type": "string","enum": ["missing-context"]},"request": {"$ref": "#/$defs/request"}},"required": ["status","request"],"additionalProperties": false},{"type": "object","properties": {"status": {"type": "string","enum": ["failed"]},"message": {"type": "string"}},"required": ["status","message"],"additionalProperties": false},{"type": "object","properties": {"status": {"type": "string","enum": ["cancelled"]}},"required": ["status"],"additionalProperties": false},{"type": "object","properties": {"status": {"type": "string","enum": ["timed-out"]}},"required": ["status"],"additionalProperties": false},{"type": "object","properties": {"status": {"type": "string","enum": ["unsupported"]},"reason": {"type": "string"}},"required": ["status","reason"],"additionalProperties": false}]}},
+  "properties": {"outcome":{"anyOf":[{"type":"object","properties":{"status":{"type":"string","enum":["completed"]},"result":{"$ref":"#/$defs/result"}},"required":["status","result"],"additionalProperties":false},{"type":"object","properties":{"status":{"type":"string","enum":["missing-context"]},"request":{"$ref":"#/$defs/request"}},"required":["status","request"],"additionalProperties":false},{"type":"object","properties":{"status":{"type":"string","enum":["failed"]},"message":{"type":"string"}},"required":["status","message"],"additionalProperties":false},{"type":"object","properties":{"status":{"type":"string","enum":["cancelled"]}},"required":["status"],"additionalProperties":false},{"type":"object","properties":{"status":{"type":"string","enum":["timed-out"]}},"required":["status"],"additionalProperties":false},{"type":"object","properties":{"status":{"type":"string","enum":["unsupported"]},"reason":{"type":"string"}},"required":["status","reason"],"additionalProperties":false}]}},
   "required": ["outcome"],
   "additionalProperties": false,
   "$defs": {
-    "evidence": {"anyOf": [{"type": "object","properties": {"source": {"type": "string","enum": ["target"]},"workspace_relative_path": {"type": "string"},"content_digest": {"type": "string"},"locator": {"type": "string"}},"required": ["source","workspace_relative_path","content_digest","locator"],"additionalProperties": false},{"type": "object","properties": {"source": {"type": "string","enum": ["bound-document"]},"relative_path": {"type": "string"},"content_digest": {"type": "string"},"locator": {"type": "string"}},"required": ["source","relative_path","content_digest","locator"],"additionalProperties": false},{"type": "object","properties": {"source": {"type": "string","enum": ["tool-result"]},"unit": {"type": "string"},"result_digest": {"type": "string"}},"required": ["source","unit","result_digest"],"additionalProperties": false},{"type": "object","properties": {"source": {"type": "string","enum": ["produced-artifact"]},"artifact_digest": {"type": "string"},"locator": {"type": "string"}},"required": ["source","artifact_digest","locator"],"additionalProperties": false}]},
-    "requirement": {"type": "object","properties": {"unit": {"type": "string"},"passed": {"type": "boolean"},"detail": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["unit","passed","detail","evidence"],"additionalProperties": false},
-    "observation": {"type": "object","properties": {"message": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["message","evidence"],"additionalProperties": false},
-    "learning": {"type": "object","properties": {"title": {"type": "string"},"guidance": {"type": "string"},"failed_unit": {"type": "string"},"requirement_result_digest": {"type": "string"},"evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}}},"required": ["title","guidance","failed_unit","requirement_result_digest","evidence"],"additionalProperties": false},
-    "result": {"anyOf": [{"type": "object","properties": {"role": {"type": "string","enum": ["verifier"]},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"requirement_results": {"type": "array","items": {"$ref": "#/$defs/requirement"}}},"required": ["role","subject_evidence","requirement_results"],"additionalProperties": false},{"type": "object","properties": {"role": {"type": "string","enum": ["reviewer"]},"summary": {"type": "string"},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"requirement_results": {"type": "array","items": {"$ref": "#/$defs/requirement"}},"blocking_findings": {"type": "array","items": {"$ref": "#/$defs/observation"}},"improvements": {"type": "array","items": {"$ref": "#/$defs/observation"}},"learning_candidates": {"type": "array","items": {"$ref": "#/$defs/learning"}}},"required": ["role","summary","subject_evidence","requirement_results","blocking_findings","improvements","learning_candidates"],"additionalProperties": false}]},
-    "request": {"type": "object","properties": {"reason": {"type": "string"},"blocked_verification_units": {"type": "array","items": {"type": "string"}},"subject_evidence": {"type": "array","items": {"$ref": "#/$defs/evidence"}},"candidate": {"anyOf": [{"type": "object","properties": {"kind": {"type": "string","enum": ["additional-workspace-target"]},"workspace_relative_path": {"type": "string"}},"required": ["kind","workspace_relative_path"],"additionalProperties": false},{"type": "object","properties": {"kind": {"type": "string","enum": ["vault-evidence"]},"repository_relative_path": {"type": "string"}},"required": ["kind","repository_relative_path"],"additionalProperties": false}]}},"required": ["reason","blocked_verification_units","subject_evidence","candidate"],"additionalProperties": false}
+    "evidence": {"anyOf":[{"type":"object","properties":{"source":{"type":"string","enum":["target"]},"workspace_relative_path":{"type":"string"},"content_digest":{"type":"string"},"locator":{"type":"string"}},"required":["source","workspace_relative_path","content_digest","locator"],"additionalProperties":false},{"type":"object","properties":{"source":{"type":"string","enum":["bound-document"]},"relative_path":{"type":"string"},"content_digest":{"type":"string"},"locator":{"type":"string"}},"required":["source","relative_path","content_digest","locator"],"additionalProperties":false},{"type":"object","properties":{"source":{"type":"string","enum":["tool-result"]},"unit":{"type":"string"},"result_digest":{"type":"string"}},"required":["source","unit","result_digest"],"additionalProperties":false},{"type":"object","properties":{"source":{"type":"string","enum":["produced-artifact"]},"artifact_digest":{"type":"string"},"locator":{"type":"string"}},"required":["source","artifact_digest","locator"],"additionalProperties":false}]},
+    "requirement": {"type":"object","properties":{"unit":{"type":"string"},"passed":{"type":"boolean"},"detail":{"type":"string"},"evidence":{"type":"array","items":{"$ref":"#/$defs/evidence"}}},"required":["unit","passed","detail","evidence"],"additionalProperties":false},
+    "observation": {"type":"object","properties":{"message":{"type":"string"},"evidence":{"type":"array","items":{"$ref":"#/$defs/evidence"}}},"required":["message","evidence"],"additionalProperties":false},
+    "learning": {"type":"object","properties":{"title":{"type":"string"},"guidance":{"type":"string"},"failed_unit":{"type":"string"},"requirement_result_digest":{"type":"string"},"evidence":{"type":"array","items":{"$ref":"#/$defs/evidence"}}},"required":["title","guidance","failed_unit","requirement_result_digest","evidence"],"additionalProperties":false},
+    "result": {"anyOf":[{"type":"object","properties":{"role":{"type":"string","enum":["writer"]},"artifact":{"$ref":"#/$defs/writer-artifact"}},"required":["role","artifact"],"additionalProperties":false},{"type":"object","properties":{"role":{"type":"string","enum":["specialist"]},"artifact":{"type":"object","properties":{"source_targets":{"type":"array","items":{"type":"string"}},"context_bundle_digest":{"type":["string","null"]},"output":{"type":"string"}},"required":["source_targets","context_bundle_digest","output"],"additionalProperties":false},"requirement_results":{"type":"array","items":{"$ref":"#/$defs/requirement"}},"promotion_proposals":{"type":"array","items":{"$ref":"#/$defs/promotion"}}},"required":["role","artifact","requirement_results","promotion_proposals"],"additionalProperties":false},{"type":"object","properties":{"role":{"type":"string","enum":["verifier"]},"subject_evidence":{"type":"array","items":{"$ref":"#/$defs/evidence"}},"requirement_results":{"type":"array","items":{"$ref":"#/$defs/requirement"}}},"required":["role","subject_evidence","requirement_results"],"additionalProperties":false},{"type":"object","properties":{"role":{"type":"string","enum":["reviewer"]},"summary":{"type":"string"},"subject_evidence":{"type":"array","items":{"$ref":"#/$defs/evidence"}},"requirement_results":{"type":"array","items":{"$ref":"#/$defs/requirement"}},"blocking_findings":{"type":"array","items":{"$ref":"#/$defs/observation"}},"improvements":{"type":"array","items":{"$ref":"#/$defs/observation"}},"learning_candidates":{"type":"array","items":{"$ref":"#/$defs/learning"}}},"required":["role","summary","subject_evidence","requirement_results","blocking_findings","improvements","learning_candidates"],"additionalProperties":false}]},
+    "request": {"type":"object","properties":{"reason":{"type":"string"},"blocked_verification_units":{"type":"array","items":{"type":"string"}},"subject_evidence":{"type":"array","items":{"$ref":"#/$defs/evidence"}},"candidate":{"anyOf":[{"type":"object","properties":{"kind":{"type":"string","enum":["additional-workspace-target"]},"workspace_relative_path":{"type":"string"}},"required":["kind","workspace_relative_path"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["vault-evidence"]},"repository_relative_path":{"type":"string"}},"required":["kind","repository_relative_path"],"additionalProperties":false}]}},"required":["reason","blocked_verification_units","subject_evidence","candidate"],"additionalProperties":false},
+    "change": {"anyOf":[{"type":"object","properties":{"operation":{"type":"string","enum":["create"]},"path":{"type":"string"},"content":{"type":"string"}},"required":["operation","path","content"],"additionalProperties":false},{"type":"object","properties":{"operation":{"type":"string","enum":["update"]},"path":{"type":"string"},"expected_content_digest":{"type":"string"},"content":{"type":"string"}},"required":["operation","path","expected_content_digest","content"],"additionalProperties":false},{"type":"object","properties":{"operation":{"type":"string","enum":["delete"]},"path":{"type":"string"},"expected_content_digest":{"type":"string"}},"required":["operation","path","expected_content_digest"],"additionalProperties":false}]},
+    "curation-kind": {"type":"string","enum":["idea","knowledge","fact","decision","journal","ontology"]},
+    "source-binding": {"type":"object","properties":{"repository_relative_path":{"type":"string"},"content_digest":{"type":"string"}},"required":["repository_relative_path","content_digest"],"additionalProperties":false},
+    "curation-entry": {"type":"object","properties":{"change":{"$ref":"#/$defs/change"},"provenance":{"type":"array","items":{"type":"string"}},"source_references":{"type":"array","items":{"$ref":"#/$defs/source-binding"}},"promotion_handoff_digest":{"type":["string","null"]}},"required":["change","provenance","source_references","promotion_handoff_digest"],"additionalProperties":false},
+    "writer-artifact": {"anyOf":[{"type":"object","properties":{"kind":{"type":"string","enum":["changes"]},"changes":{"type":"array","items":{"$ref":"#/$defs/change"}}},"required":["kind","changes"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["curation"]},"curation_kind":{"$ref":"#/$defs/curation-kind"},"entries":{"type":"array","items":{"$ref":"#/$defs/curation-entry"}}},"required":["kind","curation_kind","entries"],"additionalProperties":false}]},
+    "owner": {"anyOf":[{"type":"object","properties":{"kind":{"type":"string","enum":["profile","common-work","personal-business","personal"]}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["personal-project"]},"project":{"type":"string"}},"required":["kind","project"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["company"]},"company":{"type":"string"}},"required":["kind","company"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["company-project"]},"company":{"type":"string"},"project":{"type":"string"}},"required":["kind","company","project"],"additionalProperties":false}]},
+    "intent": {"anyOf":[{"type":"object","properties":{"kind":{"type":"string","enum":["general","policy-maintenance","solo-mvp-ideation"]}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["career-artifact","output-adapter"]},"surface":{"type":"string","enum":["general","resume","career-description","portfolio","professional-profile"]}},"required":["kind","surface"],"additionalProperties":false}]},
+    "promotion-evidence": {"type":"object","properties":{"source_kind":{"type":"string","enum":["target","granted-evidence","retrieval"]},"source_owner":{"$ref":"#/$defs/owner"},"relative_path":{"type":"string"},"content_digest":{"type":"string"},"locator":{"type":"string"}},"required":["source_kind","source_owner","relative_path","content_digest","locator"],"additionalProperties":false},
+    "promotion-origin": {"anyOf":[{"type":"object","properties":{"kind":{"type":"string","enum":["specialist-memory"]},"claim_kind":{"type":"string","enum":["observed-fact","model-interpretation","model-proposal"]},"evidence":{"type":"array","items":{"$ref":"#/$defs/promotion-evidence"}}},"required":["kind","claim_kind","evidence"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["reviewer-learning"]},"learning_id":{"type":"string"},"source_action":{"type":"string","enum":["code-write","code-review","document-write","document-review","investigation","design","ideation","vault-read","vault-curation"]},"source_intent":{"$ref":"#/$defs/intent"},"failed_unit":{"type":"string"},"requirement_result_digest":{"type":"string"},"evidence":{"type":"array","items":{"$ref":"#/$defs/evidence"}}},"required":["kind","learning_id","source_action","source_intent","failed_unit","requirement_result_digest","evidence"],"additionalProperties":false}]},
+    "promotion": {"type":"object","properties":{"identifier":{"type":"string"},"owner":{"$ref":"#/$defs/owner"},"curation_kind":{"$ref":"#/$defs/curation-kind"},"title":{"type":"string"},"content":{"type":"string"},"origin":{"$ref":"#/$defs/promotion-origin"}},"required":["identifier","owner","curation_kind","title","content","origin"],"additionalProperties":false}
   }
 }"##
 }
@@ -353,14 +386,7 @@ pub(crate) fn execute_codex_role(
     invocation: &RoleInvocationContract,
     cancelled: &AtomicBool,
 ) -> Result<RoleExecutionResult> {
-    if !matches!(
-        invocation.role,
-        HarnessRole::Reviewer | HarnessRole::Verifier
-    ) {
-        return Err(NativeHarnessError::invalid_input(
-            "unsupported runtime: only Reviewer/Verifier may execute",
-        ));
-    }
+    validate_codex_producer_frontier(prepared, [invocation.role])?;
     // Serialize the exact typed segments once: no wrapper, prompt preamble, target
     // reread, summary, content replacement or argument-length-dependent transport.
     let input = serde_json::to_vec(&invocation.segments)

@@ -10,6 +10,95 @@ use ontology::store::Store;
 use std::fs;
 
 #[tokio::test]
+async fn composition_rejects_semantic_and_authority_errors_before_database_access() {
+    let files = tempfile::tempdir().unwrap();
+    for (variant, expected) in [
+        ("unresolved", "clarification"),
+        ("wrong-authority", "configured authority"),
+        ("model-owner", "not authoritative"),
+        ("unknown-owner-reference", "unknown composition reference"),
+    ] {
+        let mut request = serde_json::to_value(envelope(
+            &"1".repeat(64),
+            vec!["README.md".into()],
+            vec![],
+            false,
+        ))
+        .unwrap();
+        for record in request["decision_trace"]["records"].as_array_mut().unwrap() {
+            record["value_digest"] = "".into();
+            if record["kind"] == "policy-default" {
+                record["policy_content_digest"] = "".into();
+            }
+        }
+        match variant {
+            "unresolved" => {
+                request["draft"]["common"]["owner"] =
+                    serde_json::to_value(context_core::harness::DraftValue::<
+                        context_core::harness::DataOwner,
+                    >::Unresolved {
+                        question: "Which owner did the user authorize?".into(),
+                    })
+                    .unwrap()
+            }
+            "wrong-authority" => {
+                request["decision_trace"]["records"][1]["policy_identifier"] = "foundation".into()
+            }
+            "model-owner" => {
+                let parent = request["decision_trace"]["records"][0]["identifier"].clone();
+                request["decision_trace"]["records"][0]["value_digest"] = ontology::store::digest(
+                    &serde_json::to_vec(&context_core::harness::DataOwner::Personal).unwrap(),
+                )
+                .into();
+                request["decision_trace"]["records"].as_array_mut().unwrap().push(serde_json::json!({
+                    "kind": "model-proposal", "identifier": "owner-proposal", "value_digest": "",
+                    "based_on_record_identifiers": [parent]
+                }));
+                request["draft"]["common"]["owner"]["decision_identifier"] =
+                    "owner-proposal".into();
+            }
+            "unknown-owner-reference" => {
+                request["draft"]["common"]["owner"]["decision_identifier"] =
+                    "missing-reference".into()
+            }
+            _ => unreachable!(),
+        }
+        let path = files.path().join(format!("{variant}.json"));
+        fs::write(&path, serde_json::to_vec(&request).unwrap()).unwrap();
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
+            .env_clear()
+            .env("DATABASE_URL", "invalid://must-not-connect")
+            .args([
+                "harness",
+                "resolve",
+                "--compose-decisions",
+                "--context-view",
+                "/never-opened",
+                "--store-id",
+                "11111111-1111-4111-8111-111111111111",
+                "--workspace-root",
+                files.path().to_str().unwrap(),
+                "--request-envelope",
+                path.to_str().unwrap(),
+                "--runtime-capabilities",
+                "/never-opened",
+                "--policy-config",
+                context_fixture::configuration_path().to_str().unwrap(),
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{variant}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[tokio::test]
 async fn native_harness_reloads_changed_configuration_before_replay_database_access() {
     let url = std::env::var("TEST_DATABASE_URL").expect("owned test DB");
     assert!(

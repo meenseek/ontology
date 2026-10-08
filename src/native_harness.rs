@@ -1,13 +1,16 @@
 use crate::{
     native_context::{NativeContextSession, NativeContextSource},
-    native_role::{execute_codex_frontier, validate_codex_binary},
+    native_role::{
+        execute_codex_frontier, validate_codex_binary, validate_codex_producer_frontier,
+    },
     store::Store,
 };
 use context_core::harness::{
-    CareerCompositionManifest, CareerExecutionReviewReceipt, HarnessEngine, HarnessError,
-    HarnessExecutionEvent, HarnessExecutionRecord, HarnessExecutionState, HarnessPlan,
-    HarnessRouter, HarnessRuntimeCapabilities, PolicyConfiguration, PreparedHarnessRun,
-    RequestEnvelope, ToolExecutionEvidence, ToolExecutionPlan, decode_current_json,
+    CareerCompositionManifest, CareerExecutionReviewReceipt, ComposedRequest, HarnessEngine,
+    HarnessError, HarnessExecutionEvent, HarnessExecutionRecord, HarnessExecutionState,
+    HarnessPlan, HarnessRouter, HarnessRuntimeCapabilities, PolicyConfiguration,
+    PreparedHarnessRun, RequestEnvelope, RoleExecutionResult, ToolExecutionEvidence,
+    ToolExecutionPlan, ValidatedRequest, decode_current_json,
 };
 use std::{
     collections::BTreeMap,
@@ -18,20 +21,71 @@ use std::{
 };
 pub const MAX_HARNESS_JSON_BYTES: u64 = 32 * 1024 * 1024;
 #[derive(Debug)]
-pub struct NativeHarnessError(String);
+pub struct NativeHarnessError {
+    message: String,
+    role_submission: Option<Box<RoleSubmission>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RoleSubmission {
+    run_identifier: String,
+    submitted_result: RoleExecutionResult,
+}
+
+#[derive(serde::Serialize)]
+struct HarnessDiagnostic<'a> {
+    error: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct RoleSubmissionDiagnostic<'a> {
+    error: &'a str,
+    kind: &'static str,
+    submission: &'a RoleSubmission,
+}
 pub type NativeHarnessResult<T> = std::result::Result<T, NativeHarnessError>;
 type Result<T> = NativeHarnessResult<T>;
 impl NativeHarnessError {
     pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            role_submission: None,
+        }
     }
     pub(crate) fn io(action: &str, _path: impl AsRef<Path>, _error: std::io::Error) -> Self {
-        Self(format!("{action} failed"))
+        Self::invalid_input(format!("{action} failed"))
+    }
+    pub(crate) fn submission_error(
+        error: HarnessError,
+        run_identifier: &str,
+        submitted_result: RoleExecutionResult,
+    ) -> Self {
+        Self {
+            message: error.to_string(),
+            role_submission: Some(Box::new(RoleSubmission {
+                run_identifier: run_identifier.to_owned(),
+                submitted_result,
+            })),
+        }
+    }
+    pub fn diagnostic_json(&self) -> String {
+        if let Some(submission) = self.role_submission.as_deref() {
+            serde_json::to_string(&RoleSubmissionDiagnostic {
+                error: &self.message,
+                kind: "role-submission-error",
+                submission,
+            })
+        } else {
+            serde_json::to_string(&HarnessDiagnostic {
+                error: &self.message,
+            })
+        }
+        .expect("serialize typed Harness diagnostic")
     }
 }
 impl std::fmt::Display for NativeHarnessError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 impl std::error::Error for NativeHarnessError {}
@@ -63,12 +117,27 @@ impl Command {
     }
 
     fn run_resolve_harness_command(&self, arguments: impl Iterator<Item = String>) -> Result<()> {
-        let input = harness_input(arguments, "resolve")?;
-        let (request_contract, _, _) = input
-            .request_envelope
-            .resolve()
-            .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-        let execution_profile = request_contract.execution_profile();
+        let input = preflight_resolve_input(
+            harness_input(arguments, "resolve")?,
+            &self.policy_configuration,
+        )?;
+        self.run_resolve_harness_input(input)
+    }
+
+    fn run_resolve_harness_input(&self, input: HarnessCliInput) -> Result<()> {
+        let execution_profile = input
+            .composed_request
+            .as_ref()
+            .map(|r| r.contract().execution_profile())
+            .or_else(|| {
+                input
+                    .validated_request
+                    .as_ref()
+                    .map(|r| r.contract().execution_profile())
+            })
+            .ok_or_else(|| {
+                NativeHarnessError::invalid_input("resolve input was not preflighted")
+            })?;
         let router = HarnessRouter::with_execution_profile(2, execution_profile)
             .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
         let engine = HarnessEngine::with_source_and_router(
@@ -79,12 +148,17 @@ impl Command {
             self.policy_configuration.clone(),
         )
         .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-        let resolved = engine
-            .resolve_envelope(
-                &input.request_envelope,
+        let resolved = if let Some(composed) = input.composed_request {
+            engine.resolve_composed(composed, input.career_composition_manifest.as_ref())
+        } else {
+            engine.resolve_validated(
+                input.validated_request.ok_or_else(|| {
+                    NativeHarnessError::invalid_input("missing validated request")
+                })?,
                 input.career_composition_manifest.as_ref(),
             )
-            .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+        }
+        .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
         let capabilities_path = input.runtime_capabilities_path.as_deref().ok_or_else(|| {
             NativeHarnessError::invalid_input("resolve requires `--runtime-capabilities`")
         })?;
@@ -272,6 +346,10 @@ impl Command {
             .ok_or_else(|| NativeHarnessError::invalid_input("missing `--run-id`"))?;
         if let Some(binary) = &codex_binary {
             validate_codex_binary(binary)?;
+            validate_codex_producer_frontier(
+                &prepared,
+                [prepared.plan.resolved_request.plan.primary_producer_role],
+            )?;
         }
         let record =
             HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, &run_identifier)
@@ -308,8 +386,17 @@ impl Command {
                 .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))
             })
             .transpose()?;
+        let rejected_result = match &event {
+            HarnessExecutionEvent::RoleResult { result } => Some((**result).clone()),
+            _ => None,
+        };
         let next = HarnessExecutionRecord::advance_durable(&engine, &run_identifier, event)
-            .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+            .map_err(|error| match rejected_result {
+                Some(result) => {
+                    NativeHarnessError::submission_error(error, &run_identifier, result)
+                }
+                None => NativeHarnessError::invalid_input(error.to_string()),
+            })?;
         let next = match (paths.get("--codex-binary"), codex_prepared.as_ref()) {
             (Some(binary), Some(prepared)) => {
                 execute_codex_frontier(&engine, prepared, next, binary)?
@@ -640,6 +727,9 @@ struct HarnessCliInput {
     request_envelope: RequestEnvelope,
     career_composition_manifest: Option<CareerCompositionManifest>,
     runtime_capabilities_path: Option<PathBuf>,
+    compose_decisions: bool,
+    composed_request: Option<ComposedRequest>,
+    validated_request: Option<ValidatedRequest>,
 }
 
 fn harness_input(
@@ -699,6 +789,7 @@ struct HarnessInputOptions {
     career_manifest_path: Option<PathBuf>,
     runtime_capabilities_path: Option<PathBuf>,
     output_json: bool,
+    compose_decisions: bool,
 }
 
 impl HarnessInputOptions {
@@ -709,9 +800,15 @@ impl HarnessInputOptions {
                 .ok_or_else(|| NativeHarnessError::invalid_input("missing `--request-envelope`"))?,
             "request envelope",
         )?;
-        request_envelope
-            .resolve()
-            .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+        let validated_request = if self.compose_decisions {
+            None
+        } else {
+            Some(
+                request_envelope
+                    .validated()
+                    .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?,
+            )
+        };
         let career_composition_manifest = self
             .career_manifest_path
             .as_deref()
@@ -727,6 +824,9 @@ impl HarnessInputOptions {
             request_envelope,
             career_composition_manifest,
             runtime_capabilities_path: self.runtime_capabilities_path,
+            compose_decisions: self.compose_decisions,
+            composed_request: None,
+            validated_request,
         })
     }
 }
@@ -778,6 +878,12 @@ fn parse_harness_execution_option(
     options: &mut HarnessInputOptions,
 ) -> Result<bool> {
     match argument {
+        "--compose-decisions" if !options.compose_decisions => options.compose_decisions = true,
+        "--compose-decisions" => {
+            return Err(NativeHarnessError::invalid_input(
+                "duplicate harness option `--compose-decisions`",
+            ));
+        }
         "--runtime-capabilities" => {
             let value = PathBuf::from(required_inline_value(arguments, argument)?);
             set_harness_option(&mut options.runtime_capabilities_path, value, argument)?;
@@ -877,6 +983,7 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
     let allowed: &[&str] = match verb.as_str() {
         "resolve" => &[
             "--request-envelope",
+            "--compose-decisions",
             "--runtime-capabilities",
             "--career-manifest",
         ],
@@ -889,7 +996,8 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
         "replay" => &["--prepared-run"],
         "begin" => &["--prepared-run", "--run-id", "--codex-binary"],
         "advance" => &["--run-id", "--event", "--codex-binary"],
-        "revise" | "validate" | "apply" | "recover" => &["--run-id"],
+        "revise" | "validate" | "apply" => &["--run-id"],
+        "recover" => &["--run-id", "--close-before-apply", "--reason"],
         "evaluate" => &["--run-id", "--tool-evidence"],
         "attest-career" => &["--prepared-run", "--execution-record"],
         "compose-career" => &[
@@ -913,7 +1021,11 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
                 "duplicate Harness option `{flag}`"
             )));
         }
-        if flag == "--json" {
+        if verb == "recover" && flag == "--close-before-apply" {
+            options.insert(flag.clone(), String::new());
+            continue;
+        }
+        if flag == "--json" || (verb == "resolve" && flag == "--compose-decisions") {
             forwarded.push(flag.clone());
             continue;
         }
@@ -976,14 +1088,31 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
     }
     let policy_configuration = PolicyConfiguration::read(&options["--policy-config"])
         .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-    preflight_policy_configuration(verb, rest, &options, &policy_configuration)?;
+    let close_before_apply = options.contains_key("--close-before-apply");
+    if options.contains_key("--reason") != close_before_apply {
+        return Err(NativeHarnessError::invalid_input(
+            "recover --close-before-apply requires --reason; --reason is otherwise invalid",
+        ));
+    }
+    let resolve_input = if verb == "resolve" {
+        Some(preflight_resolve_input(
+            harness_input(forwarded.iter().skip(1).cloned(), "resolve")?,
+            &policy_configuration,
+        )?)
+    } else {
+        // Closure authenticates exact stored integrity and no effects without
+        // replaying a request whose source/configuration may have changed.
+        if !close_before_apply {
+            preflight_policy_configuration(verb, rest, &options, &policy_configuration)?;
+        }
+        None
+    };
     let view = PathBuf::from(&options["--context-view"]);
     let expected_store = options["--store-id"].clone();
     let url = std::env::var("DATABASE_URL")
         .map_err(|_| NativeHarnessError::invalid_input("DATABASE_URL is required"))?;
-    let store = Store::connect(&url)
-        .await
-        .map_err(|e| NativeHarnessError::invalid_input(e.to_string()))?;
+    let store =
+        Store::for_native(&url).map_err(|e| NativeHarnessError::invalid_input(e.to_string()))?;
     if matches!(verb.as_str(), "apply" | "recover") {
         let recover = verb == "recover";
         let workspace = PathBuf::from(&options["--workspace-root"]);
@@ -991,8 +1120,26 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
             .get("--run-id")
             .cloned()
             .ok_or_else(|| NativeHarnessError::invalid_input("missing `--run-id`"))?;
+        let close_reason = options.get("--reason").cloned();
         store
             .with_native_commit(view, expected_store, move |session| {
+                if let Some(reason) = close_reason {
+                    let result = HarnessExecutionRecord::close_durable_before_apply(
+                        &workspace,
+                        &run,
+                        &reason,
+                        policy_configuration.digest(),
+                        session,
+                    )
+                    .map_err(|e| harness_command_error(e, true))
+                    .and_then(|(head, closure)| {
+                        print_json(
+                            &serde_json::json!({"head":head,"pre_apply_close":closure}),
+                            "pre-apply Harness closure",
+                        )
+                    });
+                    return Ok(result);
+                }
                 Ok(apply_or_recover(
                     session,
                     &workspace,
@@ -1014,17 +1161,48 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
                 {
                     return Err(crate::domain::Error::Conflict);
                 }
-                Ok(Command {
+                let command = Command {
                     source,
                     policy_configuration,
-                }
-                .run_harness_command(forwarded.into_iter()))
+                };
+                Ok(if let Some(input) = resolve_input {
+                    command.run_resolve_harness_input(input)
+                } else {
+                    command.run_harness_command(forwarded.into_iter())
+                })
             })
             .await
             .map_err(|e| NativeHarnessError::invalid_input(e.to_string()))??;
     }
     Ok(())
 }
+fn preflight_resolve_input(
+    mut input: HarnessCliInput,
+    configuration: &PolicyConfiguration,
+) -> Result<HarnessCliInput> {
+    if input.compose_decisions {
+        input.composed_request = Some(
+            input
+                .request_envelope
+                .compose_decisions(configuration)
+                .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?,
+        );
+    } else {
+        let validated = input
+            .validated_request
+            .take()
+            .ok_or_else(|| NativeHarnessError::invalid_input("missing strict input validation"))?;
+        configuration
+            .validate_decision_defaults(validated.decision_trace())
+            .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+        configuration
+            .validate_contract(validated.contract())
+            .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+        input.validated_request = Some(validated);
+    }
+    Ok(input)
+}
+
 fn preflight_policy_configuration(
     verb: &str,
     arguments: &[String],
@@ -1037,21 +1215,6 @@ fn preflight_policy_configuration(
             .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))
     };
     match verb {
-        "resolve" => {
-            let envelope: RequestEnvelope = read_harness_json(
-                Path::new(&options["--request-envelope"]),
-                "request envelope",
-            )?;
-            let (contract, trace, _) = envelope
-                .resolve()
-                .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-            configuration
-                .validate_decision_defaults(&trace)
-                .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-            configuration
-                .validate_contract(&contract)
-                .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))
-        }
         "prepare" => {
             let plan: HarnessPlan =
                 read_harness_json(Path::new(&options["--plan"]), "Harness plan")?;
@@ -2540,7 +2703,7 @@ mod tests {
     ) -> (HarnessEngine, PreparedHarnessRun, Vec<u8>, PathBuf) {
         let workspace = temp.path().join("workspace");
         fs::create_dir(&workspace).expect("synthetic workspace must be created");
-        let extension = if action == HarnessAction::CodeReview {
+        let extension = if matches!(action, HarnessAction::CodeReview | HarnessAction::CodeWrite) {
             "rs"
         } else {
             "md"
@@ -2552,11 +2715,12 @@ mod tests {
                     "# 문서 {index}\n{}끝 🚀\n",
                     "한글🙂 e\u{301} \"quoted\" \\ path\t원문 줄\n".repeat(repetitions)
                 );
-                let content = if action == HarnessAction::CodeReview {
-                    format!("pub const DOCUMENT: &str = {content:?};\n")
-                } else {
-                    content
-                };
+                let content =
+                    if matches!(action, HarnessAction::CodeReview | HarnessAction::CodeWrite) {
+                        format!("pub const DOCUMENT: &str = {content:?};\n")
+                    } else {
+                        content
+                    };
                 fs::write(workspace.join(&path), content)
                     .expect("synthetic target must be written");
                 path
@@ -3090,8 +3254,8 @@ cat "$0.events.$n"
         let calls = codex_calls(binary);
         assert_eq!(
             calls.len(),
-            2,
-            "one process per role and zero automatic retries at each document size"
+            head.role_execution.accepted_role_order.len(),
+            "one process per accepted role and zero automatic retries at each document size"
         );
         let mut step = engine
             .begin_execution(&prepared.plan.resolved_request, &prepared.role_run, &[])
@@ -3662,24 +3826,12 @@ cat "$0.events.$role"
 
     #[cfg(unix)]
     #[test]
-    fn codex_rejects_unsupported_frontiers_before_any_process() {
+    fn codex_rejects_unsupported_tool_frontier_before_any_process() {
         let temp = TempDirectory::new("codex-unsupported-frontier");
         let (engine, prepared, raw, _) = codex_fixture(&temp, 2, 8);
         let binary = codex_test_script(&temp, CODEX_CAPTURE);
         let head = HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "unsupported")
             .expect("run must begin");
-        let mut role_frontier = head.clone();
-        role_frontier
-            .ready_role_invocations
-            .last_mut()
-            .expect("fixture has ready siblings")
-            .role = HarnessRole::Writer;
-        assert!(
-            execute_codex_frontier(&engine, &prepared, role_frontier, &binary)
-                .expect_err("Writer frontier must be unsupported")
-                .to_string()
-                .contains("unsupported runtime")
-        );
         let mut tool_frontier = head;
         let invocation = &tool_frontier.ready_role_invocations[0];
         tool_frontier.ready_tool_invocation = Some(context_core::harness::ToolInvocationContract {
@@ -3990,6 +4142,271 @@ cat "$0.events.$role"
         }
         assert!(head.ready_tool_invocation.is_none());
         head
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_producer_flows_through_independent_review_without_applying() {
+        let temp = TempDirectory::new("codex-producer-flow");
+        let (engine, prepared, raw, workspace) =
+            codex_fixture_for_action(&temp, 2, 8, HarnessAction::DocumentWrite);
+        let original = fs::read(workspace.join("document-0.md")).unwrap();
+        let head = HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "producer-flow")
+            .unwrap();
+        let binary = codex_test_script(&temp, CODEX_CAPTURE);
+        let mut preview = head.clone();
+        let mut number = 1;
+        while let Some(invocation) = preview.ready_role_invocations.first() {
+            let outcome = codex_write_scenario_outcome(&prepared, invocation, "accepted");
+            codex_test_events(&binary, number, outcome.clone());
+            number += 1;
+            let lifecycle =
+                codex_test_lifecycle(invocation.role, format!("preview-{number}"), &outcome);
+            let result = invocation.bind_result(lifecycle, outcome).unwrap();
+            preview = preview
+                .advance(
+                    &engine,
+                    &raw,
+                    &prepared,
+                    HarnessExecutionEvent::RoleResult {
+                        result: Box::new(result),
+                    },
+                )
+                .unwrap();
+        }
+        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary).unwrap();
+        assert_eq!(evaluated.state, HarnessExecutionState::Evaluated);
+        assert_eq!(evaluated.role_execution.role_results.len(), 3);
+        assert_eq!(codex_calls(&binary).len(), 3);
+        assert_eq!(
+            evaluated.role_execution.role_results[0].role,
+            HarnessRole::Writer
+        );
+        let contexts = evaluated
+            .role_execution
+            .role_results
+            .iter()
+            .map(|result| &result.context_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            contexts.len(),
+            3,
+            "each required role keeps an independently observed context"
+        );
+        assert_eq!(
+            evaluated.evaluation.as_ref().unwrap().subject_status,
+            context_core::harness::SubjectStatus::Accepted
+        );
+        assert!(evaluated.validation_receipt_digest.is_none());
+        assert!(evaluated.finalization_digest.is_none());
+        assert_eq!(fs::read(workspace.join("document-0.md")).unwrap(), original);
+        codex_assert_exact_transport(&engine, &prepared, &evaluated, &binary);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_rejected_reviewer_preserves_result_and_last_accepted_head() {
+        use context_core::harness::MissingContextCandidate;
+        let temp = TempDirectory::new("codex-rejected-diagnostic");
+        let (engine, prepared, raw, workspace) =
+            codex_fixture_for_action(&temp, 1, 1, HarnessAction::DocumentWrite);
+        let head =
+            HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "rejected-diagnostic")
+                .unwrap();
+        let binary = codex_test_script(&temp, CODEX_CAPTURE);
+        let mut preview = head.clone();
+        let mut number = 1;
+        while let Some(invocation) = preview.ready_role_invocations.first() {
+            let mut outcome =
+                codex_write_scenario_outcome(&prepared, invocation, "reviewer-missing-context");
+            if invocation.role == HarnessRole::Reviewer {
+                let RoleExecutionOutcome::MissingContext { request } = &mut outcome else {
+                    unreachable!()
+                };
+                request.candidate = MissingContextCandidate::VaultEvidence {
+                    repository_relative_path: "vault/profile/index.md".to_owned(),
+                };
+                codex_test_events(&binary, number, outcome);
+                break;
+            }
+            codex_test_events(&binary, number, outcome.clone());
+            number += 1;
+            let lifecycle =
+                codex_test_lifecycle(invocation.role, format!("preview-{number}"), &outcome);
+            let result = invocation.bind_result(lifecycle, outcome).unwrap();
+            preview = preview
+                .advance(
+                    &engine,
+                    &raw,
+                    &prepared,
+                    HarnessExecutionEvent::RoleResult {
+                        result: Box::new(result),
+                    },
+                )
+                .unwrap();
+        }
+        let error = execute_codex_frontier(&engine, &prepared, head, &binary).unwrap_err();
+        let diagnostic: serde_json::Value = serde_json::from_str(&error.diagnostic_json()).unwrap();
+        assert_eq!(diagnostic["kind"], "role-submission-error");
+        let submitted: RoleExecutionResult =
+            serde_json::from_value(diagnostic["submission"]["submitted_result"].clone()).unwrap();
+        assert_eq!(submitted.role, HarnessRole::Reviewer);
+        assert!(matches!(
+            submitted.outcome,
+            RoleExecutionOutcome::MissingContext { .. }
+        ));
+        assert!(!submitted.context_id.is_empty());
+        assert_eq!(
+            submitted.lifecycle.terminal_state,
+            RoleTerminalState::MissingContext
+        );
+        let stored: HarnessExecutionRecord = read_harness_json(
+            &workspace.join(".llm-context-vault-harness/runs/rejected-diagnostic/head.json"),
+            "last accepted head",
+        )
+        .unwrap();
+        assert_eq!(stored.sequence, preview.sequence);
+        assert_eq!(stored.role_execution.role_results.len(), 2);
+        assert!(stored.evaluation.is_none());
+        assert!(stored.validation_receipt_digest.is_none());
+        assert!(stored.finalization_digest.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_specialist_uses_the_same_bound_producer_transport() {
+        use context_core::harness::{EvaluationSubject, SpecialistArtifact};
+        let temp = TempDirectory::new("codex-specialist-flow");
+        let (engine, prepared, raw, _) =
+            codex_fixture_for_action(&temp, 1, 1, HarnessAction::Design);
+        let head =
+            HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "specialist-flow")
+                .unwrap();
+        let binary = codex_test_script(&temp, CODEX_CAPTURE);
+        let mut preview = head.clone();
+        let mut number = 1;
+        while let Some(invocation) = preview.ready_role_invocations.first() {
+            let outcome = if invocation.role == HarnessRole::Specialist {
+                let metadata = prepared
+                    .role_run
+                    .role_metadata
+                    .iter()
+                    .find(|m| m.role == HarnessRole::Specialist)
+                    .unwrap();
+                let RoleTaskContract::Specialist {
+                    source_targets,
+                    verification_requirements,
+                } = &metadata.task
+                else {
+                    unreachable!()
+                };
+                let evidence = source_targets
+                    .iter()
+                    .map(|target| {
+                        let TargetState::Existing { content_digest } = &target.state else {
+                            unreachable!()
+                        };
+                        ResultEvidenceReference::Target {
+                            workspace_relative_path: target.workspace_relative_path.clone(),
+                            content_digest: content_digest.clone(),
+                            locator: "entire source".into(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                RoleExecutionOutcome::Completed {
+                    result: CompletedRoleResult::Specialist {
+                        artifact: SpecialistArtifact {
+                            source_targets: source_targets
+                                .iter()
+                                .map(|t| t.workspace_relative_path.clone())
+                                .collect(),
+                            context_bundle_digest: None,
+                            output: "Synthetic source-grounded design".into(),
+                        },
+                        requirement_results: verification_requirements
+                            .iter()
+                            .map(|r| RequirementResult {
+                                unit: r.unit,
+                                passed: true,
+                                detail: "Synthetic check".into(),
+                                evidence: evidence.clone(),
+                            })
+                            .collect(),
+                        promotion_proposals: vec![],
+                    },
+                }
+            } else {
+                let EvaluationSubject::ProducedArtifact { artifact_digest } = &invocation.subject
+                else {
+                    unreachable!()
+                };
+                codex_completed_with_evidence(
+                    &prepared,
+                    invocation.role,
+                    false,
+                    vec![ResultEvidenceReference::ProducedArtifact {
+                        artifact_digest: artifact_digest.clone(),
+                        locator: "entire output".into(),
+                    }],
+                )
+            };
+            codex_test_events(&binary, number, outcome.clone());
+            number += 1;
+            let lifecycle =
+                codex_test_lifecycle(invocation.role, format!("preview-{number}"), &outcome);
+            let result = invocation.bind_result(lifecycle, outcome).unwrap();
+            preview = preview
+                .advance(
+                    &engine,
+                    &raw,
+                    &prepared,
+                    HarnessExecutionEvent::RoleResult {
+                        result: Box::new(result),
+                    },
+                )
+                .unwrap();
+        }
+        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary).unwrap();
+        assert_eq!(
+            evaluated.role_execution.role_results[0].role,
+            HarnessRole::Specialist
+        );
+        assert_eq!(
+            evaluated.evaluation.as_ref().unwrap().subject_status,
+            context_core::harness::SubjectStatus::Accepted
+        );
+        codex_assert_exact_transport(&engine, &prepared, &evaluated, &binary);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_tool_backed_writer_is_rejected_before_creating_a_durable_run() {
+        let temp = TempDirectory::new("codex-writer-tools");
+        let (_, _, raw, workspace) =
+            codex_fixture_for_action(&temp, 1, 1, HarnessAction::CodeWrite);
+        let binary = codex_test_script(&temp, CODEX_CAPTURE);
+        let prepared_path = temp.path().join("prepared.json");
+        fs::write(&prepared_path, raw).unwrap();
+        let error = run_begin_harness_command([
+            "--context-view".to_owned(),
+            temp.path().join("source-placeholder").display().to_string(),
+            "--workspace-root".to_owned(),
+            workspace.display().to_string(),
+            "--prepared-run".to_owned(),
+            prepared_path.display().to_string(),
+            "--run-id".to_owned(),
+            "unsupported-writer-tools".to_owned(),
+            "--codex-binary".to_owned(),
+            binary.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("tool-free plan"));
+        assert!(codex_calls(&binary).is_empty());
+        assert!(
+            !workspace
+                .join(".llm-context-vault-harness/runs/unsupported-writer-tools")
+                .exists()
+        );
     }
 
     #[cfg(unix)]

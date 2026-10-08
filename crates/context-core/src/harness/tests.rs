@@ -14998,6 +14998,15 @@ impl NativeFaultSession {
     }
 }
 impl ContextCommitSession for NativeFaultSession {
+    fn verify_pre_apply_close(&mut self, _: &ContextPreApplyCloseContract) -> HarnessResult<()> {
+        self.calls.push("pre-apply-close");
+        if self.recovery.is_some() {
+            return Err(HarnessError::InvalidSubmission(
+                "injected correlated effect".into(),
+            ));
+        }
+        Ok(())
+    }
     fn store_identity(&self) -> &SourceStoreIdentity {
         self.identity.as_ref().unwrap()
     }
@@ -16269,4 +16278,445 @@ fn relocated_core_policy_maintenance_preserves_boundaries() {
         engine.validate_prepared_run(&fresh, &prepared).is_err(),
         "policy currentness is still mandatory"
     );
+}
+
+#[cfg(unix)]
+fn pre_apply_close_fixture(
+    run: &str,
+) -> (
+    TemporaryWorkspace,
+    HarnessEngine,
+    PreparedHarnessRun,
+    Vec<u8>,
+    HarnessExecutionRecord,
+) {
+    let (repository, engine, prepared, raw, _) = native_boundary_run("closure-fixture-preparation");
+    let head = HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, run).unwrap();
+    let invocation = head.ready_role_invocations[0].clone();
+    let head = HarnessExecutionRecord::advance_durable(
+        &engine,
+        run,
+        completed_role_event(
+            &prepared.plan.resolved_request,
+            &prepared.role_run,
+            &invocation,
+            vec![],
+            run,
+        ),
+    )
+    .unwrap();
+    (repository, engine, prepared, raw, head)
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_apply_close_preserves_writer_and_survives_proof_before_head_interruption() {
+    let run = "preapply-interrupted";
+    let (repository, engine, prepared, raw, original) = pre_apply_close_fixture(run);
+    let directory = repository
+        .0
+        .join(".llm-context-vault-harness/runs")
+        .join(run);
+    let before = fs::read(directory.join("head.json")).unwrap();
+    let mut session = NativeFaultSession::new();
+    let policy = "a".repeat(64);
+    let close = |session: &mut NativeFaultSession| {
+        HarnessExecutionRecord::close_durable_before_apply(
+            &repository.0,
+            run,
+            "Stop the uncommitted request",
+            &policy,
+            session,
+        )
+    };
+    assert!(
+        HarnessExecutionRecord::close_durable_before_apply_with_hook(
+            &repository.0,
+            run,
+            "Stop the uncommitted request",
+            &policy,
+            &mut session,
+            || Err(HarnessError::InvalidSubmission(
+                "injected interruption".into()
+            )),
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(directory.join("head.json")).unwrap(), before);
+    let proof = fs::read(directory.join("pre-apply-close.json")).unwrap();
+    session.recovery = Some(ContextRecoveryStatus::Pending);
+    assert!(close(&mut session).is_err());
+    assert_eq!(fs::read(directory.join("head.json")).unwrap(), before);
+    session.recovery = None;
+    let (closed, receipt) = close(&mut session).unwrap();
+    assert_eq!(closed.state, HarnessExecutionState::ClosedBeforeApply);
+    assert_eq!(closed.role_execution, original.role_execution);
+    assert_eq!(closed.revision_history, original.revision_history);
+    assert_eq!(closed.sequence, original.sequence + 1);
+    assert!(closed.ready_role_invocations.is_empty());
+    assert!(
+        closed.evaluation.is_none()
+            && closed.validation_receipt_digest.is_none()
+            && closed.finalization_digest.is_none()
+    );
+    closed.validate(&prepared, &raw).unwrap();
+    assert_eq!(
+        proof,
+        fs::read(directory.join("pre-apply-close.json")).unwrap()
+    );
+    assert_eq!(close(&mut session).unwrap(), (closed.clone(), receipt));
+    assert!(
+        HarnessExecutionRecord::close_durable_before_apply(
+            &repository.0,
+            run,
+            "different reason",
+            &policy,
+            &mut session
+        )
+        .is_err()
+    );
+    let invocation = original.ready_role_invocations[0].clone();
+    let event = completed_role_event(
+        &prepared.plan.resolved_request,
+        &prepared.role_run,
+        &invocation,
+        vec![],
+        run,
+    );
+    assert!(HarnessExecutionRecord::advance_durable(&engine, run, event).is_err());
+    assert!(HarnessExecutionRecord::evaluate_durable(&engine, run, None).is_err());
+    assert!(HarnessExecutionRecord::validate_durable(&engine, run).is_err());
+    assert!(HarnessExecutionRecord::apply_durable(&engine, run, Some(&mut session)).is_err());
+    assert!(!directory.join("apply-attempt.json").exists());
+    assert!(session.calls.iter().all(|call| *call == "pre-apply-close"));
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_apply_close_interruption_blocks_all_ordinary_durable_transitions() {
+    let run = "preapply-ordinary-interrupted";
+    let (repository, engine, prepared, _, original) = pre_apply_close_fixture(run);
+    let directory = repository
+        .0
+        .join(".llm-context-vault-harness/runs")
+        .join(run);
+    let before = fs::read(directory.join("head.json")).unwrap();
+    let mut session = NativeFaultSession::new();
+    let reason = "Stop before ordinary reentry";
+    let policy = "a".repeat(64);
+    assert!(
+        HarnessExecutionRecord::close_durable_before_apply_with_hook(
+            &repository.0,
+            run,
+            reason,
+            &policy,
+            &mut session,
+            || Err(HarnessError::InvalidSubmission(
+                "injected interruption".into()
+            )),
+        )
+        .is_err()
+    );
+    let proof = fs::read(directory.join("pre-apply-close.json")).unwrap();
+    let calls = session.calls.clone();
+    let event = completed_role_event(
+        &prepared.plan.resolved_request,
+        &prepared.role_run,
+        &original.ready_role_invocations[0],
+        vec![],
+        run,
+    );
+    let errors = [
+        HarnessExecutionRecord::advance_durable(&engine, run, event)
+            .err()
+            .unwrap(),
+        HarnessExecutionRecord::evaluate_durable(&engine, run, None)
+            .err()
+            .unwrap(),
+        HarnessExecutionRecord::validate_durable(&engine, run)
+            .err()
+            .unwrap(),
+        HarnessExecutionRecord::apply_durable(&engine, run, Some(&mut session))
+            .err()
+            .unwrap(),
+        HarnessExecutionRecord::open_durable_recovery(&repository.0, run, Some(&mut session))
+            .err()
+            .unwrap(),
+    ];
+    assert!(
+        errors
+            .iter()
+            .all(|error| error.to_string().contains("explicit closure recovery"))
+    );
+    assert_eq!(fs::read(directory.join("head.json")).unwrap(), before);
+    assert_eq!(
+        fs::read(directory.join("pre-apply-close.json")).unwrap(),
+        proof
+    );
+    assert_eq!(session.calls, calls);
+    assert!(!directory.join("apply-attempt.json").exists());
+    assert!(HarnessExecutionRecord::load_durable_prepared(&repository.0, run).is_ok());
+    let (closed, _) = HarnessExecutionRecord::close_durable_before_apply(
+        &repository.0,
+        run,
+        reason,
+        &policy,
+        &mut session,
+    )
+    .unwrap();
+    assert_eq!(closed.state, HarnessExecutionState::ClosedBeforeApply);
+    assert_eq!(closed.role_execution, original.role_execution);
+    assert_eq!(
+        fs::read(directory.join("pre-apply-close.json")).unwrap(),
+        proof
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_apply_close_terminal_load_requires_the_exact_proof() {
+    use std::os::unix::fs::PermissionsExt;
+    let run = "preapply-ordinary-closed";
+    let (repository, engine, _, _, _) = pre_apply_close_fixture(run);
+    let directory = repository
+        .0
+        .join(".llm-context-vault-harness/runs")
+        .join(run);
+    let mut session = NativeFaultSession::new();
+    let reason = "Stop with exact proof";
+    let policy = "a".repeat(64);
+    let closed = HarnessExecutionRecord::close_durable_before_apply(
+        &repository.0,
+        run,
+        reason,
+        &policy,
+        &mut session,
+    )
+    .unwrap();
+    let head = fs::read(directory.join("head.json")).unwrap();
+    let path = directory.join("pre-apply-close.json");
+    let proof = fs::read(&path).unwrap();
+    let ordinary_error = HarnessExecutionRecord::evaluate_durable(&engine, run, None)
+        .err()
+        .unwrap()
+        .to_string();
+    let mut unknown: serde_json::Value = serde_json::from_slice(&proof).unwrap();
+    unknown["unknown"] = serde_json::json!(true);
+    let other_run = "preapply-other-proof";
+    let (other, _, _, _, _) = pre_apply_close_fixture(other_run);
+    let (_, other_receipt) = HarnessExecutionRecord::close_durable_before_apply(
+        &other.0,
+        other_run,
+        reason,
+        &policy,
+        &mut session,
+    )
+    .unwrap();
+    let calls = session.calls.clone();
+    for invalid in [
+        None,
+        Some(b"{".to_vec()),
+        Some(serde_json::to_vec(&unknown).unwrap()),
+        Some(serde_json::to_vec(&other_receipt).unwrap()),
+    ] {
+        fs::remove_file(&path).unwrap();
+        if let Some(bytes) = invalid {
+            fs::write(&path, bytes).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let error = HarnessExecutionRecord::evaluate_durable(&engine, run, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert_ne!(
+            error, ordinary_error,
+            "proof must be checked before the terminal-state rejection"
+        );
+        assert!(
+            HarnessExecutionRecord::open_durable_recovery(&repository.0, run, Some(&mut session),)
+                .is_err()
+        );
+        assert_eq!(fs::read(directory.join("head.json")).unwrap(), head);
+        assert_eq!(session.calls, calls);
+        assert!(!directory.join("apply-attempt.json").exists());
+        assert!(HarnessExecutionRecord::load_durable_prepared(&repository.0, run).is_ok());
+        fs::write(&path, &proof).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert_eq!(
+        HarnessExecutionRecord::close_durable_before_apply(
+            &repository.0,
+            run,
+            reason,
+            &policy,
+            &mut session,
+        )
+        .unwrap(),
+        closed
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_apply_close_rejects_unknown_proof_attempt_and_wrong_store_without_provider_calls() {
+    let run = "preapply-invalid";
+    let (repository, _, _, _, _) = pre_apply_close_fixture(run);
+    let directory = repository
+        .0
+        .join(".llm-context-vault-harness/runs")
+        .join(run);
+    let before = fs::read(directory.join("head.json")).unwrap();
+    let mut session = NativeFaultSession::new();
+    let policy = "b".repeat(64);
+    let close = |session: &mut NativeFaultSession| {
+        HarnessExecutionRecord::close_durable_before_apply(
+            &repository.0,
+            run,
+            "Stop",
+            &policy,
+            session,
+        )
+    };
+    session.identity.as_mut().unwrap().store_id = "wrong-store".into();
+    assert!(close(&mut session).is_err());
+    session.identity.as_mut().unwrap().store_id = "boundary-test-store".into();
+    let attempt = directory.join("apply-attempt.json");
+    fs::write(&attempt, b"unknown or incomplete attempt").unwrap();
+    assert!(close(&mut session).is_err());
+    fs::remove_file(&attempt).unwrap();
+    let proof = directory.join("pre-apply-close.json");
+    fs::write(&proof, b"{\"unknown\":true}").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&proof, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(close(&mut session).is_err());
+    assert!(session.calls.is_empty());
+    assert_eq!(before, fs::read(directory.join("head.json")).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_apply_close_does_not_replay_drifted_source_or_configuration() {
+    let run = "preapply-drift";
+    let (repository, _, prepared, raw, _) = pre_apply_close_fixture(run);
+    let mut bytes = include_bytes!("../../tests/fixtures/policy-settings.json").to_vec();
+    bytes.push(b' ');
+    let configuration = PolicyConfiguration::from_bytes(&bytes).unwrap();
+    let source = std::sync::Arc::new(NativeBoundarySource::fixture(&repository.0));
+    let drifted_engine =
+        HarnessEngine::with_source(&repository.0, &repository.0, source, configuration.clone())
+            .unwrap();
+    assert!(
+        prepared
+            .validate_with_engine(&raw, &drifted_engine)
+            .is_err()
+    );
+    fs::remove_file(repository.0.join("vault/profile/rules/control.md")).unwrap();
+    let mut session = NativeFaultSession::new();
+    let (closed, receipt) = HarnessExecutionRecord::close_durable_before_apply(
+        &repository.0,
+        run,
+        "Stop after source and caller policy changed",
+        configuration.digest(),
+        &mut session,
+    )
+    .unwrap();
+    assert_eq!(closed.state, HarnessExecutionState::ClosedBeforeApply);
+    assert_eq!(receipt.policy_configuration_digest, configuration.digest());
+    assert!(
+        prepared
+            .validate_with_engine(&raw, &drifted_engine)
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_apply_close_cas_never_overwrites_a_changed_head() {
+    let run = "preapply-cas";
+    let (repository, engine, prepared, raw, original) = pre_apply_close_fixture(run);
+    let path = repository
+        .0
+        .join(".llm-context-vault-harness/runs")
+        .join(run)
+        .join("head.json");
+    let invocation = original.ready_role_invocations[0].clone();
+    let event = completed_role_event(
+        &prepared.plan.resolved_request,
+        &prepared.role_run,
+        &invocation,
+        vec![],
+        run,
+    );
+    let raced = original.advance(&engine, &raw, &prepared, event).unwrap();
+    let mut session = NativeFaultSession::new();
+    assert!(
+        HarnessExecutionRecord::close_durable_before_apply_with_hook(
+            &repository.0,
+            run,
+            "Stop",
+            &"d".repeat(64),
+            &mut session,
+            || {
+                fs::write(&path, serde_json::to_vec(&raced).unwrap()).unwrap();
+                Ok(())
+            },
+        )
+        .is_err()
+    );
+    let current: HarnessExecutionRecord =
+        decode_current_json(&fs::read(path).unwrap(), "raced head").unwrap();
+    assert_eq!(current, raced);
+    assert!(
+        HarnessExecutionRecord::close_durable_before_apply(
+            &repository.0,
+            run,
+            "Stop",
+            &"d".repeat(64),
+            &mut session
+        )
+        .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_apply_close_rejects_owned_run_lock_and_pending_journal() {
+    use std::os::fd::AsRawFd;
+    let run = "preapply-locked";
+    let (repository, _, _, _, _) = pre_apply_close_fixture(run);
+    let runs = repository.0.join(".llm-context-vault-harness/runs");
+    let lock = File::open(runs.join(format!(".{run}.lock"))).unwrap();
+    // SAFETY: the fixture owns this live descriptor until unlock/drop.
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let mut session = NativeFaultSession::new();
+    assert!(
+        HarnessExecutionRecord::close_durable_before_apply(
+            &repository.0,
+            run,
+            "Stop",
+            &"e".repeat(64),
+            &mut session
+        )
+        .is_err()
+    );
+    drop(lock);
+    let batches = repository
+        .0
+        .join(".llm-context-vault-harness/batches/unknown");
+    fs::create_dir_all(&batches).unwrap();
+    fs::write(batches.join("journal.json"), b"unknown effect").unwrap();
+    assert!(
+        HarnessExecutionRecord::close_durable_before_apply(
+            &repository.0,
+            run,
+            "Stop",
+            &"e".repeat(64),
+            &mut session
+        )
+        .is_err()
+    );
+    assert!(session.calls.is_empty());
 }

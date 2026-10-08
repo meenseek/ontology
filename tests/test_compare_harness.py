@@ -24,7 +24,7 @@ class CommandTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
 
     def test_input_argv_and_external_scratch(self):
         spec = command("import os,sys; print(os.getcwd()); print(os.environ['TMPDIR']); print(sys.stdin.read()); print(sys.argv[1])")

@@ -63,7 +63,29 @@ pub struct Store {
 impl Store {
     pub async fn connect(url: &str) -> Result<Self, Error> {
         let options = database_options(url)?;
-        let pool = PgPoolOptions::new()
+        let pool = Self::pool_options()
+            .connect_with(options.clone())
+            .await
+            .map_err(|_| Error::Storage)?;
+        Ok(Self::from_pool(options, pool))
+    }
+    /// Native commands open their own bounded, gated connection. Do not eagerly
+    /// open a second unused pool connection; ordinary consumers retain connect().
+    pub(crate) fn for_native(url: &str) -> Result<Self, Error> {
+        let options = database_options(url)?;
+        let pool = Self::pool_options().connect_lazy_with(options.clone());
+        Ok(Self::from_pool(options, pool))
+    }
+    fn from_pool(database_options: PgConnectOptions, pool: PgPool) -> Self {
+        Self {
+            database_options,
+            pool,
+            calls: Arc::new(AtomicU64::new(0)),
+            dependencies: Arc::new(std::sync::Mutex::new(DependencyObservations::default())),
+        }
+    }
+    fn pool_options() -> PgPoolOptions {
+        PgPoolOptions::new()
             .max_connections(5)
             .acquire_timeout(Duration::from_secs(3))
             .after_connect(|connection, _| {
@@ -82,15 +104,6 @@ impl Store {
                     Ok(())
                 })
             })
-            .connect_with(options.clone())
-            .await
-            .map_err(|_| Error::Storage)?;
-        Ok(Self {
-            database_options: options,
-            pool,
-            calls: Arc::new(AtomicU64::new(0)),
-            dependencies: Arc::new(std::sync::Mutex::new(DependencyObservations::default())),
-        })
     }
     pub fn pool(&self) -> &PgPool {
         &self.pool

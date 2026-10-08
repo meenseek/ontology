@@ -633,11 +633,35 @@ prepare·replay·apply·recover에서 기존 PlanDrift 판정으로 닫힌다. �
 요청을 다시 resolve하고 검토·검증한다. default는 정확한 authority ID와 현재 source digest를
 대조하며, 설정이 request owner·grant·native 읽기 또는 복구 authorization을 넓힐 수 없다.
 
+적용 시도 전 멈춘 native 원문 전용 run은 기존 `recover`에
+`--close-before-apply --reason '<현재 종료 이유>'`를 명시해 종료한다. 이 경로는
+기존 역할 결과를 보존하고 원문·과거 요청을 재실행하지 않는다. 실제 store와 owned
+prepared/head, workspace·source-view identity, 적용 시도·미해결 journal 부재와 DB의
+정확한 run ID 또는 prepared digest에 연결된 모든 상태의 반영 기록 부재를 잠금 안에서
+확인한다. 영향이 있거나 확인할 수 없으면 일반 적용 복구로 처리한다.
+
+종료 증명은 원래 head, 실제 확인 시각·이유·현재 호출자 설정과 terminal
+`closed-before-apply` head를 결합한다. 증명 저장 뒤 head 갱신이 중단되면 같은
+이유·설정으로 재호출하여 무효과 확인과 누락된 전이만 마친다. 종료된 run에는
+`advance`, `evaluate`, `validate`, `apply`를 실행하지 않는다. 이 명시적 종료 경로만
+과거 정책 binding의 차이를 허용하며, 다른 명령의 현재 설정 검증은 그대로 유지한다.
+원문 revision·history를 변경하지 않으며 terminal 정리는 native 운영 정책을 따른다.
+
 세부 역할·수락·적용·복구 계약은 [Context Core](crates/context-core/src/harness.rs)을 따른다.
 Source view나 DB를 직접 고치거나 별도 protocol·version 축·호환 실행 경로를 만들지 않는다.
 
+`resolve --compose-decisions`는 같은 `RequestEnvelope`의 명시된 값·참조를 정규화하고
+비어 있는 식별자·값 digest와 허용된 기본값만 구성한다. 의미·owner·grant·사용자 동의는
+추측하지 않는다. 기본값 authority는 호출자 설정에서 선택하고, 현재 source bytes를
+결합한 뒤 전체 요청 검증을 통과해야 실행 계획을 발급한다. 완성된 envelope는 이 옵션
+없이 사용한다. 구성 결과는 별도 실행 protocol이나 원문 복사본으로 저장하지 않는다.
+
 `begin`·`advance`의 `--codex-binary /absolute/path/to/codex`는 Core가 발급한
-Reviewer·Verifier 호출만 실행한다. 준비된 `runtime_capabilities.max_concurrent_roles`가
+Writer·Specialist·Reviewer·Verifier 호출을 실행한다. Writer·Specialist 자동 실행은
+도구 계획이 없는 경우에 지원한다. 도구 계획이 있으면 기존 명시적 도구 실행 흐름을
+사용한다. Writer·Specialist가 필요한 변경을 모두 마치면 결과를 제출하고 현재 Core
+head에 따라 후속 역할을 실행한다. 준비된
+`runtime_capabilities.max_concurrent_roles`가
 2 이상이면 현재 독립 호출을 최대 두 개 함께 실행하고, 1이면 순차 실행한다. 각 호출은
 기존 exact 입력과 별도 작업 공간을 사용하며 결과 수락은 부모가 관측한 완료 순서대로
 현재 Core head에 제출한다. Non-completed 결과나 제출 오류가 나면 이미 시작한 다른

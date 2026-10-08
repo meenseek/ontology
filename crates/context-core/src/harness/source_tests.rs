@@ -7,6 +7,85 @@ fn policy_configuration() -> PolicyConfiguration {
 }
 
 #[test]
+fn composed_request_cannot_cross_configuration_before_source_access() {
+    let fixture = SourceFixture::new();
+    let mut request = SourceFixture::request(DataOwner::Personal);
+    request.action = HarnessAction::DocumentWrite;
+    let mut envelope = RequestEnvelope::from_structured_request(
+        request,
+        HarnessIntent::General,
+        vec![],
+        vec![],
+        HarnessExecutionProfile::Standard,
+        "fictional configuration-binding test",
+    )
+    .unwrap();
+    let statement = "statement-0000000000000001".to_owned();
+    envelope.source = RequestSource::UserLanguage {
+        statements: vec![UserStatement {
+            identifier: statement.clone(),
+            text: "Write the fictional README candidate.".into(),
+        }],
+    };
+    for record in &mut envelope.decision_trace.records {
+        if let DecisionRecord::StructuredCaller {
+            identifier,
+            value_digest,
+            ..
+        } = record
+        {
+            *record = DecisionRecord::UserStatement {
+                identifier: identifier.clone(),
+                value_digest: value_digest.clone(),
+                statement_identifiers: vec![statement.clone()],
+            };
+        }
+    }
+    let DraftTaskRequest::Write(ref mut draft) = envelope.draft else {
+        unreachable!()
+    };
+    let mut defaults = Vec::new();
+    if let DraftValue::Resolved {
+        decision_identifier,
+        ..
+    } = &mut draft.common.intent
+    {
+        defaults.push(std::mem::take(decision_identifier));
+    }
+    if let DraftValue::Resolved {
+        decision_identifier,
+        ..
+    } = &mut draft.common.execution_profile
+    {
+        defaults.push(std::mem::take(decision_identifier));
+    }
+    envelope.decision_trace.records.retain(|record| {
+        !matches!(record,
+        DecisionRecord::UserStatement { identifier, .. } if defaults.contains(identifier))
+    });
+    let pending = envelope.compose_decisions(&policy_configuration()).unwrap();
+    let mut engine = fixture.engine();
+    let mut changed = include_bytes!("../../tests/fixtures/policy-settings.json").to_vec();
+    changed.push(b' ');
+    engine.vault.policy_configuration = PolicyConfiguration::from_bytes(&changed).unwrap();
+    fixture.source.reset_calls();
+    assert!(
+        engine
+            .resolve_composed(pending, None)
+            .unwrap_err()
+            .to_string()
+            .contains("different caller policy configuration")
+    );
+    let calls = fixture.source.calls.lock().unwrap();
+    assert!(
+        calls.opens.is_empty()
+            && calls.metadata.is_empty()
+            && calls.validations.is_empty()
+            && calls.children.is_empty()
+    );
+}
+
+#[test]
 fn fictional_rule_axes_select_only_matching_source_and_role_bindings() {
     for axis in ["intent", "surface", "curation", "dependency", "native"] {
         for matched in [true, false] {

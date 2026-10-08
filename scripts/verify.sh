@@ -95,6 +95,9 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   cargo check --workspace --locked
   cargo clippy --workspace --locked --all-targets -- -D warnings
   cargo test --workspace --locked
+  if [[ -n "${ONTOLOGY_TEST_CODEX_BINARY:-}" ]]; then
+    cargo test --locked --test context_native native_cli_real_codex_producer_and_reviewer -- --ignored --exact --nocapture
+  fi
   cargo audit --file Cargo.lock
   pnpm --dir web install --frozen-lockfile
   pnpm --dir web test

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     ContextGrant, CurationKind, DataOwner, HARNESS_SCHEMA_VERSION, HarnessAction, HarnessError,
     HarnessExecutionProfile, HarnessIntent, HarnessRequest, HarnessResult, MAX_RETRIEVAL_BYTES,
-    MAX_RETRIEVAL_QUERY_LENGTH, PolicyBinding, PromotionHandoff, serialized_digest,
-    validate_single_line,
+    MAX_RETRIEVAL_QUERY_LENGTH, PolicyBinding, PolicyConfiguration, PromotionHandoff,
+    serialized_digest, validate_single_line,
 };
 
 const REQUEST_TEXT_LIMIT: usize = 16 * 1024;
@@ -339,7 +339,217 @@ impl RequestProvenanceBinding {
     }
 }
 
+/// Strictly resolved, immutable request input. Only full envelope validation constructs it.
+#[derive(Clone, Debug)]
+pub struct ValidatedRequest {
+    contract: ResolvedTaskContract,
+    trace: DecisionTrace,
+    provenance: RequestProvenanceBinding,
+}
+impl ValidatedRequest {
+    pub fn contract(&self) -> &ResolvedTaskContract {
+        &self.contract
+    }
+    pub fn decision_trace(&self) -> &DecisionTrace {
+        &self.trace
+    }
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        ResolvedTaskContract,
+        DecisionTrace,
+        RequestProvenanceBinding,
+    ) {
+        (self.contract, self.trace, self.provenance)
+    }
+}
+
+/// A construction result whose current source authorities are not bound yet.
+/// It cannot be serialized or used as an executable envelope before binding.
+#[derive(Clone, Debug)]
+pub struct ComposedRequest {
+    envelope: RequestEnvelope,
+    contract: ResolvedTaskContract,
+    configuration_digest: String,
+}
+impl ComposedRequest {
+    pub(super) fn configuration_digest(&self) -> &str {
+        &self.configuration_digest
+    }
+    pub fn contract(&self) -> &ResolvedTaskContract {
+        &self.contract
+    }
+    pub(super) fn bind(
+        mut self,
+        mut authority: impl FnMut(PolicyDefaultRule) -> HarnessResult<PolicyBinding>,
+    ) -> HarnessResult<RequestEnvelope> {
+        for record in &mut self.envelope.decision_trace.records {
+            if let DecisionRecord::PolicyDefault {
+                rule,
+                policy_identifier,
+                policy_content_digest,
+                ..
+            } = record
+            {
+                let binding = authority(*rule)?;
+                if binding.id != *policy_identifier {
+                    return Err(HarnessError::InvalidRequest(
+                        "composition authority changed before source binding".to_owned(),
+                    ));
+                }
+                fill_digest(policy_content_digest, &binding.content_digest)?;
+            }
+        }
+        Ok(self.envelope)
+    }
+}
+
 impl RequestEnvelope {
+    pub fn validated(&self) -> HarnessResult<ValidatedRequest> {
+        let (contract, trace, provenance) = self.resolve()?;
+        Ok(ValidatedRequest {
+            contract,
+            trace,
+            provenance,
+        })
+    }
+    /// Fill construction-only identifiers and empty digests without inventing
+    /// meaning or authority. The result still passes the executable resolver.
+    pub fn compose_decisions(
+        &self,
+        configuration: &PolicyConfiguration,
+    ) -> HarnessResult<ComposedRequest> {
+        let RequestSource::UserLanguage { statements } = &self.source else {
+            return Err(HarnessError::InvalidRequest(
+                "decision composition requires user-language statements".to_owned(),
+            ));
+        };
+        let questions = self.draft.unresolved_questions();
+        if !questions.is_empty() {
+            return Err(HarnessError::ClarificationRequired(questions));
+        }
+        let mut envelope = self.clone();
+        let mut statement_ids = BTreeMap::new();
+        let mut output_statements = Vec::new();
+        for (index, statement) in statements.iter().enumerate() {
+            validate_text("statement reference", &statement.identifier)?;
+            let identifier = opaque_identifier("statement", &(index, &statement.text))?;
+            if statement_ids
+                .insert(statement.identifier.clone(), identifier.clone())
+                .is_some()
+            {
+                return Err(HarnessError::InvalidRequest(
+                    "duplicate composition statement reference".to_owned(),
+                ));
+            }
+            output_statements.push(UserStatement {
+                identifier,
+                text: statement.text.clone(),
+            });
+        }
+        let mut composer = DecisionComposer {
+            configuration,
+            identifiers: BTreeMap::new(),
+            digests: BTreeMap::new(),
+            defaults: Vec::new(),
+        };
+        for (index, record) in envelope.decision_trace.records.iter().enumerate() {
+            validate_text("decision reference", record.identifier())?;
+            let identifier = opaque_identifier("decision", &(index, record.identifier()))?;
+            if composer
+                .identifiers
+                .insert(record.identifier().to_owned(), identifier)
+                .is_some()
+            {
+                return Err(HarnessError::InvalidRequest(
+                    "duplicate composition decision reference".to_owned(),
+                ));
+            }
+        }
+        envelope.draft.compose_values(&mut composer)?;
+        // A confirmation explicitly links the same value to a prior proposal.
+        // Propagate only that declared link; no observation becomes authority.
+        for record in envelope.decision_trace.records.iter_mut().rev() {
+            if let Some(digest) = composer.digests.get(record.identifier()).cloned() {
+                fill_digest(record.value_digest_mut(), &digest)?;
+                if let DecisionRecord::UserConfirmation {
+                    confirms_record_identifier,
+                    ..
+                } = record
+                {
+                    composer.bind_digest(confirms_record_identifier, &digest)?;
+                }
+            }
+        }
+        for record in &mut envelope.decision_trace.records {
+            match record {
+                DecisionRecord::UserStatement {
+                    statement_identifiers,
+                    ..
+                }
+                | DecisionRecord::UserConfirmation {
+                    statement_identifiers,
+                    ..
+                } => {
+                    for identifier in statement_identifiers {
+                        *identifier = mapped_identifier(&statement_ids, identifier)?;
+                    }
+                }
+                DecisionRecord::PolicyDefault {
+                    policy_identifier,
+                    rule,
+                    ..
+                } => {
+                    let (identifier, _) = configuration.default_policy(*rule)?;
+                    if policy_identifier.is_empty() {
+                        *policy_identifier = identifier.to_owned();
+                    } else if policy_identifier != identifier {
+                        return Err(HarnessError::InvalidRequest(
+                            "composition default does not use its configured authority".to_owned(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            match record {
+                DecisionRecord::UserConfirmation {
+                    confirms_record_identifier,
+                    ..
+                } => {
+                    *confirms_record_identifier =
+                        mapped_identifier(&composer.identifiers, confirms_record_identifier)?;
+                }
+                DecisionRecord::ModelInterpretation {
+                    based_on_record_identifiers,
+                    ..
+                }
+                | DecisionRecord::ModelProposal {
+                    based_on_record_identifiers,
+                    ..
+                } => {
+                    for identifier in based_on_record_identifiers {
+                        *identifier = mapped_identifier(&composer.identifiers, identifier)?;
+                    }
+                }
+                _ => {}
+            }
+            *record.identifier_mut() =
+                mapped_identifier(&composer.identifiers, record.identifier())?;
+        }
+        envelope.decision_trace.records.extend(composer.defaults);
+        envelope.source = RequestSource::UserLanguage {
+            statements: output_statements,
+        };
+        let (contract, _, _) = envelope.resolve_internal(false, true)?;
+        configuration.validate_contract(&contract)?;
+        configuration.validate_decision_defaults(&envelope.decision_trace)?;
+        Ok(ComposedRequest {
+            envelope,
+            contract,
+            configuration_digest: configuration.digest.clone(),
+        })
+    }
+
     #[cfg(test)]
     #[allow(
         clippy::too_many_lines,
@@ -532,7 +742,7 @@ impl RequestEnvelope {
         DecisionTrace,
         RequestProvenanceBinding,
     )> {
-        self.resolve_internal(false)
+        self.resolve_internal(false, false)
     }
 
     #[cfg(test)]
@@ -543,12 +753,13 @@ impl RequestEnvelope {
         DecisionTrace,
         RequestProvenanceBinding,
     )> {
-        self.resolve_internal(true)
+        self.resolve_internal(true, false)
     }
 
     fn resolve_internal(
         &self,
         allow_structured_test_fixture: bool,
+        allow_unbound_composition: bool,
     ) -> HarnessResult<(
         ResolvedTaskContract,
         DecisionTrace,
@@ -575,7 +786,8 @@ impl RequestEnvelope {
             ));
         }
         let statements = self.source.validate()?;
-        self.decision_trace.validate(&self.source, statements)?;
+        self.decision_trace
+            .validate(&self.source, statements, allow_unbound_composition)?;
         let unresolved = self.draft.unresolved_questions();
         if !unresolved.is_empty() {
             return Err(HarnessError::ClarificationRequired(unresolved));
@@ -620,6 +832,151 @@ impl RequestEnvelope {
                 statement_bindings,
             },
         ))
+    }
+}
+
+fn opaque_identifier(prefix: &str, value: &impl Serialize) -> HarnessResult<String> {
+    let digest = serialized_digest(value)?;
+    Ok(format!(
+        "{prefix}-{}",
+        &digest[..OPAQUE_IDENTIFIER_HEX_LENGTH]
+    ))
+}
+
+fn mapped_identifier(ids: &BTreeMap<String, String>, identifier: &str) -> HarnessResult<String> {
+    ids.get(identifier).cloned().ok_or_else(|| {
+        HarnessError::InvalidRequest(format!("unknown composition reference `{identifier}`"))
+    })
+}
+
+fn fill_digest(current: &mut String, actual: &str) -> HarnessResult<()> {
+    if !current.is_empty() && current != actual {
+        return Err(HarnessError::InvalidRequest(
+            "supplied composition digest does not match the typed value or current policy"
+                .to_owned(),
+        ));
+    }
+    *current = actual.to_owned();
+    Ok(())
+}
+
+struct DecisionComposer<'a> {
+    configuration: &'a PolicyConfiguration,
+    identifiers: BTreeMap<String, String>,
+    digests: BTreeMap<String, String>,
+    defaults: Vec<DecisionRecord>,
+}
+
+impl DecisionComposer<'_> {
+    fn bind_digest(&mut self, identifier: &str, digest: &str) -> HarnessResult<()> {
+        if self
+            .digests
+            .get(identifier)
+            .is_some_and(|prior| prior != digest)
+        {
+            return Err(HarnessError::InvalidRequest(
+                "one composition decision cannot represent different values".to_owned(),
+            ));
+        }
+        self.digests
+            .insert(identifier.to_owned(), digest.to_owned());
+        Ok(())
+    }
+
+    fn value<T: Serialize>(&mut self, field: &str, draft: &mut DraftValue<T>) -> HarnessResult<()> {
+        let DraftValue::Resolved {
+            value,
+            decision_identifier,
+        } = draft
+        else {
+            return Ok(());
+        };
+        let digest = serialized_digest(value)?;
+        if decision_identifier.is_empty() {
+            let rule = required_policy_default_rule(field, &digest)?.ok_or_else(|| {
+                HarnessError::InvalidRequest(format!(
+                    "field `{field}` requires an explicit decision source"
+                ))
+            })?;
+            let identifier = opaque_identifier("decision", &("policy-default", field, &digest))?;
+            self.defaults.push(DecisionRecord::PolicyDefault {
+                identifier: identifier.clone(),
+                value_digest: digest,
+                policy_identifier: self.configuration.default_policy(rule)?.0.to_owned(),
+                policy_content_digest: String::new(),
+                rule,
+            });
+            *decision_identifier = identifier;
+        } else {
+            self.bind_digest(decision_identifier, &digest)?;
+            *decision_identifier = mapped_identifier(&self.identifiers, decision_identifier)?;
+        }
+        Ok(())
+    }
+
+    fn optional<T: Serialize>(
+        &mut self,
+        field: &str,
+        draft: &mut Option<DraftValue<T>>,
+    ) -> HarnessResult<()> {
+        if let Some(draft) = draft {
+            self.value(field, draft)?;
+        }
+        Ok(())
+    }
+}
+
+impl DraftTaskCommon {
+    fn compose_values(&mut self, composer: &mut DecisionComposer<'_>) -> HarnessResult<()> {
+        composer.value("owner", &mut self.owner)?;
+        composer.value("intent", &mut self.intent)?;
+        composer.value("task_statement", &mut self.task_statement)?;
+        composer.value("execution_profile", &mut self.execution_profile)?;
+        composer.optional("context_grants", &mut self.context_grants)?;
+        composer.optional("evidence_source_paths", &mut self.evidence_source_paths)
+    }
+}
+
+impl DraftTaskRequest {
+    fn compose_values(&mut self, composer: &mut DecisionComposer<'_>) -> HarnessResult<()> {
+        match self {
+            Self::Write(task) => {
+                task.common.compose_values(composer)?;
+                composer.value("write_kind", &mut task.write_kind)?;
+                composer.value("targets", &mut task.targets)?;
+                composer.optional("delete_targets", &mut task.delete_targets)
+            }
+            Self::Review(task) => {
+                task.common.compose_values(composer)?;
+                composer.value("review_kind", &mut task.review_kind)?;
+                composer.value("targets", &mut task.targets)
+            }
+            Self::Analysis(task) => {
+                task.common.compose_values(composer)?;
+                composer.value("analysis_kind", &mut task.analysis_kind)?;
+                composer.optional("targets", &mut task.targets)
+            }
+            Self::VaultRead(task) => {
+                composer.value("owner", &mut task.owner)?;
+                composer.value("task_statement", &mut task.task_statement)?;
+                composer.value("execution_profile", &mut task.execution_profile)?;
+                composer.value("curation_kind", &mut task.curation_kind)?;
+                composer.value("query", &mut task.query)?;
+                composer.value("maximum_context_bytes", &mut task.maximum_context_bytes)?;
+                composer.value("confirmation", &mut task.confirmation)
+            }
+            Self::Curation(task) => {
+                composer.value("owner", &mut task.common.owner)?;
+                composer.value("task_statement", &mut task.common.task_statement)?;
+                composer.value("execution_profile", &mut task.common.execution_profile)?;
+                composer.value("curation_kind", &mut task.curation_kind)?;
+                composer.value("target", &mut task.target)?;
+                composer.optional("curation_sources", &mut task.curation_sources)?;
+                composer.optional("delete_target", &mut task.delete_target)?;
+                composer.optional("promotion_handoff", &mut task.promotion_handoff)?;
+                composer.value("confirmation", &mut task.confirmation)
+            }
+        }
     }
 }
 
@@ -705,7 +1062,12 @@ impl RequestSource {
 }
 
 impl DecisionTrace {
-    fn validate(&self, source: &RequestSource, statements: &[UserStatement]) -> HarnessResult<()> {
+    fn validate(
+        &self,
+        source: &RequestSource,
+        statements: &[UserStatement],
+        allow_unbound_composition: bool,
+    ) -> HarnessResult<()> {
         if self.records.is_empty() || self.records.len() > REQUEST_LIST_LIMIT {
             return Err(HarnessError::InvalidRequest(format!(
                 "decision trace must contain between one and {REQUEST_LIST_LIMIT} records"
@@ -753,7 +1115,11 @@ impl DecisionTrace {
                 }
                 _ => {}
             }
-            record.validate_references(&records, &statement_identifiers)?;
+            record.validate_references(
+                &records,
+                &statement_identifiers,
+                allow_unbound_composition,
+            )?;
             record.validate_chronology(&prior_record_identifiers)?;
             prior_record_identifiers.insert(record.identifier());
         }
@@ -841,6 +1207,30 @@ impl DecisionTrace {
 }
 
 impl DecisionRecord {
+    fn identifier_mut(&mut self) -> &mut String {
+        match self {
+            Self::UserStatement { identifier, .. }
+            | Self::UserConfirmation { identifier, .. }
+            | Self::PolicyDefault { identifier, .. }
+            | Self::ObservedFact { identifier, .. }
+            | Self::ModelInterpretation { identifier, .. }
+            | Self::ModelProposal { identifier, .. }
+            | Self::StructuredCaller { identifier, .. } => identifier,
+        }
+    }
+
+    fn value_digest_mut(&mut self) -> &mut String {
+        match self {
+            Self::UserStatement { value_digest, .. }
+            | Self::UserConfirmation { value_digest, .. }
+            | Self::PolicyDefault { value_digest, .. }
+            | Self::ObservedFact { value_digest, .. }
+            | Self::ModelInterpretation { value_digest, .. }
+            | Self::ModelProposal { value_digest, .. }
+            | Self::StructuredCaller { value_digest, .. } => value_digest,
+        }
+    }
+
     fn identifier(&self) -> &str {
         match self {
             Self::UserStatement { identifier, .. }
@@ -914,6 +1304,7 @@ impl DecisionRecord {
         &'a self,
         records: &BTreeMap<&'a str, &'a DecisionRecord>,
         statement_identifiers: &BTreeSet<&str>,
+        allow_unbound_composition: bool,
     ) -> HarnessResult<()> {
         match self {
             Self::UserStatement {
@@ -948,7 +1339,9 @@ impl DecisionRecord {
                 ..
             } => {
                 validate_text("policy default identifier", policy_identifier)?;
-                validate_digest("policy default content digest", policy_content_digest)?;
+                if !allow_unbound_composition || !policy_content_digest.is_empty() {
+                    validate_digest("policy default content digest", policy_content_digest)?;
+                }
                 Ok(())
             }
             Self::ObservedFact { evidence, .. } => {
@@ -1970,6 +2363,312 @@ mod tests {
         )
     }
 
+    fn composition_configuration() -> PolicyConfiguration {
+        PolicyConfiguration::from_bytes(include_bytes!("../../tests/fixtures/policy-settings.json"))
+            .unwrap()
+    }
+    fn bound_composition(input: &RequestEnvelope) -> HarnessResult<RequestEnvelope> {
+        input
+            .compose_decisions(&composition_configuration())?
+            .bind(|_| Ok(composition_policy()))
+    }
+    fn composition_policy() -> PolicyBinding {
+        PolicyBinding {
+            id: "control".to_owned(),
+            repository_relative_path: "vault/profile/rules/control.md".to_owned(),
+            content_digest: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn composition_preserves_meaning_and_builds_only_required_defaults() {
+        let mut input = user_write_envelope().unwrap();
+        let original_text = match &input.source {
+            RequestSource::UserLanguage { statements } => statements[0].text.clone(),
+            _ => unreachable!(),
+        };
+        let DraftTaskRequest::Write(task) = &mut input.draft else {
+            unreachable!()
+        };
+        task.common.intent = resolved_value(HarnessIntent::General, "");
+        task.common.execution_profile = resolved_value(HarnessExecutionProfile::Standard, "");
+        input.decision_trace.records.retain(|record| {
+            ![decision_identifier(2), decision_identifier(4)]
+                .contains(&record.identifier().to_owned())
+        });
+        for record in &mut input.decision_trace.records {
+            record.value_digest_mut().clear();
+        }
+        assert!(
+            input.resolve().is_err(),
+            "construction input is not executable"
+        );
+        let composed = bound_composition(&input).unwrap();
+        let (contract, trace, provenance) = composed.resolve().unwrap();
+        assert_eq!(contract.intent(), HarnessIntent::General);
+        assert_eq!(
+            contract.execution_profile(),
+            HarnessExecutionProfile::Standard
+        );
+        assert_eq!(
+            contract.to_harness_request().targets,
+            vec!["crates/context-core/src/harness.rs"]
+        );
+        assert_eq!(
+            trace
+                .records
+                .iter()
+                .filter(|record| matches!(record, DecisionRecord::PolicyDefault { .. }))
+                .count(),
+            2
+        );
+        let RequestSource::UserLanguage { statements } = &composed.source else {
+            unreachable!()
+        };
+        assert_eq!(statements[0].text, original_text);
+        assert_eq!(
+            provenance.statement_bindings[0].content_digest,
+            serialized_digest(&original_text).unwrap()
+        );
+        assert_eq!(bound_composition(&input).unwrap(), composed);
+        let mut changed_policy = composition_policy();
+        changed_policy.content_digest = "b".repeat(64);
+        assert!(trace.validate_policy_bindings(&[changed_policy]).is_err());
+    }
+
+    #[test]
+    fn composition_rejects_changed_values_missing_authority_and_wrong_default_sources() {
+        let baseline = user_write_envelope().unwrap();
+        let mut changed = baseline.clone();
+        let DraftTaskRequest::Write(task) = &mut changed.draft else {
+            unreachable!()
+        };
+        task.common.owner = resolved_value(DataOwner::Personal, &decision_identifier(1));
+        assert!(
+            changed
+                .compose_decisions(&composition_configuration())
+                .unwrap_err()
+                .to_string()
+                .contains("supplied composition digest")
+        );
+
+        let mut missing = baseline.clone();
+        let DraftTaskRequest::Write(task) = &mut missing.draft else {
+            unreachable!()
+        };
+        task.common.owner = resolved_value(DataOwner::Profile, "");
+        assert!(
+            missing
+                .compose_decisions(&composition_configuration())
+                .unwrap_err()
+                .to_string()
+                .contains("explicit decision source")
+        );
+
+        let mut wrong_default = baseline.clone();
+        let DraftTaskRequest::Write(task) = &mut wrong_default.draft else {
+            unreachable!()
+        };
+        task.common.intent = resolved_value(HarnessIntent::General, &decision_identifier(2));
+        wrong_default.decision_trace.records[1]
+            .value_digest_mut()
+            .clear();
+        assert!(
+            wrong_default
+                .compose_decisions(&composition_configuration())
+                .unwrap_err()
+                .to_string()
+                .contains("requires policy default")
+        );
+
+        let mut unresolved = baseline.clone();
+        let DraftTaskRequest::Write(task) = &mut unresolved.draft else {
+            unreachable!()
+        };
+        task.common.owner = DraftValue::Unresolved {
+            question: "Which owner?".to_owned(),
+        };
+        assert!(matches!(
+            unresolved.compose_decisions(&composition_configuration()),
+            Err(HarnessError::ClarificationRequired(_))
+        ));
+        assert!(
+            write_envelope()
+                .unwrap()
+                .compose_decisions(&composition_configuration())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn composition_preserves_confirmation_and_does_not_promote_model_lineage() {
+        let mut input = user_write_envelope().unwrap();
+        let proposal = decision_identifier(7);
+        let confirmation = decision_identifier(8);
+        input
+            .decision_trace
+            .records
+            .push(DecisionRecord::ModelProposal {
+                identifier: proposal.clone(),
+                value_digest: String::new(),
+                based_on_record_identifiers: vec![decision_identifier(1)],
+            });
+        input
+            .decision_trace
+            .records
+            .push(DecisionRecord::UserConfirmation {
+                identifier: confirmation.clone(),
+                value_digest: String::new(),
+                confirms_record_identifier: proposal.clone(),
+                statement_identifiers: vec![statement_identifier(1)],
+            });
+        let DraftTaskRequest::Write(task) = &mut input.draft else {
+            unreachable!()
+        };
+        task.common.owner = resolved_value(DataOwner::Profile, &confirmation);
+        let composed = bound_composition(&input).unwrap();
+        assert!(matches!(
+            composed.decision_trace.records[6],
+            DecisionRecord::ModelProposal { .. }
+        ));
+        assert!(matches!(
+            composed.decision_trace.records[7],
+            DecisionRecord::UserConfirmation { .. }
+        ));
+
+        let mut model_only = input.clone();
+        let DraftTaskRequest::Write(task) = &mut model_only.draft else {
+            unreachable!()
+        };
+        task.common.owner = resolved_value(DataOwner::Profile, &proposal);
+        model_only.decision_trace.records.pop();
+        assert!(
+            model_only
+                .compose_decisions(&composition_configuration())
+                .unwrap_err()
+                .to_string()
+                .contains("not authoritative")
+        );
+
+        input.decision_trace.records[0].value_digest_mut().clear();
+        assert!(
+            bound_composition(&input).is_err(),
+            "a confirmation cannot fill a different background value"
+        );
+    }
+
+    #[test]
+    fn composition_keeps_source_authorities_unbound_until_current_bytes_are_supplied() {
+        let mut input = user_write_envelope().unwrap();
+        let DraftTaskRequest::Write(task) = &mut input.draft else {
+            unreachable!()
+        };
+        task.common.intent = resolved_value(HarnessIntent::General, "");
+        task.common.execution_profile = resolved_value(HarnessExecutionProfile::Standard, "");
+        input.decision_trace.records.retain(|r| {
+            ![decision_identifier(2), decision_identifier(4)].contains(&r.identifier().to_owned())
+        });
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../tests/fixtures/policy-settings.json"))
+                .unwrap();
+        let authorities = ["intent-authority", "execution-authority", "read-authority"];
+        for (index, authority) in authorities.iter().enumerate() {
+            settings["documents"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "key": authority, "id": authority,
+                    "path": format!("vault/profile/rules/{authority}.md"),
+                    "project_entrypoint": false, "dependencies": []
+                }));
+            settings["defaults"][index]["document"] = (*authority).into();
+        }
+        settings["documents"][0]["dependencies"] = serde_json::json!(authorities);
+        let configuration =
+            PolicyConfiguration::from_bytes(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        let mut read = input.clone();
+        read.decision_trace.records[0] =
+            user_decision(1, &DataOwner::Personal, &statement_identifier(1)).unwrap();
+        let DraftTaskRequest::Write(task) = &input.draft else {
+            unreachable!()
+        };
+        let query = "fictional knowledge".to_owned();
+        let maximum_context_bytes = 4000_usize;
+        read.decision_trace.records.extend([
+            user_decision(7, &CurationKind::Knowledge, &statement_identifier(1)).unwrap(),
+            user_decision(8, &query, &statement_identifier(1)).unwrap(),
+            user_decision(9, &maximum_context_bytes, &statement_identifier(1)).unwrap(),
+        ]);
+        read.draft = DraftTaskRequest::VaultRead(DraftVaultReadContract {
+            owner: resolved_value(DataOwner::Personal, &decision_identifier(1)),
+            task_statement: task.common.task_statement.clone(),
+            execution_profile: resolved_value(HarnessExecutionProfile::Standard, ""),
+            curation_kind: resolved_value(CurationKind::Knowledge, &decision_identifier(7)),
+            query: resolved_value(query, &decision_identifier(8)),
+            maximum_context_bytes: resolved_value(maximum_context_bytes, &decision_identifier(9)),
+            confirmation: resolved_value(UserConfirmationStatus::NotRequired, ""),
+        });
+        let pending_read = read.compose_decisions(&configuration).unwrap();
+        assert!(pending_read.envelope.decision_trace.records.iter().any(|r| matches!(r,
+            DecisionRecord::PolicyDefault { rule: PolicyDefaultRule::NonJournalReadConfirmationNotRequired, policy_identifier, policy_content_digest, .. }
+            if policy_identifier == "read-authority" && policy_content_digest.is_empty())));
+        pending_read
+            .bind(|rule| {
+                let (id, path) = configuration.default_policy(rule)?;
+                Ok(PolicyBinding {
+                    id: id.to_owned(),
+                    repository_relative_path: path.to_owned(),
+                    content_digest: "a".repeat(64),
+                })
+            })
+            .unwrap()
+            .validated()
+            .unwrap();
+        let pending = input.compose_decisions(&configuration).unwrap();
+        assert!(
+            pending.envelope.resolve().is_err(),
+            "unbound construction is not executable"
+        );
+        let records = &pending.envelope.decision_trace.records;
+        assert!(records.iter().any(|r| matches!(r, DecisionRecord::PolicyDefault { rule: PolicyDefaultRule::GeneralIntent, policy_identifier, policy_content_digest, .. } if policy_identifier == "intent-authority" && policy_content_digest.is_empty())));
+        assert!(records.iter().any(|r| matches!(r, DecisionRecord::PolicyDefault { rule: PolicyDefaultRule::StandardExecutionProfile, policy_identifier, policy_content_digest, .. } if policy_identifier == "execution-authority" && policy_content_digest.is_empty())));
+        let mut bound = pending
+            .bind(|rule| {
+                let (id, path) = configuration.default_policy(rule)?;
+                Ok(PolicyBinding {
+                    id: id.to_owned(),
+                    repository_relative_path: path.to_owned(),
+                    content_digest: "a".repeat(64),
+                })
+            })
+            .unwrap();
+        bound.validated().unwrap();
+        for r in &mut bound.decision_trace.records {
+            if let DecisionRecord::PolicyDefault {
+                policy_content_digest,
+                ..
+            } = r
+            {
+                *policy_content_digest = "b".repeat(64);
+            }
+        }
+        assert!(
+            bound
+                .compose_decisions(&configuration)
+                .unwrap()
+                .bind(|rule| {
+                    let (id, path) = configuration.default_policy(rule)?;
+                    Ok(PolicyBinding {
+                        id: id.to_owned(),
+                        repository_relative_path: path.to_owned(),
+                        content_digest: "a".repeat(64),
+                    })
+                })
+                .is_err(),
+            "supplied authority digests cannot be silently replaced"
+        );
+    }
+
     #[test]
     fn resolved_contract_rejects_unresolved_fields() {
         let mut envelope = write_envelope().expect("fixture must build");
@@ -2169,7 +2868,7 @@ mod tests {
             unreachable!()
         };
         confirmation_trace
-            .validate(&source, statements)
+            .validate(&source, statements, false)
             .expect("confirmation trace must be valid");
         let confirmation_value = resolved_value(not_required, &decision_identifier(2));
         assert!(matches!(

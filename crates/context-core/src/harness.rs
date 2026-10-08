@@ -4480,13 +4480,42 @@ impl HarnessEngine {
         envelope: &RequestEnvelope,
         career_composition_manifest: Option<&CareerCompositionManifest>,
     ) -> HarnessResult<ResolvedHarnessRequest> {
-        let (contract, decision_trace, request_provenance) = envelope.resolve()?;
-        self.resolve_contract(
-            contract,
-            decision_trace,
-            request_provenance,
-            career_composition_manifest,
-        )
+        self.resolve_validated(envelope.validated()?, career_composition_manifest)
+    }
+
+    pub fn resolve_validated(
+        &self,
+        request: ValidatedRequest,
+        career_composition_manifest: Option<&CareerCompositionManifest>,
+    ) -> HarnessResult<ResolvedHarnessRequest> {
+        let (contract, trace, provenance) = request.into_parts();
+        self.resolve_contract(contract, trace, provenance, career_composition_manifest)
+    }
+
+    pub fn resolve_composed(
+        &self,
+        request: ComposedRequest,
+        career_composition_manifest: Option<&CareerCompositionManifest>,
+    ) -> HarnessResult<ResolvedHarnessRequest> {
+        if request.configuration_digest() != self.vault.policy_configuration.digest {
+            return Err(HarnessError::InvalidRequest(
+                "composition belongs to a different caller policy configuration".to_owned(),
+            ));
+        }
+        self.vault
+            .policy_configuration
+            .validate_contract(request.contract())?;
+        let mut bound: BTreeMap<String, PolicyBinding> = BTreeMap::new();
+        let envelope = request.bind(|rule| {
+            let (id, path) = self.vault.policy_configuration.default_policy(rule)?;
+            if let Some(binding) = bound.get(id) {
+                return Ok(binding.clone());
+            }
+            let binding = self.vault.bind_policy(id, path)?;
+            bound.insert(id.to_owned(), binding.clone());
+            Ok(binding)
+        })?;
+        self.resolve_validated(envelope.validated()?, career_composition_manifest)
     }
 
     fn resolve_contract(

@@ -231,6 +231,9 @@ fn expand_path(path: &str, owner: &DataOwner) -> HarnessResult<String> {
 }
 
 impl PolicyConfiguration {
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
     /// Read a bounded regular file without following a file link or accepting multiple links.
     pub fn read(path: impl AsRef<Path>) -> HarnessResult<Self> {
         let path = path.as_ref();
@@ -1012,6 +1015,17 @@ impl PolicyConfiguration {
             }
         }
         Ok(leaves.into_iter().collect())
+    }
+
+    pub(super) fn default_policy(&self, rule: PolicyDefaultRule) -> HarnessResult<(&str, &str)> {
+        let authority = self
+            .data
+            .defaults
+            .iter()
+            .find(|entry| entry.rule == rule)
+            .ok_or_else(|| settings_error("default rule has no authority"))?;
+        let document = self.document(&authority.document)?;
+        Ok((&document.id, &document.path))
     }
 
     /// Check configured authority identifiers without reading their source bytes.

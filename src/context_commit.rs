@@ -8,9 +8,9 @@ use crate::{
 };
 use context_core::harness::{
     ContextAbortProof, ContextApplyContract, ContextCommitReceipt, ContextCommitSession,
-    ContextRecoveryContract, ContextRecoveryStatus, ContextTerminalProof, FinalizationOperation,
-    HarnessApplyAttemptState, HarnessResult, SourceStoreIdentity, SourceVersion, StoredSourceState,
-    VerifiedContextCommit,
+    ContextPreApplyCloseContract, ContextRecoveryContract, ContextRecoveryStatus,
+    ContextTerminalProof, FinalizationOperation, HarnessApplyAttemptState, HarnessResult,
+    SourceStoreIdentity, SourceVersion, StoredSourceState, VerifiedContextCommit,
 };
 use serde_json::{Value, json};
 use sqlx::{Connection, PgConnection, Row, postgres::PgRow};
@@ -476,6 +476,29 @@ async fn committed_rows(
     Ok((resulting, digest(&encode(&metadata)?)))
 }
 impl ContextCommitSession for NativeContextSession {
+    fn verify_pre_apply_close(
+        &mut self,
+        contract: &ContextPreApplyCloseContract,
+    ) -> HarnessResult<()> {
+        if self.identity != *contract.store_identity() {
+            return conflict();
+        }
+        contract.check_view(self.view_root())?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        self.handle.block_on(async {
+            let statement = "SELECT EXISTS(SELECT 1 FROM context_apply_batches WHERE state IN ('pending','committed') OR core_run_id=$1 OR prepared_run_digest=$2)";
+            let observation = SqlObservation::new(&self.store, &self.sql_observations, statement);
+            let query = sqlx::query(statement)
+                .bind(observation.bind(contract.run_identifier()))
+                .bind(observation.bind(contract.prepared_run_digest()));
+            let rows = observation.fetch_all(query, &mut connection).await?;
+            if rows.len() != 1 || rows[0].get::<bool, _>(0) { return conflict(); }
+            Ok(())
+        })
+    }
     fn store_identity(&self) -> &SourceStoreIdentity {
         &self.identity
     }

@@ -279,8 +279,9 @@ async fn native_provider_is_lazy_batched_and_preserves_inode() {
     let view = tempfile::tempdir().expect("view");
     fs::set_permissions(view.path(), fs::Permissions::from_mode(0o700)).expect("owned view");
     let view_path = view.path().canonicalize().expect("view root");
+    let observed = store.clone();
     store
-        .with_native_context(view_path, |source| {
+        .with_native_context(view_path, move |source| {
             for count in [1, 2000] {
                 let paths: Vec<_> = (0..count)
                     .map(|n| PathBuf::from(format!("vault/personal/{n:04}.md")))
@@ -302,8 +303,39 @@ async fn native_provider_is_lazy_batched_and_preserves_inode() {
                 SourcePathKind::RegularFile
             );
             assert_eq!(source.body_queries(), 0);
+            let paths = [
+                "vault/personal/1999.md",
+                "vault/personal/missing.md",
+                "vault/personal/0000.md",
+                "vault/personal/1999.md",
+            ]
+            .map(PathBuf::from);
+            let versions = source
+                .stored_versions(&paths)
+                .expect("ordered sparse duplicates");
+            assert_eq!(
+                versions
+                    .iter()
+                    .map(|v| v.logical_path.as_str())
+                    .collect::<Vec<_>>(),
+                paths
+                    .iter()
+                    .map(|p| p.to_str().unwrap())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(versions[0], versions[3]);
+            assert!(matches!(
+                versions[1].state,
+                context_core::harness::StoredSourceState::Missing
+            ));
+            let calls = observed.calls();
             let first = source.open_file(p, 65536).expect("selected bytes");
             let second = source.open_file(p, 65536).expect("repeat selected");
+            assert_eq!(
+                observed.calls() - calls,
+                4,
+                "fresh metadata and bounded body query per direct open"
+            );
             assert_eq!(
                 first.metadata().expect("inode").ino(),
                 second.metadata().expect("inode").ino()
@@ -700,6 +732,16 @@ async fn native_provider_rejects_foreign_views_links_and_file_descendant_collisi
                     .is_err()
             );
             assert_eq!(source.body_queries(), 0);
+            assert!(
+                source
+                    .open_file(Path::new("vault/personal/0000.md"), 65536)
+                    .is_err()
+            );
+            assert_eq!(
+                source.body_queries(),
+                0,
+                "live file with children never returns a body"
+            );
             Ok(())
         })
         .await
@@ -1281,6 +1323,12 @@ fn assert_sql_phase(
     );
 }
 impl context_core::harness::ContextCommitSession for SqlMeasuredSession<'_> {
+    fn verify_pre_apply_close(
+        &mut self,
+        c: &context_core::harness::ContextPreApplyCloseContract,
+    ) -> context_core::harness::HarnessResult<()> {
+        self.inner.verify_pre_apply_close(c)
+    }
     fn store_identity(&self) -> &context_core::harness::SourceStoreIdentity {
         self.inner.store_identity()
     }
@@ -1691,6 +1739,12 @@ struct InterruptedSession<'a> {
     earlier_head: Vec<u8>,
 }
 impl context_core::harness::ContextCommitSession for InterruptedSession<'_> {
+    fn verify_pre_apply_close(
+        &mut self,
+        c: &context_core::harness::ContextPreApplyCloseContract,
+    ) -> context_core::harness::HarnessResult<()> {
+        self.inner.verify_pre_apply_close(c)
+    }
     fn store_identity(&self) -> &context_core::harness::SourceStoreIdentity {
         self.inner.store_identity()
     }
@@ -2160,6 +2214,287 @@ async fn native_projection_atomicity_and_freshness() {
     );
 }
 
+async fn composed_cli_fixture(
+    store: &Store,
+    root: &Path,
+    statement: &str,
+    live: bool,
+) -> (tempfile::TempDir, context_core::harness::PreparedHarnessRun) {
+    use context_core::harness::*;
+    let sha = harness_fixture::seed(store).await;
+    let mut request = harness_fixture::envelope(
+        &sha,
+        vec!["vault/personal/knowledge/composed-cli.md".into()],
+        vec![],
+        false,
+    );
+    let DraftTaskRequest::Write(task) = &mut request.draft else {
+        unreachable!()
+    };
+    let DraftValue::Resolved { value, .. } = &mut task.common.task_statement else {
+        unreachable!()
+    };
+    *value = statement.to_owned();
+    let RequestSource::UserLanguage { statements } = &mut request.source else {
+        unreachable!()
+    };
+    statements[0].identifier = "request".to_owned();
+    statements[0].text = statement.to_owned();
+    let mut input = serde_json::to_value(&request).unwrap();
+    for record in input["decision_trace"]["records"].as_array_mut().unwrap() {
+        record["value_digest"] = json!("");
+        if record["kind"] == "user-statement" {
+            record["statement_identifiers"] = json!(["request"]);
+        }
+    }
+    let files = tempfile::tempdir().unwrap();
+    let request_path = files.path().join("request.json");
+    let capabilities_path = files.path().join("capabilities.json");
+    let plan_path = files.path().join("plan.json");
+    let prepared_path = files.path().join("prepared.json");
+    fs::write(&request_path, serde_json::to_vec(&input).unwrap()).unwrap();
+    let mut capabilities = harness_fixture::capabilities();
+    if live {
+        capabilities.lifecycle.max_role_execution_millis = 180_000;
+        // The observed CLI did not exit within 500ms of turn.completed.
+        // Declare a finite real-process closing budget; fixture/fault tests retain
+        // their short deadlines and the adapter's termination checks are unchanged.
+        capabilities.lifecycle.max_role_close_millis = 10_000;
+        capabilities.lifecycle.max_total_role_millis = 191_000;
+    }
+    fs::write(
+        &capabilities_path,
+        serde_json::to_vec(&capabilities).unwrap(),
+    )
+    .unwrap();
+    let mut args = vec![
+        "--request-envelope".into(),
+        request_path.display().to_string(),
+        "--runtime-capabilities".into(),
+        capabilities_path.display().to_string(),
+    ];
+    let uncomposed = harness_fixture::command(store, root, root, "resolve", &args).await;
+    assert!(!uncomposed.status.success());
+    assert!(
+        uncomposed.stdout.is_empty(),
+        "incomplete envelopes remain non-executable"
+    );
+    args.push("--compose-decisions".into());
+    let resolved = harness_fixture::command(store, root, root, "resolve", &args).await;
+    assert!(
+        resolved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resolved.stderr)
+    );
+    let plan: HarnessPlan = serde_json::from_slice(&resolved.stdout).unwrap();
+    assert_eq!(plan.resolved_request.request.objective, statement);
+    assert_eq!(plan.resolved_request.request.owner, DataOwner::Personal);
+    assert_eq!(
+        plan.resolved_request.request.targets,
+        ["vault/personal/knowledge/composed-cli.md"]
+    );
+    fs::write(&plan_path, &resolved.stdout).unwrap();
+    let prepared = harness_fixture::command(
+        store,
+        root,
+        root,
+        "prepare",
+        &[
+            "--plan".into(),
+            plan_path.display().to_string(),
+            "--runtime-capabilities".into(),
+            capabilities_path.display().to_string(),
+            "--prepared-output".into(),
+            prepared_path.display().to_string(),
+        ],
+    )
+    .await;
+    assert!(
+        prepared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let prepared: PreparedHarnessRun = serde_json::from_slice(&prepared.stdout).unwrap();
+    assert!(prepared.accepted_tool_plan.is_none());
+    (files, prepared)
+}
+
+#[tokio::test]
+async fn native_cli_composition_and_rejected_manual_role_preserve_source_and_head() {
+    use context_core::harness::*;
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let view = harness_fixture::view();
+    let root = view.path().canonicalize().unwrap();
+    let (files, prepared) = composed_cli_fixture(
+        &store,
+        &root,
+        "Create the exact synthetic document; independently review its candidate.",
+        false,
+    )
+    .await;
+    let begun = harness_fixture::command(
+        &store,
+        &root,
+        &root,
+        "begin",
+        &[
+            "--prepared-run".into(),
+            files.path().join("prepared.json").display().to_string(),
+            "--run-id".into(),
+            "composed-cli".into(),
+        ],
+    )
+    .await;
+    assert!(
+        begun.status.success(),
+        "{}",
+        String::from_utf8_lossy(&begun.stderr)
+    );
+    let head: HarnessExecutionRecord = serde_json::from_slice(&begun.stdout).unwrap();
+    let mut event = harness_fixture::role_event(
+        &prepared,
+        &head.ready_role_invocations[0],
+        "# Unaccepted candidate",
+    );
+    let HarnessExecutionEvent::RoleResult { result } = &mut event else {
+        unreachable!()
+    };
+    result.invocation_digest = "f".repeat(64);
+    let rejected_result = result.clone();
+    let event_path = files.path().join("rejected-event.json");
+    fs::write(&event_path, serde_json::to_vec(&event).unwrap()).unwrap();
+    let rejected = harness_fixture::command(
+        &store,
+        &root,
+        &root,
+        "advance",
+        &[
+            "--run-id".into(),
+            "composed-cli".into(),
+            "--event".into(),
+            event_path.display().to_string(),
+        ],
+    )
+    .await;
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
+    let diagnostic: Value = serde_json::from_slice(&rejected.stderr).unwrap();
+    assert_eq!(diagnostic["kind"], "role-submission-error");
+    assert_eq!(
+        diagnostic["submission"]["submitted_result"],
+        serde_json::to_value(rejected_result).unwrap()
+    );
+    let stored: HarnessExecutionRecord = serde_json::from_slice(
+        &fs::read(root.join(".llm-context-vault-harness/runs/composed-cli/head.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        stored, head,
+        "a rejected result must not update the accepted head"
+    );
+    assert_eq!(
+        store
+            .read_context(&scope(), "knowledge/composed-cli.md", false)
+            .await,
+        Err(Error::NotFound)
+    );
+}
+
+#[tokio::test]
+#[ignore = "explicit authenticated Codex integration; synthetic sources and isolated test database only"]
+async fn native_cli_real_codex_producer_and_reviewer() {
+    use context_core::harness::*;
+    let _guard = TEST_LOCK.lock().await;
+    let binary =
+        std::env::var("ONTOLOGY_TEST_CODEX_BINARY").expect("explicit installed Codex binary");
+    assert!(Path::new(&binary).is_absolute());
+    let store = store().await;
+    let view = harness_fixture::view();
+    let root = view.path().canonicalize().unwrap();
+    let (files, prepared) = composed_cli_fixture(&store, &root,
+        "Create only vault/personal/knowledge/composed-cli.md with exactly this Markdown: # Synthetic CLI probe\nVerified fixture content.\n. Independently review the proposed document using the supplied policies and assigned requirements.", true,
+    ).await;
+    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    // Preserve the existing authenticated CLI environment, overriding only the
+    // database with this owned, freshly reset synthetic test store.
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
+        .env("DATABASE_URL", std::env::var("TEST_DATABASE_URL").unwrap())
+        .args(["harness", "begin", "--context-view"])
+        .arg(&root)
+        .arg("--workspace-root")
+        .arg(&root)
+        .args(["--store-id", &id, "--prepared-run"])
+        .arg(files.path().join("prepared.json"))
+        .arg("--policy-config")
+        .arg(context_fixture::configuration_path())
+        .args(["--run-id", "real-composed-cli", "--codex-binary", &binary])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let head: HarnessExecutionRecord = serde_json::from_slice(&output.stdout).unwrap();
+    if head.role_execution.role_results.len() != 2 {
+        eprintln!(
+            "actual Codex stopped before independent review: {}",
+            serde_json::to_string(&head.role_execution.role_results).unwrap()
+        );
+    }
+    assert_eq!(head.state, HarnessExecutionState::Evaluated);
+    assert_eq!(head.role_execution.role_results.len(), 2);
+    assert_eq!(
+        head.role_execution.role_results[0].role,
+        HarnessRole::Writer
+    );
+    assert_eq!(
+        head.role_execution.role_results[1].role,
+        HarnessRole::Reviewer
+    );
+    assert_ne!(
+        head.role_execution.role_results[0].context_id,
+        head.role_execution.role_results[1].context_id
+    );
+    assert_eq!(
+        head.evaluation.as_ref().unwrap().subject_status,
+        SubjectStatus::Accepted
+    );
+    let validated = harness_fixture::command(
+        &store,
+        &root,
+        &root,
+        "validate",
+        &["--run-id".into(), "real-composed-cli".into()],
+    )
+    .await;
+    assert!(
+        validated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+    assert_eq!(
+        store
+            .read_context(&scope(), "knowledge/composed-cli.md", false)
+            .await,
+        Err(Error::NotFound)
+    );
+    assert!(prepared.accepted_tool_plan.is_none());
+    for result in &head.role_execution.role_results {
+        assert_eq!(result.lifecycle.context_id, result.context_id);
+        assert_eq!(
+            result.lifecycle.terminal_state,
+            RoleTerminalState::Completed
+        );
+        assert!(result.lifecycle.closed_at_millis >= result.lifecycle.terminal_at_millis);
+    }
+}
+
 #[tokio::test]
 async fn native_harness_cli_write_revise_and_terminal_reentry() {
     use context_core::harness::HarnessExecutionState;
@@ -2457,6 +2792,12 @@ struct NativeContractCapture<'a> {
     recover_called: bool,
 }
 impl context_core::harness::ContextCommitSession for NativeContractCapture<'_> {
+    fn verify_pre_apply_close(
+        &mut self,
+        c: &context_core::harness::ContextPreApplyCloseContract,
+    ) -> context_core::harness::HarnessResult<()> {
+        self.inner.verify_pre_apply_close(c)
+    }
     fn store_identity(&self) -> &context_core::harness::SourceStoreIdentity {
         &self.identity
     }
@@ -2811,6 +3152,12 @@ struct NativeCommitRejectionProbe<'a> {
     checked: bool,
 }
 impl context_core::harness::ContextCommitSession for NativeCommitRejectionProbe<'_> {
+    fn verify_pre_apply_close(
+        &mut self,
+        c: &context_core::harness::ContextPreApplyCloseContract,
+    ) -> context_core::harness::HarnessResult<()> {
+        self.inner.verify_pre_apply_close(c)
+    }
     fn store_identity(&self) -> &context_core::harness::SourceStoreIdentity {
         self.inner.store_identity()
     }
@@ -3960,4 +4307,172 @@ async fn native_migration_012_preserves_all_existing_rows_and_rejects_corrupt_re
     assert!(sqlx::query("UPDATE context_projection_versions SET payload_digest=encode(sha256(convert_to(payload::text,'UTF8')),'hex')").execute(&mut *tx).await.is_err(), "even a valid new payload digest cannot hide corrupt old bytes");
     tx.rollback().await.expect("rollback corrupt refresh");
     sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER context_projection_immutable; UPDATE context_projection_versions SET payload_digest=encode(sha256(convert_to(payload::text,'UTF8')),'hex'); ALTER TABLE context_projection_versions VALIDATE CONSTRAINT native_test_projection_checksum; ALTER TABLE context_projection_versions ENABLE TRIGGER context_projection_immutable;").execute(store.pool()).await.expect("restore owned fixture");
+}
+
+#[tokio::test]
+async fn native_pre_apply_close_checks_real_effects_and_only_terminates_drifted_run() {
+    use context_core::harness::*;
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let view = harness_fixture::view();
+    let root = view.path().canonicalize().unwrap();
+    let (files, prepared) = composed_cli_fixture(
+        &store,
+        &root,
+        "Create a fictional document; close this request before applying it.",
+        false,
+    )
+    .await;
+    let run = "native-preapply-close";
+    let begun = harness_fixture::command(
+        &store,
+        &root,
+        &root,
+        "begin",
+        &[
+            "--prepared-run".into(),
+            files.path().join("prepared.json").display().to_string(),
+            "--run-id".into(),
+            run.into(),
+        ],
+    )
+    .await;
+    assert!(
+        begun.status.success(),
+        "{}",
+        String::from_utf8_lossy(&begun.stderr)
+    );
+    let original: HarnessExecutionRecord =
+        decode_current_json(&begun.stdout, "begun fixture").unwrap();
+    let head_path = root
+        .join(".llm-context-vault-harness/runs")
+        .join(run)
+        .join("head.json");
+    let head_bytes = fs::read(&head_path).unwrap();
+    let snapshot: Value = sqlx::query_scalar("SELECT jsonb_agg(jsonb_build_array(material_id,revision,content_digest,origin_kind,source_digest) ORDER BY material_id) FROM context_materials").fetch_one(store.pool()).await.unwrap();
+    let config = files.path().join("current-policy.json");
+    let mut bytes = fs::read(context_fixture::configuration_path()).unwrap();
+    bytes.push(b' ');
+    fs::write(&config, bytes).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    async fn call(
+        root: &Path,
+        config: &Path,
+        id: &str,
+        run: &str,
+        verb: &str,
+        extra: &[&str],
+    ) -> std::process::Output {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", std::env::temp_dir())
+            .env("DATABASE_URL", std::env::var("TEST_DATABASE_URL").unwrap())
+            .args(["harness", verb, "--context-view"])
+            .arg(root)
+            .arg("--workspace-root")
+            .arg(root)
+            .arg("--policy-config")
+            .arg(config)
+            .args(["--store-id", id, "--run-id", run])
+            .args(extra)
+            .output()
+            .await
+            .unwrap()
+    }
+    let args = [
+        "--close-before-apply",
+        "--reason",
+        "Stop the uncommitted fictional request",
+    ];
+    for extra in [vec!["--reason", "Stop"], vec!["--close-before-apply"]] {
+        let out = call(&root, &config, &id, run, "recover", &extra).await;
+        assert!(!out.status.success() && out.stdout.is_empty());
+    }
+    let ordinary = call(&root, &config, &id, run, "recover", &[]).await;
+    assert!(
+        !ordinary.status.success() && ordinary.stdout.is_empty(),
+        "policy drift must still reject ordinary recovery"
+    );
+    for (state, matching_run, matching_digest) in [
+        ("pending", false, false),
+        ("committed", true, false),
+        ("finalized", true, false),
+        ("aborted", false, true),
+    ] {
+        let effect_run = if matching_run {
+            run
+        } else {
+            "other-fictional-run"
+        };
+        let effect_digest = if matching_digest {
+            prepared.prepared_run_digest.clone()
+        } else {
+            "a".repeat(64)
+        };
+        let is_committed = state == "committed" || state == "finalized";
+        let apply: String = sqlx::query_scalar("INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state,actual_batch_id,actual_journal_locator,commit_receipt,final_core_receipt_digest) VALUES(gen_random_uuid(),$1::uuid,$2,$3,$4,'{}','[{}]','fictional-attempt','fictional-batch','fictional-journal',$5,$6,$7,$8,$9) RETURNING apply_id::text")
+            .bind(&id).bind(effect_run).bind(effect_digest).bind("b".repeat(64)).bind(state)
+            .bind(is_committed.then_some("fictional-batch")).bind(is_committed.then_some("fictional-journal"))
+            .bind(is_committed.then_some(json!({"fictional":"counterevidence, not a Core receipt"})))
+            .bind((state == "finalized").then(|| "c".repeat(64)))
+            .fetch_one(store.pool()).await.unwrap();
+        let rejected = call(&root, &config, &id, run, "recover", &args).await;
+        assert!(
+            !rejected.status.success() && rejected.stdout.is_empty(),
+            "reject observed {state} effect"
+        );
+        assert_eq!(fs::read(&head_path).unwrap(), head_bytes);
+        assert!(!head_path.with_file_name("pre-apply-close.json").exists());
+        sqlx::query("DELETE FROM context_apply_batches WHERE apply_id=$1::uuid")
+            .bind(apply)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    let closed = call(&root, &config, &id, run, "recover", &args).await;
+    assert!(
+        closed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&closed.stderr)
+    );
+    let closed: Value = serde_json::from_slice(&closed.stdout).unwrap();
+    let head: HarnessExecutionRecord = decode_current_json(
+        &serde_json::to_vec(&closed["head"]).unwrap(),
+        "closed fixture",
+    )
+    .unwrap();
+    assert_eq!(head.state, HarnessExecutionState::ClosedBeforeApply);
+    assert_eq!(head.role_execution, original.role_execution);
+    assert_eq!(head.sequence, original.sequence + 1);
+    assert!(head.ready_role_invocations.is_empty() && head.evaluation.is_none());
+    assert!(!head_path.with_file_name("apply-attempt.json").exists());
+    let repeated = call(&root, &config, &id, run, "recover", &args).await;
+    assert!(repeated.status.success());
+    assert_eq!(
+        closed,
+        serde_json::from_slice::<Value>(&repeated.stdout).unwrap()
+    );
+    let after: Value = sqlx::query_scalar("SELECT jsonb_agg(jsonb_build_array(material_id,revision,content_digest,origin_kind,source_digest) ORDER BY material_id) FROM context_materials").fetch_one(store.pool()).await.unwrap();
+    assert_eq!(
+        snapshot, after,
+        "closure changes no native material or origin"
+    );
+    let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM context_material_versions")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(versions as usize, context_fixture::DOCUMENT_COUNT);
+    for verb in ["evaluate", "validate", "apply"] {
+        assert!(
+            !call(&root, &config, &id, run, verb, &[])
+                .await
+                .status
+                .success()
+        );
+    }
 }

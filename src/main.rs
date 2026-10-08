@@ -18,7 +18,7 @@ async fn main() {
     if std::env::args().nth(1).as_deref() == Some("harness") {
         if let Err(error) = ontology::native_harness::run(std::env::args().skip(2).collect()).await
         {
-            eprintln!("{}", serde_json::json!({"error":error.to_string()}));
+            eprintln!("{}", error.diagnostic_json());
             std::process::exit(1);
         }
         return;

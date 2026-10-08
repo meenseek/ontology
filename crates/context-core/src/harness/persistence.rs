@@ -723,8 +723,71 @@ impl ContextAbortProof {
 }
 
 /// The command owns the locked storage session for the entire apply/recovery call.
+/// Source-free identity selected from a validated, unapplied durable native run.
+/// Callers cannot construct this contract or turn it into an apply contract.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ContextPreApplyCloseContract {
+    store_identity: SourceStoreIdentity,
+    source_root_identity: String,
+    run_identifier: String,
+    prepared_run_digest: String,
+}
+impl ContextPreApplyCloseContract {
+    pub fn store_identity(&self) -> &SourceStoreIdentity {
+        &self.store_identity
+    }
+    pub fn run_identifier(&self) -> &str {
+        &self.run_identifier
+    }
+    pub fn prepared_run_digest(&self) -> &str {
+        &self.prepared_run_digest
+    }
+    pub fn check_view(&self, view: &Path) -> HarnessResult<()> {
+        if requirements::workspace_root_identity(view)? != self.source_root_identity {
+            return Err(invalid("pre-apply closure belongs to another source view"));
+        }
+        Ok(())
+    }
+    pub(super) fn from_durable(
+        prepared: &PreparedHarnessRun,
+        head: &HarnessExecutionRecord,
+    ) -> HarnessResult<Self> {
+        let versions = &prepared.plan.resolved_request.plan.source_versions;
+        versions.validate()?;
+        if prepared.plan.external_write_allowed
+            || prepared.plan.frozen_targets.targets.is_empty()
+            || prepared
+                .plan
+                .frozen_targets
+                .targets
+                .iter()
+                .any(|target| !target.workspace_relative_path.starts_with("vault/"))
+        {
+            return Err(invalid("pre-apply closure requires a native-only run"));
+        }
+        Ok(Self {
+            store_identity: versions
+                .store_identity
+                .clone()
+                .ok_or_else(|| invalid("pre-apply closure requires a bound native store"))?,
+            source_root_identity: versions
+                .source_root_identity
+                .clone()
+                .ok_or_else(|| invalid("pre-apply closure requires a bound source view"))?,
+            run_identifier: head.run_identifier.clone(),
+            prepared_run_digest: prepared.prepared_run_digest.clone(),
+        })
+    }
+}
+
 pub trait ContextCommitSession {
     fn store_identity(&self) -> &SourceStoreIdentity;
+    /// Under the retained exclusive store gate, reject every correlated effect,
+    /// including finalized/aborted rows, and any outstanding native batch.
+    fn verify_pre_apply_close(
+        &mut self,
+        contract: &ContextPreApplyCloseContract,
+    ) -> HarnessResult<()>;
     fn begin(&mut self, contract: &ContextApplyContract) -> HarnessResult<()>;
     fn recover(
         &mut self,
