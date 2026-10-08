@@ -92,6 +92,8 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   export TEST_DATABASE_URL="postgresql://ontology:${verify_password}@127.0.0.1:${BASH_REMATCH[1]}/${verify_database}"
   unset DATABASE_URL
   cargo fmt --all --check
+  rustfmt --edition 2021 --check vendor/pulldown-cmark/src/firstpass.rs vendor/pulldown-cmark/src/parse.rs vendor/pulldown-cmark/src/tree.rs
+  cargo test --manifest-path vendor/pulldown-cmark/Cargo.toml --locked --no-default-features --features html
   cargo check --workspace --locked
   cargo clippy --workspace --locked --all-targets -- -D warnings
   cargo test --workspace --locked

@@ -17,6 +17,12 @@ pub const MAX_FILES: usize = 10_000;
 pub const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_READ_BYTES: usize = 1024 * 1024;
+/// Maximum size of one original in a parsed CLI read.
+pub const MAX_READ_DOCUMENT_BYTES: usize = 5 * 1024 * 1024;
+/// Independent aggregate original limit for one parsed CLI read.
+pub const MAX_READ_DOCUMENT_TOTAL_BYTES: usize = 10 * 1024 * 1024;
+/// Preserve the former maximum metadata size before allocating YAML nodes.
+pub const MAX_READ_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 pub const MAX_CONTEXT_SCOPES: usize = 64;
 pub const MAX_COMMAND_BYTES: usize = 32 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;

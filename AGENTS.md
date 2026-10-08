@@ -533,8 +533,15 @@ native store에 보존한다. App consumer, 검색과 ontology projection은 이
 {"op":"version","scope":"personal","path":"<기존 목적 문서의 정확한 상대 경로>.md","revision":1}
 ```
 
-`read-documents`는 source identity·digest를 가진 parsed/redacted 문서 조회이고 raw read와
-다른 상한을 적용한다. 그 body를 원문 SHA 입력으로 쓰거나 raw policy 읽기의 선행 조건으로
+`read-documents`는 한 scope의 정확한 Markdown 상대 경로 1~100개를 지정하는
+source identity·digest가 포함된 parsed/redacted 문서 조회다. 파일당 원문은 5 MiB, 선택한 원문 합계는
+10 MiB까지이며, 본문 조회 전에 합계를 검사한다. 최종 JSON은 16 MiB−1 byte,
+마지막 newline을 포함한 stdout은 16 MiB까지다. JSON escaping·redaction·제목 반복으로
+응답이 커지거나 자료 하나라도 읽을 수 없으면 부분 출력 없이 전체 요청이 실패한다.
+YAML frontmatter 자체는 구분자 줄을 제외한 64 KiB까지이며, YAML 파싱 전에 검사한다.
+검색용 terms·관계 payload를 생성하거나 검색 projection 준비를 요구하지 않는다.
+Raw `read`의 1 MiB, Context 수집기의 파일당 64 KiB·전체 1 MiB 제한은 별도로 유지한다.
+그 body를 원문 SHA 입력으로 쓰거나 raw policy 읽기의 선행 조건으로
 두지 않는다. Metadata `search`는 본문 전체 검색이 아니며 exact path를 찾는 데 사용한다.
 
 ```json

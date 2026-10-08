@@ -1,7 +1,9 @@
 //! Version-bound search projections and bounded, exact reads from the canonical store.
 use crate::{
     context::{
-        ContextScope, MAX_FILES, MAX_READ_BYTES, MAX_TOTAL_BYTES, restricted, validate_path,
+        ContextScope, MAX_FILES, MAX_OUTPUT_BYTES, MAX_READ_BYTES, MAX_READ_DOCUMENT_BYTES,
+        MAX_READ_DOCUMENT_METADATA_BYTES, MAX_READ_DOCUMENT_TOTAL_BYTES, MAX_TOTAL_BYTES,
+        restricted, validate_path,
     },
     domain::{Error, MAX_DOCUMENT_BYTES, MAX_RESPONSE_BYTES},
     store::{Store, digest},
@@ -9,7 +11,10 @@ use crate::{
 use context_core::{
     Scope,
     context::normalize_exact_read_paths,
-    document::parse_markdown_bytes,
+    document::{
+        ParsedMarkdownDocument, markdown_body, markdown_frontmatter_bytes, parse_markdown_bytes,
+        parse_markdown_title_bytes,
+    },
     redaction::redact_secrets,
     search_text::{expanded_query_terms, expanded_search_text},
 };
@@ -133,6 +138,22 @@ fn redacted_list(values: &[String]) -> Vec<String> {
     values.iter().map(|v| redact_secrets(v)).collect()
 }
 
+fn parsed_document(
+    scope: &ContextScope,
+    path: &str,
+    bytes: &[u8],
+) -> Result<ParsedMarkdownDocument, Error> {
+    let parsed = parse_markdown_bytes(Path::new(&format!("{}/{path}", scope.as_str())), bytes)
+        .map_err(|_| Error::Invalid)?;
+    if parsed
+        .declared_scope()
+        .is_some_and(|s| s != scope.as_str().split('/').next().unwrap_or(""))
+    {
+        return Err(Error::Invalid);
+    }
+    Ok(parsed)
+}
+
 /// No I/O: callers supply only already verified, explicitly selected original bytes.
 pub(crate) fn projection(
     scope: &ContextScope,
@@ -161,16 +182,9 @@ pub(crate) fn projection(
     if bytes.len() > MAX_READ_BYTES {
         return Ok(unavailable);
     }
-    let Ok(parsed) = parse_markdown_bytes(Path::new(&format!("{}/{path}", scope.as_str())), bytes)
-    else {
+    let Ok(parsed) = parsed_document(scope, path, bytes) else {
         return Ok(payload);
     };
-    if parsed
-        .declared_scope()
-        .is_some_and(|s| s != scope.as_str().split('/').next().unwrap_or(""))
-    {
-        return Ok(payload);
-    }
     let doc = parsed.document();
     let ontology = doc.ontology();
     let title = redact_secrets(doc.title());
@@ -208,6 +222,57 @@ pub(crate) fn projection(
 #[cfg(test)]
 mod link_tests {
     use super::*;
+
+    #[test]
+    fn exact_json_budget_counts_escaping_and_accepts_inclusive_boundary() {
+        let value = json!({"body":"\u{1}\"\\\n한글","title":"[REDACTED]"});
+        let bytes = serde_json::to_vec(&value).unwrap().len();
+        assert_eq!(json_encoded_bytes(&value, bytes), Ok(bytes));
+        assert_eq!(json_encoded_bytes(&value, bytes - 1), Err(Error::Limit));
+    }
+
+    #[test]
+    fn cached_document_lengths_equal_complete_serializer_output() {
+        let controls: String = (0..=31).map(char::from).collect();
+        let long = "x".repeat(65536);
+        let bodies = [
+            "",
+            "ASCII",
+            controls.as_str(),
+            "한글😀\u{2028}",
+            "\"\\\r\n\t",
+            "token: [REDACTED]",
+            long.as_str(),
+        ];
+        for body in bodies {
+            for title in ["plain", "\"\\\n한글", "[REDACTED]"] {
+                for count in [0, 1, 2, 7, 100] {
+                    let mut bytes =
+                        Some(json_encoded_bytes(&json!({"documents":[]}), usize::MAX).unwrap());
+                    let mut documents = Vec::new();
+                    for index in 0..count {
+                        let mut metadata = json!({"scope":"personal","path":format!("personal/{index}.md"),"title":title,"body":null,"source_digest":"sha","material_id":"id","store_id":"store","revision":i64::MAX,"origin_kind":"imported-file","origin_source_digest":null,"source_path":"a\\b\n한글"});
+                        let encoded_body = json_encoded_bytes(&json!(body), usize::MAX).unwrap();
+                        bytes =
+                            append_document_json_bytes(bytes, &metadata, encoded_body, index > 0)
+                                .unwrap();
+                        metadata["body"] = json!(body);
+                        documents.push(metadata);
+                    }
+                    let complete = json!({"documents":documents});
+                    assert_eq!(bytes, Some(serde_json::to_vec(&complete).unwrap().len()));
+                }
+            }
+        }
+        assert_eq!(
+            append_document_json_bytes(Some(usize::MAX), &json!({"body":null}), 2, true).unwrap(),
+            None
+        );
+        assert_eq!(
+            append_document_json_bytes(Some(0), &json!({"body":"already assigned"}), 2, false),
+            Err(Error::Storage)
+        );
+    }
 
     #[test]
     fn opted_in_source_map_links_become_deduplicated_relations() {
@@ -408,6 +473,35 @@ pub(crate) async fn exact_documents(
     scope: &ContextScope,
     paths: &[String],
 ) -> Result<Value, Error> {
+    exact_documents_with_limits(
+        store,
+        conn,
+        scope,
+        paths,
+        ExactReadLimits {
+            original: MAX_DOCUMENT_BYTES,
+            metadata: MAX_DOCUMENT_BYTES,
+            batch: MAX_RESPONSE_BYTES,
+            response: MAX_RESPONSE_BYTES,
+        },
+    )
+    .await
+}
+
+struct ExactReadLimits {
+    original: usize,
+    metadata: usize,
+    batch: usize,
+    response: usize,
+}
+
+async fn exact_documents_with_limits(
+    store: &Store,
+    conn: &mut PgConnection,
+    scope: &ContextScope,
+    paths: &[String],
+    limits: ExactReadLimits,
+) -> Result<Value, Error> {
     let paths = normalize_paths(scope, paths)?;
     if paths.is_empty() {
         return Ok(json!({"documents":[]}));
@@ -420,11 +514,13 @@ pub(crate) async fn exact_documents(
     {
         return Err(Error::NotFound);
     }
-    if metadata
-        .iter()
-        .any(|m| m.byte_len < 0 || m.byte_len > MAX_DOCUMENT_BYTES as i64)
-    {
-        return Err(Error::Limit);
+    let mut acquired = 0usize;
+    for m in &metadata {
+        let bytes = usize::try_from(m.byte_len).map_err(|_| Error::Limit)?;
+        acquired = acquired.checked_add(bytes).ok_or(Error::Limit)?;
+        if bytes > limits.original || acquired > limits.batch {
+            return Err(Error::Limit);
+        }
     }
     store.count(1);
     let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
@@ -432,36 +528,108 @@ pub(crate) async fn exact_documents(
         .await
         .map_err(|_| Error::Storage)?;
     store.count(1);
-    let bodies=sqlx::query("SELECT path,CASE WHEN byte_len BETWEEN 0 AND 65536 AND octet_length(content)<=65536 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=ANY($2) AND NOT deleted ORDER BY path COLLATE \"C\"")
-        .bind(scope.as_str()).bind(&paths).fetch_all(conn).await.map_err(|_|Error::Storage)?;
-    if bodies.len() != metadata.len() {
-        return Err(Error::Conflict);
-    }
+    let bodies=sqlx::query("SELECT path,CASE WHEN byte_len BETWEEN 0 AND $3 AND octet_length(content)<=$3 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=ANY($2) AND NOT deleted ORDER BY path COLLATE \"C\"")
+        .bind(scope.as_str()).bind(&paths).bind(limits.original as i64).fetch(conn);
+    let mut bodies = bodies;
     let mut documents = Vec::with_capacity(metadata.len());
-    for (m, row) in metadata.iter().zip(&bodies) {
-        let bytes: Vec<u8> = row
-            .get::<Option<Vec<u8>>, _>("content")
-            .ok_or(Error::Limit)?;
-        if m.path != row.get::<String, _>("path") || m.byte_len != bytes.len() as i64 {
+    let mut response_bytes = Some(json_encoded_bytes(&json!({"documents":[]}), usize::MAX)?);
+    while let Some(row) = std::future::poll_fn(|cx| bodies.as_mut().poll_next(cx)).await {
+        let row = row.map_err(|_| Error::Storage)?;
+        let m = metadata.get(documents.len()).ok_or(Error::Conflict)?;
+        let bytes: &[u8] = row.get::<Option<&[u8]>, _>("content").ok_or(Error::Limit)?;
+        if m.path != row.get::<String, _>("path")
+            || m.byte_len != bytes.len() as i64
+            || digest(bytes) != m.sha
+        {
             return Err(Error::Storage);
         }
-        let p = projection(
-            scope,
-            &m.path,
-            &m.sha,
-            m.restricted,
-            m.deleted,
-            Some(&bytes),
-        )?;
-        if p["status"] != "searchable" {
-            return Err(Error::Invalid);
-        }
-        if serde_json::to_vec(&p).map_err(|_| Error::Storage)?.len() > MAX_DOCUMENT_BYTES {
+        let text = std::str::from_utf8(bytes).map_err(|_| Error::Invalid)?;
+        if markdown_frontmatter_bytes(text) > limits.metadata {
             return Err(Error::Limit);
         }
-        documents.push(json!({"scope":scope,"path":format!("{}/{}",scope.as_str(),m.path),"title":p["title"],"body":p["body"],"source_digest":m.sha,"material_id":m.material_id,"store_id":store_id,"revision":m.revision,"origin_kind":m.origin,"origin_source_digest":m.source_digest,"source_path":m.source_path}));
+        // If the body string alone cannot fit, the complete response certainly
+        // cannot. Reject before the heading parser allocates a Markdown tree.
+        let body = Value::String(redact_secrets(markdown_body(text)));
+        let body_bytes = json_encoded_bytes(&body, limits.response)?;
+        let parsed =
+            parse_markdown_title_bytes(Path::new(&format!("{}/{}", scope.as_str(), m.path)), bytes)
+                .map_err(|_| Error::Invalid)?;
+        if parsed
+            .declared_scope()
+            .is_some_and(|declared| declared != scope.as_str().split('/').next().unwrap_or(""))
+        {
+            return Err(Error::Invalid);
+        }
+        let doc = &parsed;
+        let mut document = json!({"scope":scope,"path":format!("{}/{}",scope.as_str(),m.path),"title":redact_secrets(doc.title()),"body":null,"source_digest":m.sha,"material_id":m.material_id,"store_id":store_id,"revision":m.revision,"origin_kind":m.origin,"origin_source_digest":m.source_digest,"source_path":m.source_path});
+        response_bytes = append_document_json_bytes(
+            response_bytes,
+            &document,
+            body_bytes,
+            !documents.is_empty(),
+        )?;
+        document["body"] = body;
+        documents.push(document);
     }
-    bounded(json!({"documents":documents}))
+    if documents.len() != metadata.len() {
+        return Err(Error::Conflict);
+    }
+    // Preserve validation/error ordering: an oversized aggregate is rejected
+    // only after every selected source and declared scope has been checked.
+    if response_bytes.is_none_or(|bytes| bytes > limits.response) {
+        return Err(Error::Limit);
+    }
+    Ok(json!({"documents":documents}))
+}
+
+fn append_document_json_bytes(
+    current: Option<usize>,
+    metadata: &Value,
+    body_bytes: usize,
+    comma: bool,
+) -> Result<Option<usize>, Error> {
+    if metadata.get("body") != Some(&Value::Null) {
+        return Err(Error::Storage);
+    }
+    let metadata_bytes = json_encoded_bytes(metadata, usize::MAX)?;
+    // The serializer counts all escaping and field encodings. Replace its
+    // four-byte null body with the already counted body string; arrays retain
+    // their brackets and add exactly one comma between adjacent documents.
+    Ok(current
+        .and_then(|n| n.checked_add(usize::from(comma)))
+        .and_then(|n| n.checked_add(metadata_bytes.checked_sub(4)?))
+        .and_then(|n| n.checked_add(body_bytes)))
+}
+
+/// Count the actual escaped JSON without allocating an oversized serialized copy.
+fn json_encoded_bytes(value: &Value, limit: usize) -> Result<usize, Error> {
+    struct Counter {
+        remaining: usize,
+        exceeded: bool,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let Some(remaining) = self.remaining.checked_sub(bytes.len()) else {
+                self.exceeded = true;
+                return Err(std::io::Error::other("JSON response limit"));
+            };
+            self.remaining = remaining;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter {
+        remaining: limit,
+        exceeded: false,
+    };
+    let result = serde_json::to_writer(&mut counter, value);
+    if counter.exceeded {
+        return Err(Error::Limit);
+    }
+    result.map_err(|_| Error::Storage)?;
+    Ok(limit - counter.remaining)
 }
 fn bounded(value: Value) -> Result<Value, Error> {
     if serde_json::to_vec(&value)
@@ -520,7 +688,19 @@ impl Store {
         }
         normalize_paths(scope, paths)?;
         let mut tx = self.lock_context(false).await?;
-        let result = exact_documents(self, &mut tx, scope, paths).await;
+        let result = exact_documents_with_limits(
+            self,
+            &mut tx,
+            scope,
+            paths,
+            ExactReadLimits {
+                original: MAX_READ_DOCUMENT_BYTES,
+                metadata: MAX_READ_DOCUMENT_METADATA_BYTES,
+                batch: MAX_READ_DOCUMENT_TOTAL_BYTES,
+                response: MAX_OUTPUT_BYTES - 1,
+            },
+        )
+        .await;
         self.finish_context(tx, result).await
     }
     pub async fn context_identity(&self) -> Result<Value, Error> {

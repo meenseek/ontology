@@ -3,7 +3,10 @@ use harness_fixture::context_fixture;
 
 use context_core::harness::{ContextSource, SourcePathKind};
 use ontology::{
-    context::{ContextScope, inventory},
+    context::{
+        ContextScope, MAX_OUTPUT_BYTES, MAX_READ_DOCUMENT_BYTES, MAX_READ_DOCUMENT_METADATA_BYTES,
+        MAX_READ_DOCUMENT_TOTAL_BYTES, inventory,
+    },
     domain::Error,
     store::Store,
 };
@@ -263,12 +266,356 @@ async fn native_read_documents_rejects_work_absolute_paths_before_database_acces
 async fn native_read_documents_response_limit_writes_nothing() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    let (_fixture, root) = fixture(100, "x ".repeat(10000).as_bytes());
+    // Original total is below 10 MiB, but repeating a long heading as title/body
+    // makes the actual returned JSON exceed its independent 16 MiB budget.
+    let (_fixture, root) = fixture(100, format!("# {}", "x".repeat(90000)).as_bytes());
     import(&store, &root).await;
     let paths: Vec<_> = (0..100).map(|n| format!("{n:04}.md")).collect();
+    let before = store.calls();
+    assert_eq!(
+        store.read_context_documents(&scope(), &paths).await,
+        Err(Error::Limit)
+    );
+    assert_eq!(
+        store.calls() - before,
+        7,
+        "final response limit after body query"
+    );
     let output = cli(json!({"op":"read-documents","scope":"personal","paths":paths})).await;
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
+}
+
+#[tokio::test]
+async fn native_read_documents_checks_later_scope_after_response_budget_exceeded() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let (_fixture, root) = fixture(100, format!("# {}", "x".repeat(90000)).as_bytes());
+    fs::write(
+        root.join("personal/0099.md"),
+        b"---\nscope: work\n---\n# Wrong scope",
+    )
+    .unwrap();
+    import(&store, &root).await;
+    let paths: Vec<_> = (0..100).map(|n| format!("{n:04}.md")).collect();
+    // Earlier documents already exceed the serialized response budget. A later
+    // invalid source still takes precedence; no partially valid result escapes.
+    let before = store.calls();
+    assert_eq!(
+        store.read_context_documents(&scope(), &paths).await,
+        Err(Error::Invalid)
+    );
+    assert_eq!(store.calls() - before, 7);
+    let output = cli(json!({"op":"read-documents","scope":"personal","paths":paths})).await;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[tokio::test]
+async fn native_read_documents_ignores_discarded_search_payload_size() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let content = format!(
+        "# Unique\n{}\npassword: small-fictional-secret",
+        (0..5000)
+            .map(|n| format!("word{n:04} "))
+            .collect::<String>()
+    );
+    assert!(content.len() < 65536);
+    let (_fixture, root) = fixture(1, content.as_bytes());
+    import(&store, &root).await;
+    let payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM context_projection_versions p JOIN context_materials m USING(material_id,revision) WHERE m.scope='personal' AND m.path='0000.md'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("fictional search projection");
+    assert!(serde_json::to_vec(&payload).unwrap().len() > 65536);
+    let output = cli(json!({"op":"read-documents","scope":"personal","paths":["0000.md"]})).await;
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["documents"][0]["source_digest"],
+        ontology::store::digest(content.as_bytes())
+    );
+    assert_eq!(value["documents"][0]["title"], "Unique");
+    assert!(
+        value["documents"][0]["body"]
+            .as_str()
+            .unwrap()
+            .ends_with("password: [REDACTED]")
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("small-fictional-secret"));
+    assert!(value["documents"][0].get("terms").is_none());
+}
+
+#[tokio::test]
+async fn native_read_documents_original_boundaries_and_unavailable_projection() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let (_fixture, root) = fixture(0, b"");
+    let header = "---\nscope: personal\n---\n# Boundary\n";
+    for (name, length) in [
+        ("below.md", MAX_READ_DOCUMENT_BYTES - 1),
+        ("exact.md", MAX_READ_DOCUMENT_BYTES),
+        ("over.md", MAX_READ_DOCUMENT_BYTES + 1),
+    ] {
+        fs::write(
+            root.join("personal").join(name),
+            format!("{header}{}", "x".repeat(length - header.len())),
+        )
+        .unwrap();
+    }
+    import(&store, &root).await;
+    let status = store.projection_status(&[scope()]).await.unwrap();
+    assert_eq!(status["counts"]["unavailable"], 3);
+    for name in ["below.md", "exact.md"] {
+        let original = fs::read(root.join("personal").join(name)).unwrap();
+        let before = store.calls();
+        let value = store
+            .read_context_documents(&scope(), &[name.into()])
+            .await
+            .unwrap();
+        assert_eq!(store.calls() - before, 7);
+        assert_eq!(
+            value["documents"][0]["source_digest"],
+            ontology::store::digest(&original)
+        );
+        assert_eq!(value["documents"][0]["revision"], 1);
+        assert_eq!(
+            value["documents"][0]["source_path"],
+            format!("personal/{name}")
+        );
+        assert_eq!(
+            value["documents"][0]["body"].as_str().unwrap().len(),
+            original.len() - "---\nscope: personal\n---\n".len()
+        );
+        drop(value);
+        let output = cli(json!({"op":"read-documents","scope":"personal","paths":[name]})).await;
+        assert!(output.status.success());
+        assert!(output.stdout.len() <= MAX_OUTPUT_BYTES);
+        serde_json::from_slice::<Value>(&output.stdout).unwrap();
+        assert_eq!(
+            store.read_context(&scope(), name, false).await,
+            Err(Error::Limit),
+            "raw limit remains 1MiB"
+        );
+    }
+    let before = store.calls();
+    assert_eq!(
+        store
+            .read_context_documents(&scope(), &["over.md".into()])
+            .await,
+        Err(Error::Limit)
+    );
+    assert_eq!(
+        store.calls() - before,
+        5,
+        "oversized original rejected before body query"
+    );
+    let output =
+        cli(json!({"op":"read-documents","scope":"personal","paths":["below.md","over.md"]})).await;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        store.projection_status(&[scope()]).await.unwrap(),
+        status,
+        "exact read does not rebuild projections"
+    );
+}
+
+#[tokio::test]
+async fn native_read_documents_ten_mib_batch_boundary_preflights_before_bodies() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let (_fixture, root) = fixture(0, b"");
+    let paths: Vec<_> = (0..100).map(|n| format!("{n:04}.md")).collect();
+    let over_paths: Vec<_> = (0..100).map(|n| format!("over/{n:04}.md")).collect();
+    fs::create_dir(root.join("personal/over")).unwrap();
+    for (n, path) in paths.iter().enumerate() {
+        let length = MAX_READ_DOCUMENT_TOTAL_BYTES / 100
+            + usize::from(n < MAX_READ_DOCUMENT_TOTAL_BYTES % 100);
+        let text = format!("# Batch\n{}", "x".repeat(length - 8));
+        fs::write(root.join("personal").join(path), &text).unwrap();
+        let over = if n == 99 { format!("{text}x") } else { text };
+        fs::write(root.join("personal").join(&over_paths[n]), over).unwrap();
+    }
+    import(&store, &root).await;
+    let before = store.calls();
+    let value = store
+        .read_context_documents(&scope(), &paths)
+        .await
+        .unwrap();
+    assert_eq!(store.calls() - before, 7);
+    assert_eq!(value["documents"].as_array().unwrap().len(), 100);
+    drop(value);
+    let output = cli(json!({"op":"read-documents","scope":"personal","paths":paths})).await;
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["documents"]
+            .as_array()
+            .unwrap()
+            .len(),
+        100
+    );
+    let before = store.calls();
+    assert_eq!(
+        store.read_context_documents(&scope(), &over_paths).await,
+        Err(Error::Limit)
+    );
+    assert_eq!(
+        store.calls() - before,
+        5,
+        "oversized aggregate rejected before body query"
+    );
+    let output = cli(json!({"op":"read-documents","scope":"personal","paths":over_paths})).await;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[tokio::test]
+async fn native_read_documents_json_boundary_includes_cli_newline() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let (_fixture, root) = fixture(0, b"");
+    // UUIDs and digests have fixed-width encodings. Seed each boundary only once;
+    // never modify an imported original just to construct a response-size case.
+    let uuid = "00000000-0000-0000-0000-000000000000";
+    let sha = "0".repeat(64);
+    let skeleton = json!({"documents":[{"scope":"personal","path":"personal/0000.md","title":"Boundary","body":"# Boundary\nx","source_digest":sha,"material_id":uuid,"store_id":uuid,"revision":1,"origin_kind":"imported-file","origin_source_digest":sha,"source_path":"personal/0000.md"}]});
+    let extra = MAX_OUTPUT_BYTES - 1 - serde_json::to_vec(&skeleton).unwrap().len();
+    // ASCII control characters escape to six JSON bytes each, without changing
+    // title or provenance field lengths. The original stays well below 10MiB.
+    let mut content = format!(
+        "# Boundary\nx{}{}",
+        "\u{1}".repeat(extra / 6),
+        "x".repeat(extra % 6)
+    );
+    assert!(content.len() < MAX_READ_DOCUMENT_BYTES);
+    fs::write(root.join("personal/0000.md"), &content).unwrap();
+    content.push('x');
+    fs::write(root.join("personal/0001.md"), content).unwrap();
+    import(&store, &root).await;
+    let value = store
+        .read_context_documents(&scope(), &["0000.md".into()])
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&value).unwrap().len(),
+        MAX_OUTPUT_BYTES - 1
+    );
+    drop(value);
+    let output = cli(json!({"op":"read-documents","scope":"personal","paths":["0000.md"]})).await;
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), MAX_OUTPUT_BYTES);
+    assert!(output.stdout.ends_with(b"\n"));
+    serde_json::from_slice::<Value>(&output.stdout).unwrap();
+    drop(output);
+    let before = store.calls();
+    assert_eq!(
+        store
+            .read_context_documents(&scope(), &["0001.md".into()])
+            .await,
+        Err(Error::Limit)
+    );
+    assert_eq!(store.calls() - before, 7, "late escaped response limit");
+    let output = cli(json!({"op":"read-documents","scope":"personal","paths":["0001.md"]})).await;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[tokio::test]
+async fn native_read_documents_redaction_expansion_is_also_bounded() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let content = format!("# Expanded\n{}", "token:x\n".repeat(500_000));
+    assert!(content.len() < MAX_READ_DOCUMENT_BYTES);
+    let (_fixture, root) = fixture(2, content.as_bytes());
+    import(&store, &root).await;
+    let before = store.calls();
+    assert_eq!(
+        store
+            .read_context_documents(&scope(), &["0000.md".into(), "0001.md".into()])
+            .await,
+        Err(Error::Limit)
+    );
+    assert_eq!(store.calls() - before, 7);
+    let output =
+        cli(json!({"op":"read-documents","scope":"personal","paths":["0000.md","0001.md"]})).await;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[tokio::test]
+async fn native_read_documents_limits_yaml_before_parsing_expanded_aliases() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let (_fixture, root) = fixture(0, b"");
+    for (name, length) in [
+        ("metadata-below.md", MAX_READ_DOCUMENT_METADATA_BYTES - 1),
+        ("metadata-exact.md", MAX_READ_DOCUMENT_METADATA_BYTES),
+        ("metadata-over.md", MAX_READ_DOCUMENT_METADATA_BYTES + 1),
+    ] {
+        let prefix = "title: Meta\n#";
+        let raw = format!("{prefix}{}", "p".repeat(length - prefix.len()));
+        fs::write(
+            root.join("personal").join(name),
+            format!("---\n{raw}\n---\n# Meta\nbody"),
+        )
+        .unwrap();
+    }
+    let prefix = "---\naliases: [";
+    let suffix = "a]\n---\n# Meta\nbody";
+    let count = (MAX_READ_DOCUMENT_BYTES - prefix.len() - suffix.len()) / 2;
+    let heavy = format!("{prefix}{}{suffix}", "a,".repeat(count));
+    assert!(heavy.len() <= MAX_READ_DOCUMENT_BYTES);
+    fs::write(root.join("personal/metadata-heavy.md"), heavy).unwrap();
+    import(&store, &root).await;
+    for name in ["metadata-below.md", "metadata-exact.md"] {
+        let output = cli(json!({"op":"read-documents","scope":"personal","paths":[name]})).await;
+        assert!(output.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()["documents"][0]["body"],
+            "# Meta\nbody"
+        );
+    }
+    for name in ["metadata-over.md", "metadata-heavy.md"] {
+        let before = store.calls();
+        assert_eq!(
+            store.read_context_documents(&scope(), &[name.into()]).await,
+            Err(Error::Limit)
+        );
+        assert_eq!(store.calls() - before, 7);
+        let output = cli(json!({"op":"read-documents","scope":"personal","paths":[name]})).await;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Operation limit exceeded"));
+    }
+}
+
+#[tokio::test]
+async fn native_read_documents_preflights_body_without_changing_formatted_titles() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let header = "# **Visible** `title`\n";
+    let escaped = format!("{header}{}", "\u{1}".repeat(3 * 1024 * 1024));
+    let (_fixture, root) = fixture(1, escaped.as_bytes());
+    let formatted = format!("\n{header}{}\n", "*text* ".repeat(150_000));
+    fs::write(root.join("personal/formatted.md"), &formatted).unwrap();
+    import(&store, &root).await;
+    let output = cli(json!({"op":"read-documents","scope":"personal","paths":["0000.md"]})).await;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let output =
+        cli(json!({"op":"read-documents","scope":"personal","paths":["formatted.md"]})).await;
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["documents"][0]["title"], "Visible title");
+    assert_eq!(value["documents"][0]["body"], formatted.trim());
+    assert_eq!(
+        value["documents"][0]["source_digest"],
+        ontology::store::digest(formatted.as_bytes())
+    );
 }
 #[tokio::test]
 async fn native_provider_is_lazy_batched_and_preserves_inode() {

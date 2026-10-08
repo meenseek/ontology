@@ -301,7 +301,58 @@ impl ParsedMarkdownDocument {
     }
 }
 
+/// Raw YAML bytes selected by the exact reader's shared splitter, without parsing
+/// or copying it. Callers can preflight their own metadata resource budget.
+#[must_use]
+pub fn markdown_frontmatter_bytes(content: &str) -> usize {
+    split_markdown_frontmatter(content).0.map_or(0, str::len)
+}
+
+/// Borrow the same trimmed body stored by the exact parser, without allocating
+/// a Markdown tree or parsing YAML.
+#[must_use]
+pub fn markdown_body(content: &str) -> &str {
+    split_markdown_frontmatter(content).1.trim()
+}
+
+/// Validated title and declared scope, without retaining another owned body.
+/// This runs the exact reader's complete path, UTF-8 and metadata validation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ParsedMarkdownTitle {
+    title: String,
+    declared_scope: Option<String>,
+}
+impl ParsedMarkdownTitle {
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    #[must_use]
+    pub fn declared_scope(&self) -> Option<&str> {
+        self.declared_scope.as_deref()
+    }
+}
+
+pub fn parse_markdown_title_bytes(
+    logical_path: &Path,
+    bytes: &[u8],
+) -> Result<ParsedMarkdownTitle> {
+    let parsed = parse_markdown_exact(logical_path, bytes, false)?;
+    Ok(ParsedMarkdownTitle {
+        title: parsed.document.title,
+        declared_scope: parsed.declared_scope,
+    })
+}
+
 pub fn parse_markdown_bytes(logical_path: &Path, bytes: &[u8]) -> Result<ParsedMarkdownDocument> {
+    parse_markdown_exact(logical_path, bytes, true)
+}
+
+fn parse_markdown_exact(
+    logical_path: &Path,
+    bytes: &[u8],
+    retain_body: bool,
+) -> Result<ParsedMarkdownDocument> {
     let path = logical_path
         .to_str()
         .ok_or_else(|| ContextError::invalid_input("Markdown path must be UTF-8"))?;
@@ -327,7 +378,7 @@ pub fn parse_markdown_bytes(logical_path: &Path, bytes: &[u8]) -> Result<ParsedM
     let content = std::str::from_utf8(bytes)
         .map_err(|_| ContextError::invalid_input("Markdown bytes must be UTF-8"))?;
     validate_closed_markdown_metadata(content)?;
-    let source = parse_markdown_content(logical_path, content)?.0;
+    let source = parse_markdown_content_with_body(logical_path, content, retain_body)?.0;
     let declared_scope = source
         .frontmatter
         .as_ref()
@@ -366,8 +417,25 @@ fn parse_markdown_source(
 }
 
 fn parse_markdown_content(path: &Path, content: &str) -> Result<(MarkdownSource, usize)> {
+    parse_markdown_content_with_body(path, content, true)
+}
+
+// An omitted body is private to the title-only result; no public Document with
+// an incomplete body escapes this helper.
+fn parse_markdown_content_with_body(
+    path: &Path,
+    content: &str,
+    retain_body: bool,
+) -> Result<(MarkdownSource, usize)> {
     let content_bytes = content.len();
-    let content_digest = sha256_hex(content.as_bytes());
+    // The title-only API returns no digest. Its native caller has already
+    // checked the full original SHA before parsing; avoid a discarded second
+    // hash. Complete Document parsing continues to compute its source digest.
+    let content_digest = if retain_body {
+        sha256_hex(content.as_bytes())
+    } else {
+        String::new()
+    };
     let (raw_frontmatter, body) = split_markdown_frontmatter(content);
     let frontmatter = ParsedFrontmatter::parse(raw_frontmatter)?;
     let relative_path = path;
@@ -400,7 +468,11 @@ fn parse_markdown_content(path: &Path, content: &str) -> Result<(MarkdownSource,
         language,
         aliases,
         title,
-        body.trim().to_owned(),
+        if retain_body {
+            markdown_body(content).to_owned()
+        } else {
+            String::new()
+        },
     );
     document.exportable = exportable;
     document.ontology = ontology;
@@ -751,15 +823,69 @@ fn scope_from_relative_path(path: &Path) -> Scope {
 }
 
 fn first_heading(body: &str) -> Option<String> {
-    use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+    // Neither ATX nor Setext H1 syntax can exist without these literal markers.
+    if !body.contains(['#', '=']) {
+        return None;
+    }
+    let options =
+        pulldown_cmark::Options::ENABLE_STRIKETHROUGH | pulldown_cmark::Options::ENABLE_FOOTNOTES;
+    if let Some(prefix) = independent_heading_prefix(body)
+        && let Some(parser) = pulldown_cmark::Parser::first_h1_title_events(prefix, options)
+        && let Some(title) = first_heading_events(parser)
+    {
+        return Some(title);
+    }
+    let parser = pulldown_cmark::Parser::first_h1_title_events(body, options)?;
+    if let Some(title) = first_heading_events(parser) {
+        return Some(title);
+    }
+    // Empty first headings can require later inline state and budget consumption.
+    first_heading_events(pulldown_cmark::Parser::new_title_events(body, options))
+}
+
+// Parse only through the first possible complete H1 block. The existing parser
+// decides whether it is actually top-level (not code/HTML/a nested container).
+// Any bracket in the prefix could begin a reference/footnote whose definition
+// is completed later, so leave all such inputs to the unchanged full parser.
+fn independent_heading_prefix(body: &str) -> Option<&str> {
+    let mut end = 0;
+    for line in body.split_inclusive(['\r', '\n']) {
+        end += line.len();
+        let unindented = line.trim_start_matches(' ');
+        if line.len() - unindented.len() > 3 {
+            continue;
+        }
+        let atx = unindented
+            .strip_prefix('#')
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t', '\r', '\n']));
+        let underline = unindented.trim_end_matches([' ', '\t', '\r', '\n']);
+        let setext = !underline.is_empty() && underline.bytes().all(|byte| byte == b'=');
+        if atx || setext {
+            let prefix = &body[..end];
+            return (!prefix.contains('[')).then_some(prefix);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+fn first_heading_full(body: &str) -> Option<String> {
+    use pulldown_cmark::{Options, Parser};
+    first_heading_events(Parser::new_ext(
+        body,
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES,
+    ))
+}
+
+fn first_heading_events<'a>(
+    events: impl Iterator<Item = pulldown_cmark::Event<'a>>,
+) -> Option<String> {
+    use pulldown_cmark::{Event, HeadingLevel, Tag, TagEnd};
 
     let mut title = String::new();
     let mut in_heading = false;
     let mut depth = 0;
-    for event in Parser::new_ext(
-        body,
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES,
-    ) {
+    for event in events {
         match event {
             Event::Start(Tag::Heading {
                 level: HeadingLevel::H1,
@@ -886,6 +1012,371 @@ mod tests {
                 parse_markdown_bytes(Path::new("personal/notes/formatted.md"), source.as_bytes())
                     .expect("valid Markdown original");
             assert_eq!(parsed.document().title(), expected);
+        }
+    }
+
+    #[test]
+    fn leading_title_matches_full_parser_across_block_and_inline_contexts() {
+        let prefixes = [
+            "",
+            "\n\t \r\n",
+            " ",
+            "   ",
+            "    ",
+            "\t",
+            "Intro.\n\n",
+            "> ",
+            "- ",
+            "<div>\n",
+            "```md\n",
+            "[r]: /target \"\n",
+            "<!--\n",
+        ];
+        let headings = [
+            "# **회의** `결과`",
+            "# ~~상태~~ &amp; &#91;값&#93;",
+            "# <b>Visible</b>",
+            "# <https://fixture.invalid>",
+            "# a\\*b ##",
+            "# `a[b]`",
+            "# [link][r]",
+            "# [shortcut]",
+            "# Text [^n]",
+            "# ![image](fixture.png)",
+            "#",
+            "# ###",
+            "#\tVisible",
+            "## H2",
+            "#invalid",
+            "Heading\n===",
+            "# ``unfinished",
+        ];
+        let tails = [
+            "\nBody",
+            "\r\nBody",
+            "\rBody",
+            "\n\n[r]: /target\n[shortcut]: /target\n[^n]: note",
+            "\n\n# Later\n",
+            "\n```\n\n# Later\n",
+            "\n\"\n\n# Actual\n",
+            "\n-->\n\n# Actual\n",
+        ];
+        for prefix in prefixes {
+            for heading in headings {
+                for tail in tails {
+                    let body = format!("{prefix}{heading}{tail}");
+                    assert_eq!(first_heading(&body), first_heading_full(&body), "{body:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn heading_prefix_preserves_prior_reference_budget_and_empty_heading_state() {
+        let destination = format!("https://example.invalid/{}", "a".repeat(12_000));
+        for count in [0, 7, 8, 9, 12] {
+            let preceding = "[r]\n\n".repeat(count);
+            let body = format!("{preceding}# [Visible][r]\n\n[r]: {destination}\n");
+            assert_eq!(first_heading(&body), first_heading_full(&body));
+            if count == 0 {
+                assert_eq!(first_heading(&body).as_deref(), Some("Visible"));
+            }
+            if count == 12 {
+                assert_eq!(first_heading(&body).as_deref(), Some("[Visible][r]"));
+            }
+            let empty_first = format!("# <i></i>\n\n{body}");
+            assert_eq!(
+                first_heading(&empty_first),
+                first_heading_full(&empty_first)
+            );
+        }
+    }
+
+    #[test]
+    fn heading_prefix_preserves_exact_reference_budget_boundary() {
+        let destination = "x".repeat(25_000);
+        for (count, expected) in [(3, "Visible"), (4, "[Visible][r]")] {
+            let body = format!(
+                "{}# [Visible][r]\n\n[r]: {destination}\n",
+                "[r]\n\n".repeat(count)
+            );
+            assert!(body.len() < 100_000);
+            assert_eq!(first_heading_full(&body).as_deref(), Some(expected));
+            assert_eq!(first_heading(&body), first_heading_full(&body));
+        }
+    }
+
+    #[test]
+    fn heading_prefix_restores_budget_from_the_complete_source_length() {
+        let destination = "x".repeat(25_000);
+        let prefix = format!("{}# [Visible][r]\n\n", "[r]\n\n".repeat(5));
+        let body = format!("{prefix}{}\n\n[r]: {destination}\n", "tail ".repeat(40_000));
+        assert!(prefix.len() < 100_000 && body.len() > 125_000);
+        assert_eq!(first_heading_full(&body).as_deref(), Some("Visible"));
+        assert_eq!(first_heading(&body), first_heading_full(&body));
+    }
+
+    #[test]
+    fn discarded_prior_links_cannot_replace_heading_link_payloads() {
+        use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag};
+        let body = "[one][a] ![two][b] [inline](/prior \"prior title\") `code [a]` [^n]\n\n# [A][a] [B][b] ![C][c] [D](/heading \"heading title\") [^n]\n\n[a]: /alpha \"alpha title\"\n[b]: /beta \"beta title\"\n[c]: /gamma \"gamma title\"\n[^n]: Footnote [a]\n";
+        let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES;
+        let expected = Parser::new_ext(body, options)
+            .into_offset_iter()
+            .collect::<Vec<_>>();
+        let heading = expected
+            .iter()
+            .position(|(event, _)| {
+                matches!(
+                    event,
+                    Event::Start(Tag::Heading {
+                        level: HeadingLevel::H1,
+                        ..
+                    })
+                )
+            })
+            .unwrap();
+        let actual = Parser::first_h1_prefix(body, options)
+            .unwrap()
+            .into_offset_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            expected[heading..]
+                .iter()
+                .take_while(|(_, range)| range.start < body.find("\n\n[a]:").unwrap())
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(first_heading(body), first_heading_full(body));
+    }
+
+    #[test]
+    fn title_only_exact_parser_matches_full_validation_and_metadata() {
+        let path = Path::new("personal/folder/a.md");
+        for source in [
+            "# **Visible** [link][r]\n\n[r]: /target\n",
+            "---\ntitle: Metadata\nscope: personal\n---\n# Heading\n",
+            "body only",
+            "---\naliases: [a, b]\nexport: false\n---\n# Heading\n",
+            "---\ntitle: [invalid]\n---\n",
+            "---\nscope: [invalid]\n---\n",
+            "---\naliases: 7\n---\n",
+            "---\nexport: word\n---\n",
+            "---\nontology: 7\n---\n",
+            "---\nunclosed\n",
+        ] {
+            let full = parse_markdown_bytes(path, source.as_bytes());
+            let title = parse_markdown_title_bytes(path, source.as_bytes());
+            assert_eq!(full.is_ok(), title.is_ok(), "{source:?}");
+            if let (Ok(full), Ok(title)) = (full, title) {
+                assert_eq!(full.document().title(), title.title());
+                assert_eq!(full.declared_scope(), title.declared_scope());
+            }
+        }
+        for path in [
+            "../a.md",
+            "personal//a.md",
+            "personal/a.txt",
+            "personal/./a.md",
+        ] {
+            assert!(parse_markdown_title_bytes(Path::new(path), b"# Title").is_err());
+        }
+        assert!(parse_markdown_title_bytes(path, &[0xff]).is_err());
+    }
+
+    #[test]
+    fn heading_prefix_events_and_definitions_match_upstream_corpus() {
+        use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+        use std::collections::BTreeMap;
+        use syn::visit::Visit;
+
+        #[derive(Default)]
+        struct Inputs(Vec<String>);
+        impl<'ast> Visit<'ast> for Inputs {
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                if matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "original")
+                    && let Some(syn::LocalInit { expr, .. }) = &local.init
+                    && let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(input),
+                        ..
+                    }) = &**expr
+                {
+                    self.0.push(input.value());
+                }
+                syn::visit::visit_local(self, local);
+            }
+        }
+        let mut inputs = Inputs::default();
+        for suite in [
+            include_str!("../../../vendor/pulldown-cmark/tests/suite/spec.rs"),
+            include_str!("../../../vendor/pulldown-cmark/tests/suite/footnotes.rs"),
+            include_str!("../../../vendor/pulldown-cmark/tests/suite/regression.rs"),
+            include_str!("../../../vendor/pulldown-cmark/tests/suite/strikethrough.rs"),
+        ] {
+            inputs.visit_file(&syn::parse_file(suite).unwrap());
+        }
+        assert!(inputs.0.len() >= 600, "upstream corpus must actually load");
+        eprintln!(
+            "Upstream Markdown corpus: {} originals, {} differential inputs",
+            inputs.0.len(),
+            inputs.0.len() * 3
+        );
+        let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES;
+        fn title_event(
+            mut pair: (Event<'_>, std::ops::Range<usize>),
+        ) -> (Event<'_>, std::ops::Range<usize>) {
+            match &mut pair.0 {
+                Event::Start(Tag::Link {
+                    link_type,
+                    dest_url,
+                    title,
+                    id,
+                })
+                | Event::Start(Tag::Image {
+                    link_type,
+                    dest_url,
+                    title,
+                    id,
+                }) => {
+                    *link_type = pulldown_cmark::LinkType::Inline;
+                    *dest_url = "".into();
+                    *title = "".into();
+                    *id = "".into();
+                }
+                _ => {}
+            }
+            pair
+        }
+        for input in inputs.0 {
+            for body in [
+                input.clone(),
+                format!("# [Visible][foo] [^note]\n\n{input}"),
+                format!("{input}\n\n# [Visible][foo]\n\n[foo]: /target\n"),
+            ] {
+                let original = Parser::new_ext(&body, options);
+                let definitions: BTreeMap<_, _> = original
+                    .reference_definitions()
+                    .iter()
+                    .map(|(label, def)| {
+                        (
+                            label.to_owned(),
+                            (
+                                def.dest.to_string(),
+                                def.title.as_ref().map(ToString::to_string),
+                                def.span.clone(),
+                            ),
+                        )
+                    })
+                    .collect();
+                let mut depth = 0usize;
+                let mut in_heading = false;
+                let mut expected = Vec::new();
+                let mut found = false;
+                let mut heading_start = None;
+                for pair in original.into_offset_iter() {
+                    match &pair.0 {
+                        Event::Start(Tag::Heading {
+                            level: HeadingLevel::H1,
+                            ..
+                        }) if depth == 0 => {
+                            in_heading = true;
+                            heading_start = Some(expected.len());
+                            depth += 1;
+                        }
+                        Event::Start(_) => depth += 1,
+                        Event::End(TagEnd::Heading(HeadingLevel::H1))
+                            if in_heading && depth == 1 =>
+                        {
+                            expected.push(pair);
+                            found = true;
+                            break;
+                        }
+                        Event::End(_) => depth -= 1,
+                        _ => {}
+                    }
+                    expected.push(pair);
+                }
+                let prefix = Parser::first_h1_prefix(&body, options);
+                assert_eq!(prefix.is_some(), found, "{body:?}");
+                if let Some(prefix) = prefix {
+                    let actual_definitions: BTreeMap<_, _> = prefix
+                        .reference_definitions()
+                        .iter()
+                        .map(|(label, def)| {
+                            (
+                                label.to_owned(),
+                                (
+                                    def.dest.to_string(),
+                                    def.title.as_ref().map(ToString::to_string),
+                                    def.span.clone(),
+                                ),
+                            )
+                        })
+                        .collect();
+                    assert_eq!(actual_definitions, definitions, "{body:?}");
+                    let actual = prefix.into_offset_iter().collect::<Vec<_>>();
+                    assert_eq!(actual, expected[heading_start.unwrap()..], "{body:?}");
+                }
+                let full_expected = Parser::new_ext(&body, options)
+                    .into_offset_iter()
+                    .map(title_event)
+                    .collect::<Vec<_>>();
+                let full_title = Parser::new_title_events(&body, options)
+                    .into_offset_iter()
+                    .map(title_event)
+                    .collect::<Vec<_>>();
+                assert_eq!(full_title, full_expected, "{body:?}");
+                if found {
+                    let actual = Parser::first_h1_title_events(&body, options)
+                        .unwrap()
+                        .into_offset_iter()
+                        .map(title_event)
+                        .collect::<Vec<_>>();
+                    let title_expected = expected[heading_start.unwrap()..]
+                        .iter()
+                        .cloned()
+                        .map(title_event)
+                        .collect::<Vec<_>>();
+                    assert_eq!(actual, title_expected, "{body:?}");
+                }
+                assert_eq!(first_heading(&body), first_heading_full(&body), "{body:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn leading_title_keeps_late_reference_and_empty_heading_semantics() {
+        for (body, expected) in [
+            ("# **Visible** [link][r]\n\n[r]: /target\n", "Visible link"),
+            ("# Note [^n]\n\n[^n]: Late definition\n", "Note"),
+            ("#\n\n# Actual\n", "Actual"),
+            ("    # Code\n\n# Actual\n", "Actual"),
+            ("Intro.\n\nActual\n===\n", "Actual"),
+        ] {
+            assert_eq!(first_heading(body).as_deref(), Some(expected));
+        }
+        let body = format!("\n# **Visible** `title`\r\n{}", "*a* ".repeat(262_144));
+        assert_eq!(first_heading(&body).as_deref(), Some("Visible title"));
+        assert_eq!(
+            independent_heading_prefix(&body),
+            Some("\n# **Visible** `title`\r")
+        );
+        for prefix in [
+            "Introduction.\n\n# **Visible** `title`\n",
+            "**Visible** `title`\n===\n",
+        ] {
+            let body = format!("{prefix}{}", "*a* ".repeat(262_144));
+            assert_eq!(first_heading(&body).as_deref(), Some("Visible title"));
+            assert_eq!(independent_heading_prefix(&body), Some(prefix));
+        }
+        for body in [
+            "*a* ",
+            "<h1>HTML title</h1>",
+            "&#35; Title\n&equals;&equals;\n",
+            "[^n]: definition\n",
+        ] {
+            assert_eq!(first_heading(body), first_heading_full(body));
         }
     }
 
