@@ -43,7 +43,7 @@ native의 다른 분류 축도 관계와 구분한다. `ontology: true`인 원�
 
 ## 의미 관계를 추가하기 전 진단
 
-Native `context`의 `ontology-audit`는 지정한 원문과 이번 호출에 제공한 관계 정의를 대조하는 읽기 전용 진단이다. 원문·관계·분류·이력·검색 projection을 변경하지 않으며 관계 수락·진실 판단을 수행하지 않는다. DB 준비와 store identity 확인은 [AGENTS.md의 공통 시작](../AGENTS.md#공통-시작)을 따른다.
+Native `context`의 `ontology-audit`는 지정한 원문과 이번 호출에 제공한 관계 정의를 대조하는 읽기 전용 진단이다. 원문·관계·분류·이력·검색 projection을 변경하지 않으며 관계 수락·진실 판단을 수행하지 않는다. DB 준비와 store identity 확인은 [AGENTS.md의 로컬 연결](../AGENTS.md#로컬-연결)을 따른다.
 
 ```json
 {"op":"ontology-audit","scope":"personal","paths":["<실제 원문의 상대 경로>.md"]}
