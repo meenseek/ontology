@@ -680,17 +680,45 @@ async fn native_provider_is_lazy_batched_and_preserves_inode() {
             let second = source.open_file(p, 65536).expect("repeat selected");
             assert_eq!(
                 observed.calls() - calls,
-                4,
-                "fresh metadata and bounded body query per direct open"
+                3,
+                "fresh metadata per open; verified body query once per shared gate"
             );
             assert_eq!(
                 first.metadata().expect("inode").ino(),
                 second.metadata().expect("inode").ino()
             );
-            assert_eq!(source.body_queries(), 2);
+            assert_eq!(source.body_queries(), 1);
             assert!(!source.view_root().join("vault/personal/0001.md").exists());
             assert!(source.children(Path::new("vault/personal"), 1999).is_err());
             assert!(source.open_file(p, 1).is_err());
+            assert_eq!(
+                source.body_queries(),
+                1,
+                "a smaller limit cannot bypass the cache bound"
+            );
+            let materialized = source.view_root().join(p);
+            fs::remove_file(&materialized).unwrap();
+            std::os::unix::fs::symlink("/never-opened", &materialized).unwrap();
+            assert!(
+                source.open_file(p, 65536).is_err(),
+                "a cache hit still rejects view links"
+            );
+            fs::remove_file(&materialized).unwrap();
+            source.open_file(p, 65536).unwrap();
+            for n in 1..=256 {
+                source
+                    .open_file(Path::new(&format!("vault/personal/{n:04}.md")), 65536)
+                    .unwrap();
+            }
+            let before = source.body_queries();
+            source
+                .open_file(Path::new("vault/personal/0256.md"), 65536)
+                .unwrap();
+            assert_eq!(
+                source.body_queries() - before,
+                1,
+                "entry cap skips caching without rejecting a valid read"
+            );
             Ok(())
         })
         .await
@@ -2723,14 +2751,25 @@ async fn composed_cli_fixture(
     statement: &str,
     live: bool,
 ) -> (tempfile::TempDir, context_core::harness::PreparedHarnessRun) {
+    composed_cli_fixture_for_target(
+        store,
+        root,
+        statement,
+        live,
+        "vault/personal/knowledge/composed-cli.md",
+    )
+    .await
+}
+async fn composed_cli_fixture_for_target(
+    store: &Store,
+    root: &Path,
+    statement: &str,
+    live: bool,
+    target: &str,
+) -> (tempfile::TempDir, context_core::harness::PreparedHarnessRun) {
     use context_core::harness::*;
     let sha = harness_fixture::seed(store).await;
-    let mut request = harness_fixture::envelope(
-        &sha,
-        vec!["vault/personal/knowledge/composed-cli.md".into()],
-        vec![],
-        false,
-    );
+    let mut request = harness_fixture::envelope(&sha, vec![target.into()], vec![], false);
     let DraftTaskRequest::Write(task) = &mut request.draft else {
         unreachable!()
     };
@@ -2792,10 +2831,7 @@ async fn composed_cli_fixture(
     let plan: HarnessPlan = serde_json::from_slice(&resolved.stdout).unwrap();
     assert_eq!(plan.resolved_request.request.objective, statement);
     assert_eq!(plan.resolved_request.request.owner, DataOwner::Personal);
-    assert_eq!(
-        plan.resolved_request.request.targets,
-        ["vault/personal/knowledge/composed-cli.md"]
-    );
+    assert_eq!(plan.resolved_request.request.targets, [target]);
     fs::write(&plan_path, &resolved.stdout).unwrap();
     let prepared = harness_fixture::command(
         store,
@@ -2820,6 +2856,433 @@ async fn composed_cli_fixture(
     let prepared: PreparedHarnessRun = serde_json::from_slice(&prepared.stdout).unwrap();
     assert!(prepared.accepted_tool_plan.is_none());
     (files, prepared)
+}
+
+#[tokio::test]
+async fn native_cli_releases_gate_during_model_wait_and_rejects_changed_original() {
+    native_gate_wait_case(0).await;
+}
+#[tokio::test]
+async fn native_cli_rejects_same_byte_revision_drift_after_model_wait() {
+    native_gate_wait_case(1).await;
+}
+#[tokio::test]
+async fn native_cli_pending_apply_after_model_wait_retains_rejected_result() {
+    native_gate_wait_case(2).await;
+}
+// 0: changed bytes; 1: original bytes restored at a newer revision; 2: pending apply.
+async fn native_gate_wait_case(mutation: u8) {
+    use context_core::harness::*;
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let view = harness_fixture::view();
+    let root = view.path().canonicalize().unwrap();
+    let (files, prepared) = composed_cli_fixture_for_target(
+        &store,
+        &root,
+        "Update the selected synthetic document and independently review it.",
+        true,
+        "vault/personal/knowledge/skills.md",
+    )
+    .await;
+    let binary = files.path().join("synthetic-codex");
+    fs::write(
+        &binary,
+        r#"#!/bin/sh
+cat > "$0.input"
+printf '%s\n' '{"type":"thread.started","thread_id":"synthetic-wait"}' '{"type":"turn.started"}'
+touch "$0.ready"
+while [ ! -f "$0.events" ]; do sleep 0.02; done
+cat "$0.events"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    let args = vec![
+        "--prepared-run".into(),
+        files.path().join("prepared.json").display().to_string(),
+        "--run-id".into(),
+        "gate-drift".into(),
+        "--codex-binary".into(),
+        binary.display().to_string(),
+    ];
+    let run = harness_fixture::command(&store, &root, &root, "begin", &args);
+    let mutate = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !binary.with_extension("ready").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("native role must reach its wait point");
+        let head_path = root.join(".llm-context-vault-harness/runs/gate-drift/head.json");
+        let before = fs::read(&head_path).unwrap();
+        let head: HarnessExecutionRecord = serde_json::from_slice(&before).unwrap();
+        let invocation = &head.ready_role_invocations[0];
+        assert_eq!(
+            fs::read(binary.with_extension("input")).unwrap(),
+            serde_json::to_vec(&invocation.segments).unwrap()
+        );
+        let original = store
+            .read_context(&scope(), "knowledge/skills.md", false)
+            .await
+            .unwrap();
+        let updated = if mutation == 2 {
+            sqlx::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-pending',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s")
+                .execute(store.pool()).await.map(|_| ()).map_err(|_| Error::Storage)
+        } else {
+            match store
+                .edit_context(
+                    &scope(),
+                    "knowledge/skills.md",
+                    1,
+                    &ontology::store::digest(original.as_bytes()),
+                    "# Edited while the model waits",
+                )
+                .await
+            {
+                Ok(edited) if mutation == 1 => store
+                    .edit_context(
+                        &scope(),
+                        "knowledge/skills.md",
+                        edited.revision,
+                        &edited.content_digest,
+                        &original,
+                    )
+                    .await
+                    .map(|_| ()),
+                Ok(_) => Ok(()),
+                Err(error) => Err(error),
+            }
+        };
+        // Unblock even on a test assertion failure, so the owned child exits.
+        let event =
+            harness_fixture::role_event(&prepared, invocation, "# Proposed stale candidate");
+        let HarnessExecutionEvent::RoleResult { result } = event else {
+            unreachable!()
+        };
+        let events = [
+            json!({"type":"item.completed","item":{"id":"answer","type":"agent_message",
+                "text":json!({"outcome":result.outcome}).to_string()}}),
+            json!({"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,
+                "cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":5}}),
+        ]
+        .map(|value| value.to_string())
+        .join("\n")
+            + "\n";
+        fs::write(binary.with_extension("events"), events).unwrap();
+        assert!(
+            updated.is_ok(),
+            "mutation must succeed while Codex waits: {updated:?}"
+        );
+        (before, head_path, original)
+    };
+    let (output, (before, head_path, original)) = tokio::join!(run, mutate);
+    assert!(
+        !output.status.success(),
+        "stale role result must be rejected"
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        fs::read(head_path).unwrap(),
+        before,
+        "rejection preserves the accepted durable head"
+    );
+    let diagnostics: Vec<Value> = String::from_utf8(output.stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let observation = diagnostics
+        .iter()
+        .find(|value| value["kind"] == "native-role-observation")
+        .unwrap();
+    assert_eq!(observation["usage"]["input_tokens"], 100);
+    assert_eq!(
+        observation["serialized_input_bytes"],
+        observation["delivered_input_bytes"]
+    );
+    let rejected = diagnostics.last().unwrap();
+    assert_eq!(rejected["kind"], "role-submission-error");
+    assert!(rejected["submission"]["submitted_result"].is_object());
+    if mutation == 2 {
+        sqlx::query("DELETE FROM context_apply_batches WHERE core_run_id='synthetic-pending'")
+            .execute(store.pool())
+            .await
+            .expect("reacquisition failure released the gate");
+    }
+    assert_eq!(
+        store
+            .read_context(&scope(), "knowledge/skills.md", false)
+            .await
+            .unwrap(),
+        if mutation == 0 {
+            "# Edited while the model waits"
+        } else {
+            &original
+        }
+    );
+}
+
+#[tokio::test]
+async fn native_shared_sessions_read_concurrently_with_separate_views() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let (_fixture, root) = fixture(1, b"# Concurrent original");
+    import(&store, &root).await;
+    let first_view = harness_fixture::view();
+    let second_view = harness_fixture::view();
+    let first_root = first_view.path().canonicalize().unwrap();
+    let second_root = second_view.path().canonicalize().unwrap();
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let first_store = store.clone();
+    let first = tokio::spawn(async move {
+        first_store
+            .with_native_context(first_root, move |source| {
+                source
+                    .open_file(Path::new("vault/personal/0000.md"), 65536)
+                    .unwrap();
+                ready.send(()).unwrap();
+                wait.recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                Ok(())
+            })
+            .await
+    });
+    started.await.unwrap();
+    let concurrent = store
+        .with_native_context(second_root, |source| {
+            source
+                .open_file(Path::new("vault/personal/0000.md"), 65536)
+                .unwrap();
+            Ok(())
+        })
+        .await;
+    let blocked_write = store
+        .edit_context(
+            &scope(),
+            "0000.md",
+            1,
+            &ontology::store::digest(b"# Concurrent original"),
+            "# Concurrent edit",
+        )
+        .await;
+    release.send(()).unwrap();
+    first.await.unwrap().unwrap();
+    assert!(
+        concurrent.is_ok(),
+        "shared readers must coexist: {concurrent:?}"
+    );
+    assert!(matches!(blocked_write, Err(Error::ContextPending)));
+    store
+        .edit_context(
+            &scope(),
+            "0000.md",
+            1,
+            &ontology::store::digest(b"# Concurrent original"),
+            "# Concurrent edit",
+        )
+        .await
+        .expect("write succeeds once both reading sessions close");
+}
+
+#[tokio::test]
+async fn native_cli_blocked_stdout_releases_database_and_view_locks() {
+    native_blocked_output_case(false).await;
+}
+
+#[tokio::test]
+async fn native_cli_blocked_observations_release_database_and_view_locks() {
+    native_blocked_output_case(true).await;
+}
+
+// Fill only the dedicated child's pipe before exec. No production descriptor
+// flags, process-lifecycle rules or application database are changed by this test.
+async fn native_blocked_output_case(block_stderr: bool) {
+    use context_core::harness::HarnessExecutionRecord;
+    use std::os::unix::{io::AsRawFd, process::CommandExt};
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let view = harness_fixture::view();
+    let root = view.path().canonicalize().unwrap();
+    let (files, _) = composed_cli_fixture_for_target(
+        &store,
+        &root,
+        "Update the exact synthetic source.",
+        true,
+        "vault/personal/knowledge/skills.md",
+    )
+    .await;
+    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let original = store
+        .read_context(&scope(), "knowledge/skills.md", false)
+        .await
+        .unwrap();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"));
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("TMPDIR", std::env::temp_dir())
+        .env("DATABASE_URL", std::env::var("TEST_DATABASE_URL").unwrap())
+        .args(["harness", "begin", "--context-view"])
+        .arg(&root)
+        .arg("--workspace-root")
+        .arg(&root)
+        .arg("--policy-config")
+        .arg(context_fixture::configuration_path())
+        .args([
+            "--store-id",
+            &id,
+            "--run-id",
+            "blocked-output",
+            "--prepared-run",
+        ])
+        .arg(files.path().join("prepared.json"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if block_stderr {
+        let binary = files.path().join("cancelled-codex");
+        fs::write(&binary, r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"blocked-output"}' '{"type":"turn.started"}' '{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"{\"outcome\":{\"status\":\"cancelled\"}}"}}' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":5}}'
+"#).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        command.arg("--codex-binary").arg(binary);
+    }
+    // SAFETY: pre_exec uses only fcntl/write and errno inspection on this child's
+    // owned pipe, with no allocation, locks or non-async-signal-safe operations.
+    unsafe {
+        command.as_std_mut().pre_exec(move || {
+            let fd = if block_stderr {
+                libc::STDERR_FILENO
+            } else {
+                libc::STDOUT_FILENO
+            };
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let fill = [b'x'; 4096];
+            for size in [4096, 1] {
+                while libc::write(fd, fill.as_ptr().cast(), size) >= 0 {}
+                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::WouldBlock {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if libc::fcntl(fd, libc::F_SETFL, flags) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    let head_path = root.join(".llm-context-vault-harness/runs/blocked-output/head.json");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join(".context-lock"))
+        .unwrap();
+    let proof = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let ready = fs::read(&head_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<HarnessExecutionRecord>(&bytes).ok())
+                .is_some_and(|head| !block_stderr || !head.role_execution.role_results.is_empty());
+            if ready {
+                // SAFETY: this is a valid descriptor to the synthetic view lock.
+                if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        loop {
+            match store
+                .edit_context(
+                    &scope(),
+                    "knowledge/skills.md",
+                    1,
+                    &ontology::store::digest(original.as_bytes()),
+                    "# Edited during blocked output",
+                )
+                .await
+            {
+                Err(Error::ContextPending) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await
+                }
+                result => break result,
+            }
+        }
+    })
+    .await;
+    let still_blocked = child.try_wait().unwrap().is_none();
+    child.start_kill().unwrap();
+    child.wait().await.unwrap();
+    assert!(still_blocked, "the pipe must keep the actual CLI running");
+    proof
+        .expect("output must not retain the DB gate or owned view lock")
+        .expect("manual edit must succeed while CLI output stays blocked");
+}
+
+#[tokio::test]
+async fn native_body_cache_byte_capacity_keeps_reads_available() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let (_fixture, root) = fixture(3, &vec![b'x'; 6 * 1024 * 1024]);
+    import(&store, &root).await;
+    let view = harness_fixture::view();
+    store
+        .with_native_context(view.path().canonicalize().unwrap(), |source| {
+            for n in 0..3 {
+                source
+                    .open_file(
+                        Path::new(&format!("vault/personal/{n:04}.md")),
+                        16 * 1024 * 1024,
+                    )
+                    .unwrap();
+            }
+            let before = source.body_queries();
+            source
+                .open_file(Path::new("vault/personal/0000.md"), 16 * 1024 * 1024)
+                .unwrap();
+            assert_eq!(source.body_queries(), before);
+            source
+                .open_file(Path::new("vault/personal/0002.md"), 16 * 1024 * 1024)
+                .unwrap();
+            assert_eq!(
+                source.body_queries(),
+                before + 1,
+                "byte cap skips caching without rejecting reads"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    store
+        .with_native_commit(view.path().canonicalize().unwrap(), id, |session| {
+            let source = session.fresh_source().unwrap();
+            let path = Path::new("vault/personal/0000.md");
+            source.open_file(path, 16 * 1024 * 1024).unwrap();
+            source.open_file(path, 16 * 1024 * 1024).unwrap();
+            assert_eq!(
+                source.body_queries(),
+                2,
+                "exclusive recovery source cannot retain stale bodies"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

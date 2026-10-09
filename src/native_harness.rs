@@ -1,7 +1,8 @@
 use crate::{
     native_context::{NativeContextSession, NativeContextSource},
     native_role::{
-        execute_codex_frontier, validate_codex_binary, validate_codex_producer_frontier,
+        RoleObservations, execute_codex_frontier, validate_codex_binary,
+        validate_codex_producer_frontier,
     },
     store::Store,
 };
@@ -95,7 +96,11 @@ struct Command {
     policy_configuration: PolicyConfiguration,
 }
 impl Command {
-    fn run_harness_command(&self, mut arguments: impl Iterator<Item = String>) -> Result<()> {
+    fn run_harness_command(
+        &self,
+        mut arguments: impl Iterator<Item = String>,
+        observations: &RoleObservations,
+    ) -> Result<String> {
         let command = arguments
             .next()
             .ok_or_else(|| NativeHarnessError::invalid_input("missing harness command"))?;
@@ -103,8 +108,8 @@ impl Command {
             "resolve" => self.run_resolve_harness_command(arguments),
             "prepare" => self.run_prepare_harness_command(arguments),
             "replay" => self.run_replay_harness_command(arguments),
-            "begin" => self.run_begin_harness_command(arguments),
-            "advance" => self.run_advance_harness_command(arguments),
+            "begin" => self.run_begin_harness_command(arguments, observations),
+            "advance" => self.run_advance_harness_command(arguments, observations),
             "revise" => self.run_revise_harness_command(arguments),
             "evaluate" => self.run_evaluate_harness_command(arguments),
             "validate" => self.run_validate_harness_command(arguments),
@@ -116,7 +121,10 @@ impl Command {
         }
     }
 
-    fn run_resolve_harness_command(&self, arguments: impl Iterator<Item = String>) -> Result<()> {
+    fn run_resolve_harness_command(
+        &self,
+        arguments: impl Iterator<Item = String>,
+    ) -> Result<String> {
         let input = preflight_resolve_input(
             harness_input(arguments, "resolve")?,
             &self.policy_configuration,
@@ -124,7 +132,7 @@ impl Command {
         self.run_resolve_harness_input(input)
     }
 
-    fn run_resolve_harness_input(&self, input: HarnessCliInput) -> Result<()> {
+    fn run_resolve_harness_input(&self, input: HarnessCliInput) -> Result<String> {
         let execution_profile = input
             .composed_request
             .as_ref()
@@ -172,7 +180,7 @@ impl Command {
         .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
         plan.validate_capabilities(&capabilities)
             .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-        print_json(&plan, "Harness plan")
+        serialize_json(&plan, "Harness plan")
     }
 
     #[allow(
@@ -182,7 +190,7 @@ impl Command {
     fn run_prepare_harness_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let mut context_view = None;
         let mut workspace_root = None;
         let mut plan_path = None;
@@ -267,13 +275,13 @@ impl Command {
             .map_err(|source| {
                 NativeHarnessError::io("write prepared Harness run", &prepared_output, source)
             })?;
-        print_json(&prepared, "prepared Harness run")
+        serialize_json(&prepared, "prepared Harness run")
     }
 
     fn run_replay_harness_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let paths = required_harness_paths(
             arguments,
             &["--context-view", "--workspace-root", "--prepared-run"],
@@ -288,10 +296,14 @@ impl Command {
         prepared
             .validate_with_engine(&raw, &engine)
             .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-        print_json(&prepared, "replayed current Harness run")
+        serialize_json(&prepared, "replayed current Harness run")
     }
 
-    fn run_begin_harness_command(&self, arguments: impl IntoIterator<Item = String>) -> Result<()> {
+    fn run_begin_harness_command(
+        &self,
+        arguments: impl IntoIterator<Item = String>,
+        observations: &RoleObservations,
+    ) -> Result<String> {
         let mut context_view = None;
         let mut workspace_root = None;
         let mut prepared_path = None;
@@ -355,17 +367,25 @@ impl Command {
             HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, &run_identifier)
                 .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
         let record = if let Some(binary) = codex_binary {
-            execute_codex_frontier(&engine, &prepared, record, &binary)?
+            execute_codex_frontier(
+                &engine,
+                &prepared,
+                record,
+                &binary,
+                Some(&self.source),
+                observations,
+            )
         } else {
-            record
+            Ok(record)
         };
-        print_json(&record, "Harness execution record")
+        record.and_then(|record| serialize_json(&record, "Harness execution record"))
     }
 
     fn run_advance_harness_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
-    ) -> Result<()> {
+        observations: &RoleObservations,
+    ) -> Result<String> {
         let paths = required_harness_paths(
             arguments,
             &["--context-view", "--workspace-root", "--run-id", "--event"],
@@ -398,18 +418,23 @@ impl Command {
                 None => NativeHarnessError::invalid_input(error.to_string()),
             })?;
         let next = match (paths.get("--codex-binary"), codex_prepared.as_ref()) {
-            (Some(binary), Some(prepared)) => {
-                execute_codex_frontier(&engine, prepared, next, binary)?
-            }
-            _ => next,
+            (Some(binary), Some(prepared)) => execute_codex_frontier(
+                &engine,
+                prepared,
+                next,
+                binary,
+                Some(&self.source),
+                observations,
+            ),
+            _ => Ok(next),
         };
-        print_json(&next, "advanced Harness execution record")
+        next.and_then(|next| serialize_json(&next, "advanced Harness execution record"))
     }
 
     fn run_revise_harness_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let paths = required_harness_paths(
             arguments,
             &["--context-view", "--workspace-root", "--run-id"],
@@ -418,13 +443,13 @@ impl Command {
         let (engine, run_identifier) = self.durable_harness_context(&paths)?;
         let next = HarnessExecutionRecord::revise_durable(&engine, &run_identifier)
             .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-        print_json(&next, "revised Harness execution record")
+        serialize_json(&next, "revised Harness execution record")
     }
 
     fn run_evaluate_harness_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let paths = required_harness_paths(
             arguments,
             &["--context-view", "--workspace-root", "--run-id"],
@@ -438,13 +463,13 @@ impl Command {
         let next =
             HarnessExecutionRecord::evaluate_durable(&engine, &run_identifier, evidence.as_ref())
                 .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-        print_json(&next, "evaluated Harness execution record")
+        serialize_json(&next, "evaluated Harness execution record")
     }
 
     fn run_validate_harness_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let paths = required_harness_paths(
             arguments,
             &["--context-view", "--workspace-root", "--run-id"],
@@ -453,13 +478,13 @@ impl Command {
         let (engine, run_identifier) = self.durable_harness_context(&paths)?;
         let next = HarnessExecutionRecord::validate_durable(&engine, &run_identifier)
             .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-        print_json(&next, "validated Harness execution record")
+        serialize_json(&next, "validated Harness execution record")
     }
 
     fn run_attest_career_harness_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let paths = required_harness_paths(
             arguments,
             &[
@@ -495,7 +520,7 @@ impl Command {
                 &record.role_execution,
             )
             .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-        print_json(&receipt, "career execution review receipt")
+        serialize_json(&receipt, "career execution review receipt")
     }
 
     fn durable_harness_context(
@@ -558,7 +583,7 @@ impl Command {
     fn run_compose_career_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let mut context_view = None;
         let mut workspace_root = None;
         let mut manifest_path = None;
@@ -624,15 +649,13 @@ impl Command {
             .compose_career_execution_reviews(&manifest, &holistic_review, &evidence_reviews)
             .map_err(|error| harness_command_error(error, output_json))?;
         if output_json {
-            print_json(&receipt, "career composition receipt")?;
+            serialize_json(&receipt, "career composition receipt")
         } else {
-            println!("경력 산출물 조립 검증 통과 (advisory)");
-            println!("조립 해시: {}", receipt.composition_digest);
-            println!(
-                "완전성은 선언된 manifest와 claim lineage 범위이며 Harness engine가 산출물 의미를 자동 판독하지 않음"
-            );
+            Ok(format!(
+                "경력 산출물 조립 검증 통과 (advisory)\n조립 해시: {}\n완전성은 선언된 manifest와 claim lineage 범위이며 Harness engine가 산출물 의미를 자동 판독하지 않음",
+                receipt.composition_digest
+            ))
         }
-        Ok(())
     }
 }
 fn required_harness_paths(
@@ -948,7 +971,7 @@ fn set_harness_option<T>(slot: &mut Option<T>, value: T, flag: &str) -> Result<(
     Ok(())
 }
 
-fn print_json(value: &impl serde::Serialize, description: &str) -> Result<()> {
+fn serialize_json(value: &impl serde::Serialize, description: &str) -> Result<String> {
     let output = serde_json::to_string_pretty(value).map_err(|error| {
         NativeHarnessError::invalid_input(format!("failed to serialize {description}: {error}"))
     })?;
@@ -957,6 +980,10 @@ fn print_json(value: &impl serde::Serialize, description: &str) -> Result<()> {
             "Harness output exceeds the finite limit",
         ));
     }
+    Ok(output)
+}
+
+fn print_output(output: String) -> Result<()> {
     println!("{output}");
     Ok(())
 }
@@ -1104,7 +1131,9 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
         .map_err(|_| NativeHarnessError::invalid_input("DATABASE_URL is required"))?;
     let store =
         Store::for_native(&url).map_err(|e| NativeHarnessError::invalid_input(e.to_string()))?;
-    if matches!(verb.as_str(), "apply" | "recover") {
+    let observations = Arc::new(RoleObservations::default());
+    let command_observations = observations.clone();
+    let output = if matches!(verb.as_str(), "apply" | "recover") {
         let recover = verb == "recover";
         let workspace = PathBuf::from(&options["--workspace-root"]);
         let run = options
@@ -1124,7 +1153,7 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
                     )
                     .map_err(|e| harness_command_error(e, true))
                     .and_then(|(head, closure)| {
-                        print_json(
+                        serialize_json(
                             &serde_json::json!({"head":head,"pre_apply_close":closure}),
                             "pre-apply Harness closure",
                         )
@@ -1140,7 +1169,7 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
                 ))
             })
             .await
-            .map_err(|e| NativeHarnessError::invalid_input(e.to_string()))??;
+            .map_err(|e| NativeHarnessError::invalid_input(e.to_string()))
     } else {
         store
             .with_native_context(view, move |source| {
@@ -1159,14 +1188,19 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
                 Ok(if let Some(input) = resolve_input {
                     command.run_resolve_harness_input(input)
                 } else {
-                    command.run_harness_command(forwarded.into_iter())
+                    command.run_harness_command(forwarded.into_iter(), &command_observations)
                 })
             })
             .await
-            .map_err(|e| NativeHarnessError::invalid_input(e.to_string()))??;
-    }
-    Ok(())
+            .map_err(|e| NativeHarnessError::invalid_input(e.to_string()))
+    };
+    // The closures return only owned output/error values. Their DB connections,
+    // source caches and view locks are gone before any potentially blocked sink.
+    let result = output.and_then(|result| result).and_then(print_output);
+    observations.emit();
+    result
 }
+
 fn preflight_resolve_input(
     mut input: HarnessCliInput,
     configuration: &PolicyConfiguration,
@@ -1261,7 +1295,7 @@ fn apply_or_recover(
     run: &str,
     recover: bool,
     policy_configuration: PolicyConfiguration,
-) -> Result<()> {
+) -> Result<String> {
     use context_core::harness::HarnessApplyAttemptState;
     // Core validates the run locator before the existence probe, which grants no source access.
     let (_, prepared) = HarnessExecutionRecord::load_durable_prepared(workspace, run)
@@ -1326,7 +1360,7 @@ fn apply_or_recover(
         HarnessExecutionRecord::apply_durable(&engine, run, Some(session))
     }
     .map_err(|e| harness_command_error(e, true))?;
-    print_json(
+    serialize_json(
         &serde_json::json!({"head":result.0,"apply_attempt":result.1}),
         "finalized Harness apply",
     )
@@ -3133,6 +3167,7 @@ cat "$0.events.$n"
         }
         assert_eq!(native.first_output, Some(5));
         assert_eq!(native.terminal, Some((6, true)));
+        assert_eq!(native.usage, Some(codex_test_usage()));
         for invalid in [
             r#"{"type":"unknown.event"}"#,
             r#"{"type":"thread.started"}"#,
@@ -3490,8 +3525,15 @@ cat "$0.events.$n"
             .ready_tool_invocation
             .as_ref()
             .expect("code review must initially issue its tool frontier");
-        let blocked = execute_codex_frontier(&engine, &prepared, head.clone(), &binary)
-            .expect_err("native roles must not run while a tool invocation is ready");
+        let blocked = execute_codex_frontier(
+            &engine,
+            &prepared,
+            head.clone(),
+            &binary,
+            None,
+            &RoleObservations::default(),
+        )
+        .expect_err("native roles must not run while a tool invocation is ready");
         assert!(blocked.to_string().contains("unsupported runtime"));
         assert!(codex_calls(&binary).is_empty());
         let exact = codex_test_tool_evidence(plan);
@@ -3510,8 +3552,15 @@ cat "$0.events.$n"
                 codex_completed(&prepared, invocation.role, false),
             );
         }
-        let next = execute_codex_frontier(&engine, &prepared, head, &binary)
-            .expect("native review must return the current head without autoevaluation");
+        let next = execute_codex_frontier(
+            &engine,
+            &prepared,
+            head,
+            &binary,
+            None,
+            &RoleObservations::default(),
+        )
+        .expect("native review must return the current head without autoevaluation");
         assert_eq!(codex_calls(&binary).len(), 2);
         assert_eq!(next.state, HarnessExecutionState::Executing);
         assert_eq!(next.role_execution.role_results.len(), 2);
@@ -3592,8 +3641,15 @@ cat "$0.events.$n"
                 2,
                 "test must start with ready siblings"
             );
-            let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
-                .expect("terminal result must be evaluated by Core");
+            let evaluated = execute_codex_frontier(
+                &engine,
+                &prepared,
+                head,
+                &binary,
+                None,
+                &RoleObservations::default(),
+            )
+            .expect("terminal result must be evaluated by Core");
             assert_eq!(codex_calls(&binary).len(), 1);
             assert_eq!(evaluated.role_execution.role_results.len(), 1);
             assert_eq!(evaluated.role_execution.role_results[0].outcome, outcome);
@@ -3687,8 +3743,15 @@ cat "$0.events.$role"
             HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "parallel-exact")
                 .expect("run must begin");
         let issued = head.ready_role_invocations.clone();
-        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
-            .expect("both independent results must evaluate");
+        let evaluated = execute_codex_frontier(
+            &engine,
+            &prepared,
+            head,
+            &binary,
+            None,
+            &RoleObservations::default(),
+        )
+        .expect("both independent results must evaluate");
         assert_eq!(
             evaluated.role_execution.accepted_role_order,
             [HarnessRole::Reviewer, HarnessRole::Verifier]
@@ -3718,7 +3781,7 @@ cat "$0.events.$role"
     #[test]
     fn codex_concurrent_terminal_result_cancels_and_reaps_running_sibling() {
         let temp = TempDirectory::new("codex-concurrent-halt");
-        let (engine, prepared, raw, _) =
+        let (engine, prepared, raw, workspace) =
             codex_fixture_with_concurrency(&temp, 2, 8, HarnessAction::DocumentReview, 2);
         let failure = RoleExecutionOutcome::Failed {
             message: "owned terminal fixture".to_owned(),
@@ -3734,8 +3797,15 @@ cat "$0.events.$role"
         let head = HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "parallel-halt")
             .expect("run must begin");
         let started = std::time::Instant::now();
-        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
-            .expect("first terminal must evaluate after closing sibling");
+        let evaluated = execute_codex_frontier(
+            &engine,
+            &prepared,
+            head,
+            &binary,
+            Some(&test_source(&workspace)),
+            &RoleObservations::default(),
+        )
+        .expect("first terminal must evaluate after closing sibling");
         assert!(started.elapsed() < std::time::Duration::from_secs(4));
         assert_eq!(evaluated.role_execution.role_results.len(), 1);
         assert_eq!(evaluated.role_execution.role_results[0].outcome, failure);
@@ -3760,7 +3830,17 @@ cat "$0.events.$role"
         let head =
             HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "parallel-invalid")
                 .expect("run must begin");
-        assert!(execute_codex_frontier(&engine, &prepared, head.clone(), &binary).is_err());
+        assert!(
+            execute_codex_frontier(
+                &engine,
+                &prepared,
+                head.clone(),
+                &binary,
+                None,
+                &RoleObservations::default()
+            )
+            .is_err()
+        );
         let saved: HarnessExecutionRecord = read_harness_json(
             &workspace.join(".llm-context-vault-harness/runs/parallel-invalid/head.json"),
             "head",
@@ -3789,8 +3869,15 @@ cat "$0.events.$role"
         let head =
             HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "parallel-late-halt")
                 .expect("run must begin");
-        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
-            .expect("prior successful sibling must persist");
+        let evaluated = execute_codex_frontier(
+            &engine,
+            &prepared,
+            head,
+            &binary,
+            None,
+            &RoleObservations::default(),
+        )
+        .expect("prior successful sibling must persist");
         assert_eq!(
             evaluated.role_execution.accepted_role_order,
             [HarnessRole::Reviewer, HarnessRole::Verifier]
@@ -3843,7 +3930,17 @@ cat "$0.events.$role"
             .is_err()
         );
         codex_test_events(&binary, 1, outcome);
-        assert!(execute_codex_frontier(&engine, &prepared, head.clone(), &binary).is_err());
+        assert!(
+            execute_codex_frontier(
+                &engine,
+                &prepared,
+                head.clone(),
+                &binary,
+                None,
+                &RoleObservations::default()
+            )
+            .is_err()
+        );
         assert_eq!(
             codex_calls(&binary).len(),
             1,
@@ -3877,10 +3974,17 @@ cat "$0.events.$role"
             invocation_digest: invocation.invocation_digest.clone(),
         });
         assert!(
-            execute_codex_frontier(&engine, &prepared, tool_frontier, &binary)
-                .expect_err("tool frontier must be unsupported")
-                .to_string()
-                .contains("unsupported runtime")
+            execute_codex_frontier(
+                &engine,
+                &prepared,
+                tool_frontier,
+                &binary,
+                None,
+                &RoleObservations::default()
+            )
+            .expect_err("tool frontier must be unsupported")
+            .to_string()
+            .contains("unsupported runtime")
         );
         assert!(codex_calls(&binary).is_empty());
         assert!(validate_codex_binary(Path::new("relative-codex")).is_err());
@@ -4179,6 +4283,40 @@ cat "$0.events.$role"
 
     #[cfg(unix)]
     #[test]
+    fn codex_native_gate_cycles_refuse_suspended_reads_and_clear_verified_bodies() {
+        let temp = TempDirectory::new("gate-cycles");
+        let (_, _, _, workspace) = codex_fixture(&temp, 1, 1);
+        let source = test_source(&workspace);
+        let path = Path::new("vault/profile/rules/control.md");
+        source.suspend_reads().unwrap();
+        source.resume_reads().unwrap();
+        for _ in 0..3 {
+            let before = source.body_queries();
+            source.open_file(path, 65536).unwrap();
+            source.open_file(path, 65536).unwrap();
+            assert_eq!(source.body_queries(), before + 1);
+            source.suspend_reads().unwrap();
+            let calls = test_store().calls();
+            source.suspend_reads().unwrap();
+            assert_eq!(test_store().calls(), calls, "suspend is idempotent");
+            assert!(source.metadata(Path::new("")).is_err());
+            assert!(source.source_versions(&[]).is_err());
+            assert!(source.children(Path::new(""), 1).is_err());
+            assert!(source.store_identity().is_err());
+            assert!(source.open_file(path, 65536).is_err());
+            source.resume_reads().unwrap();
+            let calls = test_store().calls();
+            source.resume_reads().unwrap();
+            assert_eq!(
+                test_store().calls(),
+                calls,
+                "resume cannot accumulate shared locks"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn codex_producer_flows_through_independent_review_without_applying() {
         let temp = TempDirectory::new("codex-producer-flow");
         let (engine, prepared, raw, workspace) =
@@ -4207,7 +4345,15 @@ cat "$0.events.$role"
                 )
                 .unwrap();
         }
-        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary).unwrap();
+        let evaluated = execute_codex_frontier(
+            &engine,
+            &prepared,
+            head,
+            &binary,
+            Some(&test_source(&workspace)),
+            &RoleObservations::default(),
+        )
+        .unwrap();
         assert_eq!(evaluated.state, HarnessExecutionState::Evaluated);
         assert_eq!(evaluated.role_execution.role_results.len(), 3);
         assert_eq!(codex_calls(&binary).len(), 3);
@@ -4278,7 +4424,15 @@ cat "$0.events.$role"
                 )
                 .unwrap();
         }
-        let error = execute_codex_frontier(&engine, &prepared, head, &binary).unwrap_err();
+        let error = execute_codex_frontier(
+            &engine,
+            &prepared,
+            head,
+            &binary,
+            None,
+            &RoleObservations::default(),
+        )
+        .unwrap_err();
         let diagnostic: serde_json::Value = serde_json::from_str(&error.diagnostic_json()).unwrap();
         assert_eq!(diagnostic["kind"], "role-submission-error");
         let submitted: RoleExecutionResult =
@@ -4399,7 +4553,15 @@ cat "$0.events.$role"
                 )
                 .unwrap();
         }
-        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary).unwrap();
+        let evaluated = execute_codex_frontier(
+            &engine,
+            &prepared,
+            head,
+            &binary,
+            None,
+            &RoleObservations::default(),
+        )
+        .unwrap();
         assert_eq!(
             evaluated.role_execution.role_results[0].role,
             HarnessRole::Specialist
@@ -4606,8 +4768,15 @@ cat "$0.events.$role"
         };
         let binary = codex_test_script(&temp, CODEX_CAPTURE);
         codex_test_events(&binary, 1, outcome.clone());
-        let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
-            .expect("Core must accept the existing MissingContext shape");
+        let evaluated = execute_codex_frontier(
+            &engine,
+            &prepared,
+            head,
+            &binary,
+            None,
+            &RoleObservations::default(),
+        )
+        .expect("Core must accept the existing MissingContext shape");
         assert_eq!(
             evaluated
                 .evaluation
@@ -4732,8 +4901,15 @@ wait
                 };
                 fs::write(&events_path, text).expect("failure fixture must be written");
             }
-            let evaluated = execute_codex_frontier(&engine, &prepared, head, &binary)
-                .expect("observed failure must reach Core evaluation");
+            let evaluated = execute_codex_frontier(
+                &engine,
+                &prepared,
+                head,
+                &binary,
+                None,
+                &RoleObservations::default(),
+            )
+            .expect("observed failure must reach Core evaluation");
             assert_eq!(
                 evaluated
                     .evaluation
@@ -4797,7 +4973,8 @@ wait
                 &binary,
                 &prepared,
                 &head.ready_role_invocations[0],
-                &std::sync::atomic::AtomicBool::new(false)
+                &std::sync::atomic::AtomicBool::new(false),
+                &RoleObservations::default(),
             )
             .expect_err("over-limit input must be unsupported")
             .to_string()
@@ -5082,7 +5259,8 @@ wait
             source,
             policy_configuration: context_fixture::configuration(),
         }
-        .run_harness_command(args.into_iter())
+        .run_harness_command(args.into_iter(), &RoleObservations::default())
+        .and_then(print_output)
     }
     fn run_begin_harness_command(arguments: impl IntoIterator<Item = String>) -> Result<()> {
         run_harness_command(std::iter::once("begin".to_owned()).chain(arguments))

@@ -704,6 +704,28 @@ head에 따라 후속 역할을 실행한다. 준비된
 호출을 기존 lifecycle 안에서 종료하고 이후 결과는 제출하지 않는다. 자동 재시도는 없다.
 이 실행 순서 변경은 필수 역할·검증·적용과 복구의 판정을 줄이거나 바꾸지 않는다.
 
+Shared DB gate는 별도 source view를 사용하는 여러 세션의 동시 읽기를 허용한다.
+같은 source view는 파일 생성·갱신을 보호하는 exclusive 잠금을 유지한다.
+Native 읽기 세션은 shared DB gate를 보유하는 동안 검증된 원문 본문만 재사용한다.
+캐시는 16MiB·256개 이내이고 매 open마다 최신 metadata와 호출자의 byte limit,
+작업 공간 파일 안전성을 확인한다. 적용·복구의 exclusive 세션에는 캐시를 쓰지 않는다.
+Codex 역할이 실행·종료되는 동안은 shared gate를 해제한다. 결과 제출 전에는 gate를
+다시 얻고 pending apply를 확인한 뒤 Core의 기존 원문·준비 입력 재검증을 수행한다.
+Gate 해제마다 캐시를 비우며 원문이 변경되면 기존 제출 오류와 마지막 수락 head를 보존한다.
+
+`--codex-binary` 실행의 stderr에는 `kind=native-role-observation` JSONL 관측이 나온다.
+각 시도의 역할·경과 시간·직렬화/실제 전달 byte 수·관측 terminal state·실제 Codex usage만
+기록한다. 원문·요청·응답 본문은 기록하지 않는다. 관측되지 않은 usage/state는 `null`이며
+실패·취소에서도 관측된 usage를 보존한다. stderr 저장 후 해당 kind를 선택해 확인한다.
+관측은 native 메모리에 역할 종류 수 이내로 모은다. 역할 실행·취소·join과 마지막 durable
+판정을 마친 후 DB 연결과 source view 잠금을 닫고 stdout head와 stderr 관측을 출력한다.
+다른 Harness 명령도 저장·검증·적용·복구를 마친 뒤 잠금을 닫고 결과를 출력한다.
+출력 sink의 지연·오류가 역할 lifecycle·결과 수락이나 DB 쓰기를 막지 않는다.
+최종 출력은 기존 CLI sink의 동작을 따른다.
+stdout의 Core head JSON은 기존 형식이다.
+제출 오류 진단은 같은 stderr의 마지막 JSON 객체일 수 있다. 비교 실험 도구는 이 native
+관측을 자동 집계하지 않으며, 측정하지 않은 토큰·비용·전체 속도 개선을 추정하지 않는다.
+
 ### 하네스 비교 실험
 
 `scripts/compare_harness.py`는 같은 요청을 두 실행 방식에 전달하고, 가린 품질 평가와 비용을

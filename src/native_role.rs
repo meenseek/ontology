@@ -41,6 +41,8 @@ pub(crate) fn execute_codex_frontier(
     prepared: &PreparedHarnessRun,
     mut record: HarnessExecutionRecord,
     binary: &Path,
+    source: Option<&crate::native_context::NativeContextSource>,
+    observations: &RoleObservations,
 ) -> Result<HarnessExecutionRecord> {
     // Only callers holding the typed return of begin_durable/advance_durable enter
     // here. Never deserialize a caller-supplied frontier or replay a stale sibling.
@@ -97,7 +99,12 @@ pub(crate) fn execute_codex_frontier(
             }
         }
         let cancelled = AtomicBool::new(false);
-        std::thread::scope(|scope| {
+        if let Some(source) = source {
+            source
+                .suspend_reads()
+                .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+        }
+        let outcome = std::thread::scope(|scope| {
             let (sender, receiver) = std::sync::mpsc::channel();
             let cancelled = &cancelled;
             let outcome = (|| {
@@ -107,7 +114,13 @@ pub(crate) fn execute_codex_frontier(
                         .spawn_scoped(scope, move || {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    execute_codex_role(binary, prepared, invocation, cancelled)
+                                    execute_codex_role(
+                                        binary,
+                                        prepared,
+                                        invocation,
+                                        cancelled,
+                                        observations,
+                                    )
                                 }))
                                 .unwrap_or_else(|_| {
                                     Err(NativeHarnessError::invalid_input(
@@ -125,6 +138,15 @@ pub(crate) fn execute_codex_frontier(
                     let result = result?;
                     let halted = !matches!(result.outcome, RoleExecutionOutcome::Completed { .. });
                     let submitted = result.clone();
+                    if let Some(source) = source {
+                        source.resume_reads().map_err(|error| {
+                            NativeHarnessError::submission_error(
+                                error,
+                                &record.run_identifier,
+                                submitted.clone(),
+                            )
+                        })?;
+                    }
                     record = HarnessExecutionRecord::advance_durable(
                         engine,
                         &record.run_identifier,
@@ -139,6 +161,11 @@ pub(crate) fn execute_codex_frontier(
                             submitted,
                         )
                     })?;
+                    if let Some(source) = source {
+                        source.suspend_reads().map_err(|error| {
+                            NativeHarnessError::invalid_input(error.to_string())
+                        })?;
+                    }
                     if halted {
                         break;
                     }
@@ -148,8 +175,21 @@ pub(crate) fn execute_codex_frontier(
             // A failed/terminal submission closes running siblings before scope
             // joins them. Their results are never submitted after the halt.
             cancelled.store(true, Ordering::Relaxed);
+            // Join cancelled siblings without holding the store gate, including
+            // when reacquisition/submission failed with the gate held.
+            if let Some(source) = source {
+                let released = source.suspend_reads();
+                if outcome.is_ok() {
+                    released
+                        .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+                }
+            }
             outcome
-        })?;
+        });
+        let restored = source.map(|source| source.resume_reads()).transpose();
+        // Retain the original rejected result diagnostic even if restoration fails.
+        outcome?;
+        restored.map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
     }
 }
 
@@ -300,6 +340,7 @@ pub(crate) struct CodexNativeOutput {
     pub(crate) first_output: Option<u64>,
     pub(crate) message: Option<String>,
     pub(crate) terminal: Option<(u64, bool)>,
+    pub(crate) usage: Option<CodexUsage>,
 }
 
 impl CodexNativeOutput {
@@ -343,11 +384,12 @@ impl CodexNativeOutput {
                     self.message = Some(text);
                 }
             }
-            CodexEvent::TurnCompleted { .. } => {
+            CodexEvent::TurnCompleted { usage } => {
                 if !self.turn_started || self.terminal.is_some() {
                     return Err("missing or duplicate native turn boundary");
                 }
                 self.terminal = Some((now, true));
+                self.usage = Some(usage);
             }
         }
         Ok(())
@@ -369,6 +411,79 @@ impl CodexNativeOutput {
     }
 }
 
+// Diagnostic observations are independent of Core acceptance. No source bytes,
+// prompts, model output or native context identifiers enter this record.
+#[derive(serde::Serialize)]
+struct CodexObservation {
+    kind: &'static str,
+    role: HarnessRole,
+    elapsed_millis: u64,
+    serialized_input_bytes: usize,
+    delivered_input_bytes: usize,
+    reported_terminal_state: Option<RoleTerminalState>,
+    usage: Option<CodexUsage>,
+}
+impl CodexObservation {
+    fn write(&self, writer: &mut impl Write) {
+        if let Ok(mut bytes) = serde_json::to_vec(self) {
+            bytes.push(b'\n');
+            // Broken diagnostics cannot reject an otherwise valid role result.
+            let _ = writer.write_all(&bytes);
+        }
+    }
+}
+// Workers only record into this bounded native collector. The command emits
+// after durable processing, sibling joins and native session release, so sink backpressure cannot stall
+// a role lifecycle, a submission, cancellation, or the next frontier.
+#[derive(Default)]
+pub(crate) struct RoleObservations(std::sync::Mutex<Vec<CodexObservation>>);
+impl RoleObservations {
+    fn record(&self, observation: CodexObservation) {
+        if let Ok(mut observations) = self.0.lock()
+            && observations.len() < 4
+        {
+            // Core has four role kinds; the adapter rejects repeat executions.
+            observations.push(observation);
+        }
+    }
+    pub(crate) fn emit(&self) {
+        let observations = self.0.lock().map(|mut values| std::mem::take(&mut *values));
+        if let Ok(observations) = observations {
+            let mut stderr = std::io::stderr().lock();
+            for observation in observations {
+                observation.write(&mut stderr);
+            }
+        }
+    }
+}
+#[cfg(unix)]
+struct CodexObservations<'a> {
+    sink: Option<&'a RoleObservations>,
+    native: CodexNativeOutput,
+    started: std::time::Instant,
+    role: HarnessRole,
+    input_bytes: usize,
+    delivered_bytes: usize,
+    terminal_state: Option<RoleTerminalState>,
+}
+#[cfg(unix)]
+impl Drop for CodexObservations<'_> {
+    fn drop(&mut self) {
+        if let Some(sink) = self.sink {
+            sink.record(CodexObservation {
+                kind: "native-role-observation",
+                role: self.role,
+                elapsed_millis: u64::try_from(self.started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+                serialized_input_bytes: self.input_bytes,
+                delivered_input_bytes: self.delivered_bytes,
+                reported_terminal_state: self.terminal_state,
+                usage: self.native.usage.take(),
+            });
+        }
+    }
+}
+
 pub(crate) fn codex_terminal_state(outcome: &RoleExecutionOutcome) -> RoleTerminalState {
     match outcome {
         RoleExecutionOutcome::Completed { .. } => RoleTerminalState::Completed,
@@ -385,6 +500,7 @@ pub(crate) fn execute_codex_role(
     prepared: &PreparedHarnessRun,
     invocation: &RoleInvocationContract,
     cancelled: &AtomicBool,
+    observations: &RoleObservations,
 ) -> Result<RoleExecutionResult> {
     validate_codex_producer_frontier(prepared, [invocation.role])?;
     // Serialize the exact typed segments once: no wrapper, prompt preamble, target
@@ -414,15 +530,21 @@ pub(crate) fn execute_codex_role(
         limits.max_role_grace_millis = limits
             .max_role_grace_millis
             .min(prepared.role_run.runtime_capabilities.max_role_grace_millis);
-        let (lifecycle, outcome) =
-            run_codex_process(binary, &input, invocation.role, &limits, cancelled)?;
+        let (lifecycle, outcome) = run_codex_process_observed(
+            binary,
+            &input,
+            invocation.role,
+            &limits,
+            cancelled,
+            Some(observations),
+        )?;
         invocation
             .bind_result(lifecycle, outcome)
             .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))
     }
     #[cfg(not(unix))]
     {
-        let _ = (binary, input, cancelled);
+        let _ = (binary, input, cancelled, observations);
         Err(NativeHarnessError::invalid_input(
             "unsupported runtime: Codex requires Unix process groups",
         ))
@@ -519,17 +641,29 @@ pub(crate) fn codex_failure_message(
     detail
 }
 
-#[cfg(unix)]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one bounded process supervisor owns stdin, native events, deadlines, group termination and reaping"
-)]
+#[cfg(all(unix, test))]
 pub(crate) fn run_codex_process(
     binary: &Path,
     input: &[u8],
     role: HarnessRole,
     limits: &RoleLifecycleLimits,
     cancelled: &AtomicBool,
+) -> Result<(ReportedRoleLifecycle, RoleExecutionOutcome)> {
+    run_codex_process_observed(binary, input, role, limits, cancelled, None)
+}
+
+#[cfg(unix)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one bounded process supervisor owns stdin, native events, deadlines, group termination and reaping"
+)]
+fn run_codex_process_observed(
+    binary: &Path,
+    input: &[u8],
+    role: HarnessRole,
+    limits: &RoleLifecycleLimits,
+    cancelled: &AtomicBool,
+    sink: Option<&RoleObservations>,
 ) -> Result<(ReportedRoleLifecycle, RoleExecutionOutcome)> {
     use std::os::unix::{
         fs::OpenOptionsExt as _,
@@ -582,6 +716,15 @@ pub(crate) fn run_codex_process(
             "unsupported runtime: insufficient finite Codex lifecycle budget",
         ));
     }
+    let mut observations = CodexObservations {
+        sink,
+        native: CodexNativeOutput::default(),
+        started,
+        role,
+        input_bytes: input.len(),
+        delivered_bytes: 0,
+        terminal_state: None,
+    };
     let child = process::Command::new(binary)
         .args([
             "exec",
@@ -635,7 +778,6 @@ pub(crate) fn run_codex_process(
         stdout = None;
         stderr = None;
     }
-    let mut native = CodexNativeOutput::default();
     let mut pending = Vec::new();
     let mut written = 0_usize;
     let mut stdout_bytes = 0;
@@ -676,6 +818,7 @@ pub(crate) fn run_codex_process(
                 }
                 Ok(count) => {
                     written += count;
+                    observations.delivered_bytes = written;
                     progressed = true;
                 }
                 Err(error)
@@ -704,7 +847,8 @@ pub(crate) fn run_codex_process(
                     for (index, byte) in pending.iter().enumerate().skip(scanned) {
                         if *byte == b'\n' {
                             if failure.is_none() {
-                                failure = native
+                                failure = observations
+                                    .native
                                     .observe(&pending[consumed..index], now_millis())
                                     .err();
                             }
@@ -714,7 +858,7 @@ pub(crate) fn run_codex_process(
                     pending.drain(..consumed);
                     if count == 0 {
                         if !pending.is_empty() && failure.is_none() {
-                            failure = native.observe(&pending, now_millis()).err();
+                            failure = observations.native.observe(&pending, now_millis()).err();
                         }
                         pending.clear();
                         stdout = None;
@@ -758,7 +902,7 @@ pub(crate) fn run_codex_process(
         }
         let now = Instant::now();
         if terminal.is_none() && interrupt.is_none() {
-            if let Some((at, _)) = native.terminal {
+            if let Some((at, _)) = observations.native.terminal {
                 terminal = Some(at);
             } else if failure.is_some() || (status.is_some() && stdout.is_none()) {
                 terminal = Some(now_millis());
@@ -847,7 +991,8 @@ pub(crate) fn run_codex_process(
                 )));
             }
             process.cleaned = true;
-            let Some((context_id, context_ready_at_millis)) = native.context.clone() else {
+            let Some((context_id, context_ready_at_millis)) = observations.native.context.clone()
+            else {
                 return Err(NativeHarnessError::invalid_input(codex_failure_message(
                     "Codex execution failed without an observed native thread.started context ID",
                     exit,
@@ -873,11 +1018,12 @@ pub(crate) fn run_codex_process(
             } else if matches!(exit.signal(), Some(libc::SIGINT | libc::SIGTERM)) {
                 RoleExecutionOutcome::Cancelled
             } else {
-                native.outcome(exit.success()).unwrap_or_else(|message| {
-                    RoleExecutionOutcome::Failed {
+                observations
+                    .native
+                    .outcome(exit.success())
+                    .unwrap_or_else(|message| RoleExecutionOutcome::Failed {
                         message: codex_failure_message(message, exit, &stderr_tail),
-                    }
-                })
+                    })
             };
             let terminal_at_millis = terminal.unwrap_or(closed);
             let grace_deadline_at_millis = grace_deadline.map(|deadline| {
@@ -890,7 +1036,7 @@ pub(crate) fn run_codex_process(
                 context_id,
                 started_at_millis,
                 context_ready_at_millis,
-                first_output_at_millis: native.first_output,
+                first_output_at_millis: observations.native.first_output,
                 interrupt_requested_at_millis: interrupt,
                 grace_deadline_at_millis,
                 terminal_at_millis,
@@ -909,6 +1055,7 @@ pub(crate) fn run_codex_process(
                     "observed Codex lifecycle exceeded prepared limits",
                 ));
             }
+            observations.terminal_state = Some(codex_terminal_state(&outcome));
             return Ok((lifecycle, outcome));
         }
         if close_deadline.is_some_and(|deadline| now >= deadline) {
@@ -923,5 +1070,134 @@ pub(crate) fn run_codex_process(
                 .min(total_deadline);
             std::thread::sleep(quantum.min(deadline.saturating_duration_since(Instant::now())));
         }
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn observation_is_content_free_and_unknown_usage_stays_null() {
+        let observation = CodexObservation {
+            kind: "native-role-observation",
+            role: HarnessRole::Writer,
+            elapsed_millis: 12,
+            serialized_input_bytes: 100,
+            delivered_input_bytes: 40,
+            reported_terminal_state: None,
+            usage: None,
+        };
+        let mut bytes = Vec::new();
+        observation.write(&mut bytes);
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(value["usage"].is_null());
+        assert_eq!(value["delivered_input_bytes"], 40);
+        assert_eq!(value.as_object().unwrap().len(), 7);
+        assert!(bytes.len() < 1024);
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        observation.write(&mut Broken);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn backpressured_stderr_cannot_delay_native_role_return() {
+        use std::os::unix::fs::PermissionsExt as _;
+        const CHILD: &str = "ONTOLOGY_TEST_ROLE_OBSERVATION_BACKPRESSURE";
+        if env::var_os(CHILD).is_some() {
+            // Only this dedicated test child owns the modified descriptor flags.
+            let flags = unsafe { libc::fcntl(libc::STDERR_FILENO, libc::F_GETFL) };
+            assert!(flags >= 0);
+            assert_eq!(
+                unsafe {
+                    libc::fcntl(libc::STDERR_FILENO, libc::F_SETFL, flags | libc::O_NONBLOCK)
+                },
+                0
+            );
+            let fill = [b'x'; 4096];
+            while unsafe { libc::write(libc::STDERR_FILENO, fill.as_ptr().cast(), fill.len()) } >= 0
+            {
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            assert_eq!(
+                unsafe { libc::fcntl(libc::STDERR_FILENO, libc::F_SETFL, flags) },
+                0
+            );
+            let directory = CodexDirectory::create().unwrap();
+            let binary = directory.0.join("fake-codex");
+            let message = serde_json::to_string(&CodexResponse {
+                outcome: RoleExecutionOutcome::Cancelled,
+            })
+            .unwrap();
+            let events = [
+                serde_json::json!({"type":"thread.started","thread_id":"backpressure-test"}),
+                serde_json::json!({"type":"turn.started"}),
+                serde_json::json!({"type":"item.completed","item":{"id":"answer","type":"agent_message","text":message}}),
+                serde_json::json!({"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":5}}),
+            ].map(|value| value.to_string()).join("\n");
+            fs::write(
+                &binary,
+                format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{events}'\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+            let sink = RoleObservations::default();
+            let limits = RoleLifecycleLimits {
+                max_role_execution_millis: 1000,
+                max_role_grace_millis: 100,
+                max_role_close_millis: 500,
+                max_total_role_millis: 1600,
+            };
+            let (_, outcome) = run_codex_process_observed(
+                &binary,
+                b"[]",
+                HarnessRole::Reviewer,
+                &limits,
+                &AtomicBool::new(false),
+                Some(&sink),
+            )
+            .unwrap();
+            assert_eq!(outcome, RoleExecutionOutcome::Cancelled);
+            let values = sink.0.lock().unwrap();
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0].delivered_input_bytes, 2);
+            assert_eq!(values[0].usage.as_ref().unwrap().input, 100);
+            println!("native worker returned with retained observations");
+            return;
+        }
+        let mut child = process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", "native_role::observation_tests::backpressured_stderr_cannot_delay_native_role_return", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1").stdout(process::Stdio::piped()).stderr(process::Stdio::piped())
+            .spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("native adapter waited for an unconsumed stderr pipe");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        assert!(status.success(), "{stdout}");
+        assert!(stdout.contains("native worker returned with retained observations"));
     }
 }

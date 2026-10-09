@@ -25,6 +25,7 @@ use std::{
 };
 use tokio::runtime::Handle;
 const CONTEXT_GATE: i64 = 478310003;
+const MAX_CACHED_BODIES: usize = 256;
 const MARKER: &str = ".context-store";
 pub(crate) fn source_error(error: Error) -> HarnessError {
     HarnessError::InvalidRepository(error.to_string())
@@ -395,136 +396,38 @@ pub struct NativeContextSource {
     view: Arc<View>,
     identity: SourceStoreIdentity,
     preserved_targets: std::collections::BTreeSet<String>,
+    access: Mutex<SourceAccess>,
     body_queries: AtomicU64,
     metadata_queries: AtomicU64,
 }
+// Serializes complete reads/view updates with gate handoffs. Recovery sources
+// share a mutable exclusive connection and deliberately never cache bodies.
+enum SourceGate {
+    SharedHeld,
+    Suspended,
+    Exclusive,
+    Failed,
+}
+struct CachedBody {
+    version: SourceVersion,
+    bytes: Arc<[u8]>,
+}
+struct SourceAccess {
+    gate: SourceGate,
+    bodies: std::collections::BTreeMap<String, CachedBody>,
+    bytes: usize,
+}
+impl SourceAccess {
+    fn new(gate: SourceGate) -> Self {
+        Self {
+            gate,
+            bodies: Default::default(),
+            bytes: 0,
+        }
+    }
+}
 impl NativeContextSource {
-    pub(crate) fn root(&self) -> &Path {
-        &self.view.root
-    }
-    pub fn body_queries(&self) -> u64 {
-        self.body_queries.load(Ordering::Relaxed)
-    }
-    pub fn metadata_queries(&self) -> u64 {
-        self.metadata_queries.load(Ordering::Relaxed)
-    }
-    fn preserves_subtree(&self, path: &str) -> bool {
-        self.preserved_targets
-            .iter()
-            .any(|target| Path::new(target).starts_with(path))
-    }
-    fn relative(&self, path: &Path) -> HarnessResult<Vec<String>> {
-        let p = if path.is_absolute() {
-            path.strip_prefix(&self.view.root)
-                .map_err(|_| source_error(Error::Invalid))?
-        } else {
-            path
-        };
-        parts(p)
-    }
-    fn logical(parts: &[String]) -> Option<(ContextScope, String)> {
-        if parts.first().map(String::as_str) != Some("vault") {
-            return None;
-        }
-        let (scope, start) = match parts.get(1).map(String::as_str) {
-            Some("personal") | Some("profile") => (parts[1].clone(), 2),
-            Some("work") => (format!("work/{}", parts.get(2)?), 3),
-            _ => return None,
-        };
-        Some((scope.parse().ok()?, parts.get(start..)?.join("/")))
-    }
-    /// One metadata-only query for one or thousands of selected bindings.
-    pub fn stored_versions(&self, paths: &[PathBuf]) -> HarnessResult<Vec<SourceVersion>> {
-        if paths.len() > 10_000 {
-            return Err(source_error(Error::Limit));
-        }
-        if paths.is_empty() {
-            return Ok(Vec::new());
-        }
-        let logical: Vec<_> = paths
-            .iter()
-            .map(|p| {
-                self.relative(p).and_then(|v| {
-                    let (s, p) = Self::logical(&v).ok_or_else(|| source_error(Error::Invalid))?;
-                    Ok(format!("{}/{p}", s.as_str()))
-                })
-            })
-            .collect::<HarnessResult<_>>()?;
-        let mut conn = self
-            .connection
-            .lock()
-            .map_err(|_| source_error(Error::Storage))?;
-        self.store.count(1);
-        self.metadata_queries.fetch_add(1, Ordering::Relaxed);
-        let rows=self.handle.block_on(sqlx::query("SELECT source_path,material_id::text,revision,content_digest,byte_len,deleted FROM context_materials WHERE source_path=ANY($1) ORDER BY source_path COLLATE \"C\"").bind(&logical).fetch_all(&mut *conn)).map_err(|_|source_error(Error::Storage))?;
-        let states = rows
-            .iter()
-            .map(|row| Ok((row.get::<String, _>("source_path"), stored_state(row)?)))
-            .collect::<HarnessResult<std::collections::BTreeMap<_, _>>>()?;
-        logical
-            .into_iter()
-            .map(|logical| {
-                let state = states
-                    .get(&logical)
-                    .cloned()
-                    .unwrap_or(StoredSourceState::Missing);
-                Ok(SourceVersion {
-                    logical_path: format!("vault/{logical}"),
-                    state,
-                })
-            })
-            .collect()
-    }
-}
-pub(crate) fn stored_state(row: &sqlx::postgres::PgRow) -> HarnessResult<StoredSourceState> {
-    let revision =
-        u64::try_from(row.get::<i64, _>("revision")).map_err(|_| source_error(Error::Storage))?;
-    let material_id = row.get("material_id");
-    Ok(if row.get("deleted") {
-        StoredSourceState::Deleted {
-            material_id,
-            revision,
-        }
-    } else {
-        StoredSourceState::Live {
-            material_id,
-            revision,
-            content_digest: row.get("content_digest"),
-        }
-    })
-}
-impl ContextSource for NativeContextSource {
-    fn view_root(&self) -> &Path {
-        &self.view.root
-    }
-    fn store_identity(&self) -> HarnessResult<Option<SourceStoreIdentity>> {
-        Ok(Some(self.identity.clone()))
-    }
-    fn source_versions(&self, paths: &[PathBuf]) -> HarnessResult<Vec<SourceVersion>> {
-        self.stored_versions(paths)
-    }
-    fn career_inventory(
-        &self,
-        configuration: &context_core::harness::PolicyConfiguration,
-        comparison: &context_core::career::CareerComparison,
-    ) -> HarnessResult<context_core::career::CareerInventory> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| source_error(Error::Storage))?;
-        crate::career::snapshot(
-            &self.store,
-            &self.handle,
-            &mut connection,
-            configuration,
-            self.identity.store_id.clone(),
-            comparison.inventory.request.clone(),
-            Some(comparison),
-            true,
-        )
-        .map(|r| r.inventory)
-    }
-    fn metadata(&self, path: &Path) -> HarnessResult<SourceMetadata> {
+    fn metadata_locked(&self, path: &Path) -> HarnessResult<SourceMetadata> {
         let parts = self.relative(path)?;
         if parts.is_empty() {
             return Ok(SourceMetadata {
@@ -618,8 +521,224 @@ impl ContextSource for NativeContextSource {
             }),
         })
     }
+    fn read_access(&self) -> HarnessResult<std::sync::MutexGuard<'_, SourceAccess>> {
+        let access = self
+            .access
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        if !matches!(access.gate, SourceGate::SharedHeld | SourceGate::Exclusive) {
+            return Err(source_error(Error::ContextPending));
+        }
+        Ok(access)
+    }
+    pub(crate) fn suspend_reads(&self) -> HarnessResult<()> {
+        let mut access = self
+            .access
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        match access.gate {
+            SourceGate::Suspended => return Ok(()),
+            SourceGate::SharedHeld => {}
+            _ => return Err(source_error(Error::ContextPending)),
+        }
+        access.bodies.clear();
+        access.bytes = 0;
+        // Any uncertain connection/unlock result prevents further source use.
+        access.gate = SourceGate::Failed;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        self.store.count(1);
+        let unlocked: bool = self
+            .handle
+            .block_on(
+                sqlx::query_scalar("SELECT pg_advisory_unlock_shared($1)")
+                    .bind(CONTEXT_GATE)
+                    .fetch_one(&mut *connection),
+            )
+            .map_err(|_| source_error(Error::Storage))?;
+        if !unlocked {
+            return Err(source_error(Error::Storage));
+        }
+        access.gate = SourceGate::Suspended;
+        Ok(())
+    }
+    pub(crate) fn resume_reads(&self) -> HarnessResult<()> {
+        let mut access = self
+            .access
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        match access.gate {
+            SourceGate::SharedHeld => return Ok(()),
+            SourceGate::Suspended => {}
+            _ => return Err(source_error(Error::ContextPending)),
+        }
+        access.gate = SourceGate::Failed;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        self.store.count(1);
+        self.handle
+            .block_on(
+                sqlx::query("SELECT pg_advisory_lock_shared($1)")
+                    .bind(CONTEXT_GATE)
+                    .execute(&mut *connection),
+            )
+            .map_err(|_| source_error(Error::Storage))?;
+        if let Err(error) = self
+            .handle
+            .block_on(self.store.check_context_pending(&mut connection))
+        {
+            // A known acquired gate is released before sibling cancellation/join.
+            // The source remains Failed even if cleanup itself is uncertain.
+            self.store.count(1);
+            let _ = self.handle.block_on(
+                sqlx::query("SELECT pg_advisory_unlock_shared($1)")
+                    .bind(CONTEXT_GATE)
+                    .execute(&mut *connection),
+            );
+            return Err(source_error(error));
+        }
+        access.gate = SourceGate::SharedHeld;
+        Ok(())
+    }
+    pub(crate) fn root(&self) -> &Path {
+        &self.view.root
+    }
+    pub fn body_queries(&self) -> u64 {
+        self.body_queries.load(Ordering::Relaxed)
+    }
+    pub fn metadata_queries(&self) -> u64 {
+        self.metadata_queries.load(Ordering::Relaxed)
+    }
+    fn preserves_subtree(&self, path: &str) -> bool {
+        self.preserved_targets
+            .iter()
+            .any(|target| Path::new(target).starts_with(path))
+    }
+    fn relative(&self, path: &Path) -> HarnessResult<Vec<String>> {
+        let p = if path.is_absolute() {
+            path.strip_prefix(&self.view.root)
+                .map_err(|_| source_error(Error::Invalid))?
+        } else {
+            path
+        };
+        parts(p)
+    }
+    fn logical(parts: &[String]) -> Option<(ContextScope, String)> {
+        if parts.first().map(String::as_str) != Some("vault") {
+            return None;
+        }
+        let (scope, start) = match parts.get(1).map(String::as_str) {
+            Some("personal") | Some("profile") => (parts[1].clone(), 2),
+            Some("work") => (format!("work/{}", parts.get(2)?), 3),
+            _ => return None,
+        };
+        Some((scope.parse().ok()?, parts.get(start..)?.join("/")))
+    }
+    /// One metadata-only query for one or thousands of selected bindings.
+    pub fn stored_versions(&self, paths: &[PathBuf]) -> HarnessResult<Vec<SourceVersion>> {
+        let _access = self.read_access()?;
+        if paths.len() > 10_000 {
+            return Err(source_error(Error::Limit));
+        }
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let logical: Vec<_> = paths
+            .iter()
+            .map(|p| {
+                self.relative(p).and_then(|v| {
+                    let (s, p) = Self::logical(&v).ok_or_else(|| source_error(Error::Invalid))?;
+                    Ok(format!("{}/{p}", s.as_str()))
+                })
+            })
+            .collect::<HarnessResult<_>>()?;
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        self.store.count(1);
+        self.metadata_queries.fetch_add(1, Ordering::Relaxed);
+        let rows=self.handle.block_on(sqlx::query("SELECT source_path,material_id::text,revision,content_digest,byte_len,deleted FROM context_materials WHERE source_path=ANY($1) ORDER BY source_path COLLATE \"C\"").bind(&logical).fetch_all(&mut *conn)).map_err(|_|source_error(Error::Storage))?;
+        let states = rows
+            .iter()
+            .map(|row| Ok((row.get::<String, _>("source_path"), stored_state(row)?)))
+            .collect::<HarnessResult<std::collections::BTreeMap<_, _>>>()?;
+        logical
+            .into_iter()
+            .map(|logical| {
+                let state = states
+                    .get(&logical)
+                    .cloned()
+                    .unwrap_or(StoredSourceState::Missing);
+                Ok(SourceVersion {
+                    logical_path: format!("vault/{logical}"),
+                    state,
+                })
+            })
+            .collect()
+    }
+}
+pub(crate) fn stored_state(row: &sqlx::postgres::PgRow) -> HarnessResult<StoredSourceState> {
+    let revision =
+        u64::try_from(row.get::<i64, _>("revision")).map_err(|_| source_error(Error::Storage))?;
+    let material_id = row.get("material_id");
+    Ok(if row.get("deleted") {
+        StoredSourceState::Deleted {
+            material_id,
+            revision,
+        }
+    } else {
+        StoredSourceState::Live {
+            material_id,
+            revision,
+            content_digest: row.get("content_digest"),
+        }
+    })
+}
+impl ContextSource for NativeContextSource {
+    fn view_root(&self) -> &Path {
+        &self.view.root
+    }
+    fn store_identity(&self) -> HarnessResult<Option<SourceStoreIdentity>> {
+        let _access = self.read_access()?;
+        Ok(Some(self.identity.clone()))
+    }
+    fn source_versions(&self, paths: &[PathBuf]) -> HarnessResult<Vec<SourceVersion>> {
+        self.stored_versions(paths)
+    }
+    fn career_inventory(
+        &self,
+        configuration: &context_core::harness::PolicyConfiguration,
+        comparison: &context_core::career::CareerComparison,
+    ) -> HarnessResult<context_core::career::CareerInventory> {
+        let _access = self.read_access()?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        crate::career::snapshot(
+            &self.store,
+            &self.handle,
+            &mut connection,
+            configuration,
+            self.identity.store_id.clone(),
+            comparison.inventory.request.clone(),
+            Some(comparison),
+            true,
+        )
+        .map(|r| r.inventory)
+    }
+    fn metadata(&self, path: &Path) -> HarnessResult<SourceMetadata> {
+        let _access = self.read_access()?;
+        self.metadata_locked(path)
+    }
     fn prepare_file_target(&self, path: &Path) -> HarnessResult<SourceMetadata> {
-        let metadata = self.metadata(path)?;
+        let _access = self.read_access()?;
+        let metadata = self.metadata_locked(path)?;
         let parts = self.relative(path)?;
         let full = parts.join("/");
         if metadata.kind == SourcePathKind::Missing
@@ -635,10 +754,11 @@ impl ContextSource for NativeContextSource {
         Ok(metadata)
     }
     fn children(&self, path: &Path, limit: usize) -> HarnessResult<Vec<OsString>> {
+        let _access = self.read_access()?;
         let parts = self.relative(path)?;
         let limit = limit.min(20_000);
         if parts.is_empty() {
-            let metadata = self.metadata(Path::new("vault"))?;
+            let metadata = self.metadata_locked(Path::new("vault"))?;
             return if metadata.kind == SourcePathKind::Directory && limit >= 1 {
                 Ok(vec![OsString::from("vault")])
             } else if metadata.kind == SourcePathKind::Directory {
@@ -664,33 +784,70 @@ impl ContextSource for NativeContextSource {
         Ok(rows.into_iter().map(OsString::from).collect())
     }
     fn open_file(&self, path: &Path, max_bytes: u64) -> HarnessResult<File> {
+        let mut access = self.read_access()?;
         let parts = self.relative(path)?;
         let (scope, logical) = Self::logical(&parts)
             .filter(|(_, p)| !p.is_empty())
             .ok_or_else(|| source_error(Error::NotFound))?;
-        let before = self.metadata(path)?;
+        let before = self.metadata_locked(path)?;
         if before.kind != SourcePathKind::RegularFile {
             return Err(source_error(Error::NotFound));
         }
         let limit = max_bytes.min(MAX_FILE_BYTES as u64);
-        let mut conn = self
-            .connection
-            .lock()
-            .map_err(|_| source_error(Error::Storage))?;
-        self.store.count(1);
-        self.body_queries.fetch_add(1, Ordering::Relaxed);
-        let row=self.handle.block_on(sqlx::query("SELECT material_id::text,revision,content_digest,byte_len,deleted,CASE WHEN byte_len BETWEEN 0 AND $3 AND octet_length(content)<=$3 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted").bind(scope.as_str()).bind(logical).bind(limit as i64).fetch_optional(&mut *conn)).map_err(|_|source_error(Error::Storage))?.ok_or_else(||source_error(Error::NotFound))?;
-        drop(conn);
-        let bytes: Vec<u8> = row
-            .get::<Option<Vec<u8>>, _>("content")
-            .ok_or_else(|| source_error(Error::Limit))?;
-        if bytes.len() as u64 > limit
-            || row.get::<i64, _>("byte_len") != bytes.len() as i64
-            || row.get::<String, _>("content_digest") != digest(&bytes)
-            || before.stored_version.as_ref().map(|s| &s.state) != Some(&stored_state(&row)?)
-        {
-            return Err(source_error(Error::Conflict));
-        }
+        let key = parts.join("/");
+        let version = before
+            .stored_version
+            .as_ref()
+            .ok_or_else(|| source_error(Error::Conflict))?;
+        let cached = access
+            .bodies
+            .get(&key)
+            .filter(|body| body.version == *version)
+            .map(|body| body.bytes.clone());
+        let bytes = if let Some(bytes) = cached {
+            if bytes.len() as u64 > limit {
+                return Err(source_error(Error::Limit));
+            }
+            bytes
+        } else {
+            let mut conn = self
+                .connection
+                .lock()
+                .map_err(|_| source_error(Error::Storage))?;
+            self.store.count(1);
+            self.body_queries.fetch_add(1, Ordering::Relaxed);
+            let row=self.handle.block_on(sqlx::query("SELECT material_id::text,revision,content_digest,byte_len,deleted,CASE WHEN byte_len BETWEEN 0 AND $3 AND octet_length(content)<=$3 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted").bind(scope.as_str()).bind(logical).bind(limit as i64).fetch_optional(&mut *conn)).map_err(|_|source_error(Error::Storage))?.ok_or_else(||source_error(Error::NotFound))?;
+            drop(conn);
+            let bytes: Vec<u8> = row
+                .get::<Option<Vec<u8>>, _>("content")
+                .ok_or_else(|| source_error(Error::Limit))?;
+            if bytes.len() as u64 > limit
+                || row.get::<i64, _>("byte_len") != bytes.len() as i64
+                || row.get::<String, _>("content_digest") != digest(&bytes)
+                || before.stored_version.as_ref().map(|s| &s.state) != Some(&stored_state(&row)?)
+            {
+                return Err(source_error(Error::Conflict));
+            }
+            let bytes: Arc<[u8]> = bytes.into();
+            if matches!(access.gate, SourceGate::SharedHeld) {
+                if let Some(previous) = access.bodies.remove(&key) {
+                    access.bytes -= previous.bytes.len();
+                }
+                if access.bodies.len() < MAX_CACHED_BODIES
+                    && bytes.len() <= MAX_FILE_BYTES.saturating_sub(access.bytes)
+                {
+                    access.bytes += bytes.len();
+                    access.bodies.insert(
+                        key,
+                        CachedBody {
+                            version: version.clone(),
+                            bytes: bytes.clone(),
+                        },
+                    );
+                }
+            }
+            bytes
+        };
         if self.preserved_targets.contains(&parts.join("/")) {
             let (parent, name) = self.view.parent(&parts)?;
             let mut file = open_at(&parent, &name, libc::O_RDONLY)?;
@@ -699,7 +856,7 @@ impl ContextSource for NativeContextSource {
                 .take(limit + 1)
                 .read_to_end(&mut actual)
                 .map_err(|e| io_error(path, e))?;
-            if actual != bytes {
+            if actual.as_slice() != bytes.as_ref() {
                 return Err(source_error(Error::Conflict));
             }
             return open_at(&parent, &name, libc::O_RDONLY);
@@ -785,6 +942,7 @@ impl Store {
                 view: Arc::new(view),
                 preserved_targets: Default::default(),
                 identity: SourceStoreIdentity { store_id },
+                access: Mutex::new(SourceAccess::new(SourceGate::SharedHeld)),
                 body_queries: AtomicU64::new(0),
                 metadata_queries: AtomicU64::new(0),
             }))
@@ -830,6 +988,7 @@ impl NativeContextSession {
                 view,
                 identity,
                 preserved_targets,
+                access: Mutex::new(SourceAccess::new(SourceGate::Exclusive)),
                 body_queries: AtomicU64::new(0),
                 metadata_queries: AtomicU64::new(0),
             })
@@ -859,6 +1018,7 @@ impl NativeContextSession {
             view: self.view.clone(),
             identity: self.identity.clone(),
             preserved_targets: self.preserved_targets.clone(),
+            access: Mutex::new(SourceAccess::new(SourceGate::Exclusive)),
             body_queries: AtomicU64::new(0),
             metadata_queries: AtomicU64::new(0),
         }))
