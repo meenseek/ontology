@@ -2,6 +2,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod atomic_file;
+pub mod career;
 pub mod context;
 pub mod document;
 mod frontmatter;

@@ -495,7 +495,7 @@ Raw 원문 SHA와 parsed/redacted 조회 내용 SHA는 다르다. 이전 filesys
 
 ## Native 원문 보존과 조회
 
-`bash scripts/brain.sh context`에 JSON 객체 하나를 stdin으로 보낸다. 입력은 최대 32 KiB다.
+`bash scripts/brain.sh context`에 JSON 객체 하나를 stdin으로 보낸다. 입력은 최대 512 KiB다.
 원문 bytes·frontmatter·첨부 파일과 immutable origin, 현재 revision·history는 PostgreSQL의
 native store에 보존한다. App consumer, 검색과 ontology projection은 이 원문에서 파생된다.
 
@@ -576,6 +576,33 @@ revision·이력·기존 분류를 바꾸지 않는다. 과거 projection과 삭
 경로와 `archive:true`를 지정한 `read`·`export`로만 접근한다. 선택 material export는
 [전체 DB 백업](#백업과-복원-확인)이나 baseline LLM context export가 아니다.
 
+### 경력 경험 후보와 전체 비교
+
+`career-candidates`는 승인한 `personal`·`work/<slug>` 범위에서 caller 설정의 기존 두
+목적 문서가 선언한 `career-routes`만 따라간다. 원문·설정·revision을 하나의 read-only
+DB snapshot에 결합하며 디렉터리 열거, 파생 답변이나 새 원문 저장을 수행하지 않는다.
+설정은 조회 권한이 아니며 다중 범위 preflight가 Harness 역할의 raw-source grant를 넓히지 않는다.
+
+```json
+{"op":"career-candidates","policy_config":"/absolute/path/to/caller-settings.json","original_request":"협업 경험과 그 과정에서 배운 점을 설명하세요.","surface":"application-essay","approved_scopes":["personal"],"axis_queries":[{"axis":"competency","query":"협업"},{"axis":"learning","query":"배움"}]}
+```
+
+일치 키워드가 없거나 준비가 덜 된 후보도 전체 inventory에 남는다. 범위 밖의 경로와
+빠진·잘못된·순환 route는 별도 결과에 드러난다. `comparison` 없는 조회는 discovery다.
+`comparison`과 `finalization:true`는 원래 요청 전체 coverage, 모든 근거 요구 × 전체 후보의
+선택·제외 이유와 source locator·배치를 현재 inventory와 대조한다. 중요한 `Unverified`와
+미결정은 최종화할 수 없으며 `Gap`은 승인 범위 안의 부재만 뜻한다. 구조·현재성 통과가
+의미·사실성·윤문 통과를 대신하지 않는다. 입력·반환 타입과 상한은
+[Core 경력 계약](crates/context-core/src/career.rs), snapshot은 [native adapter](src/career.rs)가 소유한다.
+
+Native 파생 CareerArtifact는 같은 전체 comparison을 기존 manifest에 결합한다. 각 foreign
+owner의 현재 검토 receipt를 먼저 확인하고 `CareerCompositionManifest::holistic_task_statement`
+로 exact owner·receipt digest refs를 원래 요청 뒤에 붙여 primary holistic review에 전달한다.
+`compose-career`는 실제 receipt를 다시 검증하고 holistic 입력의 exact refs와 대조한다.
+Primary-only의 foreign receipt 집합은 비어 있다. Compose 선행·apply 순서는 상위 실행자가
+수행하며 apply 자체에 composition receipt 검사기를 추가하지 않는다. 외부 경력 파일·form의
+최종화는 caller의 직접 독립 검토 정책을 따른다.
+
 ### 최초 자료 반입
 
 `inventory`·`import`·`verify`는 명시적으로 요청한 새 자료의 최초 반입 경계다. Native
@@ -611,7 +638,8 @@ revision을 수정하는 수단으로 쓰지 않는다. `inventory`는 DB 없이
 
 모든 `harness` 명령은 `--policy-config /absolute/path/to/caller-settings.json`을 요구한다.
 Wrapper에서는 `ONTOLOGY_POLICY_CONFIG`로 같은 파일을 명시할 수 있고, CLI의 명시적
-`--policy-config`가 우선한다. `context` 읽기에는 이 설정을 전달하지 않는다. 설치별
+`--policy-config`가 우선한다. 일반 `context` 읽기는 이 설정을 요구하지 않으며,
+`career-candidates`만 JSON의 `policy_config`로 명시한다. 설치별
 문서 선택·의존성·역할·기본값 authority는 호출자가 Git 밖에서 관리한다. 설정 파일은
 원문 body를 포함하지 않으며 source 조회나 변경 권한을 부여하지 않는다.
 
@@ -627,6 +655,7 @@ Wrapper에서는 `ONTOLOGY_POLICY_CONFIG`로 같은 파일을 명시할 수 있�
 | `defaults` | 지원되는 세 `PolicyDefaultRule` 각각의 정확한 authority document key |
 | `target_constraints` | selector에 필요한 정확한 target 또는 허용한 curation source path |
 | `context_exclusions` | intent별 제외할 scoped 경로 |
+| `career` | 기존 portfolio casebook·resume source map document key 두 개 |
 | `company` | 선택적 registry·routing key, leaf dependency·ID prefix, 승인한 shared document key |
 
 `{company}`·`{project}`는 검증된 owner 구성요소만 치환한다. 설정은 5 MiB 이하의

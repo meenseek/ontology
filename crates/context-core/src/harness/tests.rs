@@ -1868,6 +1868,7 @@ fn selected_career_manifest(
     owner_sources: Vec<(DataOwner, Vec<String>)>,
 ) -> CareerCompositionManifest {
     CareerCompositionManifest {
+        comparison: None,
         version: HARNESS_SCHEMA_VERSION,
         career_output_surface: CareerOutputSurface::Resume,
         artifact_targets: targets,
@@ -3663,6 +3664,58 @@ fn current_career_receipts_bind_execution_and_global_context_separation() {
         .expect("current career receipts must compose");
     assert_eq!(composition.version, HARNESS_SCHEMA_VERSION);
     assert_eq!(composition.assurance, ExecutionAssurance::Advisory);
+}
+
+#[test]
+fn holistic_owner_receipt_handoff_preserves_original_and_exact_current_references() {
+    let original = "Describe your collaboration experience.\nKeep the original question.";
+    let owner = DataOwner::Company {
+        company: "cedar".into(),
+    };
+    let owners = vec![owner.clone()];
+    let refs = vec![(owner.clone(), "1".repeat(64))];
+    let statement = encode_career_owner_review_refs(original, &refs).unwrap();
+    assert_eq!(
+        parse_career_owner_review_refs(original, &statement, &owners).unwrap(),
+        Some(refs.clone())
+    );
+    validate_career_owner_review_handoff(original, &statement, &owners, &refs).unwrap();
+    assert!(validate_career_owner_review_handoff(original, original, &owners, &refs).is_err());
+    assert!(
+        validate_career_owner_review_handoff(
+            original,
+            &statement,
+            &owners,
+            &[(owner.clone(), "2".repeat(64))]
+        )
+        .is_err(),
+        "stale or substituted receipt must fail"
+    );
+    assert!(parse_career_owner_review_refs("replacement question", &statement, &owners).is_err());
+    for invalid in [
+        encode_career_owner_review_refs(original, &[]).unwrap(),
+        encode_career_owner_review_refs(original, &[refs[0].clone(), refs[0].clone()]).unwrap(),
+        encode_career_owner_review_refs(
+            original,
+            &[(
+                DataOwner::PersonalProject {
+                    project: "other".into(),
+                },
+                "1".repeat(64),
+            )],
+        )
+        .unwrap(),
+        format!("{statement}\nAdditional instruction"),
+        statement.replace(&"1".repeat(64), "invalid-digest"),
+    ] {
+        assert!(
+            parse_career_owner_review_refs(original, &invalid, &owners).is_err(),
+            "missing, extra, substituted or malformed references must fail"
+        );
+    }
+    validate_career_owner_review_handoff(original, original, &[], &[]).unwrap();
+    let empty = encode_career_owner_review_refs(original, &[]).unwrap();
+    validate_career_owner_review_handoff(original, &empty, &[], &[]).unwrap();
 }
 
 #[test]
@@ -13534,10 +13587,10 @@ fn task_and_run_evaluation_json_use_distinct_receipt_names() {
 }
 
 #[test]
-fn schema_v5_v6_and_v7_request_prepared_run_and_execution_record_fail_closed() {
-    assert_eq!(HARNESS_SCHEMA_VERSION, 8);
+fn previous_schema_request_prepared_run_and_execution_record_fail_closed() {
+    assert_eq!(HARNESS_SCHEMA_VERSION, 9);
 
-    for legacy_version in [5, 6, 7] {
+    for legacy_version in [5, 6, 7, 8] {
         let mut envelope = user_profile_code_envelope("change the request contract");
         envelope.version = legacy_version;
         assert!(matches!(

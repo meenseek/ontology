@@ -500,6 +500,30 @@ impl ContextSource for NativeContextSource {
     fn store_identity(&self) -> HarnessResult<Option<SourceStoreIdentity>> {
         Ok(Some(self.identity.clone()))
     }
+    fn source_versions(&self, paths: &[PathBuf]) -> HarnessResult<Vec<SourceVersion>> {
+        self.stored_versions(paths)
+    }
+    fn career_inventory(
+        &self,
+        configuration: &context_core::harness::PolicyConfiguration,
+        comparison: &context_core::career::CareerComparison,
+    ) -> HarnessResult<context_core::career::CareerInventory> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        crate::career::snapshot(
+            &self.store,
+            &self.handle,
+            &mut connection,
+            configuration,
+            self.identity.store_id.clone(),
+            comparison.inventory.request.clone(),
+            Some(comparison),
+            true,
+        )
+        .map(|r| r.inventory)
+    }
     fn metadata(&self, path: &Path) -> HarnessResult<SourceMetadata> {
         let parts = self.relative(path)?;
         if parts.is_empty() {

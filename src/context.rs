@@ -24,7 +24,8 @@ pub const MAX_READ_DOCUMENT_TOTAL_BYTES: usize = 10 * 1024 * 1024;
 /// Preserve the former maximum metadata size before allocating YAML nodes.
 pub const MAX_READ_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 pub const MAX_CONTEXT_SCOPES: usize = 64;
-pub const MAX_COMMAND_BYTES: usize = 32 * 1024;
+/// Bounded career comparisons contain full inventory metadata; original body budgets stay separate.
+pub const MAX_COMMAND_BYTES: usize = 512 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 20_000;
@@ -101,6 +102,17 @@ fn default_limit() -> usize {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ContextCommand {
+    CareerCandidates {
+        original_request: String,
+        surface: context_core::harness::CareerOutputSurface,
+        approved_scopes: Vec<String>,
+        axis_queries: Vec<context_core::career::CareerAxisQuery>,
+        policy_config: PathBuf,
+        #[serde(default)]
+        comparison: Option<Box<context_core::career::CareerComparison>>,
+        #[serde(default)]
+        finalization: bool,
+    },
     ReadDocuments {
         scope: ContextScope,
         paths: Vec<String>,
@@ -333,6 +345,29 @@ fn scan(root: &Path, scopes: &[ContextScope], retain: bool) -> Result<Scan, Erro
 impl Store {
     pub async fn context(&self, command: ContextCommand) -> Result<ContextOutput, Error> {
         let value = match command {
+            ContextCommand::CareerCandidates {
+                original_request,
+                surface,
+                approved_scopes,
+                axis_queries,
+                policy_config,
+                comparison,
+                finalization,
+            } => serde_json::to_value(
+                self.career_candidates(
+                    &policy_config,
+                    context_core::career::CareerDiscoveryRequest {
+                        original_request,
+                        surface,
+                        approved_scopes,
+                        axis_queries,
+                    },
+                    comparison.map(|value| *value),
+                    finalization,
+                )
+                .await?,
+            )
+            .map_err(|_| Error::Storage)?,
             ContextCommand::ReadDocuments { scope, paths } => {
                 self.read_context_documents(&scope, &paths).await?
             }

@@ -28,7 +28,7 @@ use crate::{
 /// The only executable Harness record schema.
 ///
 /// Every other value is rejected. Transient runs are rebuilt from canonical inputs.
-pub const HARNESS_SCHEMA_VERSION: u32 = 8;
+pub const HARNESS_SCHEMA_VERSION: u32 = 9;
 const MAX_COMPANY_LENGTH: usize = 128;
 const MAX_TARGET_LENGTH: usize = 4_096;
 const MAX_OBJECTIVE_LENGTH: usize = 16_384;
@@ -410,6 +410,8 @@ pub enum CareerOutputSurface {
     CareerDescription,
     Portfolio,
     ProfessionalProfile,
+    ApplicationEssay,
+    Interview,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -495,9 +497,53 @@ pub struct CareerCompositionManifest {
     pub canonical_evidence_owners: Vec<DataOwner>,
     pub excluded_evidence_owners: Vec<CareerOwnerExclusion>,
     pub claim_lineage: Vec<CareerClaimLineage>,
+    pub comparison: Option<crate::career::CareerComparison>,
 }
 
 impl CareerCompositionManifest {
+    /// Carries exact owner receipt references in the existing sealed task statement.
+    /// Callers must attest current owner reviews before preparing the holistic review;
+    /// composition re-attests those receipts and checks these references again.
+    pub fn holistic_task_statement(
+        &self,
+        receipts: &[CareerExecutionReviewReceipt],
+    ) -> HarnessResult<String> {
+        let comparison = self.comparison.as_ref().ok_or_else(|| {
+            HarnessError::InvalidRequest("owner review handoff requires a career comparison".into())
+        })?;
+        let manifest = self.normalized();
+        let mut refs = Vec::new();
+        let mut artifact_digest = None;
+        for receipt in receipts {
+            let [grant] = receipt.resolved.context_grants.as_slice() else {
+                return Err(HarnessError::InvalidRequest(
+                    "owner review handoff requires one grant per receipt".into(),
+                ));
+            };
+            if receipt.version != HARNESS_SCHEMA_VERSION
+                || receipt.resolved.career_composition_manifest.as_ref() != Some(&manifest)
+                || artifact_digest
+                    .as_ref()
+                    .is_some_and(|digest| digest != &receipt.artifact_set_digest)
+            {
+                return Err(HarnessError::InvalidRequest(
+                    "owner review handoff must bind the exact manifest and artifact set".into(),
+                ));
+            }
+            artifact_digest = Some(receipt.artifact_set_digest.clone());
+            refs.push((grant.owner.clone(), receipt.receipt_digest.clone()));
+        }
+        refs.sort();
+        let statement =
+            encode_career_owner_review_refs(&comparison.inventory.request.original_request, &refs)?;
+        parse_career_owner_review_refs(
+            &comparison.inventory.request.original_request,
+            &statement,
+            &self.evidence_owners,
+        )?;
+        Ok(statement)
+    }
+
     fn normalized(&self) -> Self {
         let mut normalized = self.clone();
         normalized.artifact_targets.sort();
@@ -542,7 +588,9 @@ impl CareerCompositionManifest {
                 "career composition manifest targets do not match the request".to_owned(),
             ));
         }
-        if self.evidence_owners.is_empty() || self.evidence_owners.len() > MAX_TARGETS {
+        if (self.comparison.is_none() && self.evidence_owners.is_empty())
+            || self.evidence_owners.len() > MAX_TARGETS
+        {
             return Err(HarnessError::InvalidRequest(format!(
                 "career composition manifest must declare between one and {MAX_TARGETS} evidence owners"
             )));
@@ -565,21 +613,69 @@ impl CareerCompositionManifest {
                     "career composition manifest claim IDs must be unique".to_owned(),
                 ));
             }
-            validate_evidence_owner(&lineage.evidence_owner)?;
+            if lineage.evidence_owner != DataOwner::Personal || self.comparison.is_none() {
+                validate_evidence_owner(&lineage.evidence_owner)?;
+            }
             lineage_owners.insert(lineage.evidence_owner.clone());
             validate_evidence_source_paths(&lineage.evidence_source_paths)?;
         }
-        if lineage_owners
-            != self
-                .evidence_owners
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
+        if self.comparison.is_none()
+            && lineage_owners
+                != self
+                    .evidence_owners
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
         {
             return Err(HarnessError::InvalidRequest(
                 "career claim-lineage owners must exactly match declared evidence owners"
                     .to_owned(),
             ));
+        }
+        if let Some(comparison) = &self.comparison {
+            comparison.validate_structure(true)?;
+            if comparison.inventory.request.surface != self.career_output_surface
+                || comparison.foreign_owners() != self.evidence_owners.iter().cloned().collect()
+                || comparison.placements.len() != self.claim_lineage.len()
+            {
+                return Err(HarnessError::InvalidRequest("career comparison must bind the exact request, surface and complete compared-owner set".into()));
+            }
+            parse_career_owner_review_refs(
+                &comparison.inventory.request.original_request,
+                &request.objective,
+                &self.evidence_owners,
+            )?;
+            for placement in &comparison.placements {
+                let candidate = comparison
+                    .inventory
+                    .candidates
+                    .iter()
+                    .find(|c| c.path == placement.candidate_path)
+                    .ok_or_else(|| {
+                        HarnessError::InvalidRequest("placement candidate is unavailable".into())
+                    })?;
+                let sources = placement
+                    .source_locators
+                    .iter()
+                    .map(|l| l.path.clone())
+                    .collect::<BTreeSet<_>>();
+                if !self.artifact_targets.contains(&placement.target)
+                    || !self.claim_lineage.iter().any(|l| {
+                        l.claim_id == placement.claim_id
+                            && l.evidence_owner == candidate.owner
+                            && l.evidence_source_paths
+                                .iter()
+                                .cloned()
+                                .collect::<BTreeSet<_>>()
+                                == sources
+                    })
+                {
+                    return Err(HarnessError::InvalidRequest(
+                        "claim lineage and comparison placements must match in both directions"
+                            .into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -658,6 +754,9 @@ impl CareerCompositionManifest {
     }
 
     fn evidence_source_paths_for(&self, owner: &DataOwner) -> Vec<String> {
+        if let Some(comparison) = &self.comparison {
+            return comparison.owner_source_paths(owner);
+        }
         self.claim_lineage
             .iter()
             .filter(|lineage| &lineage.evidence_owner == owner)
@@ -666,6 +765,73 @@ impl CareerCompositionManifest {
             .into_iter()
             .collect()
     }
+}
+
+const CAREER_OWNER_REVIEW_REFS_PREFIX: &str = "\n\n```career-owner-review-refs\n";
+
+fn encode_career_owner_review_refs(
+    original: &str,
+    refs: &[(DataOwner, String)],
+) -> HarnessResult<String> {
+    let statement = format!(
+        "{original}{CAREER_OWNER_REVIEW_REFS_PREFIX}{}\n```",
+        serde_json::to_string(refs).map_err(|error| HarnessError::InvalidRequest(format!(
+            "cannot encode career owner references: {error}"
+        )))?
+    );
+    validate_multiline("holistic task statement", &statement, MAX_OBJECTIVE_LENGTH)?;
+    Ok(statement)
+}
+
+fn parse_career_owner_review_refs(
+    original: &str,
+    statement: &str,
+    owners: &[DataOwner],
+) -> HarnessResult<Option<Vec<(DataOwner, String)>>> {
+    if statement == original {
+        return Ok(None);
+    }
+    let body = statement.strip_prefix(original)
+        .and_then(|suffix| suffix.strip_prefix(CAREER_OWNER_REVIEW_REFS_PREFIX))
+        .and_then(|suffix| suffix.strip_suffix("\n```"))
+        .ok_or_else(|| HarnessError::InvalidRequest("career task must preserve the exact original request with only canonical owner receipt references appended".into()))?;
+    let refs: Vec<(DataOwner, String)> =
+        decode_current_json(body.as_bytes(), "career owner review references")?;
+    let mut sorted = refs.clone();
+    sorted.sort();
+    let expected = owners.iter().cloned().collect::<BTreeSet<_>>();
+    let actual = refs
+        .iter()
+        .map(|(owner, _)| owner.clone())
+        .collect::<BTreeSet<_>>();
+    if refs.len() > MAX_TARGETS
+        || actual.len() != refs.len()
+        || actual != expected
+        || sorted != refs
+        || encode_career_owner_review_refs(original, &refs)? != statement
+    {
+        return Err(HarnessError::InvalidRequest(
+            "career owner references must canonically and exactly cover compared foreign owners"
+                .into(),
+        ));
+    }
+    for (_, digest) in &refs {
+        validate_digest("career owner receipt digest", digest)?;
+    }
+    Ok(Some(refs))
+}
+
+fn validate_career_owner_review_handoff(
+    original: &str,
+    statement: &str,
+    owners: &[DataOwner],
+    expected_refs: &[(DataOwner, String)],
+) -> HarnessResult<()> {
+    let actual = parse_career_owner_review_refs(original, statement, owners)?.unwrap_or_default();
+    if actual != expected_refs {
+        return Err(HarnessError::InvalidSubmission("holistic career review must bind the exact current owner receipts supplied for composition".into()));
+    }
+    Ok(())
 }
 
 impl CareerOutputSurface {
@@ -677,6 +843,8 @@ impl CareerOutputSurface {
             Self::CareerDescription => "career-description",
             Self::Portfolio => "portfolio",
             Self::ProfessionalProfile => "professional-profile",
+            Self::ApplicationEssay => "application-essay",
+            Self::Interview => "interview",
         }
     }
 }
@@ -689,6 +857,43 @@ pub struct ContextGrant {
 }
 
 impl DataOwner {
+    /// The single source boundary used by career discovery and evidence binding.
+    pub fn career_evidence_roots(&self) -> HarnessResult<Vec<String>> {
+        self.validate()?;
+        Ok(match self {
+            Self::Personal => [
+                "profile.md",
+                "facts",
+                "knowledge",
+                "learning",
+                "decisions",
+                "ontology",
+                "projects/ideas",
+            ]
+            .into_iter()
+            .map(|p| format!("vault/personal/{p}"))
+            .collect(),
+            Self::PersonalProject { project } => vec![
+                format!("vault/personal/projects/{project}.md"),
+                format!("vault/personal/projects/{project}"),
+            ],
+            Self::Company { company } => ["index.md", "experience", "projects", "overview"]
+                .into_iter()
+                .map(|p| format!("vault/work/{company}/{p}"))
+                .collect(),
+            Self::CompanyProject { company, project } => vec![
+                format!("vault/work/{company}/index.md"),
+                format!("vault/work/{company}/projects/{project}.md"),
+                format!("vault/work/{company}/projects/{project}"),
+                format!("vault/work/{company}/overview/{project}.md"),
+            ],
+            _ => {
+                return Err(HarnessError::InvalidRequest(
+                    "owner has no career fact sources".into(),
+                ));
+            }
+        })
+    }
     fn validate(&self) -> HarnessResult<()> {
         match self {
             Self::PersonalProject { project } => validate_partition_id("project", project)?,
@@ -1231,6 +1436,7 @@ pub struct RoleTaskScope {
     pub context_grants: Vec<ContextGrant>,
     pub career_manifest_digest: Option<String>,
     pub career_claim_lineage: Vec<CareerClaimLineage>,
+    pub career_comparison: Option<crate::career::CareerReviewView>,
     pub evidence_sources: Vec<SourceBinding>,
     pub learning_sources: Vec<LearningSourceBinding>,
     pub task_statement: String,
@@ -1943,7 +2149,17 @@ impl ResolvedHarnessPlan {
         if self.evidence_sources.is_empty() {
             return Ok(());
         }
-        if self.context_grants.len() != 1 || !self.intent.is_career_artifact() {
+        if !self.intent.is_career_artifact()
+            || (self.context_grants.len() != 1
+                && !(self.context_grants.is_empty()
+                    && self.evidence_sources.iter().all(|s| {
+                        crate::career::owner_allows(
+                            &DataOwner::Personal,
+                            &s.repository_relative_path,
+                        )
+                        .unwrap_or(false)
+                    })))
+        {
             return Err(HarnessError::InvalidPlan(
                 "evidence source bindings require exactly one career-writing evidence grant"
                     .to_owned(),
@@ -2398,6 +2614,9 @@ impl HarnessRouter {
             intent,
             &roles,
             career_composition_manifest.is_some() && context_grants.is_empty(),
+            career_composition_manifest
+                .and_then(|m| m.comparison.as_ref())
+                .is_some_and(|c| !c.owner_source_paths(&DataOwner::Personal).is_empty()),
         );
         let PlanContextBindings {
             allowed_context_roots,
@@ -2520,11 +2739,14 @@ fn plan_verification_requirements(
     intent: HarnessIntent,
     roles: &[HarnessRole],
     holistic_career_review: bool,
+    primary_career_lineage: bool,
 ) -> Vec<VerificationRequirement> {
     let mut requirements = verification_requirements_for(request, intent, roles);
     if holistic_career_review && request.action == HarnessAction::DocumentReview {
-        requirements
-            .retain(|requirement| requirement.unit != VerificationUnit::CareerEvidenceLineage);
+        if !primary_career_lineage {
+            requirements
+                .retain(|requirement| requirement.unit != VerificationUnit::CareerEvidenceLineage);
+        }
         requirements.push(VerificationRequirement {
             unit: VerificationUnit::CareerHolisticCoherence,
             owner: VerificationOwner::Role {
@@ -2548,6 +2770,13 @@ fn bind_plan_context(
     let evidence_sources = match context_grants {
         [grant] if !evidence_source_paths.is_empty() => {
             let sources = vault.bind_evidence_sources(grant, evidence_source_paths)?;
+            allowed_context_roots.extend(sources.iter().map(|source| ContextRoot {
+                repository_relative_path: source.repository_relative_path.clone(),
+            }));
+            sources
+        }
+        [] if !evidence_source_paths.is_empty() && intent.is_career_artifact() => {
+            let sources = vault.bind_primary_career_sources(evidence_source_paths)?;
             allowed_context_roots.extend(sources.iter().map(|source| ContextRoot {
                 repository_relative_path: source.repository_relative_path.clone(),
             }));
@@ -3679,39 +3908,25 @@ impl VaultRepository {
     }
 
     fn context_grant_roots(&self, grant: &ContextGrant) -> HarnessResult<Vec<ContextRoot>> {
-        let candidates = match &grant.owner {
+        match &grant.owner {
             DataOwner::PersonalProject { project } => {
-                self.project_context_roots("vault/personal/projects", project)?
+                self.project_context_roots("vault/personal/projects", project)?;
             }
             DataOwner::Company { company } => {
                 self.require_registered_company(company)?;
-                vec![
-                    format!("vault/work/{company}/index.md"),
-                    format!("vault/work/{company}/experience"),
-                    format!("vault/work/{company}/projects"),
-                    format!("vault/work/{company}/overview"),
-                ]
             }
             DataOwner::CompanyProject { company, project } => {
                 self.require_registered_company(company)?;
-                let mut roots = vec![format!("vault/work/{company}/index.md")];
-                roots.extend(
-                    self.project_context_roots(&format!("vault/work/{company}/projects"), project)?,
-                );
-                let overview = format!("vault/work/{company}/overview/{project}.md");
-                if self.source_metadata(Path::new(&overview))?.is_file() {
-                    roots.push(overview);
-                }
-                roots
+                self.project_context_roots(&format!("vault/work/{company}/projects"), project)?;
             }
             _ => {
                 return Err(HarnessError::InvalidRequest(
                     "context grant owner must be a personal project, company, or company project"
-                        .to_owned(),
+                        .into(),
                 ));
             }
-        };
-        self.existing_context_roots(candidates)
+        }
+        self.existing_context_roots(grant.owner.career_evidence_roots()?)
     }
 
     fn bind_evidence_sources(
@@ -3721,6 +3936,29 @@ impl VaultRepository {
     ) -> HarnessResult<Vec<SourceBinding>> {
         validate_evidence_source_paths(source_paths)?;
         let grant_roots = self.context_grant_roots(grant)?;
+        self.bind_career_sources(source_paths, &grant_roots)
+    }
+
+    fn bind_primary_career_sources(
+        &self,
+        source_paths: &[String],
+    ) -> HarnessResult<Vec<SourceBinding>> {
+        let roots = DataOwner::Personal
+            .career_evidence_roots()?
+            .into_iter()
+            .map(|repository_relative_path| ContextRoot {
+                repository_relative_path,
+            })
+            .collect::<Vec<_>>();
+        self.bind_career_sources(source_paths, &roots)
+    }
+
+    fn bind_career_sources(
+        &self,
+        source_paths: &[String],
+        grant_roots: &[ContextRoot],
+    ) -> HarnessResult<Vec<SourceBinding>> {
+        validate_evidence_source_paths(source_paths)?;
         let mut bindings = source_paths
             .iter()
             .map(|source_path| {
@@ -4561,15 +4799,55 @@ impl HarnessEngine {
             ));
         }
         self.validate_profile_source_intent(&request, intent)?;
+        if intent.is_career_artifact()
+            && self.vault.store_identity.is_some()
+            && career_composition_manifest
+                .as_ref()
+                .and_then(|m| m.comparison.as_ref())
+                .is_none()
+        {
+            return Err(HarnessError::InvalidRequest(
+                "native career artifacts require a complete current comparison manifest".into(),
+            ));
+        }
         if let Some(manifest) = career_composition_manifest.as_ref() {
             manifest.validate(&request, career_output_surface)?;
+            if let Some(comparison) = &manifest.comparison {
+                let refs = parse_career_owner_review_refs(
+                    &comparison.inventory.request.original_request,
+                    &request.objective,
+                    &manifest.evidence_owners,
+                )?;
+                if request.action == HarnessAction::DocumentReview && context_grants.is_empty() {
+                    if !manifest.evidence_owners.is_empty() && refs.is_none() {
+                        return Err(HarnessError::InvalidRequest("holistic career review requires exact owner receipt references before preparation".into()));
+                    }
+                } else if refs.is_some() {
+                    return Err(HarnessError::InvalidRequest(
+                        "owner receipt references belong only to the holistic document review"
+                            .into(),
+                    ));
+                }
+                let current = self
+                    .vault
+                    .source
+                    .career_inventory(&self.vault.policy_configuration, comparison)?;
+                if current != comparison.inventory {
+                    return Err(HarnessError::InvalidRequest(
+                        "adapter career inventory does not match the manifest".into(),
+                    ));
+                }
+            }
             match context_grants.as_slice() {
                 [grant]
                     if manifest.evidence_owners.contains(&grant.owner)
                         && !evidence_source_paths.is_empty()
                         && manifest.evidence_source_paths_for(&grant.owner)
                             == evidence_source_paths => {}
-                [] if evidence_source_paths.is_empty() => {}
+                [] if evidence_source_paths.is_empty() && manifest.comparison.is_none() => {}
+                [] if manifest.comparison.is_some()
+                    && manifest.evidence_source_paths_for(&DataOwner::Personal)
+                        == evidence_source_paths => {}
                 _ => {
                     return Err(HarnessError::InvalidRequest(
                         "career review evidence sources must exactly match the manifest lineage for its selected owner"
@@ -4631,7 +4909,12 @@ impl HarnessEngine {
             workspace_policies,
             vault: &self.vault,
         })?;
-        plan.source_versions = self.plan_source_versions(&plan)?;
+        plan.source_versions = self.plan_source_versions(
+            &plan,
+            career_composition_manifest
+                .as_ref()
+                .and_then(|m| m.comparison.as_ref()),
+        )?;
         plan.validate()?;
         self.vault
             .policy_configuration
@@ -4789,6 +5072,7 @@ impl HarnessEngine {
                     context_grants: resolved.plan.context_grants.clone(),
                     career_manifest_digest: resolved.plan.career_manifest_digest.clone(),
                     career_claim_lineage: career_claim_lineage.clone(),
+                    career_comparison: career_comparison_for_role(resolved)?,
                     evidence_sources: resolved.plan.evidence_sources.clone(),
                     learning_sources: if role == resolved.plan.primary_producer_role {
                         resolved.plan.learning_sources.clone()
@@ -5928,8 +6212,12 @@ impl HarnessEngine {
             ));
         }
         match resolved.context_grants.as_slice() {
+            [] if manifest.comparison.is_some()
+                && manifest.evidence_source_paths_for(&DataOwner::Personal)
+                    == resolved.evidence_source_paths => {}
             [] if resolved.plan.evidence_sources.is_empty()
-                && resolved.evidence_source_paths.is_empty() => {}
+                && resolved.evidence_source_paths.is_empty()
+                && manifest.comparison.is_none() => {}
             [grant]
                 if !resolved.plan.evidence_sources.is_empty()
                     && manifest.evidence_owners.contains(&grant.owner)
@@ -6036,8 +6324,12 @@ impl HarnessEngine {
             ));
         }
         match resolved.context_grants.as_slice() {
+            [] if manifest.comparison.is_some()
+                && manifest.evidence_source_paths_for(&DataOwner::Personal)
+                    == resolved.evidence_source_paths => {}
             [] if resolved.plan.evidence_sources.is_empty()
-                && resolved.evidence_source_paths.is_empty() => {}
+                && resolved.evidence_source_paths.is_empty()
+                && manifest.comparison.is_none() => {}
             [grant]
                 if !resolved.plan.evidence_sources.is_empty()
                     && manifest.evidence_owners.contains(&grant.owner)
@@ -7469,6 +7761,18 @@ fn validate_career_execution_receipt_set(
             "owner execution receipts must exactly cover the manifest evidence owners".to_owned(),
         ));
     }
+    if let Some(comparison) = &manifest.comparison {
+        let expected_refs = evidence_reviews
+            .iter()
+            .map(|(owner, receipt)| (owner.clone(), receipt.receipt_digest.clone()))
+            .collect::<Vec<_>>();
+        validate_career_owner_review_handoff(
+            &comparison.inventory.request.original_request,
+            &holistic_review.resolved.request.objective,
+            &manifest.evidence_owners,
+            &expected_refs,
+        )?;
+    }
     let artifact_targets = holistic_review.resolved.plan.targets.clone();
     if evidence_reviews.iter().any(|(_, receipt)| {
         receipt.resolved.plan.targets != artifact_targets
@@ -7647,7 +7951,9 @@ fn verification_requirements_for(
         ]);
         requirements.push(role_requirement(
             match surface {
-                CareerOutputSurface::General => VerificationUnit::CareerOutputSurfaceSelection,
+                CareerOutputSurface::General
+                | CareerOutputSurface::ApplicationEssay
+                | CareerOutputSurface::Interview => VerificationUnit::CareerOutputSurfaceSelection,
                 CareerOutputSurface::Resume => VerificationUnit::ResumeFirstScreenAndArtifact,
                 CareerOutputSurface::CareerDescription => {
                     VerificationUnit::CareerDescriptionCaseStructure
@@ -7668,7 +7974,9 @@ fn verification_requirements_for(
         ));
         requirements.push(role_requirement(
             match surface {
-                CareerOutputSurface::General => VerificationUnit::OutputAdapterSurfaceSelection,
+                CareerOutputSurface::General
+                | CareerOutputSurface::ApplicationEssay
+                | CareerOutputSurface::Interview => VerificationUnit::OutputAdapterSurfaceSelection,
                 CareerOutputSurface::Resume => VerificationUnit::ResumeOutputAdapterArtifact,
                 CareerOutputSurface::CareerDescription => {
                     VerificationUnit::CareerDescriptionOutputAdapterArtifact
@@ -7718,6 +8026,21 @@ fn role_requirements(
         .collect()
 }
 
+fn career_comparison_for_role(
+    resolved: &ResolvedHarnessRequest,
+) -> HarnessResult<Option<crate::career::CareerReviewView>> {
+    let owner = resolved
+        .context_grants
+        .first()
+        .map_or(&DataOwner::Personal, |g| &g.owner);
+    resolved
+        .career_composition_manifest
+        .as_ref()
+        .and_then(|m| m.comparison.as_ref())
+        .map(|c| c.review_view(owner))
+        .transpose()
+}
+
 fn career_claim_lineage_for_role(resolved: &ResolvedHarnessRequest) -> Vec<CareerClaimLineage> {
     resolved
         .career_composition_manifest
@@ -7726,13 +8049,19 @@ fn career_claim_lineage_for_role(resolved: &ResolvedHarnessRequest) -> Vec<Caree
             resolved
                 .context_grants
                 .first()
-                .map(|grant| (manifest, &grant.owner))
+                .map(|grant| (manifest, grant.owner.clone()))
+                .or_else(|| {
+                    manifest
+                        .comparison
+                        .as_ref()
+                        .map(|_| (manifest, DataOwner::Personal))
+                })
         })
         .map_or_else(Vec::new, |(manifest, owner)| {
             manifest
                 .claim_lineage
                 .iter()
-                .filter(|lineage| &lineage.evidence_owner == owner)
+                .filter(|lineage| lineage.evidence_owner == owner)
                 .cloned()
                 .collect()
         })
@@ -7772,6 +8101,7 @@ struct RoleControlHead<'a> {
     context_grants: &'a [ContextGrant],
     career_manifest_digest: Option<&'a str>,
     career_claim_lineage: &'a [CareerClaimLineage],
+    career_comparison: Option<crate::career::CareerReviewView>,
     allowed_context_roots: &'a [ContextRoot],
     denied_context_roots: &'a [ContextRoot],
     learning_sources: &'a [LearningSourceBinding],
@@ -7810,6 +8140,7 @@ fn role_control_segments(
         context_grants: &resolved.plan.context_grants,
         career_manifest_digest: resolved.plan.career_manifest_digest.as_deref(),
         career_claim_lineage,
+        career_comparison: career_comparison_for_role(resolved)?,
         allowed_context_roots: &resolved.plan.allowed_context_roots,
         denied_context_roots: &resolved.plan.denied_context_roots,
         learning_sources,

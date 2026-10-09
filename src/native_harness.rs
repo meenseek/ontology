@@ -595,11 +595,6 @@ impl Command {
                 }
             }
         }
-        if evidence_receipt_paths.is_empty() {
-            return Err(NativeHarnessError::invalid_input(
-                "missing `--evidence-receipt`",
-            ));
-        }
         let context_view = context_view
             .ok_or_else(|| NativeHarnessError::invalid_input("missing `--context-view`"))?;
         let workspace_root = workspace_root
@@ -1072,11 +1067,7 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
         "begin" => &["--prepared-run", "--run-id"],
         "advance" => &["--run-id", "--event"],
         "attest-career" => &["--prepared-run", "--execution-record"],
-        "compose-career" => &[
-            "--career-manifest",
-            "--holistic-receipt",
-            "--evidence-receipt",
-        ],
+        "compose-career" => &["--career-manifest", "--holistic-receipt"],
         _ => &["--run-id"],
     };
     for flag in required {
@@ -1377,6 +1368,37 @@ mod tests {
     use super::*;
     use crate::native_role::*;
     use context_core::harness::{ContextSource, RoleInvocationContract};
+
+    #[test]
+    fn codex_promotion_intent_schema_supports_current_career_surfaces() {
+        let schema: serde_json::Value =
+            serde_json::from_str(codex_output_schema()).expect("native schema must parse");
+        let surfaces = schema["$defs"]["intent"]["anyOf"][1]["properties"]["surface"]["enum"]
+            .as_array()
+            .expect("promotion source intent must declare career surfaces");
+        let current = [
+            CareerOutputSurface::General,
+            CareerOutputSurface::Resume,
+            CareerOutputSurface::CareerDescription,
+            CareerOutputSurface::Portfolio,
+            CareerOutputSurface::ProfessionalProfile,
+            CareerOutputSurface::ApplicationEssay,
+            CareerOutputSurface::Interview,
+        ];
+        assert_eq!(surfaces.len(), current.len());
+        for surface in current {
+            let wire = serde_json::to_value(surface).expect("Core surface must serialize");
+            assert!(
+                surfaces.contains(&wire),
+                "native schema omitted {surface:?}"
+            );
+            for kind in ["career-artifact", "output-adapter"] {
+                let intent = serde_json::json!({"kind": kind, "surface": wire});
+                serde_json::from_value::<HarnessIntent>(intent)
+                    .expect("native source intent must decode into current Core");
+            }
+        }
+    }
 
     pub(crate) struct TempDirectory {
         path: PathBuf,
@@ -1926,9 +1948,9 @@ mod tests {
             ]
             .map(str::to_owned),
         )
-        .expect_err("composition without owner receipts must be rejected");
+        .expect_err("nonempty foreign owners still require matching receipts later");
 
-        assert!(error.to_string().contains("--evidence-receipt"));
+        assert!(!error.to_string().contains("missing `--evidence-receipt`"));
     }
 
     #[test]
@@ -2039,7 +2061,14 @@ mod tests {
         )
         .expect("synthetic read target");
         let source = "vault/personal/projects/sample.md".to_owned();
+        let comparison = context_fixture::career_comparison(
+            test_source(&repository_root).as_ref(),
+            "review frozen career artifact",
+            "sample-career-claim",
+            "README.md",
+        );
         let manifest = CareerCompositionManifest {
+            comparison: Some(comparison),
             version: HARNESS_SCHEMA_VERSION,
             career_output_surface: CareerOutputSurface::Resume,
             artifact_targets: vec!["README.md".to_owned()],
@@ -2105,22 +2134,26 @@ mod tests {
         let owner_envelope: RequestEnvelope =
             read_harness_json(&request_envelope_path, "test request envelope")
                 .expect("owner request envelope must be readable");
+        let owner_receipt =
+            test_career_receipt(&engine, &owner_envelope, &manifest, &capabilities, "owner");
+        let mut holistic_request = request.clone();
+        holistic_request.objective = manifest
+            .holistic_task_statement(std::slice::from_ref(&owner_receipt))
+            .expect("current owner review handoff");
         let holistic_envelope_path = write_user_request_envelope(
             &temp,
             "holistic-career-review",
-            request.clone(),
+            holistic_request,
             HarnessIntent::CareerArtifact {
                 surface: CareerOutputSurface::Resume,
             },
             Vec::new(),
-            Vec::new(),
+            vec!["vault/personal/profile.md".to_owned()],
             HarnessExecutionProfile::Standard,
         );
         let holistic_envelope: RequestEnvelope =
             read_harness_json(&holistic_envelope_path, "test request envelope")
                 .expect("holistic request envelope must be readable");
-        let owner_receipt =
-            test_career_receipt(&engine, &owner_envelope, &manifest, &capabilities, "owner");
         let holistic_receipt = test_career_receipt(
             &engine,
             &holistic_envelope,

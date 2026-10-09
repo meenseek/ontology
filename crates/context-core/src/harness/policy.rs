@@ -17,6 +17,15 @@ pub(super) struct PolicySettings {
     target_constraints: Vec<TargetConstraint>,
     pub(super) context_exclusions: Vec<ContextExclusion>,
     pub(super) company: Option<CompanySettings>,
+    career: Option<CareerSourceRoots>,
+}
+
+/// Pointers to existing caller-owned routers; never another experience registry.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CareerSourceRoots {
+    pub experience_routes: String,
+    pub source_map: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -152,7 +161,7 @@ impl Selector {
         if self.actions.len() > 9
             || self.owners.len() > 7
             || self.intents.len() > 5
-            || self.surfaces.len() > 5
+            || self.surfaces.len() > 7
             || self.curation_kinds.len() > 6
         {
             return Err(settings_error("selector exceeds the supported axes"));
@@ -231,6 +240,32 @@ fn expand_path(path: &str, owner: &DataOwner) -> HarnessResult<String> {
 }
 
 impl PolicyConfiguration {
+    /// Canonical exact router paths selected by this caller configuration.
+    pub fn career_source_roots(&self) -> HarnessResult<Vec<String>> {
+        let selected = self
+            .data
+            .career
+            .as_ref()
+            .ok_or_else(|| settings_error("career source roots are not configured"))?;
+        if selected.experience_routes == selected.source_map {
+            return Err(settings_error("career routers must have distinct owners"));
+        }
+        [&selected.experience_routes, &selected.source_map]
+            .into_iter()
+            .map(|key| {
+                let document = self.document(key)?;
+                if document.project_entrypoint
+                    || !document.path.starts_with("vault/personal/writing/")
+                    || document.path.contains(['{', '}'])
+                {
+                    return Err(settings_error(
+                        "career roots must be exact personal writing routers",
+                    ));
+                }
+                Ok(document.path.clone())
+            })
+            .collect()
+    }
     pub fn digest(&self) -> &str {
         &self.digest
     }
@@ -322,6 +357,9 @@ impl PolicyConfiguration {
     }
 
     fn validate(&self) -> HarnessResult<()> {
+        if self.data.career.is_some() {
+            self.career_source_roots()?;
+        }
         if self.data.documents.is_empty()
             || self.data.documents.len() > 128
             || self.data.rules.is_empty()

@@ -169,7 +169,30 @@ impl SourceMetadata {
 pub trait ContextSource: Send + Sync {
     fn view_root(&self) -> &Path;
     fn store_identity(&self) -> HarnessResult<Option<SourceStoreIdentity>>;
+    /// Separate, explicitly scoped career discovery preflight. Implementations must rebuild
+    /// the canonical inventory and validate locators from current original bytes in one
+    /// snapshot. This does not grant any role access to the discovered source bodies.
+    fn career_inventory(
+        &self,
+        _configuration: &PolicyConfiguration,
+        _comparison: &crate::career::CareerComparison,
+    ) -> HarnessResult<crate::career::CareerInventory> {
+        Err(HarnessError::UnsupportedRuntime(
+            "source provider has no scoped career discovery preflight".into(),
+        ))
+    }
     fn metadata(&self, relative_path: &Path) -> HarnessResult<SourceMetadata>;
+    /// Metadata only; native providers batch selected paths without reading source bodies.
+    fn source_versions(&self, paths: &[PathBuf]) -> HarnessResult<Vec<SourceVersion>> {
+        paths
+            .iter()
+            .map(|p| {
+                self.metadata(p)?
+                    .stored_version
+                    .ok_or_else(|| invalid_source("bound source path has no stored state"))
+            })
+            .collect()
+    }
     /// Prepare an authorized, exact file write target in the disposable source view before
     /// its locator is bound. Preserve parent directory identities and stored source state.
     /// The default retains the provider's ordinary metadata behavior without reading a body.
@@ -528,11 +551,20 @@ impl VaultRepository {
             versions: Vec::new(),
         };
         if self.store_identity.is_some() {
-            for (path, digest) in paths {
-                let metadata = self.source_metadata(Path::new(path))?;
-                let version = metadata
-                    .stored_version
-                    .ok_or_else(|| invalid_source("bound source path has no stored state"))?;
+            let selected = paths.keys().map(PathBuf::from).collect::<Vec<_>>();
+            for path in &selected {
+                validate_source_path(path)?;
+            }
+            let versions = self.source.source_versions(&selected)?;
+            if versions.len() != paths.len() {
+                return Err(invalid_source(
+                    "source version batch does not cover exact selected paths",
+                ));
+            }
+            for ((path, digest), version) in paths.iter().zip(versions) {
+                if version.logical_path != *path {
+                    return Err(invalid_source("source version batch path mismatch"));
+                }
                 let matches = match (&version.state, digest) {
                     (StoredSourceState::Live { content_digest, .. }, Some(expected)) => {
                         content_digest == expected
@@ -617,16 +649,23 @@ impl HarnessEngine {
     pub(super) fn plan_source_versions(
         &self,
         plan: &ResolvedHarnessPlan,
+        comparison: Option<&crate::career::CareerComparison>,
     ) -> HarnessResult<SourceVersionSet> {
         self.vault
-            .bind_source_versions(&self.plan_source_paths(plan)?)
+            .bind_source_versions(&self.plan_source_paths(plan, comparison)?)
     }
 
     fn plan_source_paths(
         &self,
         plan: &ResolvedHarnessPlan,
+        comparison: Option<&crate::career::CareerComparison>,
     ) -> HarnessResult<BTreeMap<String, Option<String>>> {
         let mut paths = BTreeMap::new();
+        if let Some(comparison) = comparison {
+            for source in comparison.sources() {
+                insert_source_path(&mut paths, &source.path, Some(&source.content_digest))?;
+            }
+        }
         for policy in plan
             .required_policies
             .iter()
@@ -690,7 +729,13 @@ impl HarnessEngine {
         context: Option<&HarnessContextBundle>,
         bundles: &[HarnessRoleBundle],
     ) -> HarnessResult<SourceVersionSet> {
-        let mut paths = self.plan_source_paths(&resolved.plan)?;
+        let mut paths = self.plan_source_paths(
+            &resolved.plan,
+            resolved
+                .career_composition_manifest
+                .as_ref()
+                .and_then(|m| m.comparison.as_ref()),
+        )?;
         if let Some(context) = context {
             for document in &context.documents {
                 insert_source_path(

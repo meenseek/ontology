@@ -1062,7 +1062,7 @@ mod tests {
             ),
             (
                 "crates/context-core/src/harness.rs",
-                "\npub const HARNESS_SCHEMA_VERSION: u32 = 8;\n",
+                "\npub const HARNESS_SCHEMA_VERSION: u32 = 9;\n",
                 "",
                 "",
             ),

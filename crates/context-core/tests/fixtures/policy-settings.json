@@ -72,6 +72,20 @@
       "dependencies": [
         "foundation"
       ]
+    },
+    {
+      "key": "career-routes",
+      "id": "career-routes",
+      "path": "vault/personal/writing/evidence.md",
+      "project_entrypoint": false,
+      "dependencies": []
+    },
+    {
+      "key": "career-sources",
+      "id": "career-sources",
+      "path": "vault/personal/writing/overview.md",
+      "project_entrypoint": false,
+      "dependencies": []
     }
   ],
   "orchestrator": [
@@ -274,5 +288,9 @@
     "shared_documents": [
       "authoring"
     ]
+  },
+  "career": {
+    "experience_routes": "career-routes",
+    "source_map": "career-sources"
   }
 }

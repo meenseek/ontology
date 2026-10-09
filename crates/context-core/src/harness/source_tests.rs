@@ -110,9 +110,10 @@ fn fictional_rule_axes_select_only_matching_source_and_role_bindings() {
             let mut intent = HarnessIntent::General;
             match axis {
                 "intent" => {
-                    selector["intents"] = serde_json::json!(["career-artifact"]);
+                    selector["intents"] = serde_json::json!(["output-adapter"]);
                     if matched {
-                        intent = HarnessIntent::CareerArtifact {
+                        request.owner = DataOwner::Profile;
+                        intent = HarnessIntent::OutputAdapter {
                             surface: CareerOutputSurface::General,
                         };
                     }
@@ -654,6 +655,36 @@ impl ContextSource for RecordingSource {
                 .expect("test identity lock is not poisoned")
                 .clone(),
         ))
+    }
+    fn career_inventory(
+        &self,
+        configuration: &PolicyConfiguration,
+        comparison: &crate::career::CareerComparison,
+    ) -> HarnessResult<crate::career::CareerInventory> {
+        let mut originals = BTreeMap::new();
+        let inventory = crate::career::discover(
+            configuration,
+            self.store_identity()?.map(|i| i.store_id),
+            comparison.inventory.request.clone(),
+            |paths| {
+                paths
+                    .iter()
+                    .map(|p| {
+                        let content = fs::read_to_string(self.view_root().join(p))
+                            .map_err(|e| HarnessError::InvalidRepository(e.to_string()))?;
+                        let original = crate::career::CareerOriginal {
+                            path: p.clone(),
+                            content,
+                            version: self.metadata_value(Path::new(p))?.stored_version,
+                        };
+                        originals.insert(p.clone(), original.clone());
+                        Ok(original)
+                    })
+                    .collect()
+            },
+        )?;
+        comparison.validate_current(&inventory, &originals, true)?;
+        Ok(inventory)
     }
     fn metadata(&self, path: &Path) -> HarnessResult<SourceMetadata> {
         self.calls
@@ -1431,6 +1462,101 @@ fn source_granted_evidence_keeps_selection_and_binds_non_target_revision() {
         purpose: ContextGrantPurpose::CareerWritingEvidence,
         access: ContextAccess::ReadOnly,
     };
+    use crate::career::*;
+    let roots = policy_configuration().career_source_roots().unwrap();
+    let routes = serde_json::json!({"routes":[{"owner":grant.owner,"kind":"fact","path":evidence,"label":"sample work"}]});
+    fixture
+        .source
+        .write(&roots[0], &format!("```career-routes\n{routes}\n```\n"), 1);
+    fixture
+        .source
+        .write("vault/personal/profile.md", "# Personal original\n", 1);
+    fixture.source.write(&roots[1],"```career-routes\n{\"routes\":[{\"owner\":{\"kind\":\"personal\"},\"kind\":\"fact\",\"path\":\"vault/personal/profile.md\",\"label\":\"profile\"}]}\n```\n",1);
+    let discovery = CareerDiscoveryRequest {
+        original_request: request.objective.clone(),
+        surface: CareerOutputSurface::General,
+        approved_scopes: vec!["personal".into(), "work/acme".into()],
+        axis_queries: vec![],
+    };
+    let inventory = discover(
+        &policy_configuration(),
+        fixture.source.store_identity().unwrap().map(|i| i.store_id),
+        discovery,
+        |paths| {
+            paths
+                .iter()
+                .map(|p| {
+                    Ok(CareerOriginal {
+                        path: p.clone(),
+                        content: fs::read_to_string(fixture.source.view_root().join(p)).unwrap(),
+                        version: fixture.source.metadata_value(Path::new(p))?.stored_version,
+                    })
+                })
+                .collect()
+        },
+    )
+    .unwrap();
+    let comparison = CareerComparison {
+        requirements: vec![CareerRequirement {
+            id: "work".into(),
+            original_span: CareerSpan {
+                start: 0,
+                end: request.objective.len(),
+            },
+            kind: CareerRequirementKind::Requirement,
+            coverage: CareerCoverage::Direct,
+            material: true,
+        }],
+        decisions: inventory
+            .candidates
+            .iter()
+            .map(|c| CareerDecision {
+                requirement_id: "work".into(),
+                candidate_path: c.path.clone(),
+                disposition: if c.path == evidence {
+                    CareerDisposition::Selected
+                } else {
+                    CareerDisposition::Excluded
+                },
+                reason: "compare exact source".into(),
+                facets: vec![CareerFacet {
+                    axis: CareerAxis::Technical,
+                    original: CareerLocator {
+                        path: c.path.clone(),
+                        original_span: CareerSpan { start: 0, end: 5 },
+                    },
+                }],
+            })
+            .collect(),
+        placements: vec![CareerPlacement {
+            claim_id: "work-claim".into(),
+            candidate_path: evidence.into(),
+            requirement_ids: vec!["work".into()],
+            source_locators: vec![CareerLocator {
+                path: evidence.into(),
+                original_span: CareerSpan { start: 0, end: 5 },
+            }],
+            target: request.targets[0].clone(),
+            slot: "work".into(),
+        }],
+        inventory,
+    };
+    let manifest = CareerCompositionManifest {
+        version: HARNESS_SCHEMA_VERSION,
+        career_output_surface: CareerOutputSurface::General,
+        artifact_targets: request.targets.clone(),
+        coverage: CareerCoverageMode::Selected,
+        complete_coverage_confirmation_reported: false,
+        evidence_owners: vec![grant.owner.clone()],
+        canonical_evidence_owners: vec![],
+        excluded_evidence_owners: vec![],
+        claim_lineage: vec![CareerClaimLineage {
+            claim_id: "work-claim".into(),
+            evidence_owner: grant.owner.clone(),
+            evidence_source_paths: vec![evidence.into()],
+        }],
+        comparison: Some(comparison),
+    };
     let resolved = engine
         .resolve_with_intent_and_career_composition(
             &request,
@@ -1439,7 +1565,7 @@ fn source_granted_evidence_keeps_selection_and_binds_non_target_revision() {
             },
             &[grant],
             &[evidence.to_owned()],
-            None,
+            Some(&manifest),
         )
         .expect("exact company evidence grant must resolve");
     assert_eq!(resolved.plan.evidence_sources.len(), 1);

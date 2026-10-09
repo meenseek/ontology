@@ -636,7 +636,7 @@ async fn native_provider_is_lazy_batched_and_preserves_inode() {
                 let before = source.metadata_queries();
                 assert_eq!(
                     source
-                        .stored_versions(&paths)
+                        .source_versions(&paths)
                         .expect("batch metadata")
                         .len(),
                     count
@@ -695,6 +695,162 @@ async fn native_provider_is_lazy_batched_and_preserves_inode() {
         })
         .await
         .expect("native session");
+}
+
+#[tokio::test]
+async fn native_career_discovery_batches_inventory_and_rejects_forged_or_stale_comparisons() {
+    use context_core::{
+        career::*,
+        harness::{CareerOutputSurface, DataOwner},
+    };
+    let _guard = TEST_LOCK.lock().await;
+    let mut store = store().await;
+    let fixture = context_fixture::build();
+    let root = fixture.path().canonicalize().unwrap();
+    fs::create_dir_all(root.join("personal/facts/cases")).unwrap();
+    let body = "# Case\nTogether we discussed design and reduced contribution burden.\n";
+    for n in 0..100 {
+        fs::write(root.join(format!("personal/facts/cases/{n:04}.md")), body).unwrap();
+    }
+    let request = CareerDiscoveryRequest {
+        original_request: "Describe helping others".into(),
+        surface: CareerOutputSurface::General,
+        approved_scopes: vec!["personal".into()],
+        axis_queries: vec![CareerAxisQuery {
+            axis: CareerAxis::Competency,
+            query: "does-not-match".into(),
+        }],
+    };
+    let mut one_wave_queries = None;
+    let mut full_inventory = None;
+    for count in [1, 100] {
+        if count == 100 {
+            store = self::store().await;
+        }
+        let routes = (0..count)
+            .map(|n| CareerRoute {
+                owner: DataOwner::Personal,
+                kind: CareerRouteKind::Fact,
+                path: format!("vault/personal/facts/cases/{n:04}.md"),
+                label: "case".into(),
+                supporting_sources: vec![],
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            root.join("personal/writing/evidence.md"),
+            format!("```career-routes\n{}\n```\n", json!({"routes":routes})),
+        )
+        .unwrap();
+        import(&store, &root).await;
+        let before = store.calls();
+        let result = store
+            .career_candidates(
+                &context_fixture::configuration_path(),
+                request.clone(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let queries = store.calls() - before;
+        assert_eq!(
+            queries,
+            *one_wave_queries.get_or_insert(queries),
+            "fixed wave count, not one query per candidate"
+        );
+        result.inventory.require_complete().unwrap();
+        assert_eq!(result.inventory.candidates.len(), count + 1);
+        assert!(
+            result
+                .inventory
+                .candidates
+                .iter()
+                .all(|c| c.matches.is_empty()),
+            "no-match is not exclusion"
+        );
+        assert!(!result.finalization_structure_checked);
+        assert!(result.semantic_review_required);
+        full_inventory = Some(result.inventory);
+    }
+    let inventory = full_inventory.unwrap();
+    let selected = "vault/personal/facts/cases/0000.md";
+    let comparison = CareerComparison {
+        requirements: vec![CareerRequirement {
+            id: "help".into(),
+            original_span: CareerSpan {
+                start: 0,
+                end: request.original_request.len(),
+            },
+            kind: CareerRequirementKind::Requirement,
+            coverage: CareerCoverage::Direct,
+            material: true,
+        }],
+        decisions: inventory
+            .candidates
+            .iter()
+            .map(|c| CareerDecision {
+                requirement_id: "help".into(),
+                candidate_path: c.path.clone(),
+                disposition: if c.path == selected {
+                    CareerDisposition::Selected
+                } else {
+                    CareerDisposition::Excluded
+                },
+                reason: "The exact original facet is available for independent interpretation"
+                    .into(),
+                facets: vec![CareerFacet {
+                    axis: CareerAxis::Competency,
+                    original: CareerLocator {
+                        path: c.path.clone(),
+                        original_span: CareerSpan { start: 0, end: 5 },
+                    },
+                }],
+            })
+            .collect(),
+        placements: vec![CareerPlacement {
+            claim_id: "help".into(),
+            candidate_path: selected.into(),
+            requirement_ids: vec!["help".into()],
+            source_locators: vec![CareerLocator {
+                path: selected.into(),
+                original_span: CareerSpan {
+                    start: 7,
+                    end: body.len() - 1,
+                },
+            }],
+            target: "answer.md".into(),
+            slot: "help".into(),
+        }],
+        inventory,
+    };
+    let command = |comparison: &CareerComparison| json!({"op":"career-candidates","original_request":request.original_request,"surface":"general","approved_scopes":["personal"],"axis_queries":request.axis_queries,"policy_config":context_fixture::configuration_path(),"comparison":comparison,"finalization":true});
+    let output = cli(command(&comparison)).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["finalization_structure_checked"],
+        true
+    );
+    let mut forged = comparison.clone();
+    let removed = forged.inventory.candidates.pop().unwrap();
+    forged
+        .decisions
+        .retain(|d| d.candidate_path != removed.path);
+    forged.inventory.inventory_digest = forged.inventory.content_digest().unwrap();
+    let output = cli(command(&forged)).await;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    // Negative storage fixture: same original bytes with a newer native source identity.
+    sqlx::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=revision+1 WHERE source_path='personal/facts/cases/0000.md'; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;").execute(store.pool()).await.unwrap();
+    let output = cli(command(&comparison)).await;
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "stale comparison cannot produce a partial acceptance"
+    );
 }
 #[tokio::test]
 async fn native_projection_is_explicit_current_and_redacted() {
@@ -3838,7 +3994,21 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
         project: "sample".into(),
     };
     let source = "vault/personal/projects/sample.md";
+    let statement =
+        "Review the exact synthetic career artifact and its declared evidence without changing it.";
+    let comparison = store
+        .with_native_context(root.clone(), move |source| {
+            Ok(harness_fixture::context_fixture::career_comparison(
+                source.as_ref(),
+                statement,
+                "synthetic-claim",
+                "README.md",
+            ))
+        })
+        .await
+        .unwrap();
     let manifest = CareerCompositionManifest {
+        comparison: Some(comparison),
         version: HARNESS_SCHEMA_VERSION,
         career_output_surface: CareerOutputSurface::Resume,
         artifact_targets: vec!["README.md".into()],
@@ -3857,7 +4027,7 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
     let artifacts = tempfile::tempdir().expect("actual career CLI artifacts");
     let mut receipts = Vec::new();
     let mut contexts = std::collections::BTreeSet::new();
-    for evidence in [false, true] {
+    for evidence in [true, false] {
         let mut request =
             harness_fixture::envelope(&policy, vec!["README.md".into()], vec![], false);
         let DraftTaskRequest::Write(mut write) = request.draft else {
@@ -3876,7 +4046,13 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
                 .contains(&identifier.as_str()),
                 _ => true,
             });
-        let statement = "Review the exact synthetic career artifact and its declared evidence without changing it.".to_owned();
+        let statement = if evidence {
+            "Review the exact synthetic career artifact and its declared evidence without changing it.".to_owned()
+        } else {
+            manifest
+                .holistic_task_statement(&receipts)
+                .expect("current owner receipt handoff")
+        };
         request.source = RequestSource::UserLanguage {
             statements: vec![UserStatement {
                 identifier: "statement-0000000000000001".into(),
@@ -3892,6 +4068,13 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
         );
         write.common.task_statement =
             harness_fixture::value(statement, 3, &mut request.decision_trace.records);
+        if !evidence {
+            write.common.evidence_source_paths = Some(harness_fixture::value(
+                vec!["vault/personal/profile.md".into()],
+                9,
+                &mut request.decision_trace.records,
+            ));
+        }
         if evidence {
             write.common.context_grants = Some(harness_fixture::value(
                 vec![ContextGrant {
@@ -4020,7 +4203,7 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
                 content_digest: ontology::store::digest(body)
             }
         );
-        assert_eq!(receipt.evidence_bundle_digest.is_some(), evidence);
+        assert!(receipt.evidence_bundle_digest.is_some());
         let path = artifacts.path().join(if evidence {
             "owner.json"
         } else {
@@ -4107,6 +4290,245 @@ fn private_staging_directory(path: &Path) {
         .mode(0o700)
         .create(path)
         .expect("owned staging directories");
+}
+
+#[tokio::test]
+async fn native_primary_only_career_composes_without_foreign_receipts_and_binds_leaf_facts() {
+    use context_core::{career::*, harness::*};
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let fixture = context_fixture::build();
+    let leaf = "vault/personal/facts/award.md";
+    fs::write(
+        fixture.path().join("personal/facts/award.md"),
+        "# Award\nA fictional team award.\n",
+    )
+    .unwrap();
+    fs::write(fixture.path().join("personal/writing/evidence.md"), format!("```career-routes\n{}\n```\n", json!({"routes":[{"owner":{"kind":"personal"},"kind":"fact","path":leaf,"label":"award"}]}))).unwrap();
+    let scopes = context_fixture::SCOPES
+        .iter()
+        .map(|s| s.parse().unwrap())
+        .collect::<Vec<ContextScope>>();
+    let fixture_root = fixture.path().canonicalize().unwrap();
+    let initial = inventory(&fixture_root, &scopes).unwrap();
+    store
+        .import_context(&fixture_root, &scopes, &initial.inventory_digest)
+        .await
+        .unwrap();
+    let sha = ontology::store::digest(
+        &fs::read(fixture.path().join("profile/rules/control.md")).unwrap(),
+    );
+    let view = harness_fixture::view();
+    let root = view.path().canonicalize().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace = workspace.path().canonicalize().unwrap();
+    fs::write(
+        workspace.join("README.md"),
+        "# Career\nA fictional team award.\n",
+    )
+    .unwrap();
+    let statement = "Review the exact fictional team award artifact.";
+    let inventory = store
+        .career_candidates(
+            &context_fixture::configuration_path(),
+            CareerDiscoveryRequest {
+                original_request: statement.into(),
+                surface: CareerOutputSurface::Resume,
+                approved_scopes: vec!["personal".into()],
+                axis_queries: vec![],
+            },
+            None,
+            false,
+        )
+        .await
+        .unwrap()
+        .inventory;
+    let comparison = CareerComparison {
+        requirements: vec![CareerRequirement {
+            id: "award".into(),
+            original_span: CareerSpan {
+                start: 0,
+                end: statement.len(),
+            },
+            kind: CareerRequirementKind::Requirement,
+            coverage: CareerCoverage::Direct,
+            material: true,
+        }],
+        decisions: inventory
+            .candidates
+            .iter()
+            .map(|c| CareerDecision {
+                requirement_id: "award".into(),
+                candidate_path: c.path.clone(),
+                disposition: if c.path == leaf {
+                    CareerDisposition::Selected
+                } else {
+                    CareerDisposition::Excluded
+                },
+                reason: "Bounded original fixture facet".into(),
+                facets: vec![CareerFacet {
+                    axis: CareerAxis::Result,
+                    original: CareerLocator {
+                        path: c.path.clone(),
+                        original_span: CareerSpan { start: 0, end: 5 },
+                    },
+                }],
+            })
+            .collect(),
+        placements: vec![CareerPlacement {
+            claim_id: "award".into(),
+            candidate_path: leaf.into(),
+            requirement_ids: vec!["award".into()],
+            source_locators: vec![CareerLocator {
+                path: leaf.into(),
+                original_span: CareerSpan { start: 8, end: 30 },
+            }],
+            target: "README.md".into(),
+            slot: "award".into(),
+        }],
+        inventory,
+    };
+    let manifest = CareerCompositionManifest {
+        version: HARNESS_SCHEMA_VERSION,
+        comparison: Some(comparison),
+        career_output_surface: CareerOutputSurface::Resume,
+        artifact_targets: vec!["README.md".into()],
+        coverage: CareerCoverageMode::Selected,
+        complete_coverage_confirmation_reported: false,
+        evidence_owners: vec![],
+        canonical_evidence_owners: vec![],
+        excluded_evidence_owners: vec![],
+        claim_lineage: vec![CareerClaimLineage {
+            claim_id: "award".into(),
+            evidence_owner: DataOwner::Personal,
+            evidence_source_paths: vec![leaf.into()],
+        }],
+    };
+    let mut records = vec![];
+    let request = RequestEnvelope {
+        version: HARNESS_SCHEMA_VERSION,
+        source: RequestSource::UserLanguage {
+            statements: vec![UserStatement {
+                identifier: "statement-0000000000000001".into(),
+                text: statement.into(),
+            }],
+        },
+        draft: DraftTaskRequest::Review(DraftReviewContract {
+            common: DraftTaskCommon {
+                owner: harness_fixture::value(DataOwner::Personal, 1, &mut records),
+                intent: harness_fixture::value(
+                    HarnessIntent::CareerArtifact {
+                        surface: CareerOutputSurface::Resume,
+                    },
+                    2,
+                    &mut records,
+                ),
+                task_statement: harness_fixture::value(statement.to_owned(), 3, &mut records),
+                execution_profile: harness_fixture::default(
+                    HarnessExecutionProfile::Standard,
+                    4,
+                    PolicyDefaultRule::StandardExecutionProfile,
+                    &sha,
+                    &mut records,
+                ),
+                context_grants: None,
+                evidence_source_paths: Some(harness_fixture::value(
+                    vec![leaf.into(), "vault/personal/profile.md".into()],
+                    9,
+                    &mut records,
+                )),
+            },
+            review_kind: harness_fixture::value(ReviewKind::Document, 5, &mut records),
+            targets: harness_fixture::value(vec!["README.md".into()], 6, &mut records),
+        }),
+        decision_trace: DecisionTrace { records },
+    };
+    let before = native_rows_fingerprint(&store).await;
+    let (files, prepared) = harness_fixture::cli_prepared_with_manifest(
+        &store,
+        &root,
+        &workspace,
+        request,
+        Some(&manifest),
+    )
+    .await;
+    assert!(prepared.role_run.role_metadata.iter().any(|role| {
+        matches!(&role.task, RoleTaskContract::Reviewer { verification_requirements, .. }
+            if verification_requirements.iter().any(|r| r.unit == VerificationUnit::CareerHolisticCoherence))
+    }));
+    let head = harness_fixture::cli_roles(
+        &store,
+        &root,
+        &workspace,
+        files.path(),
+        &prepared,
+        "primary-award-review",
+        "",
+        false,
+    )
+    .await;
+    assert_eq!(head.state, HarnessExecutionState::Evaluated);
+    let validated = harness_fixture::command(
+        &store,
+        &root,
+        &workspace,
+        "validate",
+        &["--run-id".into(), "primary-award-review".into()],
+    )
+    .await;
+    assert!(
+        validated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+    let validated_record: HarnessExecutionRecord =
+        decode_current_json(&validated.stdout, "primary career validation").unwrap();
+    assert_eq!(validated_record.state, HarnessExecutionState::Validated);
+    let record = files.path().join("accepted.json");
+    fs::write(&record, validated.stdout).unwrap();
+    let attested = harness_fixture::command(
+        &store,
+        &root,
+        &workspace,
+        "attest-career",
+        &[
+            "--execution-record".into(),
+            record.display().to_string(),
+            "--prepared-run".into(),
+            files.path().join("prepared.json").display().to_string(),
+        ],
+    )
+    .await;
+    assert!(
+        attested.status.success(),
+        "{}",
+        String::from_utf8_lossy(&attested.stderr)
+    );
+    let receipt = files.path().join("receipt.json");
+    fs::write(&receipt, attested.stdout).unwrap();
+    let composed = harness_fixture::command(
+        &store,
+        &root,
+        &workspace,
+        "compose-career",
+        &[
+            "--career-manifest".into(),
+            files.path().join("manifest.json").display().to_string(),
+            "--holistic-receipt".into(),
+            receipt.display().to_string(),
+            "--json".into(),
+        ],
+    )
+    .await;
+    assert!(
+        composed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let receipt: CareerExecutionCompositionReceipt =
+        decode_current_json(&composed.stdout, "primary only composition").unwrap();
+    assert!(receipt.declared_evidence_owners.is_empty());
+    assert_eq!(native_rows_fingerprint(&store).await, before);
 }
 
 fn private_staging_file(path: &Path, bytes: &[u8]) {
