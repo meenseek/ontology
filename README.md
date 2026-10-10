@@ -52,6 +52,8 @@ Native scope는 `profile`, `personal`, `work/common`, `work/<회사 slug>`다. �
 
 이 README는 시스템 구성·데이터 흐름·저장 및 실행 경계를 설명한다. [AGENTS.md](AGENTS.md)는 저장소 개발, 로컬 설치·실행·복구·백업·검증과 호출 참고를 소유하며 [문서별 소유권](AGENTS.md#이-저장소의-문서-소유권)을 안내한다. 조직 저장소의 공통 문서 배치 기준은 `meenseek/.github`의 `docs/repository-rules.md`에 둔다.
 
+[종합평가 기준](docs/evaluation.md)은 검색·재사용, 검토 비용 대비 효과, 실제 운영·복구, 필요한 컨텍스트 선택의 평가 항목과 지표를 소유한다.
+
 사용자별 source 선택, 연결 정보와 정책은 Git에 포함하지 않는다. 이 저장소는 scoped source 읽기와 identity·revision·digest 보존, 검토·적용·복구의 실행 계약을 소유한다. 호출자의 승인된 설정과 현재 원문으로 동작하며, 조회 사본이나 저장소 문서가 그 승인을 대신하지 않는다.
 
 Harness의 설치별 정책 선택은 명시적 caller 설정으로 전달한다. 누락된 설정과 기존 plan에 결합된 설정 digest의 변경은 source 접근 전에 거절한다. 형식과 CLI 호출은 [호출자 정책 설정](AGENTS.md#호출자-정책-설정)이 소유한다.
