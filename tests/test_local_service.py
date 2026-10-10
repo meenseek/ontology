@@ -1,4 +1,4 @@
-"""Login-service installation keeps the previous install on a failed health check."""
+"""Autostart installation preserves rollback and detects an outdated build."""
 
 import importlib.util
 from pathlib import Path
@@ -92,7 +92,7 @@ class InstallTests(unittest.TestCase):
 
         with patch.object(service, "wait_until_ready", side_effect=RuntimeError("not ready")):
             with patch.object(service, "launchctl", side_effect=fail_restore):
-                with self.assertRaisesRegex(RuntimeError, "이전 로그인 서비스도 복구하지 못했습니다"):
+                with self.assertRaisesRegex(RuntimeError, "이전 자동 실행도 복구하지 못했습니다"):
                     service.install()
         self.assertEqual(self.plist.read_bytes(), b"old plist")
         self.assertEqual((self.runtime / "previous-install").read_text(), "previous")
@@ -109,6 +109,38 @@ class InstallTests(unittest.TestCase):
         with patch.object(service.socket, "create_connection", side_effect=socket.timeout()):
             with self.assertRaisesRegex(RuntimeError, "앱 포트 상태를 확인할 수 없습니다"):
                 service.install()
+
+    def test_status_checks_installed_binary_and_web_assets(self):
+        with patch.object(service, "wait_until_ready"):
+            service.install()
+        state = subprocess.CompletedProcess([], 0, b"\n\tstate = running\n\tpid = 123\n")
+        with patch.object(service, "launchctl", return_value=state), patch.object(service, "app_ready", return_value=True):
+            self.assertEqual(service.status(), 0)
+            for relative in ("target/debug/ontology", "scripts/serve-local.sh", "web/dist/index.html"):
+                with self.subTest(relative=relative):
+                    path = self.runtime / relative
+                    original = path.read_bytes()
+                    path.write_bytes(b"old build")
+                    self.assertEqual(service.status(), 1)
+                    path.write_bytes(original)
+            (self.runtime / "web/dist/obsolete.js").write_bytes(b"obsolete")
+            self.assertEqual(service.status(), 1)
+
+    def test_status_rejects_registration_without_a_healthy_app(self):
+        running = subprocess.CompletedProcess([], 0, b"\n\tstate = running\n\tpid = 123\n")
+        stopped = subprocess.CompletedProcess([], 0, b"\n\tstate = waiting\n")
+        with patch.object(service, "launchctl", return_value=stopped), patch.object(service, "app_ready") as health:
+            self.assertEqual(service.status(), 1)
+            health.assert_not_called()
+        with patch.object(service, "launchctl", return_value=running), patch.object(service, "app_ready", return_value=False):
+            self.assertEqual(service.status(), 1)
+
+    def test_missing_build_is_not_reported_as_current(self):
+        with patch.object(service, "wait_until_ready"):
+            service.install()
+        (self.runtime / "target/debug/ontology").unlink()
+        with self.assertRaisesRegex(FileNotFoundError, "빌드 파일이 없습니다"):
+            service.build_matches()
 
 
 if __name__ == "__main__":

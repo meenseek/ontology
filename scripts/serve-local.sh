@@ -3,8 +3,6 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 umask 077
-mkdir -p "$HOME/Library/Logs"
-exec >>"$HOME/Library/Logs/ontology.log" 2>&1
 
 set -a
 source "$root/.env"

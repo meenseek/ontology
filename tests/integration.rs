@@ -447,6 +447,154 @@ async fn git_import_contract() {
 }
 
 #[tokio::test]
+async fn health_checks_preserve_browser_sessions_and_request_protection() {
+    let _guard = TEST_LOCK.lock().await;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use ontology::{
+        api::{AppState, router},
+        config::Config,
+    };
+    use tower::ServiceExt;
+
+    let store = store().await;
+    let app = router(AppState::new(
+        store.clone(),
+        Config {
+            address: "127.0.0.1:47831".parse().expect("loopback address"),
+            web_dist: "web/dist".into(),
+        },
+    ));
+    let request = |path: &str| {
+        Request::builder()
+            .uri(path)
+            .header("host", "127.0.0.1:47831")
+            .body(Body::empty())
+            .expect("request")
+    };
+    let before = store.calls();
+    for _ in 0..128 {
+        let response = app
+            .clone()
+            .oneshot(request("/api/health"))
+            .await
+            .expect("health");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key("set-cookie"));
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes()
+                .as_ref(),
+            b"{\"ok\":true}"
+        );
+    }
+    assert_eq!(store.calls() - before, 128, "one DB graph query per check");
+    let mut first_cookie = None;
+    for _ in 0..64 {
+        let response = app
+            .clone()
+            .oneshot(request("/api/session"))
+            .await
+            .expect("browser session");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "health checks leave all browser slots available"
+        );
+        first_cookie.get_or_insert_with(|| {
+            response.headers()["set-cookie"]
+                .to_str()
+                .expect("cookie")
+                .split(';')
+                .next()
+                .expect("cookie pair")
+                .to_owned()
+        });
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(request("/api/session"))
+            .await
+            .expect("session limit")
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("/api/health"))
+            .await
+            .expect("health at capacity")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("/api/graph?scope=meenseek&limit=1"))
+            .await
+            .expect("protected graph")
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let browser = Request::builder()
+        .uri("/api/graph?scope=meenseek&limit=1")
+        .header("host", "127.0.0.1:47831")
+        .header("cookie", first_cookie.expect("first browser"))
+        .body(Body::empty())
+        .expect("browser request");
+    assert_eq!(
+        app.clone()
+            .oneshot(browser)
+            .await
+            .expect("browser graph")
+            .status(),
+        StatusCode::OK
+    );
+    let before = store.calls();
+    for (host, origin, site) in [
+        ("evil.invalid", "http://127.0.0.1:47831", "same-origin"),
+        ("127.0.0.1:47831", "http://evil.invalid", "same-origin"),
+        ("127.0.0.1:47831", "http://127.0.0.1:47831", "cross-site"),
+    ] {
+        let hostile = Request::builder()
+            .uri("/api/health")
+            .header("host", host)
+            .header("origin", origin)
+            .header("sec-fetch-site", site)
+            .body(Body::empty())
+            .expect("hostile request");
+        assert_eq!(
+            app.clone()
+                .oneshot(hostile)
+                .await
+                .expect("rejected health")
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        store.calls(),
+        before,
+        "rejected callers do not reach the DB"
+    );
+    store.pool().close().await;
+    assert_eq!(
+        app.oneshot(request("/api/health"))
+            .await
+            .expect("unavailable DB")
+            .status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+}
+
+#[tokio::test]
 async fn api_protection_contract() {
     let _guard = TEST_LOCK.lock().await;
     use axum::{

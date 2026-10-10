@@ -88,7 +88,7 @@ pnpm run dev
 한 번 실행한다. Compose는 볼륨을 자동 생성하지 않는다. 이전 이름의 볼륨이나 기존 DB가
 있으면 빈 볼륨을 만들지 말고 [이전 설치 이름에서 데이터 옮기기](#이전-설치-이름에서-데이터-옮기기)에 따라 데이터를 먼저 옮긴다.
 
-`pnpm run dev`는 기존 로컬 `.env`의 DB 비밀번호를 읽어 PostgreSQL **18.4**를 `127.0.0.1:55432`에 시작하고, 웹 의존성 설치와 번들 생성 뒤 [개발용 앱](http://127.0.0.1:47832)을 실행한다. 설치된 로그인 서비스의 `47831` 포트와 충돌하지 않도록 개발용 기본 포트는 `47832`다. 터미널은 서버가 실행되는 동안 사용 중이다. DB 이름과 사용자, 실행 파일·폴더·원격 저장소, Compose 프로젝트와 영구 볼륨 이름은 `ontology`를 사용한다. 영구 볼륨 이름은 `ontology-data`다.
+`pnpm run dev`는 기존 로컬 `.env`의 DB 비밀번호를 읽어 PostgreSQL **18.4**를 `127.0.0.1:55432`에 시작하고, 웹 의존성 설치와 번들 생성 뒤 [개발용 앱](http://127.0.0.1:47832)을 실행한다. 설치된 온톨로지 자동 실행의 `47831` 포트와 충돌하지 않도록 개발용 기본 포트는 `47832`다. 터미널은 서버가 실행되는 동안 사용 중이다. DB 이름과 사용자, 실행 파일·폴더·원격 저장소, Compose 프로젝트와 영구 볼륨 이름은 `ontology`를 사용한다. 영구 볼륨 이름은 `ontology-data`다.
 
 같은 볼륨을 다시 사용할 때는 **같은 비밀번호**가 필요하다. `.env`나 컨테이너 환경변수에 새 비밀번호를 넣어도 기존 DB 비밀번호는 바뀌지 않는다. 기존 볼륨이 있는데 `.env`를 잃었다면 새 비밀번호를 생성하지 말고 기존 값을 복구한다.
 
@@ -105,7 +105,7 @@ PostgreSQL 컨테이너와 볼륨을 정확히 확인한다.
 `docker volume ls --filter label=com.docker.compose.volume=ontology-data`는 이전 Compose가 만든 볼륨을 찾는 데
 사용할 수 있다. 다른 제품의 볼륨을 선택하지 않는다.
 
-앱·자동 갱신·DB 쓰기와 이전 로그인 서비스를 멈춘 뒤 PostgreSQL을 정상 종료한다.
+앱·자동 갱신·DB 쓰기와 이전 온톨로지 자동 실행을 멈춘 뒤 PostgreSQL을 정상 종료한다.
 `~/Library/LaunchAgents`에 이 앱의 다른 plist가 있으면 Label과 실행 경로를 확인해
 `launchctl bootout`으로 중지한다. 이전 컨테이너가 멈춘 상태에서 그 컨테이너에
 실제로 연결된 이전 볼륨을 읽기 전용으로 마운트하여 빈 `ontology-data`로 소유권과
@@ -137,10 +137,10 @@ docker run --rm --network none --user 0:0 \
 
 복사 비교가 성공하면 `docker compose up -d --wait postgres`로 새 컨테이너를 시작하고
 `python3 scripts/connection.py check --target database`와 native `identity`의 store ID,
-자료 건수를 이전 값과 대조한다. 새 로그인 서비스를 설치한 뒤 `check --target app`도
+자료 건수를 이전 값과 대조한다. 새 온톨로지 자동 실행을 설치한 뒤 `check --target app`도
 확인한다. 새 서비스가 정상일 때 이전 plist를 제거한다. 이전 컨테이너·볼륨은 새 데이터와
 앱 조회가 확인될 때까지 보존하며, 확인 후에도 별도 삭제 승인을 거쳐 정리한다.
-이전 로그인 서비스가 중지된 뒤 `~/Library/Application Support`와 `~/Library/Logs`에
+이전 온톨로지 자동 실행이 중지된 뒤 `~/Library/Application Support`와 `~/Library/Logs`에
 남은 이 앱의 이전 실행 디렉터리·`.env` 복사본·로그도 확인해 정리한다. 이전 plist의
 `ProgramArguments`·`StandardOutPath`가 현행 경로와 같을 수 있다. 현행
 `~/Library/Application Support/ontology`와 `~/Library/Logs/ontology.log`는 보존한다.
@@ -151,6 +151,8 @@ docker run --rm --network none --user 0:0 \
 앱 루트에서 `python3 scripts/connection.py check --target database`는 DB 상태를,
 `python3 scripts/connection.py check --target app`은 앱 상태를 실제로 확인한다.
 `alert`는 상태를 확인하고 연결 실패 시 설치된 Desktop launcher를 연다.
+앱 점검은 `GET /api/health`로 기존 DB 지도 조회를 실행하고 정상 여부만 받는다.
+사용자 세션을 만들거나 자료 내용을 반환하지 않으며 로컬 Host·Origin 보호를 유지한다.
 
 승인된 기존 설치에서 native 호출을 할 때는 DB-only 준비 후 별도의 identity를 확인한다.
 `python3 scripts/connection.py repair --target database`는 정상 DB를 그대로 사용하며,
@@ -158,7 +160,7 @@ Docker 엔진이 꺼졌거나 검증된 기존 DB 컨테이너가 멈춘 경우�
 해당 컨테이너를 시작한다. 기존 볼륨·로컬 포트·인증·SQL 이력을 확인한 뒤 JSON과
 종료 코드 0을 반환한다. Docker 준비는 최대 12회, DB 응답은 최대 8회 확인하며
 각 호출의 제한 시간을 유지한다. 준비 후 native `identity`의 store ID도 대조한다.
-웹 서버·로그인 서비스·빌드·자료 갱신은 실행하지 않으며 DB·볼륨을 새로 만들거나
+웹 서버·온톨로지 자동 실행·빌드·자료 갱신은 실행하지 않으며 DB·볼륨을 새로 만들거나
 비밀번호·권한·schema를 바꾸지 않는다. 권한 제한, 기존 자원 누락·불일치와 인증·SQL
 오류는 자동 복구하지 않는다. 실패한 DB 단계만 중단하고 이미 검증된 다른 결과는 보존한다.
 이 준비는 Mac과 실행기가 켜져 실제 호출될 때 수행되며 잠자기나 전원 종료 중의 실행을
@@ -166,7 +168,7 @@ Docker 엔진이 꺼졌거나 검증된 기존 DB 컨테이너가 멈춘 경우�
 
 Desktop의 `온톨로지 연결 복구.command`를 열면 macOS 상태 대화상자가 나온다. 연결 실패 시
 **연결 복구**를 선택할 수 있다. `repair`는 Docker·DB·schema를 확인하고 정상 앱이
-있으면 재사용한다. 설치된 로그인 서비스가 있으면 이를 다시 시작하고, 없을 때만 현재
+있으면 재사용한다. 설치된 온톨로지 자동 실행이 있으면 이를 다시 시작하고, 없을 때만 현재
 실행 파일을 offline build한 뒤 그 Terminal에서 서버를 실행한다. 앱 내부 지식 지도
 버튼이 아니며, 이 안내가 실제 UI 클릭 검증을 뜻하지 않는다.
 
@@ -174,26 +176,31 @@ Wrong store, missing source, pending apply와 아직 준비되지 않은 project
 아니다. 이런 오류를 연결 복구나 이전 자료 재import로 처리하지 않고 해당 source·작업
 상태를 확인한다.
 
-### 로그인 시 로컬 앱 실행
+### Mac 로그인 후 온톨로지 자동 실행
 
-한 번만 `cargo build --locked --offline`과 `npm --prefix web run build`를 실행한 뒤
-`python3 scripts/local_service.py install`로 macOS 로그인 서비스를 설치할 수 있다.
+Mac에 로그인하면 앱을 자동으로 켜 두어 [온톨로지 주소](http://127.0.0.1:47831)에
+바로 접속할 수 있게 한다. 앱이나 ChatGPT에 별도로 로그인하는 기능은 아니다.
+`cargo build --locked --offline`과 `pnpm --dir web build`로 현재 소스를 빌드·검증한 뒤
+`python3 scripts/local_service.py install`로 설치하거나 기존 설치를 갱신한다.
 설치기는 실행 파일·웹 번들과 기존 `.env`를 사용자 전용
 `~/Library/Application Support/ontology`에 복사한다. `.env`는 0600으로
 보호하고 launchd 설정에는 비밀번호를 넣지 않는다. 서비스는 기존 로컬 DB를 사용하고
 앱을 127.0.0.1:47831에 실행한다. macOS의 Desktop 파일 접근 제한 때문에
-로그인 서비스에서는 지정 원문 자동 갱신을 실행하지 않는다. 원문은 Desktop의
+온톨로지 자동 실행에서는 지정 원문 자동 갱신을 실행하지 않는다. 원문은 Desktop의
 `온톨로지 자료 갱신.command`를 열어 명시적으로 갱신한다.
 터미널을 닫거나 앱 프로세스가 종료돼도 launchd가 다시 시작한다. Docker가 아직
-준비되지 않았다면 DB 연결이 가능해질 때까지 재시도한다. 상태는
-`python3 scripts/local_service.py status`, 중지는
+준비되지 않았다면 DB 연결이 가능해질 때까지 재시도한다.
+`python3 scripts/local_service.py status`는 실행·앱 조회와 설치본이 현재 빌드와 일치하는지
+확인한다. 등록만 됐거나 설치본이 다르면 실패를 반환한다. 중지는
 `python3 scripts/local_service.py remove`로 확인·수행한다. 제거하면 Library의
 실행 복사본과 `.env` 복사본도 지운다. 로그는
 `~/Library/Logs/ontology.log`에 기록한다.
 
-소스·schema 업그레이드 전에는 서비스를 제거한다. 기존 백업·복원·migration 절차를
-마치고 새 실행 파일과 웹 번들을 빌드한 뒤 다시 설치한다. 서비스 재시작은
-DB migration이나 의존성 설치를 대신하지 않는다.
+소스 변경은 빌드·검증 후 같은 `install`로 갱신한다. 앱 조회가 실패하면 이전 설치로
+복구한다. Schema 업그레이드에서는 먼저 자동 실행을 제거하고 기존 백업·복원·migration
+절차를 마친 뒤 빌드·검증·설치한다. 재시작은 현재 빌드를 설치하거나 정식 DB 업그레이드
+절차를 대신하지 않는다. 서버 시작 시 설치된 실행 파일의 migration을 검사·적용하므로
+schema 업그레이드는 반드시 위 절차를 먼저 마친다.
 
 ### 다른 Mac에서 같은 맥락 사용
 
@@ -204,7 +211,7 @@ Codex Desktop 동작은 그 Mac에서 아래 확인을 마쳐야 검증된 것�
 
 1. 기존 Mac에서 `cd "$HOME/Desktop/ontology"`를 실행한 뒤 앱·자동 갱신·importer·기억
    CLI·Harness 등 DB 쓰기를 멈춘다.
-   로그인 서비스가 설치돼 있으면 `python3 scripts/local_service.py remove`로 앱의
+   온톨로지 자동 실행이 설치돼 있으면 `python3 scripts/local_service.py remove`로 앱의
    자동 재시작도 멈춘다. Pending native 작업을 [복구 절차](#백업과-복원-확인)에
    따라 정리한 뒤 같은 절차의 전체
    `pg_dump`를 만들고 별도 DB 복원으로 확인한다. 현재 `git rev-parse HEAD`와 dump의
@@ -216,7 +223,7 @@ Codex Desktop 동작은 그 Mac에서 아래 확인을 마쳐야 검증된 것�
    있으면 여기서 멈추고 그 데이터를 확인한다.** 이 절차는 빈 볼륨에만 적용한다.
    새 Mac에서 [새 설치의 `.env` 생성 방법](#앱-시작과-종료)으로 새 DB 비밀번호를
    만들 수 있다. 기존 볼륨을 재사용할 때만 그 볼륨의 기존 비밀번호가 필요하다.
-3. 앱, `init`, 로그인 서비스를 시작하기 전에 받은 dump의 SHA-256을 기존 Mac에서
+3. 앱, `init`, 온톨로지 자동 실행을 시작하기 전에 받은 dump의 SHA-256을 기존 Mac에서
    기록한 값과 비교한다. 일치할 때만 PostgreSQL을 시작하고 빈 운영 DB에 복원한다.
 
    ```bash
@@ -250,7 +257,7 @@ Codex Desktop 동작은 그 Mac에서 아래 확인을 마쳐야 검증된 것�
    복원이나 schema 확인이 실패하면 앱을 시작하지 않고 원인을 확인한다. 기존 데이터가
    든 DB에 이 명령을 재실행하지 않는다. 받은 dump 사본은 복원 확인과 새 백업 보존
    여부를 확인한 뒤 정리하며 유일한 복구용 백업은 지우지 않는다.
-4. 비공개 연결 설정과 승인된 source 선택은 Git 밖에서 별도로 전달한다. 새 Mac에서 `identity`를 승인된 store ID와 대조하고 선택한 scope의 정확한 source를 raw-read한다. 전체 UTF-8 출력과 종료 코드를 확인한다. 설치·복원 확인은 새 Mac에서 실제 수행한 범위만 보고한다. 웹 화면을 사용할 때만 Node·pnpm과 웹 빌드가 필요하며 로그인 서비스는 native 읽기의 선행 조건이 아니다.
+4. 비공개 연결 설정과 승인된 source 선택은 Git 밖에서 별도로 전달한다. 새 Mac에서 `identity`를 승인된 store ID와 대조하고 선택한 scope의 정확한 source를 raw-read한다. 전체 UTF-8 출력과 종료 코드를 확인한다. 설치·복원 확인은 새 Mac에서 실제 수행한 범위만 보고한다. 웹 화면을 사용할 때만 Node·pnpm과 웹 빌드가 필요하며 온톨로지 자동 실행은 native 읽기의 선행 조건이 아니다.
 
 ## 3D 지식 지도에서 탐색하기
 
@@ -829,7 +836,7 @@ bash scripts/brain.sh context edit \
 
 자동 갱신은 `ONTOLOGY_SYNC_CONFIG`를 설정해야 켜진다. 추적되는 형식 예시는 `sync.example.json`이며 실제 설정 파일 `sync.local.json`은 Git에서 제외된다. 아래 JSON은 앱 조회용 세 경로의 설정 예시다. `<기존 목적 문서의 정확한 상대 경로>.md`를 실제 native 원문의 상대 경로로 바꾸고, 설정된 native store identity를 확인한 뒤 앱 루트의 `sync.local.json`에 저장한다. 경로를 바꾼 뒤 정확히 세 경로만 갱신한다.
 
-로그인 서비스를 사용하는 Mac에서는 Desktop의 `온톨로지 자료 갱신.command`를 열면
+온톨로지 자동 실행을 사용하는 Mac에서는 Desktop의 `온톨로지 자료 갱신.command`를 열면
 현재 `sync.local.json`에 지정된 원문을 한 번 갱신한다. 이 명령은 기존 DB와 현재
 schema를 먼저 확인하고 Rust 실행 파일을 오프라인으로 빌드한다. 앱 서비스는 계속
 실행된다. 바로 가기가 없다면 저장소에서 다음을 한 번 실행한다.
@@ -877,7 +884,7 @@ cargo run --locked -- sync-once && bash scripts/dev.sh
 
 설정은 최대 32 KiB, 원문 항목 1~8개, 전체 경로 100개, 간격 15~3,600초다. 읽기 전에 설정 전체를 검증하고, 잘못된 설정이면 자동 원문 읽기를 멈춘다. 파일을 고치면 다음 주기에 다시 읽는다. 실패는 설정 항목별로 격리되어 다른 항목은 계속 처리하며, 한 항목 안의 파일 묶음은 함께 반영한다. 실패한 조회 사본은 마지막 성공 내용을 보존하면서 확인 실패로 표시한다. Native source 부재를 삭제로 해석하지 않으며, pending apply·잠금 오류는 해당 작업이 끝난 뒤 재시도한다.
 
-서버의 `serve`가 실행되는 동안 시작 시 한 번, 이후 지정 간격마다 설정과 원문 상태를 다시 읽는다. 재시작·절전 복귀 뒤에는 현재 상태를 확인하고 놓친 횟수만큼 몰아서 실행하지 않는다. 로그인 서비스는 명시적으로 설치한 경우에만 실행된다. 자동 갱신을 끄려면 서버를 종료하고 `ONTOLOGY_SYNC_CONFIG`를 환경과 `.env`에서 해제한 뒤 다시 시작한다.
+서버의 `serve`가 실행되는 동안 시작 시 한 번, 이후 지정 간격마다 설정과 원문 상태를 다시 읽는다. 재시작·절전 복귀 뒤에는 현재 상태를 확인하고 놓친 횟수만큼 몰아서 실행하지 않는다. 온톨로지 자동 실행은 명시적으로 설치한 경우에만 실행된다. 자동 갱신을 끄려면 서버를 종료하고 `ONTOLOGY_SYNC_CONFIG`를 환경과 `.env`에서 해제한 뒤 다시 시작한다.
 
 수동 가져오기와 자동 갱신·`sync-once`는 DB 잠금으로 동시 실행을 막는다. 겹치면 다른 작업이 끝난 뒤 재시도한다. `sync-once`는 항목별 종류·건수·호출량·오류 분류를 담은 JSON을 출력하고 실패나 중복 실행 시 0이 아닌 코드로 종료한다. 화면의 **상태 새로고침**는 마지막 관측 상태만 다시 조회하며 가져오기를 실행하지 않는다. 표시된 상태는 실시간 최신 보장이 아니다.
 

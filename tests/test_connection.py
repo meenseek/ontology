@@ -27,7 +27,7 @@ INFO = dict(id="a" * 64, name="/" + c.CONTAINER, running=True, network="bridge",
 
 
 @contextlib.contextmanager
-def http_fixture(graph=None, cookie=True, mode=None):
+def http_fixture(health=None, mode=None):
     calls = []
     transferred = []
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -36,9 +36,7 @@ def http_fixture(graph=None, cookie=True, mode=None):
 
         def do_GET(self):
             calls.append((self.path, self.headers.get("Cookie")))
-            is_session = self.path == "/api/session"
-            body = {"csrf_token": "fixture"} if is_session else graph
-            raw = json.dumps(body).encode()
+            raw = json.dumps(health).encode()
             if mode == "invalid_json":
                 raw = b"not-json"
             elif mode == "too_large":
@@ -48,8 +46,7 @@ def http_fixture(graph=None, cookie=True, mode=None):
             self.send_header("Content-Length", str(len(raw)))
             if mode == "redirect":
                 self.send_header("Location", "/elsewhere")
-            if is_session and cookie:
-                self.send_header("Set-Cookie", "ontology_session=fixture-session; Path=/; HttpOnly; SameSite=Strict")
+            self.send_header("Set-Cookie", "ontology_session=fixture-session; Path=/; HttpOnly; SameSite=Strict")
             self.end_headers()
             try:
                 if mode == "trickle":
@@ -76,39 +73,29 @@ def http_fixture(graph=None, cookie=True, mode=None):
 
 
 class HttpTests(unittest.TestCase):
-    def test_authenticated_graph_transport_and_call_bound(self):
-        for size in (0, 1):
-            with self.subTest(size=size), http_fixture(dict(scope="meenseek", nodes=[{}] * size, links=[])) as (url, calls, sizes):
-                session = c.app_session()
-                c.app_health(url, session)
-                c.app_health(url, session)
-                self.assertEqual(len(calls), 4)
-                self.assertIsNone(calls[0][1])
-                self.assertTrue(all(cookie == "ontology_session=fixture-session" for _, cookie in calls[1:]))
-                self.assertEqual(calls[1][0], "/api/graph?scope=meenseek&limit=1")
-                self.assertLessEqual(sum(sizes), 4 * c.MAX_HTTP_BYTES)
-                self.assertEqual(len(list(session[1])), 1)
+    def test_health_transport_never_requests_or_reuses_a_session(self):
+        with http_fixture(dict(ok=True)) as (url, calls, sizes):
+            for _ in range(65):
+                c.app_health(url)
+            self.assertEqual(calls, [("/api/health", None)] * 65)
+            self.assertLessEqual(sum(sizes), 65 * c.MAX_HTTP_BYTES)
 
-    def test_session_only_html_redirect_bad_json_and_invalid_graph_never_pass(self):
+    def test_html_redirect_bad_json_and_invalid_health_never_pass(self):
         for mode in ("html", "redirect", "invalid_json", "status", "too_large"):
             with self.subTest(mode=mode), http_fixture(mode=mode) as (url, calls, _):
                 with self.assertRaises(c.Failure):
                     c.app_health(url)
                 self.assertEqual(len(calls), 1)
-        with http_fixture(cookie=False) as (url, calls, _):
-            with self.assertRaises(c.Failure) as caught:
-                c.app_health(url)
-            self.assertEqual(caught.exception.code, "session_invalid")
-            self.assertEqual(len(calls), 1)
-        for graph in (None, {}, dict(scope="personal", nodes=[], links=[]), dict(scope="meenseek", nodes=[], links={})):
-            with self.subTest(graph=graph), http_fixture(graph) as (url, calls, _):
+        for health in (None, {}, dict(ok=False), dict(ok=1), dict(ok="true"),
+                       dict(ok=True, nodes=[]), dict(csrf_token="fixture")):
+            with self.subTest(health=health), http_fixture(health) as (url, calls, _):
                 with self.assertRaises(c.Failure) as caught:
                     c.app_health(url)
-                self.assertEqual(caught.exception.code, "graph_invalid")
-                self.assertEqual(len(calls), 2)
+                self.assertEqual(caught.exception.code, "health_invalid")
+                self.assertEqual(len(calls), 1)
 
     def test_total_deadline_bounds_trickling_peer(self):
-        with http_fixture(mode="trickle") as (url, calls, _), patch.object(c, "HTTP_TIMEOUT", 0.06):
+        with http_fixture(dict(ok=True), mode="trickle") as (url, calls, _), patch.object(c, "HTTP_TIMEOUT", 0.06):
             start = time.monotonic()
             with self.assertRaises(c.Failure):
                 c.app_health(url)
@@ -245,7 +232,7 @@ class TempTests(unittest.TestCase):
             self.assertTrue(c.restart_login_service())
         cmd.assert_called_once_with(
             ["launchctl", "kickstart", "-k", c.SERVICE_TARGET], "app", "service_start_failed",
-            "설치된 로그인 서비스를 시작할 수 없습니다. 서비스 상태와 로그를 확인하세요.", timeout=15)
+            "설치된 온톨로지 자동 실행을 시작할 수 없습니다. 서비스 상태와 로그를 확인하세요.", timeout=15)
 
     def test_restart_login_service_bootstraps_unloaded_job(self):
         plist = self.root / "ontology.plist"
@@ -256,7 +243,7 @@ class TempTests(unittest.TestCase):
             self.assertTrue(c.restart_login_service())
         cmd.assert_called_once_with(
             ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)], "app",
-            "service_start_failed", "설치된 로그인 서비스를 시작할 수 없습니다. 서비스 상태와 로그를 확인하세요.",
+            "service_start_failed", "설치된 온톨로지 자동 실행을 시작할 수 없습니다. 서비스 상태와 로그를 확인하세요.",
             timeout=15)
 
     def test_existing_server_does_not_bypass_schema_failure(self):
@@ -599,7 +586,7 @@ class DockerDiagnosticsTests(unittest.TestCase):
             for name, value in (("recovery_lock", contextlib.nullcontext()),
                                 ("server_environment", ENV), ("database_health", None),
                                 ("sql_manifest", {"baseline.sql": "fixture"}),
-                                ("verify_schema", None), ("app_session", (None, None)),
+                                ("verify_schema", None),
                                 ("existing_app", True), ("run_server", None)):
                 mocks[name] = stack.enter_context(patch.object(c, name, return_value=value))
             mocks["sleep"] = stack.enter_context(patch.object(c.time, "sleep"))
@@ -647,7 +634,7 @@ class DockerDiagnosticsTests(unittest.TestCase):
                 self.assertEqual(self.process.call_args.args[0], [self.DOCKER, "start", INFO["id"]])
                 self.assertEqual(self.process.call_args.kwargs["timeout"], 15)
                 for name in ("server_environment", "database_health", "sql_manifest", "verify_schema",
-                             "app_session", "existing_app", "run_server", "sleep"):
+                             "existing_app", "run_server", "sleep"):
                     dependencies[name].assert_not_called()
 
     def test_missing_resources_and_sql_permissions_keep_database_codes(self):
@@ -771,7 +758,7 @@ class DockerDiagnosticsTests(unittest.TestCase):
             self.assertEqual(dependencies["sleep"].call_count, c.DOCKER_ATTEMPTS - 1)
             inspect.assert_not_called()
             for name in ("server_environment", "database_health", "sql_manifest", "verify_schema",
-                         "app_session", "existing_app", "run_server"):
+                         "existing_app", "run_server"):
                 dependencies[name].assert_not_called()
 
     def test_repair_later_nonempty_readiness_continues_without_extra_probes(self):

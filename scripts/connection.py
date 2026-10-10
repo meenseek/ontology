@@ -2,10 +2,10 @@
 """Existing local ontology connections only; Python 3 standard library.
 
 Double-click the Desktop symlink 온톨로지 연결 복구.command to inspect and recover.
-Use `check --target app` for the authenticated graph or `--target database` for
+Use `check --target app` for the session-free graph health check or `--target database` for
 DB-only callers. Both print JSON and return nonzero on failure. `alert` runs the
 same check and opens the installed launcher on failure. `repair` is the explicit
-Terminal equivalent of 연결 복구. An installed login service stays running;
+Terminal equivalent of 연결 복구. An installed macOS autostart app stays running;
 without one, keep this Terminal open and use Ctrl-C to stop its server.
 `repair --target database` prepares only the existing DB and exits with JSON;
 it reuses a healthy DB and never starts, builds or restarts the HTTP app.
@@ -18,7 +18,6 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import http.client
-import http.cookiejar
 import json
 import os
 from pathlib import Path
@@ -178,16 +177,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def app_session():
-    """Reuse one ephemeral cookie jar throughout a recovery attempt."""
-    jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-                                        NoRedirect(), urllib.request.HTTPCookieProcessor(jar))
-
-    return opener, jar
-
-
-def app_health(url=APP_URL, session=None):
+def app_health(url=APP_URL):
     # This CLI runs on the main thread. A total deadline also bounds a peer that
     # keeps trickling headers/body just fast enough to evade socket timeouts.
     def expired(signum, frame):
@@ -196,7 +186,7 @@ def app_health(url=APP_URL, session=None):
     previous = signal.signal(signal.SIGALRM, expired)
     timer = signal.setitimer(signal.ITIMER_REAL, HTTP_TIMEOUT * 2)
     try:
-        _app_health(url, session)
+        _app_health(url)
     except TimeoutError:
         raise Failure("app", "app_timeout", "앱의 지도 조회 제한 시간을 초과했습니다.") from None
     finally:
@@ -206,29 +196,23 @@ def app_health(url=APP_URL, session=None):
             signal.setitimer(signal.ITIMER_REAL, max(0.001, timer[0] - (time.monotonic() - started)), timer[1])
 
 
-def _app_health(url, session):
-    opener, jar = session if session is not None else app_session()
-
-    def read(path):
-        request = urllib.request.Request(url + path, headers={"Accept": "application/json"})
-        try:
-            with opener.open(request, timeout=HTTP_TIMEOUT) as response:
-                if response.status != 200 or response.headers.get_content_type() != "application/json":
-                    raise ValueError()
-                raw = response.read(MAX_HTTP_BYTES + 1)
-                if len(raw) > MAX_HTTP_BYTES:
-                    raise ValueError()
-                return json.loads(raw)
-        except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException):
-            raise Failure("app", "app_unavailable", "앱의 인증된 지도 조회가 실패했습니다.") from None
-
-    session_body = read("/api/session")
-    if not isinstance(session_body, dict) or not any(c.name == "ontology_session" and c.value for c in jar):
-        raise Failure("app", "session_invalid", "앱의 임시 세션을 확인할 수 없습니다.")
-    graph = read("/api/graph?scope=meenseek&limit=1")
-    if (not isinstance(graph, dict) or graph.get("scope") != "meenseek"
-            or not isinstance(graph.get("nodes"), list) or not isinstance(graph.get("links"), list)):
-        raise Failure("app", "graph_invalid", "앱의 지도 응답 형식이 예상과 다릅니다.")
+def _app_health(url):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    request = urllib.request.Request(url + "/api/health", headers={"Accept": "application/json"})
+    try:
+        with opener.open(request, timeout=HTTP_TIMEOUT) as response:
+            if response.status != 200 or response.headers.get_content_type() != "application/json":
+                raise ValueError()
+            raw = response.read(MAX_HTTP_BYTES + 1)
+            if len(raw) > MAX_HTTP_BYTES:
+                raise ValueError()
+            health = json.loads(raw)
+    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as error:
+        if isinstance(error, urllib.error.HTTPError):
+            error.close()
+        raise Failure("app", "app_unavailable", "앱의 DB 기반 지도 점검이 실패했습니다.") from None
+    if not isinstance(health, dict) or len(health) != 1 or health.get("ok") is not True:
+        raise Failure("app", "health_invalid", "앱의 상태 응답 형식이 예상과 다릅니다.")
 
 
 def check(target, root=ROOT):
@@ -340,7 +324,7 @@ def retry(operation, attempts):
             time.sleep(1)
 
 
-def existing_app(session=None):
+def existing_app():
     try:
         with socket.create_connection(("127.0.0.1", 47831), timeout=0.3):
             pass
@@ -349,7 +333,7 @@ def existing_app(session=None):
     except OSError:
         raise Failure("app", "listener_unknown", "앱 포트 사용 상태를 확인할 수 없습니다.") from None
     try:
-        app_health(session=session)
+        app_health()
     except Failure:
         raise Failure("app", "listener_unknown", "앱 포트를 다른 서버가 사용 중이거나 기존 서버가 응답하지 않습니다. 해당 서버를 직접 확인하세요.") from None
     return True
@@ -363,11 +347,11 @@ def restart_login_service():
                                 capture_output=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         raise Failure("app", "service_status_failed",
-                      "로그인 서비스 상태를 확인할 수 없습니다.") from None
+                      "온톨로지 자동 실행 상태를 확인할 수 없습니다.") from None
     action = (["launchctl", "kickstart", "-k", SERVICE_TARGET] if status.returncode == 0
               else ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(SERVICE_PLIST)])
     command(action, "app", "service_start_failed",
-            "설치된 로그인 서비스를 시작할 수 없습니다. 서비스 상태와 로그를 확인하세요.", timeout=15)
+            "설치된 온톨로지 자동 실행을 시작할 수 없습니다. 서비스 상태와 로그를 확인하세요.", timeout=15)
     return True
 
 
@@ -385,9 +369,8 @@ def stop_child(child):
             pass
 
 
-def run_server(env, root=ROOT, session=None, binary=None):
+def run_server(env, root=ROOT, binary=None):
     child = None
-    session = session if session is not None else app_session()
     def interrupted(signum, frame):
         raise KeyboardInterrupt()
     previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGHUP, signal.SIGTERM)}
@@ -403,7 +386,7 @@ def run_server(env, root=ROOT, session=None, binary=None):
             if child.poll() is not None:
                 raise Failure("app", "startup_exited", "앱 서버가 지도 조회 확인 전에 종료됐습니다.")
             try:
-                app_health(session=session)
+                app_health()
             except Failure:
                 if attempt == START_ATTEMPTS - 1:
                     raise Failure("app", "startup_timeout", "제한 시간 안에 앱의 DB 기반 지도 조회를 확인하지 못했습니다.") from None
@@ -455,17 +438,16 @@ def repair(root=ROOT, target="app"):
             unchanged(manifest, root)
             return dict(ok=True, target="database", layer="database", code="ready",
                         message="DB 조회가 정상입니다.", impact="")
-        session = app_session()
-        if existing_app(session):
+        if existing_app():
             print("기존 앱의 DB 기반 지도 조회가 정상입니다. 실행 중인 서버를 그대로 사용합니다.")
             return
         if restart_login_service():
             try:
-                retry(lambda: app_health(session=session), START_ATTEMPTS)
+                retry(app_health, START_ATTEMPTS)
             except Failure:
                 raise Failure("app", "service_unavailable",
-                              "로그인 서비스를 다시 시작했지만 앱이 준비되지 않았습니다. 서비스 상태와 로그를 확인하세요.") from None
-            print("연결 복구 완료: 로그인 서비스의 DB 기반 지도 조회가 정상입니다.")
+                              "온톨로지 자동 실행을 다시 시작했지만 앱이 준비되지 않았습니다. 서비스 상태와 로그를 확인하세요.") from None
+            print("연결 복구 완료: 온톨로지 자동 실행의 DB 기반 지도 조회가 정상입니다.")
             return
         print("기존 데이터 확인 완료. 현재 소스를 오프라인으로 빌드합니다.", flush=True)
         built = command(["cargo", "build", "--locked", "--offline", "--message-format=json"], "recovery", "build_failed",
@@ -488,12 +470,12 @@ def repair(root=ROOT, target="app"):
         info = inspect_container(docker)
         database_health(docker, info, env)
         verify_schema(docker, info, manifest, env)
-        running = existing_app(session)
+        running = existing_app()
         unchanged(manifest, root)
         if running:
             print("기존 앱의 DB 기반 지도 조회가 정상입니다. 실행 중인 서버를 그대로 사용합니다.")
             return
-        run_server(env, root, session, binary)
+        run_server(env, root, binary)
 
 
 def dialog(result, recover=False):
@@ -507,7 +489,7 @@ def dialog(result, recover=False):
     message = result["message"] + ("\n\n" + result["impact"] if result["impact"] else "")
     if recover:
         message += ("\n\n연결 복구를 선택하면 기존 Docker·DB를 확인하고 "
-                    "설치된 로그인 서비스를 다시 시작합니다. 서비스가 없으면 이 터미널에서 앱을 시작합니다.")
+                    "설치된 온톨로지 자동 실행을 다시 시작합니다. 서비스가 없으면 이 터미널에서 앱을 시작합니다.")
     raw = command(["/usr/bin/osascript", "-e", script, message], "recovery",
                   "dialog_failed", "macOS 연결 상태 창을 열 수 없습니다.", timeout=125)
     return raw.decode("utf-8", errors="replace").strip() == "연결 복구"

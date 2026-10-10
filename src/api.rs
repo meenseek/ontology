@@ -54,6 +54,7 @@ pub fn router(state: AppState) -> Router {
     let files = ServeDir::new(&state.config.web_dist)
         .not_found_service(ServeFile::new(state.config.web_dist.join("index.html")));
     Router::new()
+        .route("/api/health", get(health))
         .route("/api/session", get(session))
         .route("/api/brain", post(brain))
         .route("/api/graph", get(graph))
@@ -138,7 +139,7 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
     }
     let path = request.uri().path();
     let api = path.starts_with("/api/");
-    if api && path != "/api/session" {
+    if api && !matches!(path, "/api/session" | "/api/health") {
         let sessions = state.sessions.lock().await;
         let Some(session) = cookie(headers)
             .and_then(|id| sessions.get(id))
@@ -166,6 +167,21 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
     headers.insert("cache-control", HeaderValue::from_static("no-store"));
     response
 }
+// Exercise the same bounded DB projection without allocating a browser session
+// or returning its contents. Host/origin protection still applies.
+async fn health(State(state): State<AppState>) -> Result<Response, Error> {
+    state
+        .store
+        .graph(GraphQuery {
+            scope: Scope::Meenseek,
+            q: String::new(),
+            focus: None,
+            limit: 1,
+        })
+        .await?;
+    json_response(json!({"ok": true}))
+}
+
 async fn session(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, Error> {
     let mut sessions = state.sessions.lock().await;
     let now = Instant::now();

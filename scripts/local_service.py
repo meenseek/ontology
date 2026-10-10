@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Install or remove this checkout's login service for the existing local app.
+"""Install or remove macOS autostart for the existing local ontology app.
 
 The plist contains no credentials. Build and schema preparation remain explicit
-steps so a service restart never upgrades production data or fetches packages.
+steps; restart does not install a build or replace the documented DB upgrade procedure.
 """
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import plistlib
@@ -36,7 +37,32 @@ def installed() -> bool:
 def bootout() -> None:
     launchctl("bootout", DOMAIN, str(PLIST), check=False)
     if launchctl("print", f"{DOMAIN}/{LABEL}", check=False).returncode == 0:
-        raise RuntimeError("로그인 서비스를 중지하지 못했습니다. 설치 상태를 확인하세요.")
+        raise RuntimeError("온톨로지 자동 실행을 중지하지 못했습니다. 설치 상태를 확인하세요.")
+
+
+def app_ready() -> bool:
+    try:
+        health = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/connection.py"), "check", "--target", "app"],
+            capture_output=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return health.returncode == 0
+
+
+def build_matches() -> bool:
+    def artifacts(base: Path) -> dict:
+        required = [base / path for path in (
+            "scripts/serve-local.sh", "target/debug/ontology", "web/dist/index.html",
+        )]
+        for path in required:
+            if not path.is_file():
+                raise FileNotFoundError(f"빌드 파일이 없습니다: {path}")
+        files = required[:2] + [path for path in (base / "web/dist").rglob("*") if path.is_file()]
+        return {path.relative_to(base): hashlib.sha256(path.read_bytes()).digest() for path in files}
+
+    return artifacts(ROOT) == artifacts(RUNTIME)
 
 
 def wait_until_ready() -> None:
@@ -44,20 +70,13 @@ def wait_until_ready() -> None:
     for attempt in range(8):
         state = launchctl("print", service, check=False)
         if b"\n\tstate = running\n" in state.stdout and b"\n\tpid = " in state.stdout:
-            try:
-                health = subprocess.run(
-                    [sys.executable, str(ROOT / "scripts/connection.py"), "check", "--target", "app"],
-                    capture_output=True, timeout=15,
-                )
-            except subprocess.TimeoutExpired:
-                health = None
-            if health is not None and health.returncode == 0:
+            if app_ready():
                 state = launchctl("print", service, check=False)
                 if b"\n\tstate = running\n" in state.stdout and b"\n\tpid = " in state.stdout:
                     return
         if attempt < 7:
             time.sleep(1)
-    raise RuntimeError("새 로그인 서비스가 앱 조회에 응답하지 않습니다. 이전 설치를 복구합니다.")
+    raise RuntimeError("새 온톨로지 앱이 조회에 응답하지 않습니다. 이전 설치를 복구합니다.")
 
 
 def install() -> None:
@@ -146,13 +165,13 @@ def install() -> None:
             try:
                 launchctl("bootstrap", DOMAIN, str(PLIST))
             except subprocess.CalledProcessError as error:
-                raise RuntimeError("새 서비스 설치 실패 후 이전 로그인 서비스도 복구하지 못했습니다.") from error
+                raise RuntimeError("새 앱 설치 실패 후 이전 자동 실행도 복구하지 못했습니다.") from error
         elif PLIST.exists():
             PLIST.unlink()
         raise
     if previous.exists():
         shutil.rmtree(previous)
-    print(f"설치 완료: {PLIST}")
+    print("온톨로지 자동 실행 설치 완료: http://127.0.0.1:47831")
 
 
 def remove() -> None:
@@ -163,13 +182,23 @@ def remove() -> None:
         PLIST.unlink()
     if RUNTIME.is_dir():
         shutil.rmtree(RUNTIME)
-    print("로그인 서비스 제거 완료")
+    print("온톨로지 자동 실행 제거 완료")
 
 
 def status() -> int:
     result = launchctl("print", f"{DOMAIN}/{LABEL}", check=False)
-    print("등록됨" if result.returncode == 0 else "등록되지 않음")
-    return result.returncode
+    if result.returncode != 0:
+        print("온톨로지 자동 실행: 등록되지 않음")
+        return result.returncode
+    if b"\n\tstate = running\n" not in result.stdout or b"\n\tpid = " not in result.stdout or not app_ready():
+        print("온톨로지 자동 실행: 등록됐지만 앱 조회 실패")
+        return 1
+    print("온톨로지 자동 실행: 실행 중 (http://127.0.0.1:47831)")
+    if not build_matches():
+        print("설치본이 현재 빌드와 다릅니다. 빌드·검증 후 python3 scripts/local_service.py install로 갱신하세요.")
+        return 1
+    print("설치본: 현재 빌드와 일치")
+    return 0
 
 
 def main() -> int:
