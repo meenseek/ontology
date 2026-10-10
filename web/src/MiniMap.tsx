@@ -17,8 +17,8 @@ export function miniMapTransform(points: readonly XY[], width: number, height: n
     toWorld: (p: XY): XY => ({ x: center.x + (p.x - width / 2) / scale, y: center.y - (p.y - height / 2) / scale }),
   };
 }
-type Props = { nodes: PositionedNode[]; getCamera: () => { camera: PerspectiveCamera; pose: CameraPose } | null; onMove: (pose: CameraPose) => void; onZoom: (factor: number) => void; onFit?: () => void; disabled: boolean; visible: boolean };
-export default function MiniMap({ nodes, getCamera, onMove, onZoom, onFit, disabled, visible }: Props) {
+type Props = { nodes: PositionedNode[]; getCamera: () => { camera: PerspectiveCamera; pose: CameraPose } | null; onMove: (pose: CameraPose) => void; onZoom: (factor: number) => void; onFit?: () => void; rotating?: boolean; rotationUnavailable?: string; onToggleRotation?: () => void; disabled: boolean; visible: boolean };
+export default function MiniMap({ nodes, getCamera, onMove, onZoom, onFit, rotating, rotationUnavailable, onToggleRotation, disabled, visible }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const navigate = useRef<((x: number, y: number, relative?: boolean) => void) | null>(null);
   const pointer = useRef<number | null>(null);
@@ -81,7 +81,11 @@ export default function MiniMap({ nodes, getCamera, onMove, onZoom, onFit, disab
   };
   const center = () => { const element = canvas.current; if (element) navigate.current?.(element.clientWidth / 2, element.clientHeight / 2); };
   return <div className="graph-minimap">
-    <span aria-hidden="true">전체 지도</span>
+    <div className="minimap-heading"><span aria-hidden="true">전체 지도</span>
+      {onToggleRotation && <button type="button" className="minimap-rotation" disabled={disabled || !!rotationUnavailable} aria-pressed={!!rotating}
+        aria-label={rotating ? "3D 회전 멈춤" : "3D 회전 시작"} title={rotationUnavailable ?? (rotating ? "느린 3D 회전 멈춤" : "느린 3D 회전 · 지도를 끌면 이동")}
+        onClick={onToggleRotation}><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="9" ry="4" transform="rotate(-30 12 12)" /><circle cx="12" cy="12" r="2" /><path d="m17 3 3 2-1 4" /></svg></button>}
+    </div>
     <canvas ref={canvas} tabIndex={disabled ? -1 : 0} role="application" aria-label="미니맵. 클릭하거나 끌어서 지도 이동. 방향키로 이동, Home으로 가운데 보기." aria-disabled={disabled}
       onPointerDown={event => {
         if (disabled || event.button !== 0) return;

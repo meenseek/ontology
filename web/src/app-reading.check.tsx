@@ -788,7 +788,7 @@ async function checkSummaryOverview() {
     const assertLocalEdges = () => {
       for (const link of links.filter(link => link.source === "group-120-0")) {
         const a = positions!.layoutTarget(link.source)!, b = positions!.layoutTarget(link.target)!;
-        assert(Math.hypot(a.x - b.x, a.y - b.y) < 200, "A settled core page cannot eject a star beyond its local neighborhood");
+        assert(Math.hypot(a.x - b.x, a.y - b.y) < 200, `A settled core page cannot eject a star beyond its local neighborhood: ${link.target} (${Math.hypot(a.x-b.x,a.y-b.y)}, ${JSON.stringify({a,b})})`);
       }
     };
     summary(120)!.click();
@@ -919,7 +919,7 @@ async function checkRenderedMotion() {
   const originalFetch = window.fetch, originalUrl = window.location.href, root = createRoot(host);
   const originalRender = Scene.prototype.onBeforeRender, originalInstall = Positions.prototype.install, originalPack = Positions.prototype.packOverview;
   const originalControlsUpdate = OrbitControls.prototype.update;
-  let cameraDistance = 0, overviewPacked = false;
+  let cameraDistance = 0, overviewPacked = false, autoRotation = false;
   const nodes: GraphNode[] = Array.from({ length: 5 }, (_, index) => ({ id: `motion-${index}`, scope: "personal", kind: "document", label: `합성 모션 자료 ${index}`, status: "ok", present: true, current: true }));
   const links: Snapshot["links"] = [1, 2].map(index => ({ source: nodes[0].id, target: nodes[index].id, kind: "related", current: true }));
   const snapshot: Snapshot = { scope: "personal", query: "", focus: { id: null, found: false }, nodes, links,
@@ -933,6 +933,7 @@ async function checkRenderedMotion() {
     OrbitControls.prototype.update = function (this: OrbitControls, ...args: Parameters<OrbitControls["update"]>) {
       const result = originalControlsUpdate.apply(this, args);
       cameraDistance = this.object.position.distanceTo(this.target);
+      autoRotation = this.autoRotate;
       return result;
     };
     Positions.prototype.install = function (this: Positions, ...args: Parameters<Positions["install"]>) {
@@ -979,9 +980,24 @@ async function checkRenderedMotion() {
     await until(() => sampled.get(node.id)?.wobble === 0, "pointer exit restores the star without leaving a wobble behind");
     details("보기 설정").summary.click();
     const before = camera!.position.clone();
-    button("지도 천천히 회전").click();
+    const rotation = button("3D 회전 시작");
+    assert(rotation.getAttribute("aria-pressed") === "false" && rotation.title.includes("느린 3D"), "minimap rotation exposes its mode and pace");
+    rotation.click();
     await until(() => camera!.position.distanceTo(before) > .01, "slow 3D camera rotation remains available with pointer rotation disabled");
-    button("지도 회전 멈춤").click();
+    canvas.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse", pointerId: 9, button: 0, buttons: 1, clientX: rect.left + 5, clientY: rect.top + 5 }));
+    await until(() => !autoRotation, "holding the map pauses automatic rotation while pan remains the primary gesture");
+    window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "mouse", pointerId: 9, button: 0, buttons: 0, clientX: rect.left + 5, clientY: rect.top + 5 }));
+    await until(() => autoRotation, "release resumes the requested rotation without leaving a stale pointer");
+    const navigation = host.querySelector<HTMLCanvasElement>('.graph-minimap canvas')!;
+    navigation.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    navigation.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", repeat: true, bubbles: true }));
+    await until(() => !autoRotation, "held and repeating minimap keys pause automatic rotation");
+    window.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowRight", bubbles: true }));
+    await until(() => autoRotation, "key release resumes automatic rotation");
+    assert(button("지도 회전 멈춤").getAttribute("aria-pressed") === "true", "settings and minimap share the same rotation state");
+    button("3D 회전 멈춤").click();
+    await until(() => host.querySelector('[aria-label="3D 회전 시작"]')?.getAttribute("aria-pressed") === "false", "minimap stop commits the shared rotation state");
+    assert(button("지도 천천히 회전").getAttribute("aria-pressed") === "false", "stopping at the minimap also updates settings");
     details("보기 설정").summary.click();
     let restingDirection = camera!.getWorldDirection(new Vector3()), restingSamples = 0;
     await until(() => {

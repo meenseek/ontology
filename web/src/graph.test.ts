@@ -60,7 +60,8 @@ test("purpose compression follows stored membership while relationship compressi
     const purpose = reconcile(input, undefined, false, "purpose");
     const relation = reconcile(input, purpose, false, "relationships");
     assert.deepEqual(purpose.links, relation.links, "switching diagrams preserves all source relations");
-    assert.deepEqual(diagramLinks(purpose), [], "references cannot become purpose memberships");
+    const purposeIds = new Map(purpose.nodes.map(node => [node.id, node.subject_id]));
+    assert.deepEqual(diagramLinks(purpose), input.links.filter(link => !!purposeIds.get(link.source) && purposeIds.get(link.source) === purposeIds.get(link.target)), "only real relationships within a stored purpose are shown; relationships never change membership");
     const expected = membership === "none" ? [] : membership === "same" ? [count] : count / 2 > 18 ? [Math.floor(count / 2), Math.ceil(count / 2)] : [];
     const purposeful = constellationView(purpose.nodes, diagramLinks(purpose), null, null, 0, purpose.view);
     assert.deepEqual(purposeful.cores.map(core => core.count), expected);
@@ -1964,6 +1965,32 @@ test("unbundled overviews use measured star clearance and retain depth and store
     assert.deepEqual(results[0], results[1], "input order cannot change the compact layout");
   }
 });
+test("measured hub constellations have a stable asymmetric silhouette that survives a pull", () => {
+  for (const count of [3, 4, 8, 12, 13, 36]) {
+    const nodes = [doc("hub"), ...Array.from({ length: count }, (_, index) => doc(`leaf-${index}`))];
+    const links = nodes.slice(1).map(node => edge("hub", node.id));
+    const model = reconcile(snapshot(nodes, links)), positions = new Positions(); positions.install(model, true);
+    positions.packOverview(model.nodes.map(node => ({ id: node.id, x: node.x, y: node.y, depth: 100, radius: 5 })), model.links, new Map(), {
+      right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, worldPerPixel: () => 1,
+    }, 0, true);
+    const hub = model.nodes.find(node => node.id === "hub")!;
+    const radii = model.nodes.filter(node => node.id !== "hub").map(node => Math.hypot(node.x - hub.x, node.y - hub.y));
+    assert.ok(Math.max(...radii) / Math.min(...radii) > 1.1, "stars have varied distances rather than equal spokes");
+    assert.ok(Math.max(...radii) < 24 * Math.sqrt(count), "the silhouette stays compact as membership grows");
+    const before = new Map(model.nodes.map(node => [node.id, { x: node.x, y: node.y, z: node.z }]));
+    positions.begin("hub", 1, { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+      visible: model.nodes.map(node => node.id), radius: () => 5,
+      project: value => ({ x: value.x, y: value.y, depth: 1 }) });
+    positions.move("hub", { x: hub.x + 200, y: hub.y + 100, z: hub.z }); positions.release(0, true);
+    for (const node of model.nodes) {
+      const old = before.get(node.id)!, origin = before.get("hub")!;
+      assert.ok(Math.hypot((node.x - hub.x) - (old.x - origin.x), (node.y - hub.y) - (old.y - origin.y)) < 1e-6,
+        "release keeps the measured silhouette instead of regenerating a uniform ring");
+      assert.equal(node.z, old.z, "the pull keeps the existing depth");
+    }
+    assert.deepEqual(model.links, reconcile(snapshot(nodes, links)).links);
+  }
+});
 test("overview packing closes group gaps at different zooms without overlapping footprints or losing hidden members", async () => {
   const { summaryAppearance } = await import("./presentation.ts");
   const sizes = [22, 40, 75, 120];
@@ -2523,8 +2550,8 @@ test("static star clearance turns or expands a whole uniform ring and preserves 
   assertUniformRings(leaves, clear.get("hub")!);
   assert.ok(Math.hypot(leaves[0].x, leaves[0].y) > 24 && Math.hypot(leaves[0].x, leaves[0].y) < 40, "necessary clearance may exceed the preferred 24px radius");
   assert.deepEqual(clear.get("hub"), desired.get("hub")); assert.deepEqual(clear.get("outside"), desired.get("outside"));
-  assert.deepEqual(positions.clearLayout(desired, moving, "hub", { ...plane, compactReveal: true }), clear,
-    "a little breathing room keeps the existing ring instead of invoking compact fallback");
+  assert.deepEqual(positions.clearLayout(clear, moving, "hub", { ...plane, compactReveal: true }), clear,
+    "an already clear shape is preserved when compact reveal is enabled");
   for (const [index, node] of model.nodes.entries()) for (const other of model.nodes.slice(index + 1)) {
     const a = clear.get(node.id)!, b = clear.get(other.id)!;
     assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= plane.radius(node) + plane.radius(other) + 1 - 1e-6);

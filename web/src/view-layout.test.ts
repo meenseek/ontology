@@ -41,7 +41,7 @@ function fixture(sizes: number[], outside: number, size: { width: number; height
   const locks = new Map([...spatial.groups].map(([id, group]) => [id, { members: group.members, level: lod }]));
   return { source, model, positions, camera, center, size, lod, locks };
 }
-function samePoints(nodes: PositionedNode[], before: ReadonlyMap<string, Point>, message: string) {
+function samePoints(nodes: PositionedNode[], before: ReadonlyMap<string, { x: number; y: number; z: number }>, message: string) {
   for (const node of nodes) {
     const at = before.get(node.id)!;
     assert.ok(Math.hypot(node.x - at.x, node.y - at.y, node.z - at.z) < 1e-7, `${message}: ${node.id}`);
@@ -86,23 +86,19 @@ function assertClear(f: ReturnType<typeof fixture>, opened: ReturnType<typeof op
   return plane;
 }
 
-function assertUniformView(f: ReturnType<typeof fixture>, opened: ReturnType<typeof open>, selected: string | null = null) {
-  const plane = assertClear(f, opened, selected), center = plane.project(opened.plan!.positions.get(opened.group.hub)!);
-  const rings = new Map<number, number[]>();
-  for (const id of opened.group.members) {
-    if (id === opened.group.hub || !opened.plan!.visible.includes(id)) continue;
-    const at = plane.project(opened.plan!.positions.get(id)!), dx = at.x - center.x, dy = at.y - center.y;
-    const radius = Math.round(Math.hypot(dx, dy) * 1e6) / 1e6;
-    const angles = rings.get(radius) ?? []; angles.push(Math.atan2(dy, dx)); rings.set(radius, angles);
-  }
-  assert.ok(rings.size < opened.group.count / 2, "clearance retains rings rather than scattering individual leaves");
-  for (const angles of rings.values()) {
-    angles.sort((a, b) => a - b);
-    for (const [index, angle] of angles.entries()) {
-      const next = index + 1 < angles.length ? angles[index + 1] : angles[0] + 2 * Math.PI;
-      assert.ok(Math.abs(next - angle - 2 * Math.PI / angles.length) < 1e-7, "each rendered ring keeps 360 / its node count spacing");
-    }
-  }
+function assertWholeShape(plane: ReturnType<typeof screenPlane>, before: ReadonlyMap<string, { x: number; y: number; z: number }>, after: ReadonlyMap<string, { x: number; y: number; z: number }>, ids: readonly string[], anchor: string) {
+  const origin = plane.project(before.get(anchor)!), final = plane.project(after.get(anchor)!);
+  const offsets = ids.filter(id => id !== anchor).map(id => {
+    const a = plane.project(before.get(id)!), b = plane.project(after.get(id)!);
+    assert.ok(Math.abs(a.depth - b.depth) < 1e-6, "clearance preserves each star's camera depth");
+    return { ax: a.x - origin.x, ay: a.y - origin.y, bx: b.x - final.x, by: b.y - final.y };
+  });
+  const first = offsets.find(at => Math.hypot(at.ax, at.ay) > 1e-6)!;
+  const squared = first.ax ** 2 + first.ay ** 2;
+  const cosine = (first.ax * first.bx + first.ay * first.by) / squared;
+  const sine = (first.ax * first.by - first.ay * first.bx) / squared;
+  for (const at of offsets) assert.ok(Math.hypot(at.bx - (at.ax * cosine - at.ay * sine), at.by - (at.ax * sine + at.ay * cosine)) < 1e-5,
+    "every star follows one whole-shape scale and rotation instead of acquiring a new direction");
 }
 
 test("static pages use actual screen footprints and restore their overview across desktop and mobile", () => {
@@ -256,32 +252,42 @@ test("a committed view preserves singleton bodies as ordinary stars", () => {
 });
 
 
-test("content growth preserves uniform rings while movable background yields", () => {
+test("content growth clears an asymmetric constellation while movable background yields", () => {
   for (const size of [{ width: 1280, height: 900 }, { width: 390, height: 800 }]) {
     const f = fixture([22], 100, size, 1.6), opened = open(f, "g22-0", 0);
     for (const node of f.model.nodes) node.changed = true;
     const grown = open(f, "g22-0", 0, { key: "uniform-growth", automatic: false, camera: opened.plan!.camera, target: opened.plan!.target });
-    assertUniformView(f, grown);
+    const plane = assertClear(f, grown), center = plane.project(grown.plan!.positions.get(grown.group.hub)!);
+    const radii = [...grown.group.members].filter(id => id !== grown.group.hub && grown.plan!.visible.includes(id)).map(id => {
+      const at = plane.project(grown.plan!.positions.get(id)!); return Math.round(Math.hypot(at.x - center.x, at.y - center.y) * 1000);
+    });
+    assert.ok(new Set(radii).size > radii.length / 2, "compact expansion avoids concentric uniform rings");
+    const settled = new Map(f.model.nodes.map(node => [node.id, point(node)]));
+    for (const node of f.model.nodes) node.changed = false;
+    open(f, "g22-0", 0, { key: "asymmetric-shrink", automatic: false, camera: grown.plan!.camera, target: grown.plan!.target });
+    samePoints(f.model.nodes, settled, "shrinking bodies preserve the settled silhouette");
     assert.deepEqual(grown.plan!.camera.position, opened.plan!.camera.position);
     assert.deepEqual(grown.plan!.target, opened.plan!.target);
   }
 });
 
 
-test("a selected leaf stays anchored while its whole fan clears uniformly", () => {
+test("a selected leaf stays anchored while its whole constellation clears", () => {
   for (const size of [{ width: 1280, height: 900 }, { width: 390, height: 800 }]) {
     for (const direction of [new Vector3(0, 0, 1), new Vector3(.7, .4, 1).normalize()]) {
       const f = fixture([22], 100, size), camera = f.camera.clone(), target = new Vector3(f.center.x, f.center.y, f.center.z);
       camera.position.copy(target).addScaledVector(direction, f.camera.position.distanceTo(target)); camera.lookAt(target); camera.updateMatrixWorld();
       const before = new Map(f.model.nodes.map(node => [node.id, point(node)])), selected = "g22-1";
       const opened = open(f, "g22-0", 0, { selected, camera });
-      assertUniformView(f, opened, selected);
+      assertClear(f, opened, selected);
       assert.deepEqual(point(f.model.nodes.find(node => node.id === selected)!), opened.plan!.target, "the selected star remains the exact camera target");
       samePoints(f.model.nodes.filter(node => !opened.group.members.has(node.id)), before, "selecting a fan preserves unrelated background");
       const anchor = point(f.model.nodes.find(node => node.id === selected)!);
+      const silhouette = new Map(f.model.nodes.map(node => [node.id, point(node)]));
       for (const node of f.model.nodes) node.changed = true;
       const grown = open(f, "g22-0", 0, { selected, key: "selected-growth", automatic: false, camera: opened.plan!.camera, target: opened.plan!.target });
-      assertUniformView(f, grown, selected);
+      const plane = assertClear(f, grown, selected);
+      assertWholeShape(plane, silhouette, grown.plan!.positions, [...grown.group.members].filter(id => grown.plan!.visible.includes(id)), selected);
       assert.deepEqual(point(f.model.nodes.find(node => node.id === selected)!), anchor);
       assert.deepEqual(grown.plan!.camera.position, opened.plan!.camera.position);
       assert.deepEqual(grown.plan!.target, opened.plan!.target);

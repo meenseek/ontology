@@ -19,7 +19,7 @@ import MiniMap from "./MiniMap";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
-type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onFailure: () => void };
+type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onToggleRotation?: () => void; onFailure: () => void };
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
 const coreLabel = (node: PositionedNode | undefined, count: number, view?: GraphView) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : view === "purpose" ? `${node?.subject_name ?? node?.label ?? "목적 묶음"} · ${count}개` : `관계 묶음 · ${count}개`;
 function texture(kind: "ring" | "selection" | "change") {
@@ -205,7 +205,7 @@ function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "bod
   return sprite;
 }
 const endpoint = (value: string | number | { id?: string | number } | undefined) => typeof value === "object" ? value.id : value;
-export default function Graph({ positions, snapshot, nodes, links, selected, rotate, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onFailure }: Props) {
+export default function Graph({ positions, snapshot, nodes, links, selected, rotate, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onToggleRotation, onFailure }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
   const cameraMotion = useRef(new CameraMotion());
@@ -266,6 +266,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const spatialCloseTimer = useRef<number | null>(null);
   const allowDrag = useRef(true), suppressClickUntil = useRef(0);
   const pointer = useRef<{ pointerId: number; pointerType: string } | null>(null);
+  const navigationKeys = useRef(new Set<string>());
   const controlPointer = useRef<{ pointerId: number; pointerType: string } | null>(null);
   const activePointers = useRef(new Map<number, string>());
   const pressedNode = useRef<{ id: string; pointerId: number; x: number; y: number } | null>(null);
@@ -560,12 +561,16 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const clearControlPointer = (event: PointerEvent) => {
       activePointers.current.delete(event.pointerId);
       if (event.pointerId === controlPointer.current?.pointerId) controlPointer.current = null;
+      if (event.pointerId === pointer.current?.pointerId) pointer.current = null;
     };
     owner?.addEventListener("pointerup", releaseControlPointer, true);
     // Clear after canvas DragControls dispatches its compatibility release.
-    owner?.addEventListener("pointerup", clearControlPointer);
-    owner?.addEventListener("pointercancel", clearControlPointer);
+    window.addEventListener("pointerup", clearControlPointer);
+    window.addEventListener("pointercancel", clearControlPointer);
+    const releaseKey = (event: KeyboardEvent) => { navigationKeys.current.delete(event.key); };
+    window.addEventListener("keyup", releaseKey);
     const cancel = () => {
+      navigationKeys.current.clear();
       allowDrag.current = false;
       if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
       const moved = positions.dragMoved, individual = draggedSummary.current ? null : dragged.current;
@@ -590,7 +595,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     return () => {
       window.removeEventListener("blur", cancel); canvas?.removeEventListener("pointercancel", cancel); cancel();
       owner?.removeEventListener("pointerup", releaseControlPointer, true);
-      owner?.removeEventListener("pointerup", clearControlPointer); owner?.removeEventListener("pointercancel", clearControlPointer);
+      window.removeEventListener("pointerup", clearControlPointer); window.removeEventListener("pointercancel", clearControlPointer);
+      window.removeEventListener("keyup", releaseKey);
       controlPointer.current = null; activePointers.current.clear();
     };
   }, [ready, positions, snapshot, nodes, visible, disabled, fit]);
@@ -676,7 +682,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const pose = cameraMotion.current.advance(performance.now());
       if (pose) writeCamera(pose);
       // Built-in uniforms need distinct materials for independently fading objects.
-      for (const link of data.links) for (const [key, opacity] of [["__lineObj", .65], ["__arrowObj", 1.95]] as const) {
+      for (const link of data.links) for (const [key, opacity] of [["__lineObj", link.kind === "subject" || link.kind === "parent" || link.kind === "topic" || link.kind === "area" ? .22 : .65], ["__arrowObj", 1.95]] as const) {
         const object = (link as unknown as Record<string, Object3D>)[key] as (Object3D & { material?: { opacity: number } }) | undefined;
         if (!object?.material || object.userData.revealFade) continue;
         object.userData.revealFade = true;
@@ -719,7 +725,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const focusedElement = elements.find(element => element === document.activeElement);
       const focusedId = focusedElement?.dataset.nodeId;
       const focusedSummary = focusedId && (collapsedCounts.has(focusedId) || spatialCounts.has(focusedId)) ? focusedId : null;
-      if (controls) controls.autoRotate = rotate && !focusedSummary && !positions.dragging && !positions.settling && !positions.layoutMoving && !cameraMotion.current.moving && controls.enabled;
+      if (controls) controls.autoRotate = rotate && !focusedSummary && !pointer.current && !navigationKeys.current.size && !positions.dragging && !positions.settling && !positions.layoutMoving && !cameraMotion.current.moving && controls.enabled;
       const camera = instance?.camera();
       if (camera) {
         camera.updateMatrixWorld();
@@ -928,6 +934,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     }, reduced ? 0 : REVEAL_DURATION + 16);
   };
   return <div className="graph-canvas" ref={container} tabIndex={-1}
+    onKeyDownCapture={event => {
+      if (disabled || !(event.target as HTMLElement).closest(".graph-minimap") ||
+        !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "Enter", " "].includes(event.key)) return;
+      navigationKeys.current.add(event.key);
+      if (graph.current) (graph.current.controls() as OrbitControls).autoRotate = false;
+    }}
+    onBlurCapture={() => { navigationKeys.current.clear(); }}
+    onLostPointerCapture={event => { if (pointer.current?.pointerId === event.pointerId) pointer.current = null; }}
     onPointerMoveCapture={event => {
       if (disabled || positions.dragging || (event.pointerType !== "mouse" && event.pointerType !== "pen")) { cursor.current = null; return; }
       const rect = event.currentTarget.getBoundingClientRect();
@@ -937,6 +951,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     onWheelCapture={event => { if (event.target === graph.current?.renderer().domElement) cameraMotion.current.stop(); }}
     onPointerDownCapture={event => {
       cursor.current = null;
+      if (graph.current) (graph.current.controls() as OrbitControls).autoRotate = false;
       // A new press is a new action; the guard only belongs to the prior drag's click.
       if (!positions.dragging) suppressClickUntil.current = 0;
       allowDrag.current = !positions.layoutMoving && (event.button === 0 || event.pointerType === "touch");
@@ -970,7 +985,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       chooseNode(press.id);
       suppressClickUntil.current = performance.now() + 350;
     }}
-    aria-label="3D 지식 지도. 빈 공간을 끌면 지도가 이동합니다. 묶음 별을 끌면 함께 이동하고 누르면 펼쳐 개별 별을 끌 수 있습니다. 스크롤로 확대·축소하고 보기 설정에서 느린 지도 회전을 켤 수 있습니다. Tab과 Enter로 묶음을 펼칠 수 있으며 전체 항목은 목록 보기에서 탐색할 수 있습니다.">
+    aria-label="3D 지식 지도. 빈 공간을 끌면 지도가 이동합니다. 묶음 별을 끌면 함께 이동하고 누르면 펼쳐 개별 별을 끌 수 있습니다. 스크롤로 확대·축소하고 미니맵 회전 버튼이나 보기 설정에서 느린 3D 회전을 켤 수 있습니다. Tab과 Enter로 묶음을 펼칠 수 있으며 전체 항목은 목록 보기에서 탐색할 수 있습니다.">
     {ready && <ForceGraph3D<PositionedNode, RenderLink>
       ref={graph} width={size.width} height={size.height} graphData={data}
       backgroundColor="rgba(0,0,0,0)" controlType="orbit" showNavInfo={false}
@@ -1062,7 +1077,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         <button type="button" onClick={() => setShowAllCore(false)}>나눠 보기</button>}
     </div>}
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>근접 묶음 {spatialReveal.members.size}개 접기</button>}
-    {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} disabled={disabled || positions.dragging} visible={visible} />}
+    {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
+      rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} />}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
     <div className="graph-instructions" aria-hidden="true">빈 공간 끌기: 지도 이동 · 묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · 스크롤 확대·축소</div>
   </div>;

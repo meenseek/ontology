@@ -403,6 +403,23 @@ function circularSlots(count: number, minimumRadius = 1, separation = 1): Slot[]
     return { x: ring.radius * Math.cos(angle), y: ring.radius * Math.sin(angle) };
   }));
 }
+/** A compact, asymmetric sky silhouette. IDs give each cohort a stable bearing. */
+function constellationSlots(count: number, minimumRadius: number, separation: number, id: string): Slot[] {
+  if (!count) return [];
+  const outline = [[1, 0], [.35, 1.2], [-.8, .7], [-.8, -.5], [.15, -1], [1.3, -1],
+    [1.7, .8], [.9, 1.9], [-.25, 1.85], [-1.7, .7], [-1.7, -.5], [-.7, -1.6]];
+  const slots = count <= outline.length ? outline.slice(0, count).map(([x, y]) => ({ x, y })) :
+    Array.from({ length: count }, (_, index) => {
+      const radius = Math.sqrt(index + 1), angle = index * Math.PI * (3 - Math.sqrt(5));
+      const x = radius * Math.cos(angle), y = radius * Math.sin(angle);
+      return { x: x * 1.12 + .13 * y, y };
+    });
+  let closest = Infinity;
+  for (const [index, slot] of slots.entries()) for (const other of slots.slice(index + 1)) closest = Math.min(closest, Math.hypot(slot.x - other.x, slot.y - other.y));
+  const scale = Math.max(minimumRadius / Math.min(...slots.map(slot => Math.hypot(slot.x, slot.y))), separation / closest);
+  const phase = [...id].reduce((value, char) => Math.imul(value ^ char.charCodeAt(0), 16777619) >>> 0, 2166136261) / 0xffffffff * 2 * Math.PI;
+  return slots.map(slot => ({ x: scale * (slot.x * Math.cos(phase) - slot.y * Math.sin(phase)), y: scale * (slot.x * Math.sin(phase) + slot.y * Math.cos(phase)) }));
+}
 /** Identify one visible hub-and-leaf cohort without absorbing unrelated background. */
 export function starCohort(root: string, visible: ReadonlySet<string>, adjacency: ReadonlyMap<string, ReadonlySet<string>>) {
   const neighbors = (id: string) => [...(adjacency.get(id) ?? [])].filter(other => visible.has(other) && other !== id);
@@ -418,7 +435,7 @@ function starSlots(root: string, members: string[], adjacency: Map<string, Set<s
   const leafRadius = Math.max(...leaves.map(id => radii?.get(id) ?? spacing / 2));
   // Measured bodies need their clearance, not an additional unit-length spoke.
   const minimumRadius = ((radii?.get(hub) ?? spacing / 2) + leafRadius) / spacing;
-  const slots = circularSlots(leaves.length, minimumRadius, 2 * leafRadius / spacing);
+  const slots = radii ? constellationSlots(leaves.length, minimumRadius, 2 * leafRadius / spacing, hub) : circularSlots(leaves.length, minimumRadius, 2 * leafRadius / spacing);
   const placed = new Map<string, Slot>([[hub, { x: 0, y: 0 }], ...leaves.map((id, index) => [id, slots[index]] as const)]);
   const origin = placed.get(root)!;
   return new Map([...placed].filter(([id]) => id !== root).map(([id, at]) => [id, { x: at.x - origin.x, y: at.y - origin.y }]));
@@ -805,7 +822,22 @@ export class Positions {
       const validFan = [hubBody, ...bodies].every(body => body.at.depth > 0 && Number.isFinite(body.radius) && body.radius > 0);
       if (crowded && validFan) {
         const largest = Math.max(...bodies.map(body => body.radius));
-        const slots = circularSlots(leaves.length, Math.max(DEFAULT_LINK_PIXELS, hubBody.radius + largest + COLLISION_GAP), 2 * largest + COLLISION_GAP);
+        let slots = plane.compactReveal
+          ? constellationSlots(leaves.length, hubBody.radius + largest + COLLISION_GAP, 2 * largest + COLLISION_GAP, hub)
+          : circularSlots(leaves.length, Math.max(DEFAULT_LINK_PIXELS, hubBody.radius + largest + COLLISION_GAP), 2 * largest + COLLISION_GAP);
+        const current = bodies.map(body => ({ x: body.at.x - center.x, y: body.at.y - center.y }));
+        // Once an asymmetric silhouette is visible, growing footprints enlarge
+        // that whole shape instead of assigning each star a new direction.
+        if (new Set(current.map(slot => Math.round(Math.hypot(slot.x, slot.y) * 1000))).size > leaves.length / 2 &&
+          current.every(slot => Math.hypot(slot.x, slot.y) > 1e-6)) {
+          let scale = 1;
+          for (const [index, slot] of current.entries()) {
+            scale = Math.max(scale, (hubBody.radius + bodies[index].radius + COLLISION_GAP) / Math.hypot(slot.x, slot.y));
+            for (let other = index + 1; other < current.length; other++) scale = Math.max(scale,
+              (bodies[index].radius + bodies[other].radius + COLLISION_GAP) / Math.max(1e-6, Math.hypot(slot.x - current[other].x, slot.y - current[other].y)));
+          }
+          slots = current.map(slot => ({ x: slot.x * scale, y: slot.y * scale }));
+        }
         const obstacles = discs.filter(body => !allowed.has(body.id) && fixed.has(body.id) && body.at.depth > 0 && body.radius > 0);
         const place = (body: typeof hubBody, x: number, y: number, into = next) => {
           if (body.id === held) return;
@@ -823,24 +855,8 @@ export class Positions {
           for (const [index, body] of [hubBody, ...bodies].entries()) place(body, anchor.x + fit.slots[index].x * fit.scale, anchor.y + fit.slots[index].y * fit.scale);
         } else {
           const blockers = obstacles.map(body => ({ x: body.at.x - center.x, y: body.at.y - center.y, radius: body.radius }));
-          const rings = new Map<number, number[]>();
-          for (const [index, slot] of slots.entries()) {
-            const radius = Math.round(Math.hypot(slot.x, slot.y) * 1e9) / 1e9;
-            const members = rings.get(radius) ?? []; members.push(index); rings.set(radius, members);
-          }
-          let previousRadius = 0;
-          for (const [radius, indices] of rings) {
-            const minimumScale = previousRadius ? Math.max(1, (previousRadius + 2 * largest + COLLISION_GAP) / radius) : 1;
-            const radii = indices.map(index => bodies[index].radius);
-            const period = radii.every(value => Math.abs(value - radii[0]) < 1e-9) ? 2 * Math.PI / indices.length : 2 * Math.PI;
-            const fit = clearRadialSlots(indices.map(index => slots[index]), radii, blockers, minimumScale, 0, period);
-            previousRadius = radius * fit.scale;
-            for (const [at, index] of indices.entries()) {
-              const x = fit.slots[at].x * fit.scale, y = fit.slots[at].y * fit.scale;
-              place(bodies[index], center.x + x, center.y + y);
-              blockers.push({ x, y, radius: bodies[index].radius });
-            }
-          }
+          const fit = clearRadialSlots(slots, bodies.map(body => body.radius), blockers);
+          for (const [index, body] of bodies.entries()) place(body, center.x + fit.slots[index].x * fit.scale, center.y + fit.slots[index].y * fit.scale);
           if (plane.compactReveal && obstacles.length) {
             // Dense background can force every uniform ring past the same obstacle.
             // Compare a local pocket: individual leaves take their nearest free
@@ -1141,10 +1157,15 @@ export class Positions {
     // exact layout arrives; a speculative packed layout can stretch linked nodes.
     const defer = typeof Worker !== "undefined" && (included.size >= 128 || (included.size >= 32 && edgeCount > included.size));
     const exact = overfull ? null : validSlots(id, members, this.adjacency, prior) ? prior : defer && edgeCount > 0 ? null : compactSlots(id, members, this.adjacency);
-    const layout = dense ? null : starSlots(id, members, this.adjacency) ?? exact ?? (overfull ? packedSlots(id, members, this.adjacency, projected) : null);
+    // A screen-cleared constellation keeps its silhouette through the pull and release.
+    const cohort = clearance && starCohort(id, included, this.adjacency);
+    const existingFan = cohort && cohort.leaves.length > 2 ? new Map(members.map(member => {
+      const at = projected.get(member)!; return [member, { x: at.x / spacing, y: at.y / spacing }] as const;
+    })) : null;
+    const layout = dense ? null : existingFan ?? starSlots(id, members, this.adjacency) ?? exact ?? (overfull ? packedSlots(id, members, this.adjacency, projected) : null);
     for (const member of members) {
       const target = layout?.get(member);
-      const offset = target ? add(add(zero(), plane.right, target.x * spacing), plane.up, target.y * spacing) : add(point(this.nodes.get(member)!), start, -1);
+      const offset = target && !existingFan ? add(add(zero(), plane.right, target.x * spacing), plane.up, target.y * spacing) : add(point(this.nodes.get(member)!), start, -1);
       followers.set(member, { offset });
     }
     const depth = new Map([[id, 0]]), traversal = [id], virtual: [string, string][] = [];

@@ -246,8 +246,12 @@ export function reconcile(snapshot: Snapshot, previous?: Model, showFolders = fa
 }
 export type Filters = { kind: "all" | "knowledge" | NodeKind; state: "all" | "active" | "proposed" | "withdrawn" | "attention"; cluster: string | null; sourceScope?: string | null; folder?: string | null };
 /** Project the selected diagram while preserving the complete source relationship model. */
-export function diagramLinks(model: Pick<Model, "view" | "links">): GraphLink[] {
-  return model.view === "purpose" ? model.links.filter(link => link.kind === "subject" || link.kind === "parent") : model.links;
+export function diagramLinks(model: Pick<Model, "view" | "links" | "nodes">): GraphLink[] {
+  if (model.view !== "purpose") return model.links;
+  const purposes = new Map(model.nodes.filter(knowledge).map(node => [node.id, node.subject_id]));
+  return model.links.filter(link => link.kind === "subject" || link.kind === "parent" ||
+    ((link.kind === "related" || link.kind === "reference" || link.kind === "evidence") &&
+      !!purposes.get(link.source) && purposes.get(link.source) === purposes.get(link.target)));
 }
 export function visibleGraph(model: Model, filters: Filters): { nodes: PositionedNode[]; links: GraphLink[] } {
   const folder = filters.folder ? nativeFolders(model.nodes).find(node => node.id === filters.folder) : null;
