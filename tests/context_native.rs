@@ -3110,7 +3110,9 @@ async fn native_blocked_output_case(block_stderr: bool) {
         &store,
         &root,
         "Update the exact synthetic source.",
-        true,
+        // A synthetic role must use the 1s fixture close budget, not the live
+        // model's 10s budget: the lock proof below has a separate 5s bound.
+        false,
         "vault/personal/knowledge/skills.md",
     )
     .await;
@@ -3150,6 +3152,8 @@ async fn native_blocked_output_case(block_stderr: bool) {
         fs::write(&binary, r#"#!/bin/sh
 cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"blocked-output"}' '{"type":"turn.started"}' '{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"{\"outcome\":{\"status\":\"cancelled\"}}"}}' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":5}}'
+# Keep both role pipes open after the terminal event to exercise forced closing.
+exec sleep 30
 "#).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         command.arg("--codex-binary").arg(binary);

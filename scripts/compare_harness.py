@@ -134,11 +134,23 @@ def group_alive(pid):
 
 
 def stop_process(process):
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    process.wait(timeout=5)
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            break
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            # Darwin can return EPERM for a group containing only the unreaped
+            # leader. Reap it and require a subsequent successful kill or ESRCH;
+            # a permission error alone never proves descendants have stopped.
+            process.poll()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.01, remaining))
+    process.wait(timeout=max(0, deadline - time.monotonic()))
 
 
 @contextmanager

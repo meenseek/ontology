@@ -4800,17 +4800,27 @@ cat "$0.events.$role"
     #[cfg(unix)]
     #[test]
     fn codex_timeout_bounds_blocked_stdin_and_reaps_the_process_group() {
+        use std::os::unix::fs::PermissionsExt as _;
         use std::time::{Duration, Instant};
         let temp = TempDirectory::new("codex-timeout");
-        let binary = codex_test_script(
-            &temp,
-            r#"printf '{"type":"thread.started","thread_id":"native-%s"}\n' "$$"
+        // This test needs an immediate context event and blocked input. Avoid
+        // the general fixture's external ls/cp startup before that event.
+        let binary = temp.path().join("fake-codex");
+        fs::write(
+            &binary,
+            r#"#!/bin/sh
 trap '' INT TERM
+printf '%s\n' "$$" >> "$0.calls"
+printf '%s\n' "$PWD" > "$0.cwd.$$"
+printf '{"type":"thread.started","thread_id":"native-%s"}\n' "$$"
 sleep 30 &
 printf '%s\n' "$!" > "$0.descendant"
 wait
 "#,
-        );
+        )
+        .expect("blocked-input fixture must be written");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .expect("blocked-input fixture must be executable");
         let limits = RoleLifecycleLimits {
             max_role_execution_millis: 3_000,
             max_role_grace_millis: 300,

@@ -9,6 +9,7 @@ import sys
 import time
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 SPEC = importlib.util.spec_from_file_location(
     "compare_harness", Path(__file__).resolve().parents[1] / "scripts/compare_harness.py")
@@ -61,6 +62,24 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertIn("exceeds limit", result["error"])
         self.assertNotIn("artifact_digest", result)
+
+    def test_exited_unreaped_process_group_is_rechecked_after_permission_error(self):
+        process = Mock(pid=123)
+        with patch.object(c.os, "killpg", side_effect=[PermissionError(), ProcessLookupError()]) as kill, \
+             patch.object(c.time, "sleep"):
+            c.stop_process(process)
+        self.assertEqual(kill.call_count, 2)
+        process.poll.assert_called_once()
+        process.wait.assert_called_once()
+
+    def test_live_group_permission_error_is_not_silently_accepted(self):
+        process = Mock(pid=123)
+        with patch.object(c.os, "killpg", side_effect=PermissionError()), \
+             patch.object(c.time, "monotonic", side_effect=[0, 5]):
+            with self.assertRaises(PermissionError):
+                c.stop_process(process)
+        process.poll.assert_called_once()
+        process.wait.assert_not_called()
 
     def test_termination_during_process_identity_save_is_deferred(self):
         previous = signal.getsignal(signal.SIGTERM)
