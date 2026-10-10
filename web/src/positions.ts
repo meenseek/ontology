@@ -1,3 +1,4 @@
+import { REVEAL_DURATION } from "./reveal-transition";
 import { constellationView, diagramLinks, visualSatellites } from "./graph";
 import type { GraphLink, GraphView, Model, PositionedNode } from "./graph";
 import { COLLISION_GAP, separateDiscs } from "./clearance";
@@ -530,9 +531,9 @@ function springStep(value: number, target: number, velocity: number, dt: number,
 type PendingLayout = { token: number; root: string; right: Point; up: Point; spacing: number; clearance: Clearance | null; reduced: boolean };
 type LayoutMotion = { from: Map<string, Point>; to: Map<string, Point>; actual: Map<string, Point>; start: number };
 type LayoutScope = { nodes: PositionedNode[]; links: GraphLink[]; view?: GraphView };
-export type LayoutPlane = Pick<Clearance, "visible" | "right" | "up" | "project" | "radius" | "worldPerPixel" | "isVisible">;
+export type LayoutPlane = Pick<Clearance, "visible" | "right" | "up" | "project" | "radius" | "worldPerPixel" | "isVisible"> & { compactReveal?: boolean };
 export type LayoutView = { key: string; resolve: (desired: ReadonlyMap<string, Point>, movable: ReadonlySet<string>, hub: string) => Map<string, Point> };
-const layoutDuration = 650;
+const layoutDuration = REVEAL_DURATION;
 const graphStructure = (nodes: readonly PositionedNode[], links: readonly GraphLink[]) => JSON.stringify([
   nodes.map(node => JSON.stringify([node.id, node.cluster, node.kind, node.status, node.current, node.present, node.temporal, node.supported])).sort(),
   links.map(link => JSON.stringify([link.source, link.target, link.kind, link.current])).sort(),
@@ -803,10 +804,10 @@ export class Positions {
         const largest = Math.max(...bodies.map(body => body.radius));
         const slots = circularSlots(leaves.length, Math.max(DEFAULT_LINK_PIXELS, hubBody.radius + largest + COLLISION_GAP), 2 * largest + COLLISION_GAP);
         const obstacles = discs.filter(body => !allowed.has(body.id) && fixed.has(body.id) && body.at.depth > 0 && body.radius > 0);
-        const place = (body: typeof hubBody, x: number, y: number) => {
+        const place = (body: typeof hubBody, x: number, y: number, into = next) => {
           if (body.id === held) return;
           const world = plane.worldPerPixel(body.at.depth);
-          next.set(body.id, add(add(desired.get(body.id)!, plane.right, (x - body.at.x) * world), plane.up, (y - body.at.y) * world));
+          into.set(body.id, add(add(desired.get(body.id)!, plane.right, (x - body.at.x) * world), plane.up, (y - body.at.y) * world));
         };
         if (hub !== held) {
           // A selected leaf is the sole anchor. Moving its hub as part of the
@@ -835,6 +836,30 @@ export class Positions {
               const x = fit.slots[at].x * fit.scale, y = fit.slots[at].y * fit.scale;
               place(bodies[index], center.x + x, center.y + y);
               blockers.push({ x, y, radius: bodies[index].radius });
+            }
+          }
+          if (plane.compactReveal && obstacles.length) {
+            // Dense background can force every uniform ring past the same obstacle.
+            // Compare a local pocket: individual leaves take their nearest free
+            // points, keeping the hub, background and each leaf's depth intact.
+            const extent = (values: ReadonlyMap<string, Point>) => Math.max(...leaves.map(id => {
+              const at = plane.project(values.get(id)!);
+              return Math.hypot(at.x - center.x, at.y - center.y);
+            }));
+            let bestExtent = extent(next);
+            const preferredExtent = Math.max(...slots.map(slot => Math.hypot(slot.x, slot.y)));
+            // Try the ordinary ring and a pocket starting at the hub. The latter
+            // can fill nearby free arcs instead of keeping blocked spoke directions.
+            const seeds = bestExtent > preferredExtent + 2 * largest + COLLISION_GAP ? [slots, slots.map(() => ({ x: 0, y: 0 }))] : [];
+            for (const seed of seeds) {
+              const local = new Map(desired);
+              for (const [index, body] of bodies.entries()) place(body, center.x + seed[index].x, center.y + seed[index].y, local);
+              const compact = this.clearedPositions({ ...plane, held, fixed }, local, movable), radius = extent(compact);
+              // Prefer the settled uniform shape when its extent is equivalent.
+              if (radius + COLLISION_GAP < bestExtent) {
+                for (const [id, value] of compact) next.set(id, value);
+                bestExtent = radius;
+              }
             }
           }
         }

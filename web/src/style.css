@@ -270,3 +270,8 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 .original-editor label { display: block; margin-bottom: 8px; font-size: 13px; color: #bdcadb; }
 .original-editor textarea { min-height: 45dvh; font: 13px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
 .original-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.graph-minimap { position: absolute; right: 14px; bottom: 44px; width: 148px; padding: 8px; border: 1px solid #344353; border-radius: 9px; background: rgba(10, 18, 28, .88); color: #9fadb9; backdrop-filter: blur(10px); z-index: 2; }
+.graph-minimap > span { display: block; font-size: 10px; letter-spacing: .04em; margin-bottom: 4px; }
+.graph-minimap canvas { display: block; width: 100%; height: 92px; touch-action: none; cursor: crosshair; border-radius: 3px; }
+.graph-minimap canvas:focus-visible { outline: 1px solid #b8d3e7; outline-offset: 3px; }
+@media (max-width: 600px) { .graph-minimap { width: 112px; padding: 6px; bottom: 52px; } .graph-minimap canvas { height: 70px; } }

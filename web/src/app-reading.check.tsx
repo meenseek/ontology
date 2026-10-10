@@ -1,4 +1,6 @@
 import { createRoot } from "react-dom/client";
+import { Mesh, Scene, ShaderMaterial, Vector3 } from "three";
+import type { Camera } from "three";
 import App from "./App";
 import { Positions } from "./positions";
 import { summaryGlyphTexture } from "./summary-glyph";
@@ -912,6 +914,67 @@ function checkSummaryGlyphMotion() {
   } finally { glyph.texture.dispose(); }
 }
 
+async function checkRenderedMotion() {
+  const originalFetch = window.fetch, originalUrl = window.location.href, root = createRoot(host);
+  const originalRender = Scene.prototype.onBeforeRender, originalInstall = Positions.prototype.install;
+  const nodes: GraphNode[] = Array.from({ length: 5 }, (_, index) => ({ id: `motion-${index}`, scope: "personal", kind: "document", label: `합성 모션 자료 ${index}`, status: "ok", present: true, current: true }));
+  const links: Snapshot["links"] = [1, 2].map(index => ({ source: nodes[0].id, target: nodes[index].id, kind: "related", current: true }));
+  const snapshot: Snapshot = { scope: "personal", query: "", focus: { id: null, found: false }, nodes, links,
+    matched: nodes.length, totals: { documents: nodes.length, memories: 0, markers: 0, links: links.length },
+    returned: { knowledge: nodes.length, markers: 0, links: links.length }, omitted: { nodes: 0, links: 0 },
+    eligible: { nodes: nodes.length, links: links.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
+  let model: Parameters<Positions["install"]>[0] | undefined, positions: Positions | undefined, camera: Camera | undefined;
+  const sampled = new Map<string, { rotation: number; shimmer: number; wobble: number; z: number }>(), wrapped = new WeakSet<Mesh>(), worldPosition = new Vector3();
+  const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+  try {
+    Positions.prototype.install = function (this: Positions, ...args: Parameters<Positions["install"]>) {
+      positions = this; model = args[0]; return originalInstall.apply(this, args);
+    };
+    Scene.prototype.onBeforeRender = function (renderer, scene, frameCamera, geometry, material, group) {
+      camera = frameCamera;
+      scene.traverse(object => {
+        if (!(object instanceof Mesh) || !(object.material instanceof ShaderMaterial) || !object.material.uniforms.uRotation || wrapped.has(object)) return;
+        wrapped.add(object);
+        const draw = object.onBeforeRender;
+        object.onBeforeRender = function (...args) {
+          draw.apply(this, args);
+          const uniforms = (object.material as ShaderMaterial).uniforms, id = object.parent?.userData.nodeId;
+          if (id) sampled.set(id, { rotation: uniforms.uRotation.value, shimmer: uniforms.uShimmer.value, wobble: uniforms.uWobble.value.length(), z: object.getWorldPosition(worldPosition).z });
+        };
+      });
+      return originalRender.call(this, renderer, scene, frameCamera, geometry, material, group);
+    };
+    window.fetch = async input => {
+      const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+      if (url.pathname === "/api/session") return json({ csrf: "synthetic-only", areas: [] });
+      if (url.pathname === "/api/graph") return json(snapshot);
+      if (url.pathname === "/api/sync") return json({ enabled: false, running: false, error: null, report: null });
+      throw new Error(`Unexpected motion request: ${url.pathname}`);
+    };
+    window.history.replaceState(null, "", `${window.location.pathname}?scope=personal`);
+    root.render(<App />);
+    await until(() => sampled.size === nodes.length && !!positions && !positions.layoutMoving && !!camera, "actual Graph renders each luminous star");
+    assert(new Set([...sampled.values()].map(star => star.z.toFixed(6))).size > 1, "the rendered stars retain depth instead of flattening their world positions");
+    const initial = new Map(sampled);
+    await until(() => [...sampled].some(([id, value]) => Math.abs(value.rotation - initial.get(id)!.rotation) > .01 && Math.abs(value.shimmer - initial.get(id)!.shimmer) > .001), "the mounted renderer advances stellar surface and shimmer motion");
+    const node = model!.nodes.find(node => sampled.has(node.id))!, canvas = host.querySelector("canvas")!, rect = canvas.getBoundingClientRect();
+    const at = new Vector3(node.x, node.y, node.z).project(camera!);
+    canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: rect.left + (at.x + 1) * rect.width / 2, clientY: rect.top + (1 - at.y) * rect.height / 2 }));
+    await until(() => (sampled.get(node.id)?.wobble ?? 0) > .01, "pointer proximity drives wobble in the actual star draw");
+    canvas.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: host }));
+    await until(() => sampled.get(node.id)?.wobble === 0, "pointer exit restores the star without leaving a wobble behind");
+    details("보기 설정").summary.click();
+    const before = camera!.position.clone();
+    button("지도 천천히 회전").click();
+    await until(() => camera!.position.distanceTo(before) > .01, "slow 3D camera rotation remains available with pointer rotation disabled");
+    button("지도 회전 멈춤").click();
+    return { renderedMotion: true, stars: nodes.length, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true };
+  } finally {
+    root.unmount(); Scene.prototype.onBeforeRender = originalRender; Positions.prototype.install = originalInstall;
+    window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);
+  }
+}
+
 async function run() {
   const results: unknown[] = [];
   try {
@@ -927,6 +990,7 @@ async function run() {
     results.push(await checkFirstProximityCollapse());
     results.push(await checkSummaryOverview());
     results.push(await checkSummaryContentRefresh());
+    results.push(await checkRenderedMotion());
     output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
   } catch (error) {
     output.textContent = `FAIL\n${JSON.stringify({ passed: false, error: error instanceof Error ? error.message : String(error), results, active }, null, 2)}`;

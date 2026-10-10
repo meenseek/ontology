@@ -8,6 +8,9 @@ import { active, constellationView, denseConstellationCores, diagramLinks, expan
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 import type { ProjectedLabel } from "./presentation.ts";
+import { CameraMotion } from "./camera-motion.ts";
+import { miniMapTransform } from "./MiniMap.tsx";
+import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
 const memory = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "memory", label: id, revision: "1", status: "accepted", temporal: "current", supported: true });
 const edge = (source: string, target: string, current = true): GraphLink => ({ source, target, kind: "related", current });
@@ -2480,6 +2483,8 @@ test("static star clearance turns or expands a whole uniform ring and preserves 
   assertUniformRings(leaves, clear.get("hub")!);
   assert.ok(Math.hypot(leaves[0].x, leaves[0].y) > 24 && Math.hypot(leaves[0].x, leaves[0].y) < 40, "necessary clearance may exceed the preferred 24px radius");
   assert.deepEqual(clear.get("hub"), desired.get("hub")); assert.deepEqual(clear.get("outside"), desired.get("outside"));
+  assert.deepEqual(positions.clearLayout(desired, moving, "hub", { ...plane, compactReveal: true }), clear,
+    "a little breathing room keeps the existing ring instead of invoking compact fallback");
   for (const [index, node] of model.nodes.entries()) for (const other of model.nodes.slice(index + 1)) {
     const a = clear.get(node.id)!, b = clear.get(other.id)!;
     assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= plane.radius(node) + plane.radius(other) + 1 - 1e-6);
@@ -2487,6 +2492,37 @@ test("static star clearance turns or expands a whole uniform ring and preserves 
   assert.deepEqual(positions.clearLayout(clear, moving, "hub", plane), clear, "a repeated view retains its settled phase and radius");
   hubRadius = 3;
   assert.deepEqual(positions.clearLayout(clear, moving, "hub", plane), clear, "shrinking a footprint cannot repack a settled ring");
+});
+
+test("a crowded reveal uses a nearby pocket instead of enlarging every spoke", () => {
+  const leaves = Array.from({ length: 12 }, (_, i) => doc(`leaf-${i}`));
+  const nodes = [doc("hub"), ...leaves, ...["blocked-left", "blocked-top", "blocked-right", "distant"].map(doc)];
+  const model = reconcile(snapshot(nodes, leaves.map(node => edge("hub", node.id)))), positions = new Positions(); positions.install(model, true);
+  const desired = new Map(model.nodes.map(node => [node.id, { x: 0, y: 0, z: 0 }]));
+  desired.set("blocked-left", { x: -46, y: 0, z: 0 });
+  desired.set("blocked-top", { x: 0, y: 46, z: 0 });
+  desired.set("blocked-right", { x: 46, y: 0, z: 0 });
+  desired.set("distant", { x: 0, y: -120, z: 0 });
+  for (const [index, leaf] of leaves.entries()) desired.set(leaf.id, { x: 24 * Math.cos(index * Math.PI / 6), y: 24 * Math.sin(index * Math.PI / 6), z: index - 6 });
+  const moving = new Set(leaves.map(node => node.id));
+  const plane = { visible: nodes.map(node => node.id), right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 },
+    project: (value: { x: number; y: number }) => ({ x: value.x, y: value.y, depth: 1 }),
+    radius: (node: { id: string }) => node.id.startsWith("blocked-") ? 32 : 5, worldPerPixel: () => 1, isVisible: () => true };
+  const expanded = positions.clearLayout(desired, moving, "hub", plane);
+  const compact = positions.clearLayout(desired, moving, "hub", { ...plane, compactReveal: true });
+  const extent = (points: typeof desired) => Math.max(...leaves.map(node => Math.hypot(points.get(node.id)!.x, points.get(node.id)!.y)));
+  assert.ok(extent(compact) < extent(expanded) * .8, `local clearance materially reduces the runaway ring in this crowded case (${extent(expanded)} → ${extent(compact)})`);
+  assert.ok(extent(compact) < 60, "the free pocket is near the original hub rather than beyond the distant blocker");
+  for (const node of nodes) {
+    if (!moving.has(node.id)) assert.deepEqual(compact.get(node.id), desired.get(node.id), "the hub and background stay fixed");
+    assert.equal(compact.get(node.id)!.z, desired.get(node.id)!.z, "compact screen clearance preserves depth");
+    for (const other of nodes) {
+      if (other.id === node.id) continue;
+      const a = compact.get(node.id)!, b = compact.get(other.id)!;
+      assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= plane.radius(node) + plane.radius(other) + 1 - 1e-6, "compact bodies keep clearance");
+    }
+  }
+  assert.deepEqual(positions.clearLayout(compact, moving, "hub", { ...plane, compactReveal: true }), compact, "the settled pocket does not repack on refresh");
 });
 
 test("list sorting uses content dates and names without moving graph nodes", () => {
@@ -2503,4 +2539,80 @@ test("list sorting uses content dates and names without moving graph nodes", () 
   const same = [{ ...recent, id: "2", label: "same" }, { ...recent, id: "1", label: "same" }];
   assert.deepEqual(listNodes(same).map(n => n.id), ["1", "2"], "ties have a deterministic final key");
   assert.deepEqual(listNodes([...model.nodes].reverse()), listNodes(model.nodes), "source permutation cannot change display order");
+});
+
+test("closing retains outgoing stars for the full return and dissolves near the hub", () => {
+  const state = retargetReveal(revealState("open", "view", ["hub", "a", "b"]), "closed", "view", ["hub"], new Set(["hub", "a", "b"]), 1000, false);
+  assert.deepEqual([...state.retiring.keys()], ["a", "b"]);
+  assert.equal(revealOpacity(state, "a", 1300), 1);
+  assert.ok(revealOpacity(state, "a", 1600) > 0);
+  assert.equal(revealOpacity(state, "a", 1000 + REVEAL_DURATION), 0);
+  const finished = retargetReveal(state, "closed", "view", ["hub"], new Set(["hub", "a", "b"]), 1000 + REVEAL_DURATION, false);
+  assert.equal(finished.retiring.size, 0);
+});
+test("paging and reversing a return preserve continuity without resurrecting filtered content", () => {
+  const eligible = new Set(["hub", "a", "b", "c"]);
+  const first = retargetReveal(revealState("one", "view", ["hub", "a"]), "two", "view", ["hub", "b"], eligible, 100, false);
+  assert.equal(first.retiring.get("a"), 100);
+  assert.equal(first.entering.get("b"), 100);
+  const reverse = retargetReveal(first, "one", "view", ["hub", "a"], eligible, 200, false);
+  assert.equal(reverse.retiring.has("a"), false);
+  assert.equal(reverse.entering.has("a"), false);
+  const filtered = retargetReveal(reverse, "filter", "different-view", ["c"], new Set(["c"]), 210, false);
+  assert.equal(filtered.retiring.size, 0);
+  assert.equal(filtered.entering.size, 0);
+  const reduced = retargetReveal(first, "closed", "view", ["hub"], eligible, 210, true);
+  assert.equal(reduced.retiring.size, 0);
+});
+test("camera retargeting starts at the observed pose and manual input cancels future writes", () => {
+  const camera = new CameraMotion();
+  const initial = { position: { x: 0, y: 0, z: 500 }, target: { x: 0, y: 0, z: 0 } };
+  const first = { position: { x: 100, y: 50, z: 200 }, target: { x: 100, y: 50, z: 0 } };
+  camera.move(initial, first, 0);
+  const observed = camera.advance(200)!;
+  const second = { position: { x: -90, y: 0, z: 400 }, target: { x: -90, y: 0, z: 0 } };
+  assert.deepEqual(camera.move(observed, second, 200), observed);
+  assert.deepEqual(camera.advance(200), observed);
+  assert.notDeepEqual(observed, first);
+  camera.stop(); assert.equal(camera.advance(1000), null); assert.equal(camera.moving, false);
+  assert.deepEqual(camera.move(observed, initial, 1000, 0), initial);
+  assert.equal(camera.moving, false);
+  camera.move(observed, second, 1100);
+  assert.deepEqual(camera.finish(), second);
+  assert.equal(camera.advance(1200), null);
+});
+test("minimap coordinates invert precisely for translated scenes, empty scenes and narrow viewports", () => {
+  for (const points of [[], [{ x: 1000, y: -900 }, { x: 1100, y: -800 }], [{ x: -20, y: 20 }]]) {
+    const transform = miniMapTransform(points, 112, 70);
+    for (const point of [{ x: 0, y: 0 }, ...points]) {
+      const inverse = transform.toWorld(transform.toPixel(point));
+      assert.ok(Math.abs(inverse.x - point.x) < 1e-9 && Math.abs(inverse.y - point.y) < 1e-9);
+    }
+    assert.ok(Number.isFinite(transform.scale) && transform.scale > 0);
+  }
+});
+
+test("successive page transitions keep already returning stars until the retargeted layout reaches its hub", () => {
+  const source = snapshot([{ id: "purpose-many", scope: "meenseek", kind: "subject", label: "Many" },
+    ...Array.from({ length: 75 }, (_, index) => ({ ...doc(`member-${String(index).padStart(3, "0")}`), subject_id: "purpose-many", subject_name: "Many" }))]);
+  const model = reconcile(source, undefined, false, "purpose"), positions = new Positions(); positions.install(model, true);
+  const hub = [...constellationView(model.nodes, model.links, null, null, undefined, "purpose").counts.keys()][0];
+  const first = constellationView(model.nodes, model.links, null, hub, 0, "purpose");
+  positions.showCore(hub, 0, true, 0, first.disclosure!.visible);
+  const eligible = new Set(model.nodes.map(node => node.id));
+  let transition = revealState("0", "same", first.nodes.map(node => node.id));
+  const turn = (page: number, now: number) => {
+    const next = constellationView(model.nodes, model.links, null, hub, page, "purpose");
+    positions.showCore(hub, now, false, page, next.disclosure!.visible);
+    transition = retargetReveal(transition, String(page), "same", next.nodes.map(node => node.id), eligible, now, false);
+  };
+  turn(1, 100); positions.advance(250, false); turn(2, 250);
+  const returning = [...transition.retiring.keys()][0];
+  assert.equal(transition.retiring.get(returning), 250);
+  positions.advance(100 + REVEAL_DURATION, false);
+  assert.equal(positions.layoutMoving, true);
+  assert.ok(revealOpacity(transition, returning, 100 + REVEAL_DURATION) > 0, "old deadline cannot hide a star whose physical return was restarted");
+  positions.advance(250 + REVEAL_DURATION, false);
+  assert.equal(positions.layoutMoving, false);
+  assert.equal(revealOpacity(transition, returning, 250 + REVEAL_DURATION), 0);
 });

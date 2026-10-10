@@ -93,7 +93,7 @@ export function planCoreView(desired: ReadonlyMap<string, Point>, movable: Reado
   const counts = new Map(spatial.counts);
   for (const [id, count] of view.counts) counts.set(id, count - Number(nodes.find(node => node.id === id)?.kind === "folder"));
   const plane = { ...screenPlane(camera, () => view.size, view.selected, counts),
-    visible: spatial.nodes.map(node => node.id), isVisible: () => true };
+    visible: spatial.nodes.map(node => node.id), isVisible: () => true, compactReveal: !view.selected };
   const next = new Map(desired);
   let moving = new Set(movable);
   let held = hub;
