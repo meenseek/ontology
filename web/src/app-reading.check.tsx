@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { Mesh, Scene, ShaderMaterial, Vector3 } from "three";
 import type { Camera } from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import App from "./App";
 import { Positions } from "./positions";
 import { summaryGlyphTexture } from "./summary-glyph";
@@ -27,7 +28,7 @@ async function until(condition: () => boolean, message: string) {
   await settle();
 }
 function button(text: string, parent: ParentNode = host) {
-  const element = [...parent.querySelectorAll<HTMLButtonElement>("button")].find(node => node.textContent?.trim() === text);
+  const element = [...parent.querySelectorAll<HTMLButtonElement>("button")].find(node => (node.textContent?.trim() || node.getAttribute("aria-label")) === text);
   assert(element && !element.disabled, `Enabled button: ${text}`);
   return element;
 }
@@ -917,6 +918,8 @@ function checkSummaryGlyphMotion() {
 async function checkRenderedMotion() {
   const originalFetch = window.fetch, originalUrl = window.location.href, root = createRoot(host);
   const originalRender = Scene.prototype.onBeforeRender, originalInstall = Positions.prototype.install;
+  const originalControlsUpdate = OrbitControls.prototype.update;
+  let cameraDistance = 0;
   const nodes: GraphNode[] = Array.from({ length: 5 }, (_, index) => ({ id: `motion-${index}`, scope: "personal", kind: "document", label: `합성 모션 자료 ${index}`, status: "ok", present: true, current: true }));
   const links: Snapshot["links"] = [1, 2].map(index => ({ source: nodes[0].id, target: nodes[index].id, kind: "related", current: true }));
   const snapshot: Snapshot = { scope: "personal", query: "", focus: { id: null, found: false }, nodes, links,
@@ -927,6 +930,11 @@ async function checkRenderedMotion() {
   const sampled = new Map<string, { rotation: number; shimmer: number; wobble: number; z: number }>(), wrapped = new WeakSet<Mesh>(), worldPosition = new Vector3();
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
   try {
+    OrbitControls.prototype.update = function (this: OrbitControls, ...args: Parameters<OrbitControls["update"]>) {
+      const result = originalControlsUpdate.apply(this, args);
+      cameraDistance = this.object.position.distanceTo(this.target);
+      return result;
+    };
     Positions.prototype.install = function (this: Positions, ...args: Parameters<Positions["install"]>) {
       positions = this; model = args[0]; return originalInstall.apply(this, args);
     };
@@ -968,9 +976,41 @@ async function checkRenderedMotion() {
     button("지도 천천히 회전").click();
     await until(() => camera!.position.distanceTo(before) > .01, "slow 3D camera rotation remains available with pointer rotation disabled");
     button("지도 회전 멈춤").click();
-    return { renderedMotion: true, stars: nodes.length, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true };
+    details("보기 설정").summary.click();
+    let restingDirection = camera!.getWorldDirection(new Vector3()), restingSamples = 0;
+    await until(() => {
+      const current = camera!.getWorldDirection(new Vector3());
+      const resting = current.distanceTo(restingDirection) < .000001;
+      restingDirection = current;
+      restingSamples = resting ? restingSamples + 1 : 0;
+      return restingSamples >= 4;
+    }, "the existing damped rotation settles before isolated zoom observations");
+    const minimap = host.querySelector<HTMLCanvasElement>('.graph-minimap canvas')!;
+    const controls = [...host.querySelectorAll<HTMLButtonElement>('.minimap-actions button')];
+    assert(controls.length === 4 && controls.every(control => control.getAttribute("aria-label") && control.title), "four minimap controls expose accessible names and tooltips");
+    const boxes = controls.map(control => control.getBoundingClientRect());
+    assert(boxes.every((box, index) => box.width >= 32 && box.height >= 32 && (!index || box.left - boxes[index - 1].right >= 3.9)), "minimap icon targets have usable size and separation");
+    assert(host.querySelectorAll('button[aria-label="전체 맞춤"]').length === 1, "full fit has one minimap entry");
+    const zoomBefore = camera!.position.clone(), direction = camera!.getWorldDirection(new Vector3());
+    button("확대").click();
+    await until(() => camera!.position.distanceTo(zoomBefore) > 1, "minimap plus changes the mounted camera");
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert(camera!.getWorldDirection(new Vector3()).distanceTo(direction) < .00001, "zoom retains the rotated 3D direction");
+    button("축소").click();
+    await until(() => camera!.position.distanceTo(zoomBefore) < .01, "inverse minimap zoom restores the live camera pose");
+    minimap.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await until(() => camera!.position.distanceTo(zoomBefore) > 1, "minimap keyboard pans the live camera");
+    const panned = camera!.position.clone(), pannedDistance = cameraDistance;
+    button("지도 가운데로 이동").click();
+    await until(() => camera!.position.distanceTo(panned) > 1, "center returns from a panned view");
+    assert(Math.abs(cameraDistance - pannedDistance) < .00001, "center preserves the actual camera-to-target zoom distance");
+    button("전체 맞춤").click();
+    await until(() => camera!.getWorldDirection(new Vector3()).distanceTo(new Vector3(0, 0, -1)) < .00001, "the existing full fit resets the camera orientation");
+    assert([...sampled.values()].some(star => star.z !== 0), "minimap navigation preserves stellar depth");
+    return { renderedMotion: true, stars: nodes.length, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, minimapControls: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
   } finally {
     root.unmount(); Scene.prototype.onBeforeRender = originalRender; Positions.prototype.install = originalInstall;
+    OrbitControls.prototype.update = originalControlsUpdate;
     window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);
   }
 }

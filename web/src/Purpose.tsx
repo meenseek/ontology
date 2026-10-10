@@ -58,7 +58,7 @@ export function SubjectPurpose(props: Props) {
     {editing ? <form onSubmit={event => { event.preventDefault(); void save(); }}><fieldset disabled={disabled}>
       <label className="topic-label">묶음 이름<input value={name} maxLength={80} onChange={event => setName(event.target.value)} /></label>
       <DefinitionFields value={definition} onChange={setDefinition} /><p className="hint">기준 변경은 기존 소속을 옮기지 않습니다. 연결된 문서는 재확인 상태로 남습니다.</p>
-      <button disabled={!name.trim() || !completeDefinition(definition)}>정의 저장</button><button type="button" onClick={() => { setName(current.name); setDefinition(current.definition ?? blankDefinition()); setEditing(false); setError(""); }}>취소</button>
+      <div className="action-row"><button disabled={!name.trim() || !completeDefinition(definition)}>정의 저장</button><button type="button" onClick={() => { setName(current.name); setDefinition(current.definition ?? blankDefinition()); setEditing(false); setError(""); }}>취소</button></div>
     </fieldset></form> : <><Definition value={current.definition} /><button disabled={disabled} onClick={() => { setName(current.name); setDefinition(current.definition ?? blankDefinition()); setEditing(true); }}>목적 정의 편집</button></>}
     {error && <p className="error" role="alert">{error}</p>}
   </section>;
@@ -128,11 +128,11 @@ export function DocumentPurpose(props: Props) {
       <div className="related-search"><input aria-label="목적 묶음 검색" maxLength={120} value={query} onChange={event => setQuery(event.target.value)} /><button type="button" onClick={() => void run(() => choices())}>묶음 찾기</button></div>
       {next && <button type="button" onClick={() => void run(() => choices(next))}>묶음 더 보기</button>}
       <label className="topic-label">분류 이유<textarea rows={3} value={reason} maxLength={2048} onChange={event => setReason(event.target.value)} /></label>
-      <button disabled={!reason.trim() || bytes(reason) > 2048 || (!!subject && subjectRevision === undefined)}>소속 저장</button>
-      <button type="button" onClick={() => { setEditing(false); setError(""); }}>취소</button><button type="button" onClick={() => void run(read)}>현재 소속 다시 읽기</button>
+      <div className="action-row"><button disabled={!reason.trim() || bytes(reason) > 2048 || (!!subject && subjectRevision === undefined)}>소속 저장</button>
+      <button type="button" onClick={() => { setEditing(false); setError(""); }}>취소</button><button type="button" onClick={() => void run(read)}>현재 소속 다시 읽기</button></div>
     </fieldset></form>}
-    <button disabled={disabled} onClick={() => void run(() => past())}>소속 이력</button>
-    {value && <button disabled={disabled || dirty || ["pending", "processing"].includes(value.grouping?.state ?? "")} onClick={() => void run(retry)}>목적 자동 재검토</button>}
+    <div className="action-row"><button disabled={disabled} onClick={() => void run(() => past())}>소속 이력</button>
+    {value && <button disabled={disabled || dirty || ["pending", "processing"].includes(value.grouping?.state ?? "")} onClick={() => void run(retry)}>목적 자동 재검토</button>}</div>
     {history && <><ol>{history.map(item => <li key={item.revision}><strong>{item.subject_name ?? "미분류"}</strong> · {new Date(item.changed_at).toLocaleString("ko-KR")}<p>{item.reason}</p><details><summary>당시 목적 정의</summary><Definition value={item.definition} /></details></li>)}</ol>{before && <button disabled={disabled} onClick={() => void run(() => past(before))}>이력 더 보기</button>}</>}
     {error && <p className="error" role="alert">{error}</p>}
   </section>;

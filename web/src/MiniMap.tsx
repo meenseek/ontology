@@ -17,8 +17,8 @@ export function miniMapTransform(points: readonly XY[], width: number, height: n
     toWorld: (p: XY): XY => ({ x: center.x + (p.x - width / 2) / scale, y: center.y - (p.y - height / 2) / scale }),
   };
 }
-type Props = { nodes: PositionedNode[]; getCamera: () => { camera: PerspectiveCamera; pose: CameraPose } | null; onMove: (pose: CameraPose) => void; disabled: boolean; visible: boolean };
-export default function MiniMap({ nodes, getCamera, onMove, disabled, visible }: Props) {
+type Props = { nodes: PositionedNode[]; getCamera: () => { camera: PerspectiveCamera; pose: CameraPose } | null; onMove: (pose: CameraPose) => void; onZoom: (factor: number) => void; onFit?: () => void; disabled: boolean; visible: boolean };
+export default function MiniMap({ nodes, getCamera, onMove, onZoom, onFit, disabled, visible }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const navigate = useRef<((x: number, y: number, relative?: boolean) => void) | null>(null);
   const pointer = useRef<number | null>(null);
@@ -79,6 +79,7 @@ export default function MiniMap({ nodes, getCamera, onMove, disabled, visible }:
     const rect = event.currentTarget.getBoundingClientRect();
     navigate.current?.(event.clientX - rect.left, event.clientY - rect.top);
   };
+  const center = () => { const element = canvas.current; if (element) navigate.current?.(element.clientWidth / 2, element.clientHeight / 2); };
   return <div className="graph-minimap">
     <span aria-hidden="true">전체 지도</span>
     <canvas ref={canvas} tabIndex={disabled ? -1 : 0} role="application" aria-label="미니맵. 클릭하거나 끌어서 지도 이동. 방향키로 이동, Home으로 가운데 보기." aria-disabled={disabled}
@@ -94,7 +95,13 @@ export default function MiniMap({ nodes, getCamera, onMove, disabled, visible }:
         if (disabled) return;
         const delta: Record<string, XY> = { ArrowLeft: { x: -10, y: 0 }, ArrowRight: { x: 10, y: 0 }, ArrowUp: { x: 0, y: -10 }, ArrowDown: { x: 0, y: 10 } };
         if (delta[event.key]) { event.preventDefault(); navigate.current?.(delta[event.key].x, delta[event.key].y, true); }
-        else if (event.key === "Home") { event.preventDefault(); navigate.current?.(event.currentTarget.clientWidth / 2, event.currentTarget.clientHeight / 2); }
+        else if (event.key === "Home") { event.preventDefault(); center(); }
       }} />
+    <div className="minimap-actions" role="group" aria-label="지도 보기 조절">
+      <button type="button" disabled={disabled} aria-label="축소" title="축소" onClick={() => onZoom(1 / 1.25)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /></svg></button>
+      <button type="button" disabled={disabled} aria-label="확대" title="확대" onClick={() => onZoom(1.25)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14" /></svg></button>
+      <button type="button" disabled={disabled} aria-label="지도 가운데로 이동" title="가운데로 이동 · 확대 비율 유지" onClick={center}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6" /><path d="M12 2v4m0 12v4M2 12h4m12 0h4" /></svg></button>
+      {onFit && <button type="button" disabled={disabled} aria-label="전체 맞춤" title="전체 맞춤" onClick={onFit}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5m11-5h5v5M4 15v5h5m6 0h5v-5" /></svg></button>}
+    </div>
   </div>;
 }

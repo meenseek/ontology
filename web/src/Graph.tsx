@@ -13,13 +13,13 @@ import type { GraphLink, GraphView, Model, PositionedNode } from "./graph";
 import { LAYOUT_WORLD_SPACING, MAX_VISIBLE_LABELS, advanceStarClock, coreCameraDistance, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
 import { planCoreView, screenPlane, spatialCameraFrame } from "./view-layout";
-import { CameraMotion } from "./camera-motion";
+import { CameraMotion, zoomCameraPose } from "./camera-motion";
 import type { CameraPose } from "./camera-motion";
 import MiniMap from "./MiniMap";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
-type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFailure: () => void };
+type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onFailure: () => void };
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
 const coreLabel = (node: PositionedNode | undefined, count: number, view?: GraphView) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : view === "purpose" ? `${node?.subject_name ?? node?.label ?? "목적 묶음"} · ${count}개` : `관계 묶음 · ${count}개`;
 function texture(kind: "ring" | "selection" | "change") {
@@ -205,7 +205,7 @@ function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "bod
   return sprite;
 }
 const endpoint = (value: string | number | { id?: string | number } | undefined) => typeof value === "object" ? value.id : value;
-export default function Graph({ positions, snapshot, nodes, links, selected, rotate, reduced, visible, fit, disabled, onSelect, onClearSelection, onFailure }: Props) {
+export default function Graph({ positions, snapshot, nodes, links, selected, rotate, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onFailure }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
   const cameraMotion = useRef(new CameraMotion());
@@ -233,6 +233,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     }
   }, [getCamera, writeCamera]);
   const panMiniMap = useCallback((pose: CameraPose) => { cameraMotion.current.stop(); pendingReturn.current = null; writeCamera(pose); }, [writeCamera]);
+  const zoomMiniMap = useCallback((factor: number) => {
+    const view = getCamera();
+    if (!view) return;
+    const controls = graph.current!.controls() as OrbitControls;
+    cameraMotion.current.stop(); pendingReturn.current = null;
+    const pose = zoomCameraPose(view.pose, factor, Math.max(1, controls.minDistance), controls.maxDistance);
+    moveCamera(pose.position, pose.target, reduced ? 0 : 160);
+  }, [getCamera, moveCamera, reduced]);
   useEffect(() => {
     if (reduced) { const pose = cameraMotion.current.finish(); if (pose) writeCamera(pose); }
   }, [reduced, writeCamera]);
@@ -1056,7 +1064,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         <button type="button" onClick={() => setShowAllCore(false)}>나눠 보기</button>}
     </div>}
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>근접 묶음 {spatialReveal.members.size}개 접기</button>}
-    {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} disabled={disabled || positions.dragging} visible={visible} />}
+    {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} disabled={disabled || positions.dragging} visible={visible} />}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
     <div className="graph-instructions" aria-hidden="true">빈 공간 끌기: 지도 이동 · 묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · 스크롤 확대·축소</div>
   </div>;

@@ -8,12 +8,23 @@ import { active, constellationView, denseConstellationCores, diagramLinks, expan
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 import type { ProjectedLabel } from "./presentation.ts";
-import { CameraMotion } from "./camera-motion.ts";
+import { CameraMotion, zoomCameraPose } from "./camera-motion.ts";
 import { miniMapTransform } from "./MiniMap.tsx";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition.ts";
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
 const memory = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "memory", label: id, revision: "1", status: "accepted", temporal: "current", supported: true });
 const edge = (source: string, target: string, current = true): GraphLink => ({ source, target, kind: "related", current });
+test("minimap zoom preserves a panned 3D viewing direction and respects camera limits", () => {
+  const pose = { position: { x: 40, y: 60, z: 90 }, target: { x: 10, y: 20, z: 30 } };
+  const zoomed = zoomCameraPose(pose, 1.25, 1, 1000);
+  assert.deepEqual(zoomed.target, pose.target);
+  assert.deepEqual(zoomed.position, { x: 34, y: 52, z: 78 });
+  assert.deepEqual(zoomCameraPose(zoomed, 1 / 1.25, 1, 1000), pose);
+  const distance = (p: typeof pose) => Math.hypot(p.position.x - p.target.x, p.position.y - p.target.y, p.position.z - p.target.z);
+  assert.ok(Math.abs(distance(zoomCameraPose(pose, 100, 20, 100)) - 20) < 1e-10);
+  assert.ok(Math.abs(distance(zoomCameraPose(pose, 0.01, 20, 100)) - 100) < 1e-10);
+  assert.deepEqual(zoomCameraPose(pose, 0), pose);
+});
 function snapshot(nodes: GraphNode[], links: GraphLink[] = []): Snapshot {
   return { scope: "meenseek", query: "", focus: { id: null, found: false }, nodes, links, matched: nodes.length, totals: { documents: nodes.filter(n => n.kind === "document").length, memories: nodes.filter(n => n.kind === "memory").length, markers: nodes.filter(n => n.kind !== "document" && n.kind !== "memory").length, links: links.length }, returned: { knowledge: nodes.length, markers: 0, links: links.length }, omitted: { nodes: 0, links: 0 }, eligible: { nodes: nodes.length, links: links.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
 }

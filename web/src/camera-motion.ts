@@ -2,6 +2,14 @@ import type { Point } from "./positions";
 import { REVEAL_DURATION } from "./reveal-transition";
 
 export type CameraPose = { position: Point; target: Point };
+/** Dolly about the current target, preserving the 3D viewing direction and pan. */
+export function zoomCameraPose(pose: CameraPose, factor: number, min = 1, max = Infinity): CameraPose {
+  const offset = { x: pose.position.x - pose.target.x, y: pose.position.y - pose.target.y, z: pose.position.z - pose.target.z };
+  const distance = Math.hypot(offset.x, offset.y, offset.z);
+  if (!distance || !Number.isFinite(factor) || factor <= 0) return copy(pose);
+  const scale = Math.max(min, Math.min(max, distance / factor)) / distance;
+  return { position: { x: pose.target.x + offset.x * scale, y: pose.target.y + offset.y * scale, z: pose.target.z + offset.z * scale }, target: { ...pose.target } };
+}
 const copy = (pose: CameraPose): CameraPose => ({ position: { ...pose.position }, target: { ...pose.target } });
 const mix = (a: Point, b: Point, t: number): Point => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t });
 /** Retarget from the observed pose. Never finish an interrupted tween at its old destination. */

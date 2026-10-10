@@ -57,14 +57,16 @@ summary:hover { color: #e6edf6; }
 .map-toolbar { padding: 22px 26px 9px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; z-index: 3; }
 .map-title { min-width: 0; }
 .count-breakdown { color: #a0aec0; font-size: 12px; margin: 4px 0 0; }
-.map-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; }
-.map-actions > button { font-size: 12px; padding: 7px 10px; background: transparent; white-space: nowrap; }
+.map-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+.map-actions > label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #bdcadb; white-space: nowrap; }
+.map-actions select { min-height: 36px; font-size: 12px; padding-block: 7px; padding-inline-start: 10px; }
+.map-actions > button { min-height: 36px; font-size: 12px; padding: 7px 10px; background: transparent; white-space: nowrap; }
 .view-options { position: relative; }
-.view-options > summary { padding: 8px; font-size: 12px; white-space: nowrap; }
-.view-options > div { position: absolute; right: 0; top: 100%; width: 168px; display: grid; gap: 7px; padding: 12px; border: 1px solid #425064; border-radius: 5px; background: #151f2c; }
+.view-options > summary { min-height: 36px; padding: 8px; font-size: 12px; white-space: nowrap; }
+.view-options > div { position: absolute; right: 0; top: calc(100% + 6px); width: 188px; display: grid; gap: 8px; padding: 12px; border: 1px solid #425064; border-radius: 5px; background: #151f2c; }
 .view-options button { text-align: left; font-size: 12px; }
 .map-status { padding: 0 26px; z-index: 2; font-size: 12px; }
-.active-filters { display: flex; gap: 7px; margin: 0 0 6px; }
+.active-filters { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 8px; }
 .active-filters button { padding: 3px 0; text-decoration: underline; }
 .no-relations { margin: 8px 0 0; }
 .graph-canvas { position: relative; flex: 1; min-height: 230px; min-width: 0; background: radial-gradient(ellipse at 50% 42%, #111e30 0, #0c1421 45%, #080d16 100%); }
@@ -103,7 +105,7 @@ summary:hover { color: #e6edf6; }
 .map-empty h2 { color: #d5dfeb; font-size: 18px; margin-bottom: 0; }
 .map-empty p { font-size: 13px; }
 .list-sort { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #bdcadb; }
-.list-sort select { width: auto; min-height: 36px; padding: 6px 9px; }
+.list-sort select { width: auto; min-height: 36px; padding: 6px 34px 6px 9px; }
 .graph-list { padding: 18px 26px; flex: 1; overflow-y: auto; }
 .graph-list > button { display: flex; width: 100%; align-items: center; text-align: left; gap: 14px; padding: 15px 8px; border-width: 0 0 1px; border-radius: 0; background: transparent; }
 .graph-list > button > span:nth-child(2) { flex: 1; min-width: 0; }
@@ -115,9 +117,11 @@ summary:hover { color: #e6edf6; }
 .node-symbol.memory { color: #efd8ac; }
 .node-location { display: block; font-size: 11px; color: #93a4b8; overflow-wrap: anywhere; margin-top: 3px; }
 .management-panel { background: #141c27; border-left: 1px solid #394655; padding: 0 26px 36px; overflow-y: auto; min-width: 0; z-index: 5; scrollbar-gutter: stable; }
-.panel-heading { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #364253; padding: 14px 0; margin-bottom: 22px; background: #141c27; color: #a8b8ca; font-size: 12px; }
+.panel-heading { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid #364253; padding: 14px 0; margin-bottom: 22px; background: #141c27; color: #a8b8ca; font-size: 12px; }
 .panel-heading button { font-size: 12px; background: transparent; border-color: transparent; min-height: 36px; }
-.panel-actions { display: flex; gap: 6px; align-items: center; }
+.panel-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.action-row > button { margin: 0; }
 .record-management, #record-management { scroll-margin-top: 84px; }
 .record-management[hidden] { display: none; }
 .document-title, .memory-editor h2 { margin: 7px 0 12px; font-size: 24px; line-height: 1.45; letter-spacing: -.4px; }
@@ -193,7 +197,7 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 .error { background: #38252b; color: #f6c6c1; border-color: #c27d76; }
 .notice { background: #1d2c3b; color: #bfd6ed; border-color: #819dbb; }
 .warning { background: #332d23; color: #e3cca5; border-color: #b0986c; }
-.error button, .notice button, .warning button { margin: 5px 5px 0 0; }
+.error > button, .notice > button, .warning > button, .hint > button, .attachment-error > button { margin: 5px 0 0 8px; }
 .loading { color: #adc0d8; font-size: 12px; padding: 5px 0; }
 .date-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .memory-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 18px 0; }
@@ -221,6 +225,9 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
   .map-workspace.panel-open.explorer-open { grid-template-columns: minmax(0, 1fr); }
   .map-workspace.panel-open.explorer-open .map-sidebar { display: none; }
   .map-workspace.panel-open .galaxy { width: calc(100% - min(480px, 100vw)); }
+  .panel-open .view-options { width: 100%; }
+  .panel-open .view-options > summary { width: max-content; }
+  .panel-open .view-options > div { left: 0; right: auto; max-width: 100%; }
   .management-panel { position: fixed; inset: 0 0 0 auto; width: min(480px, 100%); box-shadow: -25px 0 60px #0008; }
   .app-header { grid-template-columns: auto auto minmax(100px, 1fr) auto auto; gap: 10px; padding-inline: 16px; }
 }
@@ -245,8 +252,11 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
   .galaxy { flex: 1; min-height: 370px; }
   .map-toolbar { padding: 17px 18px 8px; gap: 10px; }
   .map-toolbar h1 { font-size: 17px; }
-  .map-actions { gap: 6px; }
+  .map-actions { gap: 8px; }
   .map-actions > button { min-height: 36px; }
+  .view-options { width: 100%; }
+  .view-options > summary { width: max-content; }
+  .view-options > div { left: 0; right: auto; max-width: 100%; }
   .map-status { padding-inline: 18px; }
   .map-legend { padding: 10px 18px; gap: 7px 14px; }
   .map-legend details { margin-left: 0; }
@@ -270,8 +280,12 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 .original-editor label { display: block; margin-bottom: 8px; font-size: 13px; color: #bdcadb; }
 .original-editor textarea { min-height: 45dvh; font: 13px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
 .original-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.graph-minimap { position: absolute; right: 14px; bottom: 44px; width: 148px; padding: 8px; border: 1px solid #344353; border-radius: 9px; background: rgba(10, 18, 28, .88); color: #9fadb9; backdrop-filter: blur(10px); z-index: 2; }
+.original-editor-actions .primary { margin-top: 0; }
+.graph-minimap { position: absolute; right: 14px; bottom: 44px; width: 168px; padding: 8px; border: 1px solid #344353; border-radius: 9px; background: rgba(10, 18, 28, .88); color: #9fadb9; backdrop-filter: blur(10px); z-index: 2; }
 .graph-minimap > span { display: block; font-size: 10px; letter-spacing: .04em; margin-bottom: 4px; }
 .graph-minimap canvas { display: block; width: 100%; height: 92px; touch-action: none; cursor: crosshair; border-radius: 3px; }
 .graph-minimap canvas:focus-visible { outline: 1px solid #b8d3e7; outline-offset: 3px; }
-@media (max-width: 600px) { .graph-minimap { width: 112px; padding: 6px; bottom: 52px; } .graph-minimap canvas { height: 70px; } }
+.minimap-actions { display: flex; justify-content: space-between; gap: 4px; margin-top: 8px; }
+.minimap-actions button { display: grid; place-items: center; width: 32px; height: 32px; padding: 6px; border-color: transparent; background: transparent; }
+.minimap-actions svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+@media (max-width: 600px) { .graph-minimap { width: 152px; padding: 6px; bottom: 52px; } .graph-minimap canvas { height: 70px; } .minimap-actions button { height: 40px; } }
