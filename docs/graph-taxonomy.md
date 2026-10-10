@@ -60,7 +60,7 @@ Native `context`의 `ontology-audit`는 지정한 원문과 이번 호출에 제
 | `from_kinds`, `to_kinds` | 각 방향에서 허용하는 `kind:name`의 `kind` 목록 1~32개, 중복 없이 지정한다. |
 | `allow_self` | 같은 개체를 양 끝점에 쓸 수 있는지 명시하는 boolean. |
 
-정의는 최대 32개이며 기존 CLI의 32 KiB 요청 상한도 적용한다. 아래는 합성 예시이며 `depends-on`을 실제 관계 사전으로 채택한 결과가 아니다.
+정의는 최대 32개이며 [native context CLI의 공통 요청 상한](../AGENTS.md#native-원문-보존과-조회)도 적용한다. 아래는 합성 예시이며 `depends-on`을 실제 관계 사전으로 채택한 결과가 아니다.
 
 ```json
 {
