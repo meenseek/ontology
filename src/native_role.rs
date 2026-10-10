@@ -1152,20 +1152,28 @@ mod observation_tests {
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
             let sink = RoleObservations::default();
             let limits = RoleLifecycleLimits {
-                max_role_execution_millis: 1000,
+                // Allow process startup under the parallel suite; the parent
+                // still enforces a five-second bound on blocked diagnostics.
+                max_role_execution_millis: 3000,
                 max_role_grace_millis: 100,
                 max_role_close_millis: 500,
-                max_total_role_millis: 1600,
+                max_total_role_millis: 3600,
             };
-            let (_, outcome) = run_codex_process_observed(
+            let result = run_codex_process_observed(
                 &binary,
                 b"[]",
                 HarnessRole::Reviewer,
                 &limits,
                 &AtomicBool::new(false),
                 Some(&sink),
-            )
-            .unwrap();
+            );
+            // Keep stderr backpressured until the worker returns, then let test
+            // failures reach the parent instead of blocking the panic report.
+            assert_eq!(
+                unsafe { libc::dup2(libc::STDOUT_FILENO, libc::STDERR_FILENO) },
+                libc::STDERR_FILENO
+            );
+            let (_, outcome) = result.unwrap();
             assert_eq!(outcome, RoleExecutionOutcome::Cancelled);
             let values = sink.0.lock().unwrap();
             assert_eq!(values.len(), 1);
