@@ -690,16 +690,20 @@ fn run_codex_process_observed(
     )
     .map_err(|_| NativeHarnessError::invalid_input("Codex start time overflow"))?;
     let started = Instant::now();
-    // Reserve one polling quantum for scheduling and at most half the close
-    // budget for forced group termination/reaping. All reported times are actual
-    // observations; an OS overrun fails rather than being clamped into acceptance.
+    // Polling cadence is not an OS scheduling guarantee. Reserve up to 50ms
+    // (10% of each budget, at least one poll) before execution/grace limits and half the
+    // close budget for forced group termination/reaping. Report actual times;
+    // an OS overrun still fails rather than being clamped into acceptance.
     let quantum = Duration::from_millis(2);
     let total = Duration::from_millis(limits.max_total_role_millis);
     let close = Duration::from_millis(limits.max_role_close_millis);
     let grace = Duration::from_millis(limits.max_role_grace_millis);
-    let execution = Duration::from_millis(limits.max_role_execution_millis)
-        .min(total.saturating_sub(close))
-        .saturating_sub(quantum);
+    let execution_budget =
+        Duration::from_millis(limits.max_role_execution_millis).min(total.saturating_sub(close));
+    let scheduling_margin =
+        |budget: Duration| (budget / 10).min(Duration::from_millis(50)).max(quantum);
+    let execution = execution_budget.saturating_sub(scheduling_margin(execution_budget));
+    let grace_margin = scheduling_margin(grace);
     let total_deadline = started
         .checked_add(total)
         .ok_or_else(|| NativeHarnessError::invalid_input("Codex total deadline overflow"))?;
@@ -923,7 +927,7 @@ fn run_codex_process_observed(
         }
         if let Some(deadline) = grace_deadline
             && terminal.is_none()
-            && (status.is_some() || now >= deadline.checked_sub(quantum).unwrap_or(deadline))
+            && (status.is_some() || now >= deadline.checked_sub(grace_margin).unwrap_or(deadline))
         {
             terminal = Some(now_millis());
         }
@@ -1051,9 +1055,19 @@ fn run_codex_process_observed(
                     > limits.max_role_execution_millis
                 || grace_deadline_at_millis.is_some_and(|deadline| terminal_at_millis > deadline)
             {
-                return Err(NativeHarnessError::invalid_input(
-                    "observed Codex lifecycle exceeded prepared limits",
-                ));
+                return Err(NativeHarnessError::invalid_input(format!(
+                    "observed Codex lifecycle exceeded prepared limits: execution={}ms/{}ms, grace_overrun={}ms, close={}ms/{}ms, total={}ms/{}ms",
+                    interrupt
+                        .unwrap_or(terminal_at_millis)
+                        .saturating_sub(started_at_millis),
+                    limits.max_role_execution_millis,
+                    grace_deadline_at_millis
+                        .map_or(0, |deadline| terminal_at_millis.saturating_sub(deadline)),
+                    closed.saturating_sub(terminal_at_millis),
+                    limits.max_role_close_millis,
+                    closed.saturating_sub(started_at_millis),
+                    limits.max_total_role_millis,
+                )));
             }
             observations.terminal_state = Some(codex_terminal_state(&outcome));
             return Ok((lifecycle, outcome));

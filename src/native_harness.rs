@@ -4286,7 +4286,17 @@ cat "$0.events.$role"
     fn codex_native_gate_cycles_refuse_suspended_reads_and_clear_verified_bodies() {
         let temp = TempDirectory::new("gate-cycles");
         let (_, _, _, workspace) = codex_fixture(&temp, 1, 1);
-        let source = test_source(&workspace);
+        // Gate idempotence needs a workload-local counter. Other parallel fixtures
+        // intentionally share test_store(), and must not enter this observation.
+        let store = test_runtime().block_on(async {
+            Store::for_native(&std::env::var("TEST_DATABASE_URL").unwrap()).unwrap()
+        });
+        let view = workspace.join(".gate-test-view");
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&view).unwrap();
+        let source = test_runtime()
+            .block_on(store.with_native_context(view, Ok))
+            .unwrap();
         let path = Path::new("vault/profile/rules/control.md");
         source.suspend_reads().unwrap();
         source.resume_reads().unwrap();
@@ -4296,19 +4306,19 @@ cat "$0.events.$role"
             source.open_file(path, 65536).unwrap();
             assert_eq!(source.body_queries(), before + 1);
             source.suspend_reads().unwrap();
-            let calls = test_store().calls();
+            let calls = store.calls();
             source.suspend_reads().unwrap();
-            assert_eq!(test_store().calls(), calls, "suspend is idempotent");
+            assert_eq!(store.calls(), calls, "suspend is idempotent");
             assert!(source.metadata(Path::new("")).is_err());
             assert!(source.source_versions(&[]).is_err());
             assert!(source.children(Path::new(""), 1).is_err());
             assert!(source.store_identity().is_err());
             assert!(source.open_file(path, 65536).is_err());
             source.resume_reads().unwrap();
-            let calls = test_store().calls();
+            let calls = store.calls();
             source.resume_reads().unwrap();
             assert_eq!(
-                test_store().calls(),
+                store.calls(),
                 calls,
                 "resume cannot accumulate shared locks"
             );
