@@ -416,7 +416,8 @@ function starSlots(root: string, members: string[], adjacency: Map<string, Set<s
   if (!cohort || cohort.leaves.length !== members.length) return null;
   const { hub, leaves } = cohort;
   const leafRadius = Math.max(...leaves.map(id => radii?.get(id) ?? spacing / 2));
-  const minimumRadius = Math.max(1, ((radii?.get(hub) ?? spacing / 2) + leafRadius) / spacing);
+  // Measured bodies need their clearance, not an additional unit-length spoke.
+  const minimumRadius = ((radii?.get(hub) ?? spacing / 2) + leafRadius) / spacing;
   const slots = circularSlots(leaves.length, minimumRadius, 2 * leafRadius / spacing);
   const placed = new Map<string, Slot>([[hub, { x: 0, y: 0 }], ...leaves.map((id, index) => [id, slots[index]] as const)]);
   const origin = placed.get(root)!;
@@ -562,7 +563,9 @@ function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonl
       const node = byId.get(id)!;
       return [id, { x: node.x - origin.x, y: node.y - origin.y }] as const;
     }));
-    const componentSpacing = footprints ? DEFAULT_LINK_PIXELS : spacing;
+    // Retain the link solver's shape while giving small bodies only the space
+    // they use on screen. Large or changed bodies are cleared below.
+    const componentSpacing = footprints ? Math.min(DEFAULT_LINK_PIXELS, 2 * Math.max(...ids.map(radiusFor))) : spacing;
     const slots = starSlots(root, members, adjacency, footprints, componentSpacing) ??
       compactSlots(root, members, adjacency) ?? packedSlots(root, members, adjacency, projected);
     const radii = ids.map(radiusFor).sort((a, b) => b - a);

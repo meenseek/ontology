@@ -693,7 +693,7 @@ async function checkFirstProximityCollapse() {
     window.history.replaceState(null, "", `${window.location.pathname}?scope=personal`);
     root.render(<App />);
     const openedAt = performance.now();
-    await until(() => !!host.querySelector("canvas") && !!positions && !positions.layoutMoving && !hasSummary() && performance.now() - openedAt > 650, "initial view shows ungrouped stars");
+    await until(() => !!host.querySelector("canvas") && !!positions && overviewPacks === 1 && !positions.layoutMoving && !hasSummary() && performance.now() - openedAt > 650, "initial ungrouped stars compact once and settle");
     const coordinates = () => JSON.stringify(nodes.map(node => positions!.layoutTarget(node.id)));
     const initial = coordinates(), initialPacks = overviewPacks, canvas = host.querySelector("canvas")!;
     const rect = canvas.getBoundingClientRect();
@@ -704,7 +704,7 @@ async function checkFirstProximityCollapse() {
       await until(() => hasSummary() === (deltaY > 0) && !positions!.layoutMoving && performance.now() - zoomedAt > 650, "zoom forms and dissolves the first proximity summary");
       assert(coordinates() === initial && overviewPacks === initialPacks, "The first proximity collapse also preserves all world coordinates without packing");
     }
-    return { firstProximityCollapse: true, documents: 12, markers: 1, zoomPacks: overviewPacks - initialPacks, coordinatesPreserved: true };
+    return { firstProximityCollapse: true, documents: 12, markers: 1, initialPacks, zoomPacks: overviewPacks - initialPacks, coordinatesPreserved: true };
   } finally {
     root.unmount(); Positions.prototype.install = originalInstall; Positions.prototype.packOverview = originalPack;
     window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);
@@ -917,9 +917,9 @@ function checkSummaryGlyphMotion() {
 
 async function checkRenderedMotion() {
   const originalFetch = window.fetch, originalUrl = window.location.href, root = createRoot(host);
-  const originalRender = Scene.prototype.onBeforeRender, originalInstall = Positions.prototype.install;
+  const originalRender = Scene.prototype.onBeforeRender, originalInstall = Positions.prototype.install, originalPack = Positions.prototype.packOverview;
   const originalControlsUpdate = OrbitControls.prototype.update;
-  let cameraDistance = 0;
+  let cameraDistance = 0, overviewPacked = false;
   const nodes: GraphNode[] = Array.from({ length: 5 }, (_, index) => ({ id: `motion-${index}`, scope: "personal", kind: "document", label: `합성 모션 자료 ${index}`, status: "ok", present: true, current: true }));
   const links: Snapshot["links"] = [1, 2].map(index => ({ source: nodes[0].id, target: nodes[index].id, kind: "related", current: true }));
   const snapshot: Snapshot = { scope: "personal", query: "", focus: { id: null, found: false }, nodes, links,
@@ -937,6 +937,11 @@ async function checkRenderedMotion() {
     };
     Positions.prototype.install = function (this: Positions, ...args: Parameters<Positions["install"]>) {
       positions = this; model = args[0]; return originalInstall.apply(this, args);
+    };
+    Positions.prototype.packOverview = function (this: Positions, ...args: Parameters<Positions["packOverview"]>) {
+      const packed = originalPack.apply(this, args);
+      if (packed) overviewPacked = true;
+      return packed;
     };
     Scene.prototype.onBeforeRender = function (renderer, scene, frameCamera, geometry, material, group) {
       camera = frameCamera;
@@ -961,7 +966,8 @@ async function checkRenderedMotion() {
     };
     window.history.replaceState(null, "", `${window.location.pathname}?scope=personal`);
     root.render(<App />);
-    await until(() => sampled.size === nodes.length && !!positions && !positions.layoutMoving && !!camera, "actual Graph renders each luminous star");
+    await until(() => sampled.size === nodes.length && !!positions && overviewPacked && !positions.layoutMoving && !!camera, "actual Graph renders each luminous star after its compact initial layout settles");
+    const restingLayout = JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z]));
     assert(new Set([...sampled.values()].map(star => star.z.toFixed(6))).size > 1, "the rendered stars retain depth instead of flattening their world positions");
     const initial = new Map(sampled);
     await until(() => [...sampled].some(([id, value]) => Math.abs(value.rotation - initial.get(id)!.rotation) > .01 && Math.abs(value.shimmer - initial.get(id)!.shimmer) > .001), "the mounted renderer advances stellar surface and shimmer motion");
@@ -985,6 +991,7 @@ async function checkRenderedMotion() {
       restingSamples = resting ? restingSamples + 1 : 0;
       return restingSamples >= 4;
     }, "the existing damped rotation settles before isolated zoom observations");
+    assert(JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z])) === restingLayout, "slow camera rotation preserves the compact world layout without repacking");
     const minimap = host.querySelector<HTMLCanvasElement>('.graph-minimap canvas')!;
     const controls = [...host.querySelectorAll<HTMLButtonElement>('.minimap-actions button')];
     assert(controls.length === 4 && controls.every(control => control.getAttribute("aria-label") && control.title), "four minimap controls expose accessible names and tooltips");
@@ -1007,9 +1014,10 @@ async function checkRenderedMotion() {
     button("전체 맞춤").click();
     await until(() => camera!.getWorldDirection(new Vector3()).distanceTo(new Vector3(0, 0, -1)) < .00001, "the existing full fit resets the camera orientation");
     assert([...sampled.values()].some(star => star.z !== 0), "minimap navigation preserves stellar depth");
-    return { renderedMotion: true, stars: nodes.length, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, minimapControls: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
+    return { renderedMotion: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
   } finally {
     root.unmount(); Scene.prototype.onBeforeRender = originalRender; Positions.prototype.install = originalInstall;
+    Positions.prototype.packOverview = originalPack;
     OrbitControls.prototype.update = originalControlsUpdate;
     window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);
   }

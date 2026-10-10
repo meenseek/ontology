@@ -742,11 +742,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           // Compact a new view once. Zoom/LOD only reveals the existing world positions.
           const packingKey = JSON.stringify([positions.structureEpoch, viewKey, fit, size]);
           const overviewChanged = packedOverview.current !== packingKey;
-          if (!summaryCounts.size) {
-            // An initially ungrouped view must not repack when zoom first forms a nucleus.
-            packedOverview.current = packingKey;
-            zoom.checkedFootprints = changedFootprints;
-          } else if (performance.now() - zoom.changedAt >= 150 && (overviewChanged || zoom.checkedFootprints !== changedFootprints)) {
+          if (performance.now() - zoom.changedAt >= 150 && (overviewChanged || zoom.checkedFootprints !== changedFootprints)) {
             const discs = displayNodes.map(node => {
               projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
               const depth = -projected.z, pixels = nodeScreenSize(node.kind, depth, size.height, camera.projectionMatrix.elements[5]);
@@ -763,10 +759,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
               worldPerPixel: depth => 2 * depth / (size.height * camera.projectionMatrix.elements[5]),
             }, performance.now(), reduced);
             if (packed || !overlap) {
+              // Ungrouped views also compact once; a later first nucleus uses
+              // the same coordinates instead of restarting the layout.
+              packedOverview.current = packingKey;
               zoom.checkedFootprints = changedFootprints;
             }
             if (packed) {
-              packedOverview.current = packingKey;
               setMovedGroups(previous => {
                 const next = new Map(previous);
                 for (const [id, group] of spatialGroups) next.set(id, { members: group.members, level: spatialLevel, epoch: positions.groupEpoch });

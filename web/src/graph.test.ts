@@ -1935,6 +1935,35 @@ test("separate collapsed groups each sit among unrelated stars without a reserve
   }
   for (const node of model.nodes.filter(node => !node.id.startsWith("a-"))) assert.deepEqual(coordinates(node), before.get(node.id), "only newly revealed members move");
 });
+test("unbundled overviews use measured star clearance and retain depth and stored links", () => {
+  for (const count of [4, 8, 12]) for (const shape of ["fan", "path"]) {
+    const nodes = [doc("hub"), ...Array.from({ length: count }, (_, index) => doc(`leaf-${index}`))];
+    const links = nodes.slice(1).map((node, index) => edge(shape === "fan" || !index ? "hub" : nodes[index].id, node.id));
+    const results = [];
+    for (const reversed of [false, true]) {
+      const model = reconcile(snapshot(reversed ? [...nodes].reverse() : nodes, reversed ? [...links].reverse() : links));
+      const positions = new Positions(); positions.install(model, true);
+      const before = new Map(model.nodes.map(node => [node.id, coordinates(node)]));
+      const span = (points: readonly { x: number; y: number }[]) => {
+        const xs = points.map(node => node.x), ys = points.map(node => node.y);
+        return Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+      };
+      const initialSpan = span(model.nodes);
+      assert.equal(positions.packOverview(model.nodes.map(node => ({ id: node.id, x: node.x, y: node.y, depth: 100, radius: 5 })), model.links, new Map(), {
+        right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, worldPerPixel: () => 1,
+      }, 0, true), true);
+      assert.ok(span(model.nodes) < initialSpan * .8, "ordinary visible stars shed unused space instead of keeping the world-sized fan or path");
+      for (const [index, node] of model.nodes.entries()) {
+        assert.equal(node.z, before.get(node.id)![2], "screen-plane packing preserves every star's 3D depth");
+        for (const other of model.nodes.slice(index + 1)) assert.ok(Math.hypot(node.x - other.x, node.y - other.y) >= 16 - 1e-7,
+          "the visible body and six-pixel gap remain clear");
+      }
+      assert.deepEqual(model.links, reconcile(snapshot(nodes, links)).links, "compactness cannot rewrite relationships");
+      results.push(model.nodes.map(node => [node.id, ...coordinates(node)]).sort());
+    }
+    assert.deepEqual(results[0], results[1], "input order cannot change the compact layout");
+  }
+});
 test("overview packing closes group gaps at different zooms without overlapping footprints or losing hidden members", async () => {
   const { summaryAppearance } = await import("./presentation.ts");
   const sizes = [22, 40, 75, 120];
