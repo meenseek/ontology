@@ -984,8 +984,9 @@ async function checkRenderedMotion() {
     assert(rotation.getAttribute("aria-pressed") === "false" && rotation.title.includes("느린 3D"), "minimap rotation exposes its mode and pace");
     rotation.click();
     await until(() => camera!.position.distanceTo(before) > .01, "slow 3D camera rotation remains available with pointer rotation disabled");
-    canvas.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse", pointerId: 9, button: 0, buttons: 1, clientX: rect.left + 5, clientY: rect.top + 5 }));
-    await until(() => !autoRotation, "holding the map pauses automatic rotation while pan remains the primary gesture");
+    // Exercise the root hold guard; native pan is checked separately with real pointer capture.
+    host.querySelector<HTMLElement>(".graph-canvas")!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse", pointerId: 9, button: 0, buttons: 1, clientX: rect.left + 5, clientY: rect.top + 5 }));
+    await until(() => !autoRotation, "the root pointer hold guard pauses automatic rotation");
     window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "mouse", pointerId: 9, button: 0, buttons: 0, clientX: rect.left + 5, clientY: rect.top + 5 }));
     await until(() => autoRotation, "release resumes the requested rotation without leaving a stale pointer");
     const navigation = host.querySelector<HTMLCanvasElement>('.graph-minimap canvas')!;
