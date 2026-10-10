@@ -75,6 +75,9 @@ summary:hover { color: #e6edf6; }
 .graph-canvas canvas { display: block; touch-action: none; }
 .node-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .node-label { position: absolute; width: max-content; max-width: 190px; color: #bbc9d9; font-size: 12px; text-shadow: 0 1px 5px #0b1018, 0 0 4px #0b1018; }
+.node-label { line-height: 1.4; padding: 2px 4px; border-radius: 3px; background: linear-gradient(90deg, #0b131cdd, #0b131c99); }
+.node-label.compact span, .node-label.compact small { display: none; }
+.node-label.offset-label::before { content: ""; position: absolute; left: var(--leader-x); top: var(--leader-y); width: var(--leader-length); height: 0; border-top: 1px dotted #65778c66; transform: rotate(var(--leader-angle)); transform-origin: 0 0; pointer-events: none; }
 .node-label strong { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .node-label span { display: block; font-size: 10px; color: #8f9eb0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .node-label small { display: block; font-size: 10px; color: #8999ad; }

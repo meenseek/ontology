@@ -1,3 +1,4 @@
+import { topologySlots } from "./constellation-layout.ts";
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -7,7 +8,7 @@ import { PerspectiveCamera, Vector3 } from "three";
 import { active, constellationView, denseConstellationCores, diagramLinks, expandedCoreCameraFrame, graphUrl, isNativeOriginal, knowledge, listNodes, nativeFolders, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph, visualSatellites } from "./graph.ts";
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
-import type { ProjectedLabel } from "./presentation.ts";
+import { visibleLabels, type ProjectedLabel } from "./presentation.ts";
 import { CameraMotion, zoomCameraPose } from "./camera-motion.ts";
 import { miniMapTransform } from "./MiniMap.tsx";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition.ts";
@@ -2682,4 +2683,57 @@ test("successive page transitions keep already returning stars until the retarge
   positions.advance(250 + REVEAL_DURATION, false);
   assert.equal(positions.layoutMoving, false);
   assert.equal(revealOpacity(transition, returning, 250 + REVEAL_DURATION), 0);
+});
+
+
+test("membership does not turn a real chain, branch or cycle into a fan", () => {
+  const ids = ["marker", "a", "b", "c", "d", "isolated"];
+  const radii = new Map(ids.map(id => [id, 6]));
+  const membership = ids.slice(1).map(id => ({ ...edge(id, "marker"), kind: "subject" as const }));
+  for (const real of [[edge("a", "b"), edge("b", "c"), edge("c", "d")],
+    [edge("a", "b"), edge("b", "c"), edge("b", "d")],
+    [edge("a", "b"), edge("b", "c"), edge("c", "d"), edge("d", "a")]]) {
+    const links = [...membership, ...real], original = structuredClone(links);
+    const result = topologySlots(ids, links, radii, 24);
+    assert.equal(result.size, ids.length);
+    assert.deepEqual(result, topologySlots([...ids].reverse(), [...links].reverse(), radii, 24));
+    assert.deepEqual(links, original);
+    const distance = (a: string, b: string) => Math.hypot(result.get(a)!.x - result.get(b)!.x, result.get(a)!.y - result.get(b)!.y);
+    assert.ok(Math.max(...real.map(link => distance(link.source, link.target))) < 2.5, "real links remain local");
+    assert.ok(Math.min(...["a", "b", "c", "d"].map(id => distance("marker", id))) > .7, "membership marker stays outside the real subgraph");
+    assert.ok(distance("isolated", "marker") > .7, "unrelated items remain independently visible");
+  }
+});
+
+test("labels avoid unlabeled stars and measured chrome while preserving a safe previous side", () => {
+  const candidate: ProjectedLabel = { id: "a", kind: "document", active: true, x: 100, y: 100, depth: 0, radius: 10, width: 70, height: 20 };
+  const stars = [{ ...candidate }, { id: "unlabeled", x: 140, y: 100, depth: 0, radius: 10 }];
+  const obstacles = [{ left: 0, top: 94, right: 100, bottom: 106 }];
+  const boxes = visibleLabels([candidate], 300, 240, "a", null, { stars, obstacles });
+  assert.equal(boxes.length, 1); assert.ok(boxes[0].top >= 115 || boxes[0].bottom <= 85);
+  const previous = new Map(boxes.map(box => [box.id, box]));
+  assert.deepEqual(visibleLabels([candidate], 300, 240, "a", null, { stars, obstacles, previous }), boxes);
+  const covered = [{ left: 0, top: 0, right: 300, bottom: 240 }];
+  assert.deepEqual(visibleLabels([candidate], 300, 240, "a", "a", { stars, obstacles: covered }), []);
+});
+
+test("small purpose chains and branches keep their measured 3D shape through tilted-camera pulls", () => {
+  const ids = ["a", "b", "c", "d"], hub = "purpose";
+  for (const real of [[edge("a", "b"), edge("b", "c"), edge("c", "d")], [edge("a", "b"), edge("b", "c"), edge("b", "d")]]) {
+    const nodes: GraphNode[] = [{ id: hub, scope: "meenseek", kind: "subject", label: "목적" }, ...ids.map(id => ({ ...doc(id), subject_id: hub }))];
+    const links: GraphLink[] = [...ids.map(id => ({ source: id, target: hub, kind: "subject" as const, current: true })), ...real];
+    const model = reconcile(snapshot(nodes, links), undefined, false, "purpose"), positions = new Positions(); positions.install(model, true);
+    const before = new Map(model.nodes.map(node => [node.id, { x: node.x, y: node.y, z: node.z }]));
+    const held = model.nodes.find(node => node.id === "a")!, start = before.get("a")!;
+    positions.begin("a", 1, { right: { x: .8, y: 0, z: .6 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: 24,
+      visible: model.nodes.map(node => node.id), radius: () => 2,
+      project: value => ({ x: value.x * .8 + value.z * .6, y: value.y, depth: 500 - value.x * .6 + value.z * .8 }), worldPerPixel: () => 1 });
+    positions.move("a", { x: held.x + 160, y: held.y + 70, z: held.z + 120 }); positions.release(0, true);
+    for (const node of model.nodes) {
+      const old = before.get(node.id)!;
+      assert.ok(Math.hypot((node.x - held.x) - (old.x - start.x), (node.y - held.y) - (old.y - start.y), (node.z - held.z) - (old.z - start.z)) < 1e-6,
+        "membership physics follows the full displayed 3D offsets without replacing the semantic silhouette");
+    }
+    assert.deepEqual(model.links, reconcile(snapshot(nodes, links), undefined, false, "purpose").links);
+  }
 });

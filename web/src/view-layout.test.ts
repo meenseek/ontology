@@ -313,3 +313,28 @@ test("a full selected fan crossing the camera plane still clears its front-facin
   assert.deepEqual(point(f.model.nodes.find(node => node.id === selected)!), opened.plan!.target);
   f.positions.showCore(null, 0, true); samePoints(f.model.nodes, before, "closing the full view restores canonical coordinates");
 });
+
+
+test("purpose pages keep their real chain and preserve the held marker and background", () => {
+  const f = fixture([40], 3, { width: 1280, height: 720 });
+  const hub = "purpose";
+  f.source.nodes = f.source.nodes.map(node => node.id.startsWith("g40-") ? { ...node, subject_id: hub, subject_name: "목적" } : node);
+  f.source.nodes.push({ id: hub, scope: "personal", kind: "subject", label: "목적" });
+  f.source.links = f.source.nodes.filter(node => node.subject_id).map(node => ({ source: node.id, target: hub, kind: "subject", current: true }));
+  for (let i = 0; i < 39; i++) f.source.links.push(edge(`g40-${i}`, `g40-${i + 1}`));
+  const model = reconcile(f.source, undefined, false, "purpose"), positions = new Positions(); positions.install(model, true);
+  const background = model.nodes.filter(node => node.id.startsWith("outside-")), before = new Map(model.nodes.map(node => [node.id, point(node)]));
+  for (const page of [0, 1]) {
+    const view = constellationView(model.nodes, model.links, null, hub, page, "purpose");
+    assert.ok(view.disclosure);
+    positions.showCore(hub, page * 1000, true, page, view.disclosure.visible);
+    samePoints(background, before, "page expansion leaves the background in place");
+    samePoints(model.nodes.filter(node => node.id === hub), before, "the classification anchor remains held");
+    const visible = view.disclosure.visible, real = view.links.filter(link => link.kind === "related" && visible.has(link.source) && visible.has(link.target));
+    assert.ok(real.length > 0, "each page has actual relations");
+    const distance = (a: string, b: string) => { const p = positions.layoutTarget(a)!, q = positions.layoutTarget(b)!; return Math.hypot(p.x - q.x, p.y - q.y); };
+    assert.ok(Math.max(...real.map(link => distance(link.source, link.target))) < 100, "actual page links remain local instead of receiving unrelated page slots");
+  }
+  positions.showCore(null, 3000, true);
+  samePoints(model.nodes, before, "closing restores the original 3D overview");
+});

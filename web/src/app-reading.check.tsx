@@ -1,3 +1,4 @@
+import { nodeScreenSize, nodeVisualRadius } from "./presentation";
 import { createRoot } from "react-dom/client";
 import { Mesh, Scene, ShaderMaterial, Vector3 } from "three";
 import type { Camera } from "three";
@@ -759,7 +760,9 @@ async function checkSummaryOverview() {
       const current = placements();
       if (current !== lastPlacement) { lastPlacement = current; stableSince = performance.now(); }
       return !!positions && !positions.layoutMoving && counts.every(count => !!summary(count)) && performance.now() - stableSince > 350;
-    }, "initial compact overview settles");
+    }, "initial compact overview settles").catch(error => {
+      throw new Error(`${error.message}; ${JSON.stringify({ moving: positions?.layoutMoving, packs: overviewPacks, placements: placements(), lastPlacement, stableFor: performance.now() - stableSince, visible: labels().map(label => label.children[0].textContent) })}`);
+    });
     const coordinates = () => JSON.stringify(nodes.map(node => positions!.layoutTarget(node.id)));
     const worldBeforeZoom = coordinates(), packsBeforeZoom = overviewPacks;
     const beforeZoom = lastPlacement, canvas = host.querySelector("canvas")!;
@@ -781,7 +784,9 @@ async function checkSummaryOverview() {
       await until(() => performance.now() - started > 650 && !positions!.layoutMoving, "camera zoom settles across proximity detail bands");
       assert(coordinates() === worldBeforeZoom && overviewPacks === packsBeforeZoom, "Crossing proximity detail bands preserves every world coordinate");
     }
-    await until(() => counts.every(count => !!summary(count)), "return zoom keeps all relation summaries available");
+    await until(() => counts.every(count => !!summary(count)), "return zoom keeps all relation summaries available").catch(error => {
+      throw new Error(`${error.message}; ${JSON.stringify({ placements: placements(), visible: labels().map(label => label.children[0].textContent), packs: overviewPacks, moving: positions?.layoutMoving })}`);
+    });
     const zoomPacks = overviewPacks - packsBeforeZoom;
     const background = () => JSON.stringify(nodes.filter(node => !node.id.startsWith("group-120-")).map(node => positions!.layoutTarget(node.id)));
     const backgroundBeforeExpansion = background();
@@ -968,6 +973,22 @@ async function checkRenderedMotion() {
     window.history.replaceState(null, "", `${window.location.pathname}?scope=personal`);
     root.render(<App />);
     await until(() => sampled.size === nodes.length && !!positions && overviewPacked && !positions.layoutMoving && !!camera, "actual Graph renders each luminous star after its compact initial layout settles");
+    const labelLayer = host.querySelector<HTMLElement>(".node-labels")!, labelOrigin = labelLayer.getBoundingClientRect();
+    const labelBoxes = [...labelLayer.querySelectorAll<HTMLElement>(".node-label")].filter(label => !label.hidden).map(label => ({ id: label.dataset.nodeId!, box: label.getBoundingClientRect() }));
+    assert(labelBoxes.length > 0 && [...labelLayer.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].every(label => label.classList.contains("compact")), "resting labels display compact literal titles");
+    const chromeBoxes = [...host.querySelectorAll<HTMLElement>(".graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions")].filter(element => element.offsetWidth && element.offsetHeight).map(element => element.getBoundingClientRect());
+    const overlap = (a: DOMRect, b: DOMRect) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    assert(labelBoxes.every(({ box }) => !chromeBoxes.some(chrome => overlap(box, chrome))), "mounted labels clear the actual minimap and navigation areas");
+    for (const { id, box } of labelBoxes) for (const other of model!.nodes) {
+      if (other.id === id) continue;
+      const point = new Vector3(other.x, other.y, other.z).applyMatrix4(camera!.matrixWorldInverse);
+      const pixels = nodeScreenSize(other.kind, -point.z, labelOrigin.height, camera!.projectionMatrix.elements[5]);
+      const radius = nodeVisualRadius(pixels, false, other.changed);
+      point.applyMatrix4(camera!.projectionMatrix);
+      if (point.z < -1 || point.z > 1) continue;
+      const x = labelOrigin.left + (point.x + 1) * labelOrigin.width / 2, y = labelOrigin.top + (1 - point.y) * labelOrigin.height / 2;
+      assert(Math.hypot(x - Math.max(box.left, Math.min(box.right, x)), y - Math.max(box.top, Math.min(box.bottom, y))) >= radius + 3.8, "mounted labels clear every star, including stars without labels");
+    }
     const restingLayout = JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z]));
     assert(new Set([...sampled.values()].map(star => star.z.toFixed(6))).size > 1, "the rendered stars retain depth instead of flattening their world positions");
     const initial = new Map(sampled);
@@ -1031,7 +1052,7 @@ async function checkRenderedMotion() {
     button("전체 맞춤").click();
     await until(() => camera!.getWorldDirection(new Vector3()).distanceTo(new Vector3(0, 0, -1)) < .00001, "the existing full fit resets the camera orientation");
     assert([...sampled.values()].some(star => star.z !== 0), "minimap navigation preserves stellar depth");
-    return { renderedMotion: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
+    return { renderedMotion: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
   } finally {
     root.unmount(); Scene.prototype.onBeforeRender = originalRender; Positions.prototype.install = originalInstall;
     Positions.prototype.packOverview = originalPack;

@@ -1,3 +1,4 @@
+import { classificationLink, topologySlots } from "./constellation-layout";
 import { REVEAL_DURATION } from "./reveal-transition";
 import { constellationView, diagramLinks, visualSatellites } from "./graph";
 import type { GraphLink, GraphView, Model, PositionedNode } from "./graph";
@@ -583,8 +584,10 @@ function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonl
     // Retain the link solver's shape while giving small bodies only the space
     // they use on screen. Large or changed bodies are cleared below.
     const componentSpacing = footprints ? Math.min(DEFAULT_LINK_PIXELS, 2 * Math.max(...ids.map(radiusFor))) : spacing;
-    const slots = starSlots(root, members, adjacency, footprints, componentSpacing) ??
-      compactSlots(root, members, adjacency) ?? packedSlots(root, members, adjacency, projected);
+    const topology = footprints && links.some(link => classificationLink(link.kind) && ids.includes(link.source) && ids.includes(link.target));
+    const slots = topology ? topologySlots(ids, links, footprints!, componentSpacing) :
+      starSlots(root, members, adjacency, footprints, componentSpacing) ?? compactSlots(root, members, adjacency) ??
+      (footprints ? topologySlots(ids, links, footprints, componentSpacing) : packedSlots(root, members, adjacency, projected));
     const radii = ids.map(radiusFor).sort((a, b) => b - a);
     const coordinates = new Map<string, Slot>([[root, { x: 0, y: 0 }], ...slots]);
     const average = [...coordinates.values()].reduce((sum, value) => ({ x: sum.x + value.x / ids.length, y: sum.y + value.y / ids.length }), { x: 0, y: 0 });
@@ -722,17 +725,28 @@ export class Positions {
         for (const [index, id] of [...visibleMembers].filter(id => id !== core && !pinned.has(id)).sort().entries()) {
           if (slots[index] && group.members.has(id)) visible.set(id, point(slots[index]));
         }
+        if (source.view === "purpose") {
+          const ids = [...visibleMembers].filter(id => group.members.has(id));
+          if (!ids.includes(core)) ids.push(core);
+          const slots = topologySlots(ids, source.links, new Map(ids.map(id => [id, LAYOUT_WORLD_SPACING / 2])), LAYOUT_WORLD_SPACING);
+          const origin = slots.get(core)!;
+          for (const id of ids) {
+            const slot = slots.get(id)!;
+            visible.set(id, { x: hub.x + (slot.x - origin.x) * LAYOUT_WORLD_SPACING, y: hub.y + (slot.y - origin.y) * LAYOUT_WORLD_SPACING,
+              z: hub.z + constellationDepth(slot.x - origin.x, slot.y - origin.y, 1) * LAYOUT_WORLD_SPACING });
+          }
+        }
         this.layouts.set(key, visible);
         return visible;
       }
     }
     if (core === "*") {
-      const full = packInitialCoordinates(source.nodes, source.links);
+      const full = packInitialCoordinates(source.nodes, source.links, source.view === "purpose" ? new Map(source.nodes.map(node => [node.id, LAYOUT_WORLD_SPACING / 2])) : undefined);
       this.layouts.set(key, full);
       return full;
     }
     const view = constellationView(source.nodes, source.links, null, core || null, page, source.view);
-    const visible = packInitialCoordinates(view.nodes, view.links);
+    const visible = packInitialCoordinates(view.nodes, view.links, source.view === "purpose" ? new Map(view.nodes.map(node => [node.id, LAYOUT_WORLD_SPACING / 2])) : undefined);
     const shown = new Set(view.nodes.map(node => node.id));
     for (const group of view.cores) {
       if (!view.counts.has(group.hub)) continue;
@@ -807,7 +821,11 @@ export class Positions {
   clearLayout(desired: ReadonlyMap<string, Point>, movable: ReadonlySet<string>, held: string, plane: LayoutPlane): Map<string, Point> {
     const fixed = new Set(plane.visible.filter(id => !movable.has(id)));
     const next = new Map(desired);
-    const cohort = starCohort(held, new Set(plane.visible), this.adjacency);
+    const layoutAdjacency = new Map([...this.nodes.keys()].map(id => [id, new Set<string>()]));
+    for (const link of this.source?.links ?? []) if (!classificationLink(link.kind)) {
+      layoutAdjacency.get(link.source)?.add(link.target); layoutAdjacency.get(link.target)?.add(link.source);
+    }
+    const cohort = starCohort(held, new Set(plane.visible), layoutAdjacency);
     if (cohort && (cohort.hub === held || movable.has(cohort.hub)) && cohort.leaves.every(id => id === held || movable.has(id))) {
       const { hub, leaves } = cohort, allowed = new Set([hub, ...leaves]);
       const center = plane.project(desired.get(hub)!);
@@ -1156,10 +1174,11 @@ export class Positions {
     // Large searches run in a worker. Preserve the current edge lengths until an
     // exact layout arrives; a speculative packed layout can stretch linked nodes.
     const defer = typeof Worker !== "undefined" && (included.size >= 128 || (included.size >= 32 && edgeCount > included.size));
-    const exact = overfull ? null : validSlots(id, members, this.adjacency, prior) ? prior : defer && edgeCount > 0 ? null : compactSlots(id, members, this.adjacency);
+    const preserveShape = !!clearance && this.packedInitial;
+    const exact = preserveShape || overfull ? null : validSlots(id, members, this.adjacency, prior) ? prior : defer && edgeCount > 0 ? null : compactSlots(id, members, this.adjacency);
     // A screen-cleared constellation keeps its silhouette through the pull and release.
     const cohort = clearance && starCohort(id, included, this.adjacency);
-    const existingFan = cohort && cohort.leaves.length > 2 ? new Map(members.map(member => {
+    const existingFan = preserveShape || cohort && cohort.leaves.length > 2 ? new Map(members.map(member => {
       const at = projected.get(member)!; return [member, { x: at.x / spacing, y: at.y / spacing }] as const;
     })) : null;
     const layout = dense ? null : existingFan ?? starSlots(id, members, this.adjacency) ?? exact ?? (overfull ? packedSlots(id, members, this.adjacency, projected) : null);
@@ -1206,7 +1225,7 @@ export class Positions {
     const initialIds = new Set([...included, ...(activeClearance?.visible ?? []), ...[...(activeClearance?.cohorts?.values() ?? [])].flat()]);
     const initial = new Map([...initialIds].filter(member => this.nodes.has(member)).map(member => [member, point(this.nodes.get(member)!)] as const));
     this.gesture = { id, start, initial, threshold: unitsPerPixel * 6, tolerance: unitsPerPixel * .05, followers, edges, project, clearance: activeClearance, rigid: null, velocities: new Map(), moved: false, last: null };
-    if (!layout && !overfull && members.length) this.searchLater(id, members, included, plane, spacing, unitsPerPixel * .05);
+    if (!preserveShape && !layout && !overfull && members.length) this.searchLater(id, members, included, plane, spacing, unitsPerPixel * .05);
   }
   /** A spatial summary owns real, unlinked members; translate that exact cohort as one gesture. */
   beginGroup(id: string, members: readonly string[], unitsPerPixel: number, plane: DragPlane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, spacingPixels: DEFAULT_LINK_PIXELS }) {

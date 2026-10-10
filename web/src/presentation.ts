@@ -21,9 +21,14 @@ export function nodePresentation(node: { kind: string; label: string; title?: st
 }
 export const MAX_VISIBLE_LABELS = 24;
 export type ProjectedLabel = { id: string; kind: string; active: boolean; summary?: boolean; importance?: number; x: number; y: number; depth: number; radius: number; width: number; height: number };
-type LabelBox = { id: string; left: number; top: number; right: number; bottom: number };
+export type LabelBox = { id: string; left: number; top: number; right: number; bottom: number };
+export type LabelEnvironment = {
+  stars?: readonly Pick<ProjectedLabel, "id" | "x" | "y" | "depth" | "radius">[];
+  obstacles?: readonly { left: number; top: number; right: number; bottom: number }[];
+  previous?: ReadonlyMap<string, LabelBox>;
+};
 /** Rank the current projection before bounding the visible set. No ID window excludes later nodes. */
-export function visibleLabels(candidates: ProjectedLabel[], width: number, height: number, selected: string | null, hovered: string | null): LabelBox[] {
+export function visibleLabels(candidates: ProjectedLabel[], width: number, height: number, selected: string | null, hovered: string | null, environment: LabelEnvironment = {}): LabelBox[] {
   const visible = candidates.filter(n => [n.x, n.y, n.depth, n.radius, n.width, n.height].every(Number.isFinite) && n.radius > 0 && n.depth >= -1 && n.depth <= 1 && n.x >= 0 && n.x <= width && n.y >= 0 && n.y <= height);
   const distance = (n: ProjectedLabel) => Math.hypot(n.x - width / 2, n.y - height / 2);
   const nearby = (a: ProjectedLabel, b: ProjectedLabel) => distance(a) - distance(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -45,14 +50,91 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     const positions = sides.map(side => ({ left: node.x + (side === -1 ? -clearance - node.width : clearance), top: node.y - node.height / 2 }));
     const centered = Math.max(0, Math.min(width - node.width, node.x - node.width / 2));
     positions.push({ left: centered, top: node.y - clearance - node.height }, { left: centered, top: node.y + clearance });
-    return positions.map(({ left, top }) => ({ id: node.id, left, top, right: left + node.width, bottom: top + node.height }));
+    if (environment.stars || environment.obstacles) {
+      // Keep the label near its star, but let it slide along an occupied side.
+      for (const shift of [-24, 24, -48, 48, -72, 72, -96, 96]) {
+        for (const side of sides) positions.push({ left: node.x + (side === -1 ? -clearance - node.width : clearance), top: node.y - node.height / 2 + shift });
+        positions.push({ left: Math.max(0, Math.min(width - node.width, centered + shift)), top: node.y - clearance - node.height },
+          { left: Math.max(0, Math.min(width - node.width, centered + shift)), top: node.y + clearance });
+      }
+    }
+    if (node.summary && environment.stars) for (const gap of [24, 48, 72, 96, 128, 160, 208]) {
+      for (const side of sides) for (const shift of [0, -gap / 2, gap / 2]) positions.push({ left: node.x + (side === -1 ? -clearance - gap - node.width : clearance + gap), top: node.y - node.height / 2 + shift });
+      positions.push({ left: centered, top: node.y - clearance - gap - node.height }, { left: centered, top: node.y + clearance + gap });
+    }
+    const boxes = positions.map(({ left, top }) => ({ id: node.id, left, top, right: left + node.width, bottom: top + node.height }));
+    const previous = environment.previous?.get(node.id);
+    if (previous) boxes.sort((a, b) => Math.hypot(a.left - previous.left, a.top - previous.top) - Math.hypot(b.left - previous.left, b.top - previous.top));
+    return boxes;
   };
   const inBounds = (box: LabelBox) => box.left >= 0 && box.top >= 0 && box.right <= width && box.bottom <= height;
   const overlaps = (a: LabelBox, b: LabelBox) => a.left < b.right + 8 && a.right + 8 > b.left && a.top < b.bottom + 6 && a.bottom + 6 > b.top;
+  const starCells = new Map<string, NonNullable<LabelEnvironment["stars"]>[number][]>();
+  let largestStar = 0;
+  for (const star of environment.stars ?? []) {
+    if (![star.x, star.y, star.depth, star.radius].every(Number.isFinite) || star.depth < -1 || star.depth > 1 || star.radius <= 0) continue;
+    largestStar = Math.max(largestStar, star.radius);
+    const key = `${Math.floor(star.x / 64)},${Math.floor(star.y / 64)}`;
+    const bucket = starCells.get(key) ?? []; bucket.push(star); starCells.set(key, bucket);
+  }
+  const hitsStar = (box: LabelBox) => {
+    const reach = largestStar + 4;
+    for (let x = Math.floor((box.left - reach) / 64); x <= Math.floor((box.right + reach) / 64); x++)
+      for (let y = Math.floor((box.top - reach) / 64); y <= Math.floor((box.bottom + reach) / 64); y++)
+        if ((starCells.get(`${x},${y}`) ?? []).some(star => star.id !== box.id &&
+          Math.hypot(star.x - Math.max(box.left, Math.min(box.right, star.x)), star.y - Math.max(box.top, Math.min(box.bottom, star.y))) < star.radius + 4)) return true;
+    return false;
+  };
+  const clear = (box: LabelBox) => inBounds(box) &&
+    !(environment.obstacles ?? []).some(other => overlaps(box, { ...other, id: "chrome" })) &&
+    !hitsStar(box);
+  // Resolve constrained summaries first; a flexible earlier label can yield its side.
+  const options = new Map<string, LabelBox[]>();
+  const optionsFor = (node: ProjectedLabel) => {
+    let available = options.get(node.id);
+    if (!available) { available = positionsFor(node).filter(clear); options.set(node.id, available); }
+    return available;
+  };
+  if (environment.stars) {
+    const summaries = ordered.filter(node => node.summary && node.id !== selected).slice(0, MAX_VISIBLE_LABELS * 2).sort((a, b) =>
+      (b.importance ?? 0) - (a.importance ?? 0) || optionsFor(a).length - optionsFor(b).length || nearby(a, b));
+    ordered.splice(priority.length, summaries.length, ...summaries);
+  }
   // Hover never participates in the base ranking or placement.
   const boxes: LabelBox[] = [];
-  for (const node of ordered) {
-    const box = positionsFor(node).find(position => inBounds(position) && !boxes.some(other => overlaps(position, other)));
+  const important = environment.stars ? ordered.filter(node => node.summary && (node.importance ?? 0) > 0 && node.id !== selected).slice(0, 8) : [];
+  if (important.length > 1) {
+    for (const node of priority) { const box = optionsFor(node)[0]; if (box) boxes.push(box); }
+    // A bounded beam resolves competing sides together instead of hiding a large core.
+    let states = [{ boxes: [...boxes], cost: 0 }];
+    for (const node of important) {
+      const next = states.flatMap(state => [
+        ...optionsFor(node).slice(0, 52).flatMap((box, index) => state.boxes.some(other => overlaps(box, other)) ? [] : [{ boxes: [...state.boxes, box], cost: state.cost + index }]),
+        { boxes: state.boxes, cost: state.cost + 10000 },
+      ]);
+      states = next.sort((a, b) => a.cost - b.cost).slice(0, 24);
+    }
+    boxes.splice(0, boxes.length, ...states[0].boxes);
+  }
+  for (const [attempt, node] of ordered.entries()) {
+    if (attempt >= MAX_VISIBLE_LABELS * 4) break;
+    if (boxes.some(box => box.id === node.id)) continue;
+    let box = optionsFor(node).find(position => !boxes.some(other => overlaps(position, other)));
+    if (!box && node.summary && environment.stars) for (const candidate of optionsFor(node)) {
+      const collisions = boxes.filter(other => overlaps(candidate, other));
+      if (collisions.length > 2 || collisions.some(other => other.id === selected || (visible.find(candidate => candidate.id === other.id)?.importance ?? 0) > (node.importance ?? 0))) continue;
+      const shifted: LabelBox[] = [];
+      for (const other of collisions) {
+        const alternative = options.get(other.id)?.find(position => !overlaps(position, candidate) &&
+          !boxes.some(existing => !collisions.includes(existing) && overlaps(position, existing)) && !shifted.some(existing => overlaps(position, existing)));
+        if (!alternative) break;
+        shifted.push(alternative);
+      }
+      if (shifted.length === collisions.length) {
+        for (const replacement of shifted) boxes[boxes.findIndex(existing => existing.id === replacement.id)] = replacement;
+        box = candidate; break;
+      }
+    }
     if (box) boxes.push(box);
     if (boxes.length === MAX_VISIBLE_LABELS) break;
   }
@@ -62,7 +144,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   let insertion: LabelBox | undefined;
   let fewestCollisions = Infinity;
   for (const position of positionsFor(node)) {
-    if (!inBounds(position) || boxes.some(box => box.id === selected && overlaps(position, box))) continue;
+    if (!clear(position) || boxes.some(box => box.id === selected && overlaps(position, box))) continue;
     const collisions = boxes.filter(box => overlaps(position, box)).length;
     if (collisions < fewestCollisions) {
       insertion = position;

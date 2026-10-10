@@ -272,6 +272,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const pressedNode = useRef<{ id: string; pointerId: number; x: number; y: number } | null>(null);
   const cursor = useRef<{ x: number; y: number } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
+  const [labelFontRevision, setLabelFontRevision] = useState(0);
   const [hover, setHover] = useState<{ title: string; detail: string } | null>(null);
   const snapshotLinks = useMemo(() => diagramLinks(snapshot), [snapshot]);
   // Renderer endpoint mutation stays out of the reconciled model.
@@ -345,6 +346,13 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       if (rect) setSize({ width: Math.max(1, Math.floor(rect.width)), height: Math.max(1, Math.floor(rect.height)) });
     });
     observer.observe(element); return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    let live = true;
+    const update = () => { if (live) setLabelFontRevision(value => value + 1); };
+    void document.fonts.ready.then(update);
+    document.fonts.addEventListener("loadingdone", update);
+    return () => { live = false; document.fonts.removeEventListener("loadingdone", update); };
   }, []);
   useEffect(() => () => {
     resources.geometry.dispose(); resources.star.dispose(); resources.ring.dispose(); resources.selection.dispose(); resources.change.dispose();
@@ -646,11 +654,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       node, ...nodePresentation(node, true),
       status: `${kindName[node.kind]}${!active(node) ? ` · ${stateName(node)}` : ""}${node.changed ? " · 변경" : ""}`,
     }]));
-    const fill = (element: HTMLElement, id: string) => {
+    const fill = (element: HTMLElement, id: string, detailed = false) => {
       const label = labels.get(id)!;
       const summary = collapsedCounts.has(id) || spatialCounts.has(id);
       element.dataset.nodeId = id;
-      element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive" : ""}`;
+      element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive" : ""}${detailed ? "" : " compact"}`;
       element.children[0].textContent = collapsedCounts.has(id) ? coreLabel(label.node, collapsedCounts.get(id)!, snapshot.view) : spatialCounts.has(id) ? `근접 묶음 · ${spatialCounts.get(id)}개` : label.title;
       const subtitle = element.children[1] as HTMLElement;
       subtitle.textContent = summary ? "별 끌기 · 눌러 펼치기" : label.subtitle; subtitle.hidden = !subtitle.textContent;
@@ -665,17 +673,26 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     };
     // Measure each literal label once per model/viewport change using an existing slot.
     // Animation frames only project points and reposition the same bounded DOM pool.
-    const dimensions = new Map<string, { width: number; height: number }>();
+    const dimensions = new Map<string, { compact: { width: number; height: number }; detail: { width: number; height: number } }>();
     const measuredId = measuring.dataset.nodeId, measuredHidden = measuring.hidden;
     measuring.hidden = false; measuring.style.visibility = "hidden";
     for (const node of displayNodes) {
-      fill(measuring, node.id);
-      dimensions.set(node.id, { width: measuring.offsetWidth, height: measuring.offsetHeight });
+      fill(measuring, node.id, false);
+      const compact = { width: measuring.offsetWidth, height: measuring.offsetHeight };
+      fill(measuring, node.id, true);
+      dimensions.set(node.id, { compact, detail: { width: measuring.offsetWidth, height: measuring.offsetHeight } });
     }
     if (measuredId && labels.has(measuredId)) fill(measuring, measuredId);
     else { delete measuring.dataset.nodeId; measuring.className = "node-label"; measuring.removeAttribute("role"); measuring.removeAttribute("aria-label"); measuring.setAttribute("aria-hidden", "true"); measuring.tabIndex = -1; }
     measuring.hidden = measuredHidden; measuring.style.visibility = "";
     let frame = 0, lastProjection = "", lastPositions = -1, refreshLabels = true;
+    let previousLabels = new Map<string, ReturnType<typeof visibleLabels>[number]>();
+    const chrome = () => {
+      const origin = layer.getBoundingClientRect();
+      return [...(container.current?.querySelectorAll<HTMLElement>(".graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions") ?? [])]
+        .filter(element => element.offsetWidth && element.offsetHeight)
+        .map(element => { const box = element.getBoundingClientRect(); return { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }; });
+    };
     const projected = new Vector3();
     const draw = () => {
       const instance = graph.current;
@@ -752,7 +769,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             const discs = displayNodes.map(node => {
               projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
               const depth = -projected.z, pixels = nodeScreenSize(node.kind, depth, size.height, camera.projectionMatrix.elements[5]);
-              const radius = nodeVisualRadius(pixels, false, node.changed, summaryCounts.get(node.id));
+              const radius = nodeVisualRadius(pixels, false, node.changed, summaryCounts.get(node.id)) +
+                (summaryCounts.has(node.id) ? dimensions.get(node.id)!.compact.height / 2 + 4 : 0);
               projected.applyMatrix4(camera.projectionMatrix);
               return { id: node.id, x: projected.x * size.width / 2, y: -projected.y * size.height / 2, depth, radius };
             });
@@ -788,11 +806,17 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             const pixels = nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]);
             const radius = nodeVisualRadius(pixels, node.id === selected, node.changed, summaryCounts.get(node.id));
             projected.applyMatrix4(camera.projectionMatrix);
-            return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)! };
+            return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, ...dimensions.get(node.id)![node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
           });
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
           const labelCandidates = candidates.filter(node => !spatialCounts.has(node.id) || spatialLabels.has(node.id) || node.id === hoveredId.current || node.id === focusedSummary);
-          const visible = visibleLabels(labelCandidates, size.width, size.height, focusedSummary ?? dragged.current ?? selected, hoveredId.current);
+          const priorityId = focusedSummary ?? dragged.current ?? selected;
+          const environment = { stars: candidates, obstacles: chrome(), previous: previousLabels };
+          let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
+          // Expanded metadata must not make an already usable keyboard target disappear.
+          const compactFallback = new Set(labelCandidates.filter(node => (node.id === priorityId || node.id === hoveredId.current) && !visible.some(box => box.id === node.id)).map(node => node.id));
+          if (compactFallback.size) visible = visibleLabels(labelCandidates.map(node => compactFallback.has(node.id) ? { ...node, ...dimensions.get(node.id)!.compact } : node), size.width, size.height, priorityId, hoveredId.current, environment);
+          previousLabels = new Map(visible.map(box => [box.id, box]));
           const remaining = new Map(visible.map(box => [box.id, box]));
           const assigned = new Map<HTMLElement, (typeof visible)[number]>();
           for (const element of elements) {
@@ -806,11 +830,20 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           }
           for (const element of elements) {
             const box = assigned.get(element);
-            if (box && (refreshLabels || element.dataset.nodeId !== box.id)) fill(element, box.id);
+            const detailed = !!box && !compactFallback.has(box.id) && (box.id === selected || box.id === hoveredId.current || box.id === focusedSummary || box.id === dragged.current);
+            if (box && (refreshLabels || element.dataset.nodeId !== box.id || element.classList.contains("compact") === detailed)) fill(element, box.id, detailed);
             element.hidden = !box;
             element.classList.toggle("hovered", !!box && box.id === hoveredId.current);
             if (!box) continue;
             element.style.left = `${box.left}px`; element.style.top = `${box.top}px`;
+            const star = candidates.find(node => node.id === box.id)!;
+            const x = Math.max(box.left, Math.min(box.right, star.x)), y = Math.max(box.top, Math.min(box.bottom, star.y));
+            const dx = x - star.x, dy = y - star.y, distance = Math.hypot(dx, dy), length = distance - star.radius - 6;
+            element.classList.toggle("offset-label", star.summary && length > 14);
+            element.style.setProperty("--leader-x", `${star.x - box.left + dx / distance * (star.radius + 3)}px`);
+            element.style.setProperty("--leader-y", `${star.y - box.top + dy / distance * (star.radius + 3)}px`);
+            element.style.setProperty("--leader-length", `${Math.max(0, length)}px`);
+            element.style.setProperty("--leader-angle", `${Math.atan2(dy, dx)}rad`);
           }
           refreshLabels = false;
         }
@@ -827,7 +860,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       frame = requestAnimationFrame(draw);
     };
     draw(); return () => cancelAnimationFrame(frame);
-  }, [ready, nodes, displayNodes, displayLinks, collapsedCounts, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal]);
+  }, [ready, labelFontRevision, nodes, displayNodes, displayLinks, collapsedCounts, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;
@@ -1001,6 +1034,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       linkColor={link => {
         const focus = draggingId ?? selected;
         return focus && endpoint(link.source) !== focus && endpoint(link.target) !== focus ? "#35404b" : link.current ? linkColor[link.kind] : "#947867";
+      }}
+      linkVisibility={link => {
+        if (link.kind !== "subject" && link.kind !== "topic" && link.kind !== "area") return true;
+        const from = String(endpoint(link.source)), to = String(endpoint(link.target));
+        return [draggingId, selected, hoveredId.current].some(id => id === from || id === to);
       }}
       linkWidth={0}
       linkOpacity={.65} linkDirectionalArrowLength={link => link.kind === "evidence" || link.kind === "parent" || link.kind === "reference" ? 2 : 0} linkDirectionalArrowRelPos={.8}
