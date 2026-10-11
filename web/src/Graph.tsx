@@ -39,7 +39,7 @@ export function starMaterial() {
     uniforms: {
       uColor: { value: new Color() }, uOpacity: { value: 1 }, uPhase: { value: 0 },
       uRotation: { value: 0 }, uTilt: { value: 0 }, uDetail: { value: 0 }, uShimmer: { value: 1 }, uPixels: { value: 26 }, uShape: { value: 0 },
-      uNear: { value: 0 }, uWobble: { value: new Vector2() },
+      uNear: { value: 0 }, uDepth: { value: 1 }, uWobble: { value: new Vector2() },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -54,7 +54,7 @@ export function starMaterial() {
     fragmentShader: `
       varying vec2 vUv;
       uniform vec3 uColor;
-      uniform float uOpacity, uPhase, uRotation, uTilt, uDetail, uShimmer, uPixels, uNear, uShape;
+      uniform float uOpacity, uPhase, uRotation, uTilt, uDetail, uShimmer, uPixels, uNear, uShape, uDepth;
       uniform vec2 uWobble;
       float hash(vec3 p) {
         p = fract(p * 0.1031);
@@ -74,7 +74,8 @@ export function starMaterial() {
         float distance = length(p);
         float spokes = uShape < 1.5 ? 4.0 : uShape < 2.5 ? 5.0 : 6.0;
         float silhouette = uShape < 0.5 ? 1.0 : 1.0 + 0.12 * cos(spokes * atan(p.y, p.x) + uPhase);
-        float radius = mix(0.30, 0.54, uDetail) * silhouette;
+        float depth = clamp(uDepth, 0.0, 1.0);
+        float radius = mix(mix(0.26, 0.38, depth), 0.54, uDetail) * silhouette;
         float r = distance / radius;
         if (distance >= 1.0) discard;
         float edge = fwidth(r);
@@ -96,15 +97,16 @@ export function starMaterial() {
         float coreShimmer = mix(0.86, 1.0, pulse);
         float heat = exp(-r * r * 4.5);
         vec3 surface = mix(uColor, vec3(1.0), 0.35 + 0.55 * heat)
-          * (0.90 + 0.10 * normal.z + grain) * coreShimmer * (1.0 + 0.12 * uNear);
+          * (0.90 + 0.10 * normal.z + grain) * coreShimmer * (1.0 + 0.12 * uNear)
+          * mix(0.55 + 0.45 * depth, 1.0, uDetail);
         float fade = 1.0 - smoothstep(0.72, 1.0, distance);
-        float halo = mix(0.24, 0.28, uDetail) * exp(-mix(10.0, 8.0, uDetail)
+        float halo = mix(mix(0.12, 0.48, depth), 0.28, uDetail) * exp(-mix(5.5, 8.0, uDetail)
           * max(0.0, distance - mix(radius * 0.7, 0.40, uDetail)));
         // Keep the glint about one CSS pixel wide, including at overview size.
         vec2 pixel = p * uPixels * 0.5;
         float primary = (exp(-pow(abs(pixel.x) / 0.55, 1.4)) * exp(-p.y * p.y * 2.0)
           + exp(-pow(abs(pixel.y) / 0.55, 1.4)) * exp(-p.x * p.x * 2.0))
-          * (0.08 + 0.82 * pulse + 0.65 * uNear);
+          * (0.08 + 0.82 * pulse + 0.65 * uNear) * mix(0.45, 1.25, depth);
         vec2 diagonal = vec2(pixel.x + pixel.y, pixel.x - pixel.y) * 0.70710678;
         float secondary = (exp(-pow(abs(diagonal.x) / 0.42, 1.4))
           + exp(-pow(abs(diagonal.y) / 0.42, 1.4))) * exp(-distance * distance * 3.5)
@@ -113,7 +115,10 @@ export function starMaterial() {
         halo *= 1.0 + 0.70 * pulse * (1.0 - uDetail) + 1.1 * uNear;
         halo = (halo + (primary + secondary) * (1.0 - uDetail)) * fade * uShimmer;
         float alpha = clamp(disc + halo * (1.0 - disc), 0.0, 1.0);
-        vec3 color = mix(uColor, surface, disc / max(alpha, 0.0001));
+        // A hot white core, a colored inner corona, then a soft tinted falloff.
+        // Everything stays inside the existing quad; depth never changes picking or layout.
+        vec3 corona = mix(uColor, vec3(1.0), 0.20 * exp(-distance * distance * 5.0));
+        vec3 color = mix(corona, surface, disc / max(alpha, 0.0001));
         gl_FragColor = vec4(color, alpha * uOpacity);
         #include <colorspace_fragment>
       }
@@ -151,6 +156,8 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
     material.uniforms.uDetail.value = motion.detail;
     material.uniforms.uShimmer.value = motion.shimmer;
     material.uniforms.uPixels.value = pixels;
+    // Use the un-clamped perspective diameter so distant 10px stars still have depth.
+    material.uniforms.uDepth.value = Math.max(0, Math.min(1, 14 * viewport.y * camera.projectionMatrix.elements[5] / (Math.max(.001, -position.z) * 2 * 12)));
     material.uniforms.uShape.value = starShape(node.id);
     near = Math.max(near, dragged.current === node.id ? .8 : 0);
     const contact = contactMotion?.();

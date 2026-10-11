@@ -932,7 +932,7 @@ async function checkRenderedMotion() {
     returned: { knowledge: nodes.length, markers: 0, links: links.length }, omitted: { nodes: 0, links: 0 },
     eligible: { nodes: nodes.length, links: links.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
   let model: Parameters<Positions["install"]>[0] | undefined, positions: Positions | undefined, camera: Camera | undefined;
-  const sampled = new Map<string, { rotation: number; shimmer: number; wobble: number; z: number }>(), wrapped = new WeakSet<Mesh>(), worldPosition = new Vector3();
+  const sampled = new Map<string, { rotation: number; shimmer: number; wobble: number; depth: number; z: number }>(), wrapped = new WeakSet<Mesh>(), worldPosition = new Vector3();
   let edgeOpacities: number[] = [];
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
   try {
@@ -961,7 +961,7 @@ async function checkRenderedMotion() {
         object.onBeforeRender = function (...args) {
           draw.apply(this, args);
           const uniforms = (object.material as ShaderMaterial).uniforms, id = object.parent?.userData.nodeId;
-          if (id) sampled.set(id, { rotation: uniforms.uRotation.value, shimmer: uniforms.uShimmer.value, wobble: uniforms.uWobble.value.length(), z: object.getWorldPosition(worldPosition).z });
+          if (id) sampled.set(id, { rotation: uniforms.uRotation.value, shimmer: uniforms.uShimmer.value, wobble: uniforms.uWobble.value.length(), depth: uniforms.uDepth.value, z: object.getWorldPosition(worldPosition).z });
         };
       });
       return originalRender.call(this, renderer, scene, frameCamera, geometry, material, group);
@@ -1013,6 +1013,7 @@ async function checkRenderedMotion() {
     await until(() => edgeOpacities.filter(value => value > .2).length === 2 && edgeOpacities.filter(value => value < .1).length === 2, "returning to the overview restores the outline without losing connections");
     details("보기 설정").summary.click();
     assert(new Set([...sampled.values()].map(star => star.z.toFixed(6))).size > 1, "the rendered stars retain depth instead of flattening their world positions");
+    assert([...sampled.values()].every(star => Number.isFinite(star.depth) && star.depth >= 0 && star.depth <= 1), "each actual draw uploads a bounded depth light value");
     const initial = new Map(sampled);
     await until(() => [...sampled].some(([id, value]) => Math.abs(value.rotation - initial.get(id)!.rotation) > .01 && Math.abs(value.shimmer - initial.get(id)!.shimmer) > .001), "the mounted renderer advances stellar surface and shimmer motion");
     const node = model!.nodes.find(node => sampled.has(node.id))!, canvas = host.querySelector("canvas")!, rect = canvas.getBoundingClientRect();
@@ -1071,6 +1072,10 @@ async function checkRenderedMotion() {
     button("지도 가운데로 이동").click();
     await until(() => camera!.position.distanceTo(panned) > 1, "center returns from a panned view");
     assert(Math.abs(cameraDistance - pannedDistance) < .00001, "center preserves the actual camera-to-target zoom distance");
+    const lightBeforeZoom = new Map([...sampled].map(([id, star]) => [id, star.depth]));
+    for (let step = 0; step < 8; step++) button("축소").click();
+    await until(() => [...sampled].every(([id, star]) => star.depth < lightBeforeZoom.get(id)!) && new Set([...sampled.values()].map(star => star.depth.toFixed(6))).size > 1,
+      "shared material uploads distinct actual camera depths after zooming into the distant size floor");
     button("전체 맞춤").click();
     await until(() => camera!.getWorldDirection(new Vector3()).distanceTo(new Vector3(0, 0, -1)) < .00001, "the existing full fit resets the camera orientation");
     assert([...sampled.values()].some(star => star.z !== 0), "minimap navigation preserves stellar depth");
@@ -1100,7 +1105,7 @@ async function checkRenderedMotion() {
     await until(() => minimapDisclosure().getAttribute("aria-expanded") === "true" && !minimap.closest('[hidden]'), "minimap expands and restores navigation");
     assert(camera!.position.distanceTo(poseBeforeCollapse) < .00001, "disclosure preserves the settled camera pose");
     assert(JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z])) === layoutBeforeCollapse, "disclosure preserves the settled world layout");
-    return { renderedMotion: true, connectionOutline: true, allConnections: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, minimapDisclosure: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
+    return { renderedMotion: true, depthLight: true, connectionOutline: true, allConnections: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, minimapDisclosure: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
   } finally {
     root.unmount(); Scene.prototype.onBeforeRender = originalRender; Positions.prototype.install = originalInstall;
     Positions.prototype.packOverview = originalPack;

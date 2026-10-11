@@ -19,7 +19,7 @@ try {
   mesh.frustumCulled = false;
   scene.add(mesh);
   let dpr = 1;
-  function draw(size: number, color: string, time: number, phase = 0, opacity = 1, shape = 0) {
+  function draw(size: number, color: string, time: number, phase = 0, opacity = 1, shape = 0, depth = 1) {
     const motion = starMotion(size, phase, time);
     mesh.scale.setScalar(spriteScale(size, width, camera.projectionMatrix.elements[5]));
     material.uniforms.uColor.value.copy(new Color(color));
@@ -31,6 +31,7 @@ try {
     material.uniforms.uShimmer.value = motion.shimmer;
     material.uniforms.uPixels.value = size;
     material.uniforms.uShape.value = shape;
+    material.uniforms.uDepth.value = depth;
     renderer.render(scene, camera);
   }
   function pixels() {
@@ -89,6 +90,22 @@ try {
   }
   for (dpr of [1, 2]) {
     renderer.setPixelRatio(dpr); renderer.setSize(width, width);
+    // Real fitted maps often hit the 10px size floor. Camera depth must still
+    // be visible in the shipped GPU output, without growing the render bound.
+    for (const color of colors) {
+      const luminance: number[] = [];
+      for (const depth of [0, .5, 1]) {
+        draw(10, color, 1.75, 0, 1, 0, depth);
+        luminance.push(region(pixels(), 0, 4.5).mean);
+        const core = region(pixels(), 0, 1.6).mean;
+        const outside = region(pixels(), 6, 8), bg = region(pixels(), 30, 32).mean;
+        record(`10px / ${color} / depth ${depth} / DPR ${dpr}: fixed footprint`, Math.abs(outside.peak - bg) < .01, outside.peak - bg, "unchanged background beyond the quad");
+        draw(10, color, 1.75, 0, .35, 0, depth);
+        const inactive = region(pixels(), 0, 1.6).mean;
+        record(`10px / ${color} / depth ${depth} / DPR ${dpr}: inactive stays dimmer`, inactive < core * .6, inactive / core, "<0.6 of active core at the same depth");
+      }
+      record(`10px / ${color} / DPR ${dpr}: rendered depth hierarchy`, luminance[1] > luminance[0] + 5 && luminance[2] > luminance[1] + 5, luminance[2] - luminance[0], "strictly brighter near/middle/far with >5 RGB levels per step");
+    }
     for (const color of colors) for (const size of sizes) {
       const label = `${color} / ${size}px / DPR ${dpr}`;
       const core: number[] = [], primary: number[] = [], secondary: number[] = [], corona: number[] = [];
