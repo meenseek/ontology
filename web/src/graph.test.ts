@@ -2753,6 +2753,102 @@ test("labels avoid unlabeled stars and measured chrome while preserving a safe p
   assert.deepEqual(visibleLabels([candidate], 300, 240, "a", "a", { stars, obstacles: covered }), []);
 });
 
+test("first-view star titles yield to group names while focus, close stars and opened groups keep theirs", () => {
+  const groups: ProjectedLabel[] = [0, 1, 2].map(index => ({ id: `group-${index}`, kind: "subject", active: true, summary: true, importance: 2, x: 200 + index * 400, y: 120, depth: 0, radius: 20, width: 110, height: 18 }));
+  const stars: ProjectedLabel[] = Array.from({ length: 20 }, (_, index) => ({ id: `star-${String(index).padStart(2, "0")}`, kind: index % 2 ? "memory" : "document", active: true,
+    x: 90 + (index % 5) * 240, y: 260 + Math.floor(index / 5) * 90, depth: 0, radius: 5, width: 70, height: 16 }));
+  const candidates = [...groups, ...stars], environment = { stars: candidates };
+  const titles = (boxes: { id: string }[]) => boxes.filter(box => box.id.startsWith("star-")).map(box => box.id);
+  assert.ok(titles(visibleLabels(candidates, 1300, 640, null, null, environment)).length > 8, "the fixture has room for more than eight titles");
+  const limited = visibleLabels(candidates, 1300, 640, null, null, { ...environment, starTitles: { limit: 8 } });
+  assert.deepEqual(limited.filter(box => box.id.startsWith("group-")).map(box => box.id).sort(), groups.map(group => group.id), "group names are not rationed");
+  assert.equal(titles(limited).length, 8);
+  const placed = new Set(titles(limited)), outside = stars.find(star => !placed.has(star.id))!.id;
+  assert.equal(titles(visibleLabels(candidates, 1300, 640, outside, null, { ...environment, starTitles: { limit: 8 } })).length, 9, "the selection is shown on top of the limit");
+  assert.ok(titles(visibleLabels(candidates, 1300, 640, null, outside, { ...environment, starTitles: { limit: 8 } })).includes(outside), "a hovered title is inserted");
+  const close = candidates.map(node => node.id === outside ? { ...node, radius: 12 } : node);
+  assert.ok(titles(visibleLabels(close, 1300, 640, null, null, { stars: close, starTitles: { limit: 8 } })).includes(outside), "a close star is not rationed");
+  const opened = new Set(stars.slice(0, 3).map(star => star.id));
+  assert.deepEqual(titles(visibleLabels(candidates, 1300, 640, null, null, { ...environment, starTitles: { limit: 0, exempt: opened } })).sort(), [...opened].sort(),
+    "an opened group shows its own titles and others wait");
+});
+
+test("rationed titles count changed stars by body size, and an opened group hides close outsiders", () => {
+  const stars: ProjectedLabel[] = Array.from({ length: 20 }, (_, index) => ({ id: `star-${String(index).padStart(2, "0")}`, kind: "document", active: true,
+    x: 90 + (index % 5) * 240, y: 120 + Math.floor(index / 5) * 120, depth: 0, radius: 21, body: 5, width: 70, height: 16 }));
+  assert.equal(visibleLabels(stars, 1300, 640, null, null, { stars, starTitles: { limit: 8 } }).length, 8, "a change ring does not make a star close");
+  const close = stars.map((star, index) => index === 0 ? { ...star, body: 12 } : star);
+  const opened = new Set([stars[1].id]);
+  assert.deepEqual(visibleLabels(close, 1300, 640, null, null, { stars: close, starTitles: { limit: 0, exempt: opened } }).map(box => box.id), [stars[1].id],
+    "while a group is open only its members keep titles");
+});
+
+test("a crowded group name falls back to the nearest free spot off its own body", () => {
+  const group: ProjectedLabel = { id: "group", kind: "subject", active: true, summary: true, importance: 2, x: 400, y: 300, depth: 0, radius: 68, width: 120, height: 21 };
+  // Small stars fill everything outside the group's footprint except one empty pocket within reach.
+  const field = Array.from({ length: 40 * 30 }, (_, index) => ({ id: `s-${index}`, x: (index % 40) * 20 + 10, y: Math.floor(index / 40) * 20 + 10, depth: 0, radius: 4 }))
+    .filter(star => Math.hypot(star.x - 400, star.y - 300) > 82 && !(star.x > 540 && star.x < 700 && star.y > 120 && star.y < 180));
+  const second = { ...group, id: "other", x: 60, y: 560, radius: 6 };
+  const [box] = visibleLabels([group, second], 800, 600, null, null, { stars: [group, second, ...field] }).filter(found => found.id === "group");
+  assert.ok(box && box.left >= 536 && box.right <= 704 && box.top >= 116 && box.bottom <= 184, "the group keeps its name in the nearby free pocket");
+  const gap = Math.hypot(group.x - Math.max(box.left, Math.min(box.right, group.x)), group.y - Math.max(box.top, Math.min(box.bottom, group.y)));
+  assert.ok(gap >= group.radius + 4, "the name does not cover its own body");
+});
+
+test("a component's largest group keeps its name box clear of every linked body, and an unfitting view centers on the viewport", () => {
+  let seed = 7;
+  const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const plane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, worldPerPixel: () => 1 };
+  for (let trial = 0; trial < 40; trial++) {
+    // "q" is not the component root, and a smaller group "r" shares its component.
+    const members = Array.from({ length: 6 + Math.floor(random() * 10) }, (_, index) => `m-${String(index).padStart(2, "0")}`), ids = ["q", "r", ...members];
+    // Classification links take the topology slots, where a root most often lands below a group.
+    const pairs = [["q", "r"], ...members.flatMap((id, index) => random() < .7 ? [[random() < .5 ? "q" : [...members.slice(0, index), "r"][Math.floor(random() * (index + 1))], id]] : [])];
+    const links = pairs.map(([source, target]): GraphLink => ({ source, target, kind: random() < .6 ? "subject" : "related", current: true }));
+    const model = reconcile(snapshot(ids.map(doc), links.map(link => ({ ...link, kind: "related" })))), positions = new Positions(); positions.install(model, true);
+    const radius = (id: string) => id === "q" ? 30 : id === "r" ? 20 : 6;
+    const discs = model.nodes.map(node => ({ id: node.id, x: node.x, y: node.y, depth: 100, radius: radius(node.id), room: node.id === "q" || node.id === "r" ? { width: 120, height: 20, below: radius(node.id) + 5 } : undefined }));
+    assert.equal(positions.packOverview(discs, links, new Map(), plane, 0, true, { left: -600, right: 600, top: -300, bottom: 300 }), true);
+    const at = (id: string) => positions.layoutTarget(id)!, group = at("q"), box = { left: group.x - 60, right: group.x + 60, top: group.y + 35, bottom: group.y + 55 };
+    for (const id of ids.slice(1)) {
+      const star = at(id), gap = Math.hypot(star.x - Math.max(box.left, Math.min(box.right, star.x)), star.y - Math.max(box.top, Math.min(box.bottom, star.y)));
+      assert.ok(gap >= radius(id) + 4 - 1e-6, `trial ${trial}: ${id} leaves the reserved name box clear`);
+    }
+    if (trial) continue;
+    const current = discs.map(disc => ({ ...disc, x: at(disc.id).x, y: at(disc.id).y }));
+    assert.equal(positions.packOverview(current, links, new Map(), plane, 1, true, { left: 10, right: 40, top: -20, bottom: 20 }), true);
+    const left = Math.min(...current.map(disc => at(disc.id).x - disc.radius)), right = Math.max(...current.map(disc => at(disc.id).x + disc.radius));
+    const top = Math.min(...current.map(disc => at(disc.id).y - disc.radius)), bottom = Math.max(...current.map(disc => at(disc.id).y + disc.radius));
+    assert.ok(Math.abs((left + right) / 2) < 4 && Math.abs((top + bottom) / 2) < 4, `a view that cannot fit stays centered on the viewport: ${(left + right) / 2}, ${(top + bottom) / 2}`);
+  }
+});
+
+test("a framed overview spreads unconnected groups without overlap and keeps each group name box clear", () => {
+  const nodes = Array.from({ length: 14 }, (_, index) => doc(`n-${String(index).padStart(2, "0")}`));
+  const model = reconcile(snapshot(nodes)), positions = new Positions(); positions.install(model, true);
+  const discs = model.nodes.map((node, index) => ({ id: node.id, x: node.x, y: node.y, depth: 100, radius: index ? 6 : 30, room: index ? undefined : { width: 120, height: 20, below: 35 } }));
+  const plane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, worldPerPixel: () => 1 };
+  const frame = { left: -560, right: 560, top: -220, bottom: 220 };
+  const extent = () => {
+    const points = discs.map(disc => ({ ...disc, at: positions.layoutTarget(disc.id)! }));
+    return { points, width: Math.max(...points.map(p => p.at.x + p.radius)) - Math.min(...points.map(p => p.at.x - p.radius)) };
+  };
+  assert.equal(positions.packOverview(discs, [], new Map(), plane, 0, true), true);
+  const compact = extent().width;
+  assert.equal(positions.packOverview(discs, [], new Map(), plane, 1, true, frame), true);
+  const { points, width } = extent();
+  assert.ok(width > compact * 1.5, "unconnected bodies use the frame's free width");
+  for (const [index, a] of points.entries()) {
+    assert.ok(a.at.x - a.radius >= frame.left - 1e-6 && a.at.x + a.radius <= frame.right + 1e-6 && a.at.y - a.radius >= frame.top - 1e-6 && a.at.y + a.radius <= frame.bottom + 1e-6, `${a.id} stays in the frame`);
+    for (const b of points.slice(index + 1)) assert.ok(Math.hypot(a.at.x - b.at.x, a.at.y - b.at.y) >= a.radius + b.radius - 1e-6, `${a.id} and ${b.id} do not touch`);
+  }
+  const group = points[0], box = { left: group.at.x - 60, right: group.at.x + 60, top: group.at.y + 35, bottom: group.at.y + 55 };
+  for (const other of points.slice(1)) {
+    const gap = Math.hypot(other.at.x - Math.max(box.left, Math.min(box.right, other.at.x)), other.at.y - Math.max(box.top, Math.min(box.bottom, other.at.y)));
+    assert.ok(gap >= other.radius + 4 - 1e-6, `${other.id} leaves the group name box clear`);
+  }
+});
+
 test("small purpose chains and branches keep their measured 3D shape through tilted-camera pulls", () => {
   const ids = ["a", "b", "c", "d"], hub = "purpose";
   for (const real of [[edge("a", "b"), edge("b", "c"), edge("c", "d")], [edge("a", "b"), edge("b", "c"), edge("b", "d")]]) {

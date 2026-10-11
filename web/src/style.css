@@ -303,3 +303,10 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 .minimap-disclosure svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .minimap-disclosure .minimap-chevron { width: 12px; height: 12px; }
 @media (max-width: 600px) { .minimap-disclosure { min-height: 40px; } }
+
+/* Group names lead and star titles recede; :where keeps inactive, hover and focus colors in charge. */
+.node-label.interactive { font-size: 14px; }
+.node-label:where(.interactive) strong { font-weight: 600; color: #eef4fb; letter-spacing: -.01em; }
+.node-label:not(.interactive) { font-size: 11px; }
+.node-label:where(.compact:not(.interactive)) strong { font-weight: 400; color: #a3b3c6; }
+@media (max-width: 700px) { .node-label.interactive { font-size: 13px; max-width: 200px; } }

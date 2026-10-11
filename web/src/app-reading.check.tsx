@@ -903,7 +903,7 @@ async function checkSummaryOverview() {
 }
 
 async function checkSummaryContentRefresh() {
-  const originalFetch = window.fetch, originalPack = Positions.prototype.packOverview;
+  const originalFetch = window.fetch, originalPack = Positions.prototype.packOverview, originalRender = Scene.prototype.onBeforeRender;
   const originalUrl = window.location.href, root = createRoot(host);
   const counts = [22, 40, 75, 120], nodes: GraphNode[] = [], links: Snapshot["links"] = [];
   for (const count of counts) for (let index = 0; index < count; index++) {
@@ -916,7 +916,7 @@ async function checkSummaryContentRefresh() {
     returned: { knowledge: nodes.length, markers: 0, links: links.length }, omitted: { nodes: 0, links: 0 }, eligible: { nodes: nodes.length, links: links.length },
     limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
   let responseSnapshot = snapshot, graphCalls = 0, overviewPacks = 0, lastPack = 0, refreshedAt = 0;
-  let positions: Positions | undefined;
+  let positions: Positions | undefined, camera: Camera | undefined;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
   const settled = () => !!positions && !positions.layoutMoving && performance.now() - Math.max(lastPack, refreshedAt) > 350;
   const refresh = async () => {
@@ -926,6 +926,10 @@ async function checkSummaryContentRefresh() {
     refreshedAt = performance.now();
   };
   try {
+    Scene.prototype.onBeforeRender = function (renderer, scene, frameCamera, geometry, material, group) {
+      camera = frameCamera;
+      originalRender.call(this, renderer, scene, frameCamera, geometry, material, group);
+    };
     // Observe the real packing boundary while leaving its implementation intact.
     Positions.prototype.packOverview = function (this: Positions, ...args: Parameters<Positions["packOverview"]>) {
       positions = this;
@@ -947,19 +951,36 @@ async function checkSummaryContentRefresh() {
     await until(settled, "stationary overview finishes packing before metadata changes");
     const structureEpoch = positions!.structureEpoch;
     details("보기 설정").summary.click();
-    const beforeGrowth = overviewPacks;
+    const pose = () => camera!.position.toArray().map(value => value.toFixed(2)).join(",");
+    const beforeGrowth = overviewPacks, poseBefore = pose();
     responseSnapshot = { ...snapshot, nodes: nodes.map(node => ({ ...node, revision: "content-only-update" })) };
     await refresh();
-    await until(() => overviewPacks > beforeGrowth, "growing change rings trigger clearance without zoom or topology changes");
-    await until(settled, "larger change rings finish packing");
+    await until(settled, "larger change rings settle");
+    // Graph's own footprint: the change ring plus half the group name's height and 4px, kept 6px apart.
+    const clearance = (gap: number, withName: boolean) => {
+      const rect = host.querySelector("canvas")!.getBoundingClientRect();
+      const names = [...host.querySelectorAll<HTMLElement>(".node-label.interactive")].map(label => label.offsetHeight).filter(Boolean);
+      const name = withName ? Math.max(0, ...names) / 2 + 4 : 0;
+      const rings = counts.map(count => {
+        const at = positions!.layoutTarget(`refresh-${count}-0`)!, point = new Vector3(at.x, at.y, at.z).project(camera!);
+        return { x: (point.x + 1) * rect.width / 2, y: (1 - point.y) * rect.height / 2, radius: nodeVisualRadius(1, false, true, count) + name };
+      });
+      return rings.every((a, index) => rings.slice(index + 1).every(b => Math.hypot(a.x - b.x, a.y - b.y) >= a.radius + b.radius + gap - .01));
+    };
+    const growthRepacked = overviewPacks > beforeGrowth;
+    // A spread first view may already have room for larger rings; then clearance needs no repack.
+    assert(growthRepacked || clearance(6, true), "growing change rings either trigger clearance or already have Graph's footprint clearance");
+    assert(clearance(0, false), "larger change rings do not overlap after clearance");
+    assert(pose() === poseBefore, "a content refresh keeps the overview camera");
     assert(positions!.structureEpoch === structureEpoch, "content changes preserve the topology epoch");
     const afterGrowth = overviewPacks;
     await refresh();
     await until(settled, "unchanged response clears change rings");
     assert(overviewPacks === afterGrowth, "adequate clearance does not repack after rings shrink");
-    return { summaryContentRefresh: true, relationCounts: counts, growingRings: true, shrinkingRingsPreserveLayout: true };
+    assert(pose() === poseBefore, "shrinking rings keep the overview camera");
+    return { summaryContentRefresh: true, relationCounts: counts, growingRings: true, growthRepacked, shrinkingRingsPreserveLayout: true };
   } finally {
-    root.unmount(); Positions.prototype.packOverview = originalPack; window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);
+    root.unmount(); Positions.prototype.packOverview = originalPack; Scene.prototype.onBeforeRender = originalRender; window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);
   }
 }
 

@@ -20,12 +20,21 @@ export function nodePresentation(node: { kind: string; label: string; title?: st
   return { title, subtitle: repository ? `${repository} · ${node.label}` : title !== node.label ? node.label : "" };
 }
 export const MAX_VISIBLE_LABELS = 24;
-export type ProjectedLabel = { id: string; kind: string; active: boolean; summary?: boolean; importance?: number; x: number; y: number; depth: number; radius: number; width: number; height: number };
+/** Group names lead the first view; only a few small star titles sit beside them. */
+export const MAX_RESTING_STAR_LABELS = 8;
+// A star this close reads as an individual body, so its title is not rationed.
+const CLOSE_STAR_LABEL_RADIUS = 9;
+export type ProjectedLabel = { id: string; kind: string; active: boolean; summary?: boolean; importance?: number; x: number; y: number; depth: number; radius: number; width: number; height: number;
+  /** Drawn body radius without selection or change rings; defaults to radius. */
+  body?: number };
 export type LabelBox = { id: string; left: number; top: number; right: number; bottom: number };
 export type LabelEnvironment = {
   stars?: readonly Pick<ProjectedLabel, "id" | "x" | "y" | "depth" | "radius">[];
   obstacles?: readonly { left: number; top: number; right: number; bottom: number }[];
   previous?: ReadonlyMap<string, LabelBox>;
+  /** Small star titles beyond the limit yield. Group names, the selection, the hovered star and exempt stars are not counted;
+   * close stars are not counted unless an exempt set (an opened group) is given. */
+  starTitles?: { limit: number; exempt?: ReadonlySet<string> };
 };
 /** Rank the current projection before bounding the visible set. No ID window excludes later nodes. */
 export function visibleLabels(candidates: ProjectedLabel[], width: number, height: number, selected: string | null, hovered: string | null, environment: LabelEnvironment = {}): LabelBox[] {
@@ -100,8 +109,25 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
       (b.importance ?? 0) - (a.importance ?? 0) || optionsFor(a).length - optionsFor(b).length || nearby(a, b));
     ordered.splice(priority.length, summaries.length, ...summaries);
   }
+  const fromStar = (node: ProjectedLabel, box: LabelBox) => Math.hypot(node.x - Math.max(box.left, Math.min(box.right, node.x)), node.y - Math.max(box.top, Math.min(box.bottom, node.y)));
+  // The fallback keeps the label off its own body, reuses last frame's spot within reach, then takes the nearest grid spot within reach.
+  const nearestFree = (node: ProjectedLabel, placed: readonly LabelBox[]): LabelBox | undefined => {
+    const usable = (box: LabelBox) => fromStar(node, box) >= node.radius + 4 && clear(box) && !placed.some(other => overlaps(box, other));
+    const previous = environment.previous?.get(node.id);
+    const reach = Math.min(240, Math.max(width, height)), spots: LabelBox[] = [];
+    const kept = previous && { id: node.id, left: previous.left, top: previous.top, right: previous.left + node.width, bottom: previous.top + node.height };
+    if (kept && fromStar(node, kept) <= reach && usable(kept)) return kept;
+    for (let top = Math.max(0, Math.floor((node.y - reach - node.height) / 12) * 12); top <= Math.min(height - node.height, node.y + reach); top += 12)
+      for (let left = Math.max(0, Math.floor((node.x - reach - node.width) / 12) * 12); left <= Math.min(width - node.width, node.x + reach); left += 12)
+        spots.push({ id: node.id, left, top, right: left + node.width, bottom: top + node.height });
+    return spots.map(box => ({ box, distance: fromStar(node, box) })).filter(spot => spot.distance <= reach)
+      .sort((a, b) => a.distance - b.distance).find(({ box }) => usable(box))?.box;
+  };
   // Hover never participates in the base ranking or placement.
   const boxes: LabelBox[] = [];
+  const rationed = (node: ProjectedLabel) => !!environment.starTitles && !node.summary && node.id !== selected && node.id !== hovered &&
+    !environment.starTitles.exempt?.has(node.id) && (!!environment.starTitles.exempt || (node.body ?? node.radius) < CLOSE_STAR_LABEL_RADIUS);
+  let rationedTitles = 0;
   const important = environment.stars ? ordered.filter(node => node.summary && (node.importance ?? 0) > 0 && node.id !== selected).slice(0, 8) : [];
   if (important.length > 1) {
     for (const node of priority) { const box = optionsFor(node)[0]; if (box) boxes.push(box); }
@@ -119,6 +145,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   for (const [attempt, node] of ordered.entries()) {
     if (attempt >= MAX_VISIBLE_LABELS * 4) break;
     if (boxes.some(box => box.id === node.id)) continue;
+    if (rationed(node) && rationedTitles >= environment.starTitles!.limit) continue;
     let box = optionsFor(node).find(position => !boxes.some(other => overlaps(position, other)));
     if (!box && node.summary && environment.stars) for (const candidate of optionsFor(node)) {
       const collisions = boxes.filter(other => overlaps(candidate, other));
@@ -135,7 +162,9 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
         box = candidate; break;
       }
     }
-    if (box) boxes.push(box);
+    // A named group keeps its name: when nothing near it is free, use the nearest free spot with a leader line.
+    if (!box && node.summary && (node.importance ?? 0) > 0 && environment.stars) box = nearestFree(node, boxes);
+    if (box) { boxes.push(box); if (rationed(node)) rationedTitles++; }
     if (boxes.length === MAX_VISIBLE_LABELS) break;
   }
   if (!hovered || boxes.some(box => box.id === hovered)) return boxes;
