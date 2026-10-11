@@ -53,17 +53,30 @@ for (const eventName of ["pointerdown", "pointerup"] as const) window.addEventLi
 const names = ["제품 전략과 의사결정", "디자인과 사용성", "개발과 품질", "프로젝트 실행", "글쓰기와 지식 정리", "새로운 실험"];
 const counts = [225, 39, 22, 21, 20, 12];
 const titles = ["사용자의 맥락을 이해하는 방법", "작은 결정을 오래 기억하기", "제품의 방향을 정하는 질문", "읽기와 탐색의 균형", "이번 주 실험에서 배운 것", "반복 작업의 부담을 줄이기", "팀이 같은 그림을 보는 순간", "아이디어에서 실제 결과까지", "오래 쓰는 도구의 조건", "자연스럽게 이어지는 인터랙션", "기록을 다시 찾기 위한 기준", "변화하는 지식을 연결하는 방식"];
+// Members after the document chain mix in memories so kind colors, evidence and inactive states are visible.
+const isMemory = (index: number) => index >= 13 && index % 3 === 2;
+const inactive: Record<string, Partial<GraphNode>> = { "preview-1-14": { status: "proposed" }, "preview-1-17": { status: "withdrawn" }, "preview-1-20": { temporal: "expired" } };
+const memory = (id: string, title: string, extra: Partial<GraphNode> = {}): GraphNode => ({ id, scope: "personal", kind: "memory", title, label: title, memory_kind: "record", status: "accepted", temporal: "current", supported: true, ...extra, ...inactive[id] });
 const nodes: GraphNode[] = names.flatMap((name, group) => {
   const subject = `preview-purpose-${group}`;
   return [{ id: subject, scope: "personal", kind: "subject", label: name } as GraphNode,
-    ...Array.from({ length: counts[group] }, (_, index): GraphNode => ({ id: `preview-${group}-${index}`, scope: "personal", kind: "document", title: titles[index % titles.length], label: `synthetic/${name}/${index}.md`,
-      subject_id: subject, subject_name: name, source_kind: "original", context_scope: "personal", context_path: `synthetic/${group}/${index}.md`, status: "ok", present: true, current: true }))];
+    ...Array.from({ length: counts[group] }, (_, index): GraphNode => isMemory(index)
+      ? memory(`preview-${group}-${index}`, titles[index % titles.length], { subject_id: subject, subject_name: name })
+      : { id: `preview-${group}-${index}`, scope: "personal", kind: "document", title: titles[index % titles.length], label: `synthetic/${name}/${index}.md`,
+        subject_id: subject, subject_name: name, source_kind: "original", context_scope: "personal", context_path: `synthetic/${group}/${index}.md`, status: "ok", present: true, current: true })];
 });
-for (let index = 0; index < 23; index++) nodes.push({ id: `preview-single-${index}`, scope: "personal", kind: "document", title: titles[index % titles.length], label: `synthetic/ungrouped/${index}.md`,
+for (let index = 0; index < 23; index++) nodes.push(index % 4 === 3 ? memory(`preview-single-${index}`, titles[index % titles.length]) : { id: `preview-single-${index}`, scope: "personal", kind: "document", title: titles[index % titles.length], label: `synthetic/ungrouped/${index}.md`,
   source_kind: "original", context_scope: "personal", context_path: `synthetic/ungrouped/${index}.md`, status: "ok", present: true, current: true });
+nodes.push({ id: "preview-topic-shared", scope: "personal", kind: "topic", label: "공통 관점" });
 const links: Snapshot["links"] = nodes.filter(node => node.subject_id).map(node => ({ source: node.id, target: node.subject_id!, kind: "subject", current: true }));
 for (let group = 0; group < 6; group++) for (let index = 0; index < 12; index++) links.push({ source: `preview-${group}-${index}`, target: `preview-${group}-${index + 1}`, kind: index % 2 ? "related" : "reference", current: true });
 links.push({ source: "preview-0-0", target: "preview-1-0", kind: "reference", current: true });
+// Each memory cites the document before it; a few citations in the large group refer to past revisions.
+for (let group = 0; group < 6; group++) for (let index = 13; index < counts[group]; index++) {
+  if (!isMemory(index) || (group === 0 && index % 9 !== 2)) continue;
+  links.push({ source: `preview-${group}-${index}`, target: `preview-${group}-${index - 1}`, kind: "evidence", current: !(group === 0 && index % 27 === 2) });
+}
+for (const member of ["preview-2-0", "preview-2-1", "preview-2-2", "preview-3-0", "preview-3-1", "preview-3-2"]) links.push({ source: member, target: "preview-topic-shared", kind: "topic", current: true });
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 window.fetch = async (input, options) => {
   const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
@@ -73,8 +86,8 @@ window.fetch = async (input, options) => {
     const included = nodes.filter(node => !query || `${node.label} ${node.title}`.includes(query) || node.id === focus).map(node => ({ ...node, scope }));
     const ids = new Set(included.map(node => node.id)), includedLinks = links.filter(link => ids.has(link.source) && ids.has(link.target));
     return json({ scope, query, focus: { id: focus, found: !!focus && ids.has(focus) }, nodes: included, links: includedLinks, matched: included.length,
-      totals: { documents: included.filter(node => node.kind === "document").length, memories: 0, markers: included.filter(node => node.kind === "subject").length, links: includedLinks.length },
-      returned: { knowledge: included.filter(node => node.kind === "document").length, markers: included.filter(node => node.kind === "subject").length, links: includedLinks.length },
+      totals: { documents: included.filter(node => node.kind === "document").length, memories: included.filter(node => node.kind === "memory").length, markers: included.filter(node => node.kind === "subject" || node.kind === "topic").length, links: includedLinks.length },
+      returned: { knowledge: included.filter(node => node.kind === "document" || node.kind === "memory").length, markers: included.filter(node => node.kind === "subject" || node.kind === "topic").length, links: includedLinks.length },
       omitted: { nodes: 0, links: 0 }, eligible: { nodes: included.length, links: includedLinks.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false } satisfies Snapshot);
   }
   if (url.pathname === "/api/context/read") {
