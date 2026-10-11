@@ -43,7 +43,7 @@ native의 다른 분류 축도 관계와 구분한다. `ontology: true`인 원�
 
 ## 의미 관계를 추가하기 전 진단
 
-Native `context`의 `ontology-audit`는 지정한 원문과 이번 호출에 제공한 관계 정의를 대조하는 읽기 전용 진단이다. 원문·관계·분류·이력·검색 projection을 변경하지 않으며 관계 수락·진실 판단을 수행하지 않는다. DB 준비와 store identity 확인은 [AGENTS.md의 로컬 연결](../AGENTS.md#로컬-연결)을 따른다.
+Native `context`의 `ontology-audit`는 지정한 원문과 이번 호출에 제공한 관계 정의를 대조하는 읽기 전용 진단이다. 원문·관계·분류·이력·검색 projection을 변경하지 않으며 관계 수락·진실 판단을 수행하지 않는다. DB 준비와 store identity 확인은 [AGENTS.md의 로컬 연결](local-operations.md#로컬-연결)을 따른다.
 
 ```json
 {"op":"ontology-audit","scope":"personal","paths":["<실제 원문의 상대 경로>.md"]}
@@ -60,7 +60,7 @@ Native `context`의 `ontology-audit`는 지정한 원문과 이번 호출에 제
 | `from_kinds`, `to_kinds` | 각 방향에서 허용하는 `kind:name`의 `kind` 목록 1~32개, 중복 없이 지정한다. |
 | `allow_self` | 같은 개체를 양 끝점에 쓸 수 있는지 명시하는 boolean. |
 
-정의는 최대 32개이며 [native context CLI의 공통 요청 상한](../AGENTS.md#native-원문-보존과-조회)도 적용한다. 아래는 합성 예시이며 `depends-on`을 실제 관계 사전으로 채택한 결과가 아니다.
+정의는 최대 32개이며 [native context CLI의 공통 요청 상한](local-operations.md#native-원문-보존과-조회)도 적용한다. 아래는 합성 예시이며 `depends-on`을 실제 관계 사전으로 채택한 결과가 아니다.
 
 ```json
 {
@@ -160,7 +160,7 @@ native 갱신은 기존 `projection-status`/`project`의 현재 manifest 검증�
 
 지도에서 native 문서는 현재 revision·원문 digest에 일치하는 projection이 `searchable` 또는 `unavailable`일 때만 표시한다. 제외·삭제·미준비 projection은 집계·검색·초점·간선에서도 제외한다. 기존 binding이 있으면 과거 수입 사본으로 되돌아가지 않는다. 목적 소속 API도 같은 원문 경로 eligibility를 확인한다. 원문과 이력은 계속 보존한다.
 
-문서 소속과 이력의 원장은 기존 `document_subjects`다. 과거 미분류나 늦은 binding을 신규 자동 요청으로 해석하지 않는다. 스키마 변경 이력과 DB별 적용 확인·업그레이드 절차는 [AGENTS.md의 백업과 복원 확인](../AGENTS.md#백업과-복원-확인)을 따른다.
+문서 소속과 이력의 원장은 기존 `document_subjects`다. 과거 미분류나 늦은 binding을 신규 자동 요청으로 해석하지 않는다. 스키마 변경 이력과 DB별 적용 확인·업그레이드 절차는 [AGENTS.md의 백업과 복원 확인](local-operations.md#백업과-복원-확인)을 따른다.
 
 | 검증 상황 | 통과 기준 |
 | --- | --- |
