@@ -90,21 +90,22 @@ try {
   }
   for (dpr of [1, 2]) {
     renderer.setPixelRatio(dpr); renderer.setSize(width, width);
-    // Real fitted maps often hit the 10px size floor. Camera depth must still
+    // Real fitted maps reach four pixels. Camera depth must still
     // be visible in the shipped GPU output, without growing the render bound.
-    for (const color of colors) {
+    for (const color of colors) for (const size of [4, 10]) {
       const luminance: number[] = [];
       for (const depth of [0, .5, 1]) {
-        draw(10, color, 1.75, 0, 1, 0, depth);
-        luminance.push(region(pixels(), 0, 4.5).mean);
+        draw(size, color, 1.75, 0, 1, 0, depth);
+        luminance.push(region(pixels(), 0, size * .45).mean);
         const core = region(pixels(), 0, 1.6).mean;
         const outside = region(pixels(), 6, 8), bg = region(pixels(), 30, 32).mean;
-        record(`10px / ${color} / depth ${depth} / DPR ${dpr}: fixed footprint`, Math.abs(outside.peak - bg) < .01, outside.peak - bg, "unchanged background beyond the quad");
-        draw(10, color, 1.75, 0, .35, 0, depth);
+        record(`${size}px / ${color} / depth ${depth} / DPR ${dpr}: fixed footprint`, Math.abs(outside.peak - bg) < .01, outside.peak - bg, "unchanged background beyond the quad");
+        draw(size, color, 1.75, 0, .35, 0, depth);
         const inactive = region(pixels(), 0, 1.6).mean;
-        record(`10px / ${color} / depth ${depth} / DPR ${dpr}: inactive stays dimmer`, inactive < core * .6, inactive / core, "<0.6 of active core at the same depth");
+        record(`${size}px / ${color} / depth ${depth} / DPR ${dpr}: inactive stays dimmer`, size === 10 ? inactive < core * .6 : (inactive - bg) < (core - bg) * .8,
+          size === 10 ? inactive / core : (inactive - bg) / (core - bg), size === 10 ? "<0.6 of active core at the same depth" : "<0.8 of active core contrast at the same depth");
       }
-      record(`10px / ${color} / DPR ${dpr}: rendered depth hierarchy`, luminance[1] > luminance[0] + 5 && luminance[2] > luminance[1] + 5, luminance[2] - luminance[0], "strictly brighter near/middle/far with >5 RGB levels per step");
+      record(`${size}px / ${color} / DPR ${dpr}: rendered depth hierarchy`, luminance[1] > luminance[0] + 5 && luminance[2] > luminance[1] + 5, luminance[2] - luminance[0], "strictly brighter near/middle/far with >5 RGB levels per step");
     }
     for (const color of colors) for (const size of sizes) {
       const label = `${color} / ${size}px / DPR ${dpr}`;

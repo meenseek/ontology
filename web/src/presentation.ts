@@ -168,23 +168,33 @@ export function spriteScale(pixels: number, viewportHeight: number, projectionY:
 
 // Distant stars must be able to shrink with their projected spacing. A fixed
 // 26px floor turned a fitted dense constellation into a solid white disc.
-export const MIN_KNOWLEDGE_STAR_PIXELS = 10;
+export const MIN_KNOWLEDGE_STAR_PIXELS = 4;
 export const FOCUSED_KNOWLEDGE_STAR_PIXELS = 72;
 /** Count controls one bounded visual scale, shared by glyphs, hit areas and packing. */
 export function summaryAppearance(count: number): { pixels: number; samples: number } {
   if (!Number.isFinite(count) || count <= 0) return { pixels: 0, samples: 0 };
-  if (count >= 100) return { pixels: 64, samples: 24 };
-  if (count >= 50) return { pixels: 50, samples: 20 };
-  if (count >= 30) return { pixels: 40, samples: 16 };
-  if (count >= 10) return { pixels: 32, samples: 12 };
-  return { pixels: 24, samples: 10 };
+  if (count >= 100) return { pixels: 136, samples: 24 };
+  if (count >= 50) return { pixels: 92, samples: 20 };
+  if (count >= 30) return { pixels: 64, samples: 16 };
+  if (count >= 10) return { pixels: 42, samples: 12 };
+  return { pixels: 28, samples: 10 };
 }
 const KNOWLEDGE_STAR_WORLD_SIZE = 14;
+/** Unclamped visual diameter; even unresolved stars keep their true depth in the light. */
+export function starPerspectiveSize(depth: number, viewportHeight: number, projectionY: number): number {
+  if (![depth, viewportHeight, projectionY].every(Number.isFinite) || depth <= 0 || viewportHeight <= 0 || projectionY <= 0) return 0;
+  return KNOWLEDGE_STAR_WORLD_SIZE * (viewportHeight / depth) * projectionY / 2;
+}
+/** Continuous camera-depth contrast, including beyond the distant size floor. */
+export function stellarDepth(perspectivePixels: number): number {
+  return Number.isFinite(perspectivePixels) && perspectivePixels > 0 ? perspectivePixels / (perspectivePixels + KNOWLEDGE_STAR_WORLD_SIZE) : 0;
+}
 /** Perspective diameter in CSS pixels, shared by rendering, picking and projected labels. */
 export function nodeScreenSize(kind: string, depth: number, viewportHeight: number, projectionY: number): number {
-  if (![depth, viewportHeight, projectionY].every(Number.isFinite) || depth <= 0 || viewportHeight <= 0 || projectionY <= 0) return 0;
+  const perspective = starPerspectiveSize(depth, viewportHeight, projectionY);
+  if (perspective <= 0) return 0;
   if (kind !== "document" && kind !== "memory") return 10;
-  return Math.min(140, Math.max(MIN_KNOWLEDGE_STAR_PIXELS, KNOWLEDGE_STAR_WORLD_SIZE * (viewportHeight / depth) * projectionY / 2));
+  return Math.min(140, Math.max(MIN_KNOWLEDGE_STAR_PIXELS, perspective));
 }
 export const LAYOUT_WORLD_SPACING = 31;
 export const DEFAULT_LINK_PIXELS = 24;

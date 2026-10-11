@@ -1,6 +1,6 @@
-import { nodeScreenSize, nodeVisualRadius } from "./presentation";
+import { nodeScreenSize, nodeVisualRadius, summaryAppearance } from "./presentation";
 import { createRoot } from "react-dom/client";
-import { Line, LineBasicMaterial, Mesh, Raycaster, Scene, ShaderMaterial, Vector3 } from "three";
+import { Line, LineBasicMaterial, Mesh, Raycaster, Scene, ShaderMaterial, Sprite, Vector3 } from "three";
 import type { Camera } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import App from "./App";
@@ -674,6 +674,7 @@ async function checkFirstProximityCollapse() {
     limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
   let positions: Positions | undefined, overviewPacks = 0;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+  const packedFrames: unknown[] = [];
   const hasSummary = () => [...host.querySelectorAll<HTMLElement>('.node-label[role="button"]')].some(node => !node.hidden && node.textContent?.includes("근접 묶음"));
   try {
     Positions.prototype.install = function (this: Positions, ...args: Parameters<Positions["install"]>) {
@@ -681,7 +682,10 @@ async function checkFirstProximityCollapse() {
     };
     Positions.prototype.packOverview = function (this: Positions, ...args: Parameters<Positions["packOverview"]>) {
       const packed = originalPack.apply(this, args);
-      if (packed) overviewPacks++;
+      if (packed) {
+        overviewPacks++;
+        packedFrames.push({ epoch: this.structureEpoch, nodes: args[0].length, canvas: host.querySelector("canvas")?.getBoundingClientRect().toJSON() });
+      }
       return packed;
     };
     window.fetch = async input => {
@@ -694,7 +698,9 @@ async function checkFirstProximityCollapse() {
     window.history.replaceState(null, "", `${window.location.pathname}?scope=personal`);
     root.render(<App />);
     const openedAt = performance.now();
-    await until(() => !!host.querySelector("canvas") && !!positions && overviewPacks === 1 && !positions.layoutMoving && !hasSummary() && performance.now() - openedAt > 650, "initial ungrouped stars compact once and settle");
+    await until(() => !!host.querySelector("canvas") && !!positions && overviewPacks === 1 && !positions.layoutMoving && !hasSummary() && performance.now() - openedAt > 650, "initial ungrouped stars compact once and settle").catch(error => {
+      throw new Error(`${error.message}; ${JSON.stringify({ canvas: !!host.querySelector("canvas"), positions: !!positions, overviewPacks, moving: positions?.layoutMoving, hasSummary: hasSummary(), packedFrames })}`);
+    });
     const coordinates = () => JSON.stringify(nodes.map(node => positions!.layoutTarget(node.id)));
     const initial = coordinates(), initialPacks = overviewPacks, canvas = host.querySelector("canvas")!;
     const rect = canvas.getBoundingClientRect();
@@ -719,6 +725,8 @@ async function checkSummaryOverview() {
   let lightPhase: "opening" | "closing" | null = null;
   const cloudCrossfade = { opening: false, closing: false };
   const cloudSamples = new Map<string, { opacity: number; at: number }>();
+  const glyphSamples = new Map<string, { pixels: number; opacity: number; at: number }>();
+  const glyphCrossfade = { opening: false, closing: false }, wrappedGlyphs = new WeakSet<Sprite>();
   let spatialCloudId: string | undefined, spatialCloudCrossfade = false;
   let positions: Positions | undefined, overviewPacks = 0;
   const counts = [22, 40, 75, 120], nodes: GraphNode[] = [], links: Snapshot["links"] = [];
@@ -739,6 +747,16 @@ async function checkSummaryOverview() {
   try {
     Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, material, group) {
       scene.traverse(object => {
+        if (object instanceof Sprite && ["summary-glyph", "retiring-summary-glyph"].includes(object.name) && !wrappedGlyphs.has(object)) {
+          wrappedGlyphs.add(object);
+          const drawGlyph = object.onBeforeRender;
+          object.onBeforeRender = function (...args) {
+            drawGlyph.apply(this, args);
+            const id = object.parent?.userData.nodeId, opacity = object.material.opacity;
+            glyphSamples.set(id, { pixels: object.scale.x * args[0].domElement.clientHeight * args[2].projectionMatrix.elements[5] / 2, opacity, at: performance.now() });
+            if (lightPhase && id === "group-120-0" && opacity > 0 && opacity < 1) glyphCrossfade[lightPhase] = true;
+          };
+        }
         if (!(object instanceof Mesh) || object.name !== "stellar-light" || wrappedLights.has(object)) return;
         wrappedLights.add(object);
         const draw = object.onBeforeRender;
@@ -826,9 +844,13 @@ async function checkSummaryOverview() {
     await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes("관계 묶음 · 120개 · 1/10") === true, "large summary opens its compact page");
     await until(() => { const value = cloudSamples.get("group-120-0")?.opacity; return value !== undefined && value > .3 && value < .85; }, "the real summary cloud is midway through opening");
     const beforeClose = cloudSamples.get("group-120-0")!;
+    const glyphBeforeClose = glyphSamples.get("group-120-0")!;
+    assert(Math.abs(glyphBeforeClose.pixels - summaryAppearance(120).pixels) < .001, "opening retains the full count-sized glyph instead of jumping to 26px");
     button("묶음 접기").click();
     await until(() => !!summary(120) && cloudSamples.get("group-120-0")!.at > beforeClose.at, "closing retargets the rendered cloud before opening finishes");
     const afterClose = cloudSamples.get("group-120-0")!;
+    const glyphAfterClose = glyphSamples.get("group-120-0")!;
+    assert(Math.abs(glyphAfterClose.opacity - glyphBeforeClose.opacity) <= (glyphAfterClose.at - glyphBeforeClose.at) / 650 * 2 + .03, "reversing opening retargets the observed glyph opacity");
     assert(Math.abs(afterClose.opacity - beforeClose.opacity) <= (afterClose.at - beforeClose.at) / 650 * 2 + .03,
       "reversing opening preserves the observed cloud opacity within the 650ms motion bound");
     await until(() => cloudSamples.get("group-120-0")!.at - afterClose.at > 80, "the interrupted close renders several frames");
@@ -865,12 +887,13 @@ async function checkSummaryOverview() {
     const closedAt = performance.now();
     await until(() => !positions!.layoutMoving && performance.now() - closedAt > 1000 && counts.every(count => !!summary(count)), "closing restores all overview summaries");
     assert(cloudCrossfade.closing, "the actual summary light regathers as returning stars dissolve");
+    assert(glyphCrossfade.opening && glyphCrossfade.closing, "the count-sized summary image shares the light's continuous opening and closing fade");
     lightPhase = null;
     assert(background() === backgroundBeforeExpansion && overviewPacks === packsBeforeZoom, "Closing restores the same overview without a new whole-map pack");
     assert(graphCalls === initialCalls, "overview packing and expansion reuse one response");
     details("보기 설정").summary.click(); button("새로고침").click();
     await until(() => graphCalls === initialCalls + 1 && host.querySelector(".galaxy")?.getAttribute("aria-busy") === "false" && counts.every(count => !!summary(count)), "refresh retains all overview summaries");
-    return { summaryOverview: true, documents: nodes.length, relationCounts: counts, cloudCrossfade,
+    return { summaryOverview: true, documents: nodes.length, relationCounts: counts, cloudCrossfade, glyphCrossfade, glyphBeforeClose, glyphAfterClose,
       reversedCloudOpacity: { beforeClose, afterClose, beforeReopen, afterReopen }, spatialCloudCrossfade,
       proximityCohorts: true, zoomPreservesWorldCoordinates: true, zoomPacks, localExpansion: true, spatialRevealWithOpenCore: true, closingPreservesOverview: true, refresh: true };
   } finally {

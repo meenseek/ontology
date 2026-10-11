@@ -10,7 +10,7 @@ import type { NucleusView } from "./nuclei";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, GraphView, Model, PositionedNode } from "./graph";
-import { LAYOUT_WORLD_SPACING, MAX_VISIBLE_LABELS, advanceStarClock, coreCameraDistance, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starShape, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
+import { LAYOUT_WORLD_SPACING, MAX_VISIBLE_LABELS, advanceStarClock, coreCameraDistance, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starPerspectiveSize, starShape, stellarDepth, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
 import { planCoreView, screenPlane, spatialCameraFrame } from "./view-layout";
 import { CameraMotion, zoomCameraPose } from "./camera-motion";
@@ -159,17 +159,19 @@ export function cosmicLightMaterial() {
           vec2 drift = vec2(uTime * 0.022, -uTime * 0.013);
           float n = noise(q * 3.8 + drift + uPhase) * 0.67
             + noise(q * 9.3 - drift * 0.7 + uPhase) * 0.33;
-          vec2 warped = q + vec2(n - 0.5, sin(q.x * 4.0 + uPhase) * 0.12);
-          float veil = exp(-dot(warped * vec2(0.85,1.5), warped * vec2(0.85,1.5)) * 3.2);
-          float lane = smoothstep(0.04,0.20,abs(q.y + sin(q.x * 4.5 + uPhase) * 0.16));
-          field = mix(field, veil * (0.24 + n * n * 2.1) * (0.3 + 0.7 * lane), uCloud);
+          vec2 warped = q + vec2((n - 0.5) * 0.52, sin(q.x * 3.0 + uPhase) * 0.16);
+          float veil = exp(-dot(warped * vec2(0.78,1.55), warped * vec2(0.78,1.55)) * 2.2);
+          vec2 shoulder = warped - vec2(0.32, -0.18);
+          float plume = exp(-dot(shoulder * vec2(1.5,1.05), shoulder * vec2(1.5,1.05)) * 4.0);
+          float lane = smoothstep(0.025,0.17,abs(q.y + sin(q.x * 4.5 + uPhase) * 0.16));
+          field = mix(field, (veil * (0.18 + n * n * 2.2) + plume * n * 0.5) * (0.12 + 0.88 * lane), uCloud);
         }
         // Preserve the star's hue; lift its chroma instead of washing the sky grey.
         float grey = min(uColor.r, min(uColor.g, uColor.b));
         vec3 chroma = max(vec3(0.0), uColor - grey * 0.75);
         chroma /= max(0.001, max(chroma.r, max(chroma.g, chroma.b)));
         vec3 color = mix(vec3(0.16,0.25,0.48), chroma, 0.55 + depth * 0.3);
-        float strength = mix(0.055, 0.16, depth) * mix(1.0, 2.4, uCloud);
+        float strength = mix(0.025, 0.19, depth) * mix(1.0, 2.7, uCloud);
         gl_FragColor = vec4(color, field * edge * strength * uOpacity);
         #include <colorspace_fragment>
       }
@@ -197,11 +199,11 @@ function screenCosmicLight(geometry: PlaneGeometry, material: ShaderMaterial, no
   mesh.onBeforeRender = (renderer, _scene, camera) => {
     renderer.getSize(viewport);
     mesh.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
-    const perspective = 14 * viewport.y * camera.projectionMatrix.elements[5] / (Math.max(.001, -position.z) * 2);
-    const depth = Math.max(0, Math.min(1, perspective / 12));
+    const perspective = starPerspectiveSize(-position.z, viewport.y, camera.projectionMatrix.elements[5]);
+    const depth = stellarDepth(perspective);
     // The diffuse light is separate from the unchanged body/label/picking footprint.
-    const pixels = count > 0 ? summaryAppearance(count).pixels * 4
-      : Math.min(320, Math.max(24, perspective * 4));
+    const pixels = count > 0 ? Math.min(600, summaryAppearance(count).pixels * (3.5 + depth))
+      : Math.min(320, Math.max(16, perspective * 4));
     mesh.scale.setScalar(spriteScale(pixels, viewport.y, camera.projectionMatrix.elements[5]));
     mesh.updateMatrixWorld();
     material.uniforms.uColor.value.copy(color);
@@ -247,8 +249,8 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
     material.uniforms.uDetail.value = motion.detail;
     material.uniforms.uShimmer.value = motion.shimmer;
     material.uniforms.uPixels.value = pixels;
-    // Use the un-clamped perspective diameter so distant 10px stars still have depth.
-    material.uniforms.uDepth.value = Math.max(0, Math.min(1, 14 * viewport.y * camera.projectionMatrix.elements[5] / (Math.max(.001, -position.z) * 2 * 12)));
+    // Use the unclamped perspective diameter so stars at the size floor still have depth.
+    material.uniforms.uDepth.value = stellarDepth(starPerspectiveSize(-position.z, viewport.y, camera.projectionMatrix.elements[5]));
     material.uniforms.uShape.value = starShape(node.id);
     near = Math.max(near, dragged.current === node.id ? .8 : 0);
     const contact = contactMotion?.();
@@ -1037,6 +1039,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         retained.color, retained.count, motionClock.current, () => motionReduced.current,
         () => fade() * cloudOpacity(retained.fade, target, performance.now(), motionReduced.current), !summary));
     }
+    const glyphFade = () => fade() * (cloud ? cloudOpacity(cloud.fade, summary ? 1 : 0, performance.now(), motionReduced.current) : 1);
     if (summary && members?.length) {
       const samples = members.map(member => ({ id: member.id, kind: member.kind, taxonomyColor: member.taxonomyColor, opacity: active(member) ? 1 : .4 }));
       const signature = samples.map(member => `${member.id}:${starColor(member)}:${member.opacity}`).sort().join("|");
@@ -1054,20 +1057,30 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         glyph.signature = signature;
         previous.dispose();
       }
-      group.add(screenSprite(glyph.material, node, "body", false, 0, summaryPixels,
+      const body = screenSprite(glyph.material, node, "body", false, 0, summaryPixels,
         haloScale && (() => 1 + (haloScale() - 1) * .35),
         () => (contactMotion()?.pulse ?? 0) * .09,
         () => glyph.updateMotion(hoveredId.current === node.id && !!cursor.current && !positions.dragging,
-          motionClock.current.seconds, motionReduced.current), fade));
+          motionClock.current.seconds, motionReduced.current), glyphFade);
+      body.name = "summary-glyph";
+      group.add(body);
     } else group.add(isKnowledge
       ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged, summary ? 22 : 0, haloScale, contactMotion, fade)
       : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected, 0, undefined,
         () => (1 + ((haloScale?.() ?? 1) - 1) * 2) * (1 + (contactMotion()?.pulse ?? 0) * .05), undefined, undefined, fade));
     const oldGlyph = !summary && resources.summaries.get(node.id);
-    if (oldGlyph && node.id === activeExpandedCore && reveal.entering.size) {
-      const start = Math.min(...reveal.entering.values());
-      group.add(screenSprite(oldGlyph.material, node, "body", false, 0, 26, undefined, undefined, undefined,
-        () => Math.max(0, 1 - (performance.now() - start) / 180)));
+    if (oldGlyph && cloud && cloud.fade.value > 0 && !reduced) {
+      // Keep the actual count-sized image while it dissolves. The same retained
+      // fade brings it back on close, including a reversed disclosure.
+      const body = screenSprite(oldGlyph.material, node, "body", false, 0, summaryAppearance(cloud.count).pixels,
+        undefined, undefined, undefined, glyphFade);
+      body.name = "retiring-summary-glyph";
+      const draw = body.onBeforeRender;
+      body.onBeforeRender = function (...args) {
+        draw.apply(this, args);
+        if (body.material.opacity === 0) body.visible = false;
+      };
+      group.add(body);
     }
     if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .7), node, "body", false, 0, 18));
     const summaryMetrics = summaryPixels ? nodeScreenMetrics(summaryPixels, isSelected, node.changed) : null;

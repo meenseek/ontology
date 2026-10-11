@@ -657,8 +657,8 @@ test("knowledge stars grow monotonically with perspective and retain bounded ove
   const { nodeScreenSize, spriteScale } = await import("./presentation.ts");
   for (const kind of ["document", "memory"]) {
     const sizes = [10000, 1000, 400, 200, 100, 20, 1].map(depth => nodeScreenSize(kind, depth, 800, 2));
-    assert.equal(sizes[0], 10); assert.equal(sizes.at(-1), 140);
-    assert.ok(sizes.every((size, index) => size >= 10 && size <= 140 && (!index || size >= sizes[index - 1])));
+    assert.equal(sizes[0], 4); assert.equal(sizes.at(-1), 140);
+    assert.ok(sizes.every((size, index) => size >= 4 && size <= 140 && (!index || size >= sizes[index - 1])));
     assert.ok(sizes[3] > sizes[2], "approaching within the unclamped range visibly enlarges a star");
     const base = nodeScreenSize(kind, 400, 800, 2);
     assert.ok(Math.abs(nodeScreenSize(kind, 400, 1200, 2) - base * 1.5) < 1e-10);
@@ -681,9 +681,17 @@ test("invalid or behind-camera stars have no visible, ring or picking footprint"
     assert.ok(Object.values(nodeScreenMetrics(bad, true, true)).every(value => value === 0));
   }
 });
+test("actual depth remains distinct beyond both visual size clamps without shrinking the input target", async () => {
+  const { stellarDepth, nodeScreenSize, nodeScreenMetrics } = await import("./presentation.ts");
+  const near = nodeScreenSize("document", 100, 800, 2), far = nodeScreenSize("document", 10000, 800, 2);
+  assert.ok(near > far * 20, "real perspective resolves a strong foreground/background size hierarchy");
+  assert.ok(nodeScreenMetrics(far, false, false).hit >= 36, "a distant four-pixel star retains its usable input target");
+  for (const [a, b] of [[.1, .2], [1, 2], [140, 280]]) assert.ok(stellarDepth(a) > 0 && stellarDepth(a) < stellarDepth(b) && stellarDepth(b) < 1);
+  for (const invalid of [NaN, Infinity, -Infinity, -1, 0]) assert.equal(stellarDepth(invalid), 0);
+});
 test("enlarged stars share padded ring, hit and label clearance at overview and closeup", async () => {
   const { nodeScreenMetrics, visibleLabels } = await import("./presentation.ts");
-  for (const size of [10, 26, 56, 140]) for (const selected of [false, true]) for (const changed of [false, true]) {
+  for (const size of [4, 10, 26, 56, 136, 140]) for (const selected of [false, true]) for (const changed of [false, true]) {
     const metrics = nodeScreenMetrics(size, selected, changed);
     assert.equal(metrics.body, size);
     assert.ok(Math.abs(metrics.selection * 112 / 128 - Math.max(27, size + 12)) < 1e-10);
@@ -700,7 +708,7 @@ test("enlarged stars share padded ring, hit and label clearance at overview and 
 test("summary sizes share count boundaries with collision, hit and label footprints at every depth", async () => {
   const { nodeScreenMetrics, nodeVisualRadius, summaryAppearance } = await import("./presentation.ts");
   assert.deepEqual([0, 6, 9, 10, 29, 30, 49, 50, 99, 100, 120, 800].map(count => summaryAppearance(count).pixels),
-    [0, 24, 24, 32, 32, 40, 40, 50, 50, 64, 64, 64]);
+    [0, 28, 28, 42, 42, 64, 64, 92, 92, 136, 136, 136]);
   assert.deepEqual([NaN, Infinity, -1].map(summaryAppearance), Array(3).fill({ pixels: 0, samples: 0 }));
   for (const size of [10, 36, 72, 140]) {
     assert.equal(nodeVisualRadius(size, false, false), size / 2);
