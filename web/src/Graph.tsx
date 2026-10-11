@@ -4,7 +4,7 @@ import type { ForceGraphMethods } from "react-force-graph-3d";
 import { CanvasTexture, Color, Group, LineBasicMaterial, Mesh, MOUSE, PlaneGeometry, Raycaster, ShaderMaterial, Sprite, SpriteMaterial, TOUCH, Vector2, Vector3 } from "three";
 import type { Camera, Object3D, PerspectiveCamera } from "three";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { active, constellationView, diagramLinks, expandedCoreCameraFrame, kindName, knowledge, linkColor, linkName, stateName } from "./graph";
+import { active, constellationView, diagramLinks, expandedCoreCameraFrame, kindName, knowledge, linkColor, linkKey, linkName, overviewLinkKeys, stateName } from "./graph";
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei";
 import type { NucleusView } from "./nuclei";
 import { fixPosition } from "./positions";
@@ -19,7 +19,7 @@ import MiniMap from "./MiniMap";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
-type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onToggleRotation?: () => void; onFailure: () => void };
+type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; allConnections?: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onToggleRotation?: () => void; onFailure: () => void };
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
 const coreLabel = (node: PositionedNode | undefined, count: number, view?: GraphView) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : view === "purpose" ? `${node?.subject_name ?? node?.label ?? "목적 묶음"} · ${count}개` : `관계 묶음 · ${count}개`;
 function texture(kind: "ring" | "selection" | "change") {
@@ -205,7 +205,7 @@ function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "bod
   return sprite;
 }
 const endpoint = (value: string | number | { id?: string | number } | undefined) => typeof value === "object" ? value.id : value;
-export default function Graph({ positions, snapshot, nodes, links, selected, rotate, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onToggleRotation, onFailure }: Props) {
+export default function Graph({ positions, snapshot, nodes, links, selected, rotate, allConnections = false, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onToggleRotation, onFailure }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
   const cameraMotion = useRef(new CameraMotion());
@@ -308,6 +308,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     return [...displayLinks, ...links.filter(link => ids.has(link.source) && ids.has(link.target) &&
       (reveal.retiring.has(link.source) || reveal.retiring.has(link.target)) && !displayLinks.some(current => current.source === link.source && current.target === link.target && current.kind === link.kind))];
   }, [displayNodes, displayLinks, links, reveal]);
+  const outlineLinks = useMemo(() => overviewLinkKeys(displayNodes, visualLinks), [displayNodes, visualLinks]);
   // Camera detail bands change visibility, not the content/status of the snapshot.
   const changedFootprints = useMemo(() => JSON.stringify(nodes.filter(node => node.changed).map(node => node.id).sort()), [nodes]);
   const summaryCounts = useMemo(() => {
@@ -716,13 +717,19 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         if (!object?.material || object.userData.revealFade) continue;
         object.userData.revealFade = true;
         const from = String(endpoint(link.source)), to = String(endpoint(link.target));
+        const degree = Math.max(degrees.get(from) ?? 0, degrees.get(to) ?? 0);
+        const relationship = ["related", "reference", "evidence"].includes(link.kind);
+        const outline = outlineLinks.has(linkKey({ ...link, source: from, target: to }));
+        const resting = allConnections ? Math.max(.3, .6 / Math.sqrt(Math.max(1, degree / 2))) : outline ? .5 : .025;
         object.onBeforeRender = () => { if (object.material) {
           const focus = dragged.current ?? selectedId.current ?? hoveredId.current;
-          const degree = Math.max(degrees.get(from) ?? 0, degrees.get(to) ?? 0);
-          const emphasis = key === "__lineObj" && opacity === .65
-            ? focus === from || focus === to ? .82 : focus ? .2 : Math.max(.3, .6 / Math.sqrt(Math.max(1, degree / 2)))
-            : opacity;
-          object.material.opacity = emphasis * Math.min(revealOpacity(revealRef.current, from, performance.now()), revealOpacity(revealRef.current, to, performance.now()));
+          const lineEmphasis = focus === from || focus === to ? .82 : focus ? (allConnections || outline ? .12 : .015) : resting;
+          const emphasis = relationship ? lineEmphasis * (key === "__arrowObj" ? 3 : 1) : opacity;
+          const now = performance.now();
+          const fade = object.userData.edgeEmphasis ??= { value: emphasis, at: now };
+          fade.value = reduced ? emphasis : emphasis + (fade.value - emphasis) * Math.exp(-Math.min(50, Math.max(0, now - fade.at)) / 120);
+          fade.at = now;
+          object.material.opacity = fade.value * Math.min(revealOpacity(revealRef.current, from, now), revealOpacity(revealRef.current, to, now));
         } };
       }
       instance?.camera().updateMatrixWorld();
@@ -879,7 +886,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       frame = requestAnimationFrame(draw);
     };
     draw(); return () => cancelAnimationFrame(frame);
-  }, [ready, labelFontRevision, minimapRevision, nodes, displayNodes, displayLinks, collapsedCounts, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal]);
+  }, [ready, labelFontRevision, minimapRevision, nodes, displayNodes, displayLinks, outlineLinks, allConnections, collapsedCounts, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;

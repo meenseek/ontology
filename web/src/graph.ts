@@ -88,7 +88,34 @@ function random(seed: number): () => number {
   let state = seed;
   return () => { state = (Math.imul(1664525, state) + 1013904223) >>> 0; return state / 4294967296; };
 }
-const linkKey = (l: GraphLink) => `${l.kind}:${l.source}:${l.target}:${l.current}`;
+export const linkKey = (l: GraphLink) => `${l.kind}:${l.source}:${l.target}:${l.current}`;
+
+/** A visual outline of real connections, never a ranking of their meaning. */
+export function overviewLinkKeys(nodes: readonly Pick<PositionedNode, "id" | "x" | "y" | "z">[], links: readonly GraphLink[]): Set<string> {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  const neighbors = new Map(nodes.map(node => [node.id, new Set<string>()]));
+  const pairs = new Map<string, GraphLink[]>();
+  for (const link of links) {
+    if (!["related", "reference", "evidence"].includes(link.kind) || link.source === link.target || !byId.has(link.source) || !byId.has(link.target)) continue;
+    neighbors.get(link.source)!.add(link.target); neighbors.get(link.target)!.add(link.source);
+    const key = JSON.stringify([link.source, link.target].sort());
+    pairs.set(key, [...(pairs.get(key) ?? []), link]);
+  }
+  const length = (link: GraphLink) => {
+    const a = byId.get(link.source)!, b = byId.get(link.target)!;
+    return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+  };
+  const ordered = [...pairs].sort(([a, x], [b, y]) => Number(y.some(link => link.current)) - Number(x.some(link => link.current)) || length(x[0]) - length(y[0]) || compare(a, b));
+  const used = new Map<string, number>(), result = new Set<string>();
+  for (const [, pair] of ordered) {
+    const { source, target } = pair[0];
+    const limit = (id: string) => neighbors.get(id)!.size > 3 ? 2 : 3;
+    if ((used.get(source) ?? 0) >= limit(source) || (used.get(target) ?? 0) >= limit(target)) continue;
+    used.set(source, (used.get(source) ?? 0) + 1); used.set(target, (used.get(target) ?? 0) + 1);
+    for (const link of pair) result.add(linkKey(link));
+  }
+  return result;
+}
 
 const parentPath = (path: string) => path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".";
 const folderId = (scope: Scope, contextScope: string, path: string) => `folder:${scope}:${JSON.stringify([contextScope, path])}`;

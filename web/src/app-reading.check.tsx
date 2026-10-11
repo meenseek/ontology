@@ -1,6 +1,6 @@
 import { nodeScreenSize, nodeVisualRadius } from "./presentation";
 import { createRoot } from "react-dom/client";
-import { Mesh, Scene, ShaderMaterial, Vector3 } from "three";
+import { Line, LineBasicMaterial, Mesh, Scene, ShaderMaterial, Vector3 } from "three";
 import type { Camera } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import App from "./App";
@@ -925,14 +925,15 @@ async function checkRenderedMotion() {
   const originalRender = Scene.prototype.onBeforeRender, originalInstall = Positions.prototype.install, originalPack = Positions.prototype.packOverview;
   const originalControlsUpdate = OrbitControls.prototype.update;
   let cameraDistance = 0, overviewPacked = false, autoRotation = false;
-  const nodes: GraphNode[] = Array.from({ length: 5 }, (_, index) => ({ id: `motion-${index}`, scope: "personal", kind: "document", label: `합성 모션 자료 ${index}`, status: "ok", present: true, current: true }));
-  const links: Snapshot["links"] = [1, 2].map(index => ({ source: nodes[0].id, target: nodes[index].id, kind: "related", current: true }));
+  const nodes: GraphNode[] = Array.from({ length: 5 }, (_, index) => ({ id: `motion-${index}`, scope: "personal", kind: "document", label: `합성 모션 자료 ${index}`, subject_id: "p_motion", subject_name: "합성 모션 목적", purpose_total: 5, status: "ok", present: true, current: true }));
+  const links: Snapshot["links"] = [1, 2, 3, 4].map(index => ({ source: nodes[0].id, target: nodes[index].id, kind: "related", current: true }));
   const snapshot: Snapshot = { scope: "personal", query: "", focus: { id: null, found: false }, nodes, links,
     matched: nodes.length, totals: { documents: nodes.length, memories: 0, markers: 0, links: links.length },
     returned: { knowledge: nodes.length, markers: 0, links: links.length }, omitted: { nodes: 0, links: 0 },
     eligible: { nodes: nodes.length, links: links.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
   let model: Parameters<Positions["install"]>[0] | undefined, positions: Positions | undefined, camera: Camera | undefined;
   const sampled = new Map<string, { rotation: number; shimmer: number; wobble: number; z: number }>(), wrapped = new WeakSet<Mesh>(), worldPosition = new Vector3();
+  let edgeOpacities: number[] = [];
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
   try {
     OrbitControls.prototype.update = function (this: OrbitControls, ...args: Parameters<OrbitControls["update"]>) {
@@ -951,7 +952,9 @@ async function checkRenderedMotion() {
     };
     Scene.prototype.onBeforeRender = function (renderer, scene, frameCamera, geometry, material, group) {
       camera = frameCamera;
+      edgeOpacities = [];
       scene.traverse(object => {
+        if (object instanceof Line && object.material instanceof LineBasicMaterial) edgeOpacities.push(object.material.opacity);
         if (!(object instanceof Mesh) || !(object.material instanceof ShaderMaterial) || !object.material.uniforms.uRotation || wrapped.has(object)) return;
         wrapped.add(object);
         const draw = object.onBeforeRender;
@@ -973,7 +976,15 @@ async function checkRenderedMotion() {
     window.history.replaceState(null, "", `${window.location.pathname}?scope=personal`);
     root.render(<App />);
     await until(() => sampled.size === nodes.length && !!positions && overviewPacked && !positions.layoutMoving && !!camera, "actual Graph renders each luminous star after its compact initial layout settles");
+    let initialPose = "", initialPoseSince = performance.now();
+    await until(() => {
+      const pose = JSON.stringify([camera!.position.toArray(), model!.nodes.map(node => [node.id, node.x, node.y, node.z])]);
+      if (positions!.layoutMoving || positions!.settling || pose !== initialPose) initialPoseSince = performance.now();
+      initialPose = pose;
+      return performance.now() - initialPoseSince >= 250;
+    }, "the connected layout and framing settle before label observations");
     const labelLayer = host.querySelector<HTMLElement>(".node-labels")!, labelOrigin = labelLayer.getBoundingClientRect();
+    const renderSize = host.querySelector("canvas")!.getBoundingClientRect();
     const labelBoxes = [...labelLayer.querySelectorAll<HTMLElement>(".node-label")].filter(label => !label.hidden).map(label => ({ id: label.dataset.nodeId!, box: label.getBoundingClientRect() }));
     assert(labelBoxes.length > 0 && [...labelLayer.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].every(label => label.classList.contains("compact")), "resting labels display compact literal titles");
     const chromeBoxes = [...host.querySelectorAll<HTMLElement>(".graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions")].filter(element => element.offsetWidth && element.offsetHeight).map(element => element.getBoundingClientRect());
@@ -982,14 +993,25 @@ async function checkRenderedMotion() {
     for (const { id, box } of labelBoxes) for (const other of model!.nodes) {
       if (other.id === id) continue;
       const point = new Vector3(other.x, other.y, other.z).applyMatrix4(camera!.matrixWorldInverse);
-      const pixels = nodeScreenSize(other.kind, -point.z, labelOrigin.height, camera!.projectionMatrix.elements[5]);
+      const pixels = nodeScreenSize(other.kind, -point.z, renderSize.height, camera!.projectionMatrix.elements[5]);
       const radius = nodeVisualRadius(pixels, false, other.changed);
       point.applyMatrix4(camera!.projectionMatrix);
       if (point.z < -1 || point.z > 1) continue;
-      const x = labelOrigin.left + (point.x + 1) * labelOrigin.width / 2, y = labelOrigin.top + (1 - point.y) * labelOrigin.height / 2;
-      assert(Math.hypot(x - Math.max(box.left, Math.min(box.right, x)), y - Math.max(box.top, Math.min(box.bottom, y))) >= radius + 3.8, "mounted labels clear every star, including stars without labels");
+      const x = labelOrigin.left + (point.x + 1) * renderSize.width / 2, y = labelOrigin.top + (1 - point.y) * renderSize.height / 2;
+      const clearance = Math.hypot(x - Math.max(box.left, Math.min(box.right, x)), y - Math.max(box.top, Math.min(box.bottom, y)));
+      assert(clearance >= radius + 3.8, `mounted label ${id} clears star ${other.id}: ${clearance.toFixed(3)} >= ${(radius + 3.8).toFixed(3)}`);
     }
     const restingLayout = JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z]));
+    await until(() => edgeOpacities.filter(value => value > .2).length === 2 && edgeOpacities.filter(value => value < .1).length === 2, "the actual hub retains two outline edges and its remaining genuine edges at low emphasis");
+    details("보기 설정").summary.click();
+    const allConnections = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(input => input.parentElement?.textContent?.includes("연결선 모두 보기"));
+    assert(allConnections && !allConnections.checked, "full connections have an explicit unchecked view setting");
+    allConnections.click();
+    await until(() => edgeOpacities.length === links.length && edgeOpacities.every(value => value > .2), "all-connections restores each rendered edge");
+    assert(JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z])) === restingLayout, "edge emphasis changes preserve every real world position");
+    allConnections.click();
+    await until(() => edgeOpacities.filter(value => value > .2).length === 2 && edgeOpacities.filter(value => value < .1).length === 2, "returning to the overview restores the outline without losing connections");
+    details("보기 설정").summary.click();
     assert(new Set([...sampled.values()].map(star => star.z.toFixed(6))).size > 1, "the rendered stars retain depth instead of flattening their world positions");
     const initial = new Map(sampled);
     await until(() => [...sampled].some(([id, value]) => Math.abs(value.rotation - initial.get(id)!.rotation) > .01 && Math.abs(value.shimmer - initial.get(id)!.shimmer) > .001), "the mounted renderer advances stellar surface and shimmer motion");
@@ -1078,7 +1100,7 @@ async function checkRenderedMotion() {
     await until(() => minimapDisclosure().getAttribute("aria-expanded") === "true" && !minimap.closest('[hidden]'), "minimap expands and restores navigation");
     assert(camera!.position.distanceTo(poseBeforeCollapse) < .00001, "disclosure preserves the settled camera pose");
     assert(JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z])) === layoutBeforeCollapse, "disclosure preserves the settled world layout");
-    return { renderedMotion: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, minimapDisclosure: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
+    return { renderedMotion: true, connectionOutline: true, allConnections: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, minimapDisclosure: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
   } finally {
     root.unmount(); Scene.prototype.onBeforeRender = originalRender; Positions.prototype.install = originalInstall;
     Positions.prototype.packOverview = originalPack;
@@ -1091,6 +1113,11 @@ async function run() {
   const results: unknown[] = [];
   try {
     assert(import.meta.env.DEV, "Run this fixture through the development server");
+    if (new URLSearchParams(window.location.search).get("scenario") === "motion") {
+      results.push(await checkRenderedMotion());
+      output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
+      return;
+    }
     results.push(checkSummaryGlyphMotion());
     for (const size of [1, 20]) results.push(await check(size));
     results.push(await checkOriginalFolders());

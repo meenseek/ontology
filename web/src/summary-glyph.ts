@@ -14,11 +14,13 @@ export function summaryGlyphStars(groupId: string, members: readonly Member[]): 
   return chosen.map((member, index) => {
     // Stratify the projected disc so small groups have a bright center rather
     // than a hollow ring; jitter and depth keep its silhouette organic.
-    const longitude = rotation + index * 2.399963229728653 + (starPhase(`${member.id}|jitter`) / turn - .5) * .38;
+    const longitude = index * 2.399963229728653 + (starPhase(`${member.id}|jitter`) / turn - .5) * .38;
     const spread = Math.sqrt((index + .18) / chosen.length) * (.72 + starPhase(`${member.id}|spread`) / turn * .25);
+    const x = Math.cos(longitude) * spread + Math.sin(longitude) * spread * .16;
+    const y = Math.sin(longitude) * spread * .64;
     return {
-      x: Math.cos(longitude) * spread,
-      y: Math.sin(longitude) * spread,
+      x: x * Math.cos(rotation) - y * Math.sin(rotation),
+      y: x * Math.sin(rotation) + y * Math.cos(rotation),
       depth: starPhase(`${member.id}|depth`) / Math.PI - 1,
       phase: starPhase(`${member.id}|drift`),
       color: starColor(member),
@@ -53,16 +55,19 @@ export function summaryGlyphTexture(groupId: string, members: readonly Member[])
       const at = summaryGlyphPosition(star, seconds, amount);
       const x = 64 + at.x * 49, y = 64 + at.y * 49;
       const near = (star.depth + 1) / 2;
-      const radius = 3.3 + near * 2;
-      const glow = context.createRadialGradient(x, y, 0, x, y, radius * 3.2);
-      glow.addColorStop(0, star.color + "a6");
-      glow.addColorStop(.3, star.color + "58");
+      const radius = 1.5 + Math.pow(near, 2) * 2.7;
+      const glow = context.createRadialGradient(x, y, 0, x, y, radius * 5);
+      glow.addColorStop(0, star.color + "a0");
+      glow.addColorStop(.18, star.color + "42");
+      glow.addColorStop(.5, star.color + "10");
       glow.addColorStop(1, star.color + "00");
       context.fillStyle = glow;
       context.globalAlpha = star.opacity;
-      context.beginPath(); context.arc(x, y, radius * 3.2, 0, Math.PI * 2); context.fill();
+      context.globalCompositeOperation = "lighter";
+      context.beginPath(); context.arc(x, y, radius * 5, 0, Math.PI * 2); context.fill();
+      context.globalCompositeOperation = "source-over";
       context.fillStyle = star.color;
-      context.globalAlpha = (.7 + near * .3) * star.opacity;
+      context.globalAlpha = (.45 + near * .55) * star.opacity;
       context.beginPath();
       if (star.shape === 0) context.arc(x, y, radius, 0, Math.PI * 2);
       else {
@@ -77,11 +82,11 @@ export function summaryGlyphTexture(groupId: string, members: readonly Member[])
       }
       context.fill();
       context.fillStyle = "#ffffff";
-      context.globalAlpha = (.32 + near * .2) * star.opacity;
-      context.beginPath(); context.arc(x, y, Math.max(1, radius * .38), 0, Math.PI * 2); context.fill();
+      context.globalAlpha = (.55 + near * .4) * star.opacity;
+      context.beginPath(); context.arc(x, y, Math.max(.7, radius * .36), 0, Math.PI * 2); context.fill();
       if (star.glint) {
-        context.strokeStyle = star.color;
-        context.globalAlpha = (.34 + near * .22) * star.opacity;
+        context.strokeStyle = "#edf5ff";
+        context.globalAlpha = (.24 + near * .4) * star.opacity;
         context.lineWidth = 1;
         context.beginPath();
         context.moveTo(x - radius * 2.1, y); context.lineTo(x + radius * 2.1, y);

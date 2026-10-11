@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { Positions, compactSlots, fixPosition } from "./positions.ts";
 import { separateDiscs } from "./clearance.ts";
 import { PerspectiveCamera, Vector3 } from "three";
-import { active, constellationView, denseConstellationCores, diagramLinks, expandedCoreCameraFrame, graphUrl, isNativeOriginal, knowledge, listNodes, nativeFolders, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph, visualSatellites } from "./graph.ts";
+import { active, constellationView, denseConstellationCores, diagramLinks, expandedCoreCameraFrame, graphUrl, isNativeOriginal, knowledge, linkKey, listNodes, nativeFolders, overviewLinkKeys, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph, visualSatellites } from "./graph.ts";
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 import { visibleLabels, type ProjectedLabel } from "./presentation.ts";
@@ -15,6 +15,34 @@ import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./r
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
 const memory = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "memory", label: id, revision: "1", status: "accepted", temporal: "current", supported: true });
 const edge = (source: string, target: string, current = true): GraphLink => ({ source, target, kind: "related", current });
+test("overview emphasis uses real short connections without changing hub relations or parallel direction and state", () => {
+  const nodes = Array.from({ length: 7 }, (_, i) => ({ id: `n${i}`, x: i * 10, y: i % 2, z: i % 3 }));
+  const links: GraphLink[] = [...nodes.slice(1).map(node => edge("n0", node.id)),
+    { source: "n1", target: "n0", kind: "reference", current: false },
+    { source: "n0", target: "n1", kind: "evidence", current: true },
+    { source: "n0", target: "n6", kind: "subject", current: true }, edge("n0", "missing"), edge("n0", "n0")];
+  const original = JSON.stringify({ nodes, links }), outline = overviewLinkKeys(nodes, links);
+  assert.deepEqual([...outline].sort(), links.filter(link => (link.source === "n0" && ["n1", "n2"].includes(link.target)) || link.kind === "reference").map(linkKey).sort());
+  assert.deepEqual([...overviewLinkKeys([...nodes].reverse(), [...links].reverse())].sort(), [...outline].sort());
+  assert.equal(JSON.stringify({ nodes, links }), original, "all original edges and XYZ positions remain intact");
+  assert.ok([...outline].every(key => links.some(link => linkKey(link) === key)), "no decorative or inferred relation is introduced");
+});
+test("overview keeps low-degree constellations and bounds dense outlines at the existing 800-node / 2000-edge query limit", () => {
+  const chain = Array.from({ length: 8 }, (_, i) => ({ id: `n${i}`, x: i * 3, y: i % 2, z: i % 3 }));
+  const branches = chain.slice(1).map((node, i) => edge(chain[i].id, node.id));
+  branches.push(edge("n1", "n5"));
+  assert.deepEqual([...overviewLinkKeys(chain, branches)].sort(), branches.map(linkKey).sort());
+  const nodes = Array.from({ length: 800 }, (_, i) => ({ id: `n${i}`, x: i % 29, y: Math.floor(i / 29), z: i % 7 }));
+  const links = Array.from({ length: 2000 }, (_, i) => edge(nodes[i % 400].id, nodes[400 + Math.floor(i / 400) * 79 + i % 79].id));
+  const chosen = overviewLinkKeys(nodes, links), degrees = new Map<string, Set<string>>(), emphasis = new Map<string, Set<string>>();
+  for (const link of links) for (const [a, b] of [[link.source, link.target], [link.target, link.source]]) {
+    const neighbors = degrees.get(a) ?? new Set<string>(); neighbors.add(b); degrees.set(a, neighbors);
+    if (chosen.has(linkKey(link))) { const visible = emphasis.get(a) ?? new Set<string>(); visible.add(b); emphasis.set(a, visible); }
+  }
+  assert.ok(chosen.size > 0 && chosen.size < links.length);
+  assert.ok([...emphasis].every(([id, neighbors]) => neighbors.size <= (degrees.get(id)!.size > 3 ? 2 : 3)));
+  assert.deepEqual([...overviewLinkKeys([...nodes].reverse(), [...links].reverse())].sort(), [...chosen].sort());
+});
 test("minimap zoom preserves a panned 3D viewing direction and respects camera limits", () => {
   const pose = { position: { x: 40, y: 60, z: 90 }, target: { x: 10, y: 20, z: 30 } };
   const zoomed = zoomCameraPose(pose, 1.25, 1, 1000);
