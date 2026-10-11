@@ -1,5 +1,5 @@
 import { Color, Mesh, PerspectiveCamera, PlaneGeometry, Scene, WebGLRenderer } from "three";
-import { starMaterial } from "./Graph.tsx";
+import { cosmicLightMaterial, starMaterial } from "./Graph.tsx";
 import { advanceStarClock, spriteScale, starMotion, starPhase, starShape } from "./presentation";
 
 // Development-only GPU regression: import the shipped shader, never a CPU copy of its math.
@@ -160,6 +160,43 @@ try {
       record(`shape ${shape} / DPR ${dpr}: distinct outline`, delta > .1, delta, ">0.1 mean RGB difference from round star");
     }
   }
+  const light = cosmicLightMaterial(), lightMesh = new Mesh(geometry, light);
+  lightMesh.frustumCulled = false;
+  lightMesh.scale.setScalar(spriteScale(120,width,camera.projectionMatrix.elements[5]));
+  scene.add(lightMesh); mesh.visible = false;
+  const drawLight = (depth: number, cloud: number, time = 0, opacity = 1) => {
+    light.uniforms.uDepth.value = depth; light.uniforms.uCloud.value = cloud;
+    light.uniforms.uTime.value = time; light.uniforms.uOpacity.value = opacity;
+    renderer.render(scene,camera); return pixels();
+  };
+  for (dpr of [1,2]) {
+    renderer.setPixelRatio(dpr); renderer.setSize(width,width);
+    for (const color of colors) for (const cloud of [0,1]) {
+      light.uniforms.uColor.value.copy(new Color(color)); light.uniforms.uPhase.value = 2.3;
+      const label = `light / ${color} / cloud ${cloud} / DPR ${dpr}`;
+      const background = drawLight(1,cloud,0,0);
+      const far = drawLight(0,cloud), middle = drawLight(.5,cloud), near = drawLight(1,cloud);
+      const bright = [far,middle,near].map(data => region(data,0,40).mean);
+      record(`${label}: actual depth contrast`, bright[1] > bright[0] + 2 && bright[2] > bright[1] + 2,
+        bright[2]-bright[0], "near/middle/far each differ by >2 output RGB levels");
+      record(`${label}: broad glow`, region(near,12,35).mean > region(background,12,35).mean + 4,
+        region(near,12,35).mean-region(background,12,35).mean, "visible diffuse light beyond the unchanged small star body");
+      record(`${label}: bounded edge`, Math.abs(region(near,62,74).mean-region(background,62,74).mean) < .01,
+        region(near,62,74).mean-region(background,62,74).mean, "sky outside the light remains untouched");
+      const half = drawLight(1,cloud,0,.5);
+      record(`${label}: reveal fades continuously`, region(half,0,40).mean < bright[2] && region(half,0,40).mean > region(background,0,40).mean,
+        region(half,0,40).mean, "half reveal lies between hidden and visible");
+      const hidden = drawLight(1,cloud,20,0);
+      record(`${label}: hidden light leaves no ghost`, difference(hidden,background) === 0,difference(hidden,background),"0 pixel difference at zero opacity");
+      if (cloud) {
+        const moved = drawLight(1,cloud,20);
+        record(`${label}: slow cloud motion`, difference(near,moved) > .25,difference(near,moved),"actual GPU light pattern moves with its clock");
+        const frozen = drawLight(1,cloud,20);
+        record(`${label}: frozen clock`, difference(moved,frozen) === 0,difference(moved,frozen),"0 pixel difference with unchanged time");
+      }
+    }
+  }
+  scene.remove(lightMesh); mesh.visible = true; light.dispose();
   output.dataset.passed = String(results.every(r => r.passed));
   output.textContent = `${results.every(r => r.passed) ? "PASS" : "FAIL"} · ${results.filter(r => r.passed).length}/${results.length}\n${JSON.stringify(results, null, 2)}`;
   // Same renderer/material also drives the live gallery. No app data or network access.

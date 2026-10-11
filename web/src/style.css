@@ -69,7 +69,7 @@ summary:hover { color: #e6edf6; }
 .active-filters { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 8px; }
 .active-filters button { padding: 3px 0; text-decoration: underline; }
 .no-relations { margin: 8px 0 0; }
-.graph-canvas { position: relative; flex: 1; min-height: 230px; min-width: 0; background: radial-gradient(ellipse at 64% 32%, #2d205122 0, transparent 46%), radial-gradient(ellipse at 38% 64%, #1b476b26 0, transparent 48%), radial-gradient(ellipse at 50% 45%, #101b2b 0, #080f1b 50%, #040810 100%); }
+.graph-canvas { position: relative; flex: 1; min-height: 230px; min-width: 0; background: radial-gradient(ellipse at 50% 45%, #080e19 0, #040811 58%, #02040a 100%); }
 .graph-canvas > div:first-child { position: absolute; inset: 0; }
 .graph-canvas .scene-container { position: relative; }
 .graph-canvas canvas { display: block; touch-action: none; }

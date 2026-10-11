@@ -55,7 +55,7 @@ export function summaryGlyphTexture(groupId: string, members: readonly Member[])
       const at = summaryGlyphPosition(star, seconds, amount);
       const x = 64 + at.x * 49, y = 64 + at.y * 49;
       const near = (star.depth + 1) / 2;
-      const radius = 1.1 + Math.pow(near, 3) * 4.9;
+      const radius = .65 + Math.pow(near, 4) * 5.8;
       const halo = 8 + near * 16;
       const glow = context.createRadialGradient(x, y, 0, x, y, halo);
       glow.addColorStop(0, "#f0f7ffe0");
@@ -64,12 +64,12 @@ export function summaryGlyphTexture(groupId: string, members: readonly Member[])
       glow.addColorStop(.65, star.color + "0b");
       glow.addColorStop(1, star.color + "00");
       context.fillStyle = glow;
-      context.globalAlpha = (.3 + near * .7) * star.opacity;
+      context.globalAlpha = (.12 + near * near * .88) * star.opacity;
       context.globalCompositeOperation = "lighter";
       context.beginPath(); context.arc(x, y, halo, 0, Math.PI * 2); context.fill();
       context.globalCompositeOperation = "source-over";
       context.fillStyle = star.color;
-      context.globalAlpha = (.28 + near * .72) * star.opacity;
+      context.globalAlpha = (.12 + near * near * .88) * star.opacity;
       context.beginPath();
       if (star.shape === 0) context.arc(x, y, radius, 0, Math.PI * 2);
       else {
@@ -84,7 +84,7 @@ export function summaryGlyphTexture(groupId: string, members: readonly Member[])
       }
       context.fill();
       context.fillStyle = "#ffffff";
-      context.globalAlpha = (.45 + near * .55) * star.opacity;
+      context.globalAlpha = (.18 + near * near * .82) * star.opacity;
       context.beginPath(); context.arc(x, y, Math.max(.7, radius * .36), 0, Math.PI * 2); context.fill();
       if (star.glint) {
         context.strokeStyle = "#edf5ff";

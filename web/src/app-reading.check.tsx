@@ -1,6 +1,6 @@
 import { nodeScreenSize, nodeVisualRadius } from "./presentation";
 import { createRoot } from "react-dom/client";
-import { Line, LineBasicMaterial, Mesh, Scene, ShaderMaterial, Vector3 } from "three";
+import { Line, LineBasicMaterial, Mesh, Raycaster, Scene, ShaderMaterial, Vector3 } from "three";
 import type { Camera } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import App from "./App";
@@ -715,6 +715,11 @@ async function checkFirstProximityCollapse() {
 async function checkSummaryOverview() {
   const originalFetch = window.fetch, originalUrl = window.location.href, root = createRoot(host);
   const originalPack = Positions.prototype.packOverview;
+  const originalRender = Scene.prototype.onBeforeRender, wrappedLights = new WeakSet<Mesh>();
+  let lightPhase: "opening" | "closing" | null = null;
+  const cloudCrossfade = { opening: false, closing: false };
+  const cloudSamples = new Map<string, { opacity: number; at: number }>();
+  let spatialCloudId: string | undefined, spatialCloudCrossfade = false;
   let positions: Positions | undefined, overviewPacks = 0;
   const counts = [22, 40, 75, 120], nodes: GraphNode[] = [], links: Snapshot["links"] = [];
   for (const count of counts) for (let index = 0; index < count; index++) {
@@ -732,6 +737,26 @@ async function checkSummaryOverview() {
   const labels = () => [...host.querySelectorAll<HTMLElement>('.node-label[role="button"]')].filter(node => !node.hidden);
   const summary = (count: number) => labels().find(node => node.textContent?.includes(`관계 묶음 · ${count}개`));
   try {
+    Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, material, group) {
+      scene.traverse(object => {
+        if (!(object instanceof Mesh) || object.name !== "stellar-light" || wrappedLights.has(object)) return;
+        wrappedLights.add(object);
+        const draw = object.onBeforeRender;
+        object.onBeforeRender = function (...args) {
+          draw.apply(this, args);
+          const uniforms = (object.material as ShaderMaterial).uniforms;
+          if (uniforms.uCloud.value === 1) {
+            const id = object.parent?.userData.nodeId;
+            cloudSamples.set(id, { opacity: uniforms.uOpacity.value, at: performance.now() });
+            if (uniforms.uOpacity.value > 0 && uniforms.uOpacity.value < 1) {
+              if (lightPhase && id === "group-120-0") cloudCrossfade[lightPhase] = true;
+              if (id === spatialCloudId) spatialCloudCrossfade = true;
+            }
+          }
+        };
+      });
+      return originalRender.call(this, renderer, scene, camera, geometry, material, group);
+    };
     Positions.prototype.packOverview = function (this: Positions, ...args: Parameters<Positions["packOverview"]>) {
       positions = this;
       const packed = originalPack.apply(this, args);
@@ -796,9 +821,26 @@ async function checkSummaryOverview() {
         assert(Math.hypot(a.x - b.x, a.y - b.y) < 200, `A settled core page cannot eject a star beyond its local neighborhood: ${link.target} (${Math.hypot(a.x-b.x,a.y-b.y)}, ${JSON.stringify({a,b})})`);
       }
     };
+    lightPhase = "opening";
     summary(120)!.click();
     await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes("관계 묶음 · 120개 · 1/10") === true, "large summary opens its compact page");
+    await until(() => { const value = cloudSamples.get("group-120-0")?.opacity; return value !== undefined && value > .3 && value < .85; }, "the real summary cloud is midway through opening");
+    const beforeClose = cloudSamples.get("group-120-0")!;
+    button("묶음 접기").click();
+    await until(() => !!summary(120) && cloudSamples.get("group-120-0")!.at > beforeClose.at, "closing retargets the rendered cloud before opening finishes");
+    const afterClose = cloudSamples.get("group-120-0")!;
+    assert(Math.abs(afterClose.opacity - beforeClose.opacity) <= (afterClose.at - beforeClose.at) / 650 * 2 + .03,
+      "reversing opening preserves the observed cloud opacity within the 650ms motion bound");
+    await until(() => cloudSamples.get("group-120-0")!.at - afterClose.at > 80, "the interrupted close renders several frames");
+    const beforeReopen = cloudSamples.get("group-120-0")!;
+    summary(120)!.click();
+    await until(() => !!host.querySelector(".graph-core-actions") && cloudSamples.get("group-120-0")!.at > beforeReopen.at, "reopening retains a rendered cloud during the reverse");
+    const afterReopen = cloudSamples.get("group-120-0")!;
+    assert(Math.abs(afterReopen.opacity - beforeReopen.opacity) <= (afterReopen.at - beforeReopen.at) / 650 * 2 + .03,
+      "reversing closing preserves the observed cloud opacity within the 650ms motion bound");
     await until(() => !positions!.layoutMoving, "local core expansion settles");
+    assert(cloudCrossfade.opening, "the actual summary light dissolves into its individual stars while opening");
+    lightPhase = null;
     assertLocalEdges();
     assert(background() === backgroundBeforeExpansion, "Opening a core leaves every unrelated star in place");
     button("다음", host.querySelector(".graph-core-actions")!).click();
@@ -808,24 +850,32 @@ async function checkSummaryOverview() {
     assert(background() === backgroundBeforeExpansion, "Changing the core page leaves unrelated stars in place");
     const proximity = labels().find(node => node.textContent?.includes("근접 묶음"));
     assert(proximity, "a proximity summary is visible alongside the open relation core");
+    spatialCloudId = proximity.dataset.nodeId;
     proximity.click();
     await until(() => host.querySelector(".graph-core-close")?.textContent?.startsWith("근접 묶음") === true && !positions!.layoutMoving,
       "a spatial reveal settles while its relation core stays open");
+    assert(spatialCloudCrossfade, "a proximity summary also dissolves its actual cloud instead of removing it in one frame");
     assertLocalEdges();
     assert(background() === backgroundBeforeExpansion, "A spatial reveal preserves the unrelated world coordinates");
     host.querySelector<HTMLButtonElement>(".graph-core-close")!.click();
     await until(() => !!host.querySelector(".graph-core-actions") && !positions!.layoutMoving, "spatial close restores the open relation page");
     assertLocalEdges();
+    lightPhase = "closing";
     button("묶음 접기").click();
     const closedAt = performance.now();
     await until(() => !positions!.layoutMoving && performance.now() - closedAt > 1000 && counts.every(count => !!summary(count)), "closing restores all overview summaries");
+    assert(cloudCrossfade.closing, "the actual summary light regathers as returning stars dissolve");
+    lightPhase = null;
     assert(background() === backgroundBeforeExpansion && overviewPacks === packsBeforeZoom, "Closing restores the same overview without a new whole-map pack");
     assert(graphCalls === initialCalls, "overview packing and expansion reuse one response");
     details("보기 설정").summary.click(); button("새로고침").click();
     await until(() => graphCalls === initialCalls + 1 && host.querySelector(".galaxy")?.getAttribute("aria-busy") === "false" && counts.every(count => !!summary(count)), "refresh retains all overview summaries");
-    return { summaryOverview: true, documents: nodes.length, relationCounts: counts, proximityCohorts: true, zoomPreservesWorldCoordinates: true, zoomPacks, localExpansion: true, spatialRevealWithOpenCore: true, closingPreservesOverview: true, refresh: true };
+    return { summaryOverview: true, documents: nodes.length, relationCounts: counts, cloudCrossfade,
+      reversedCloudOpacity: { beforeClose, afterClose, beforeReopen, afterReopen }, spatialCloudCrossfade,
+      proximityCohorts: true, zoomPreservesWorldCoordinates: true, zoomPacks, localExpansion: true, spatialRevealWithOpenCore: true, closingPreservesOverview: true, refresh: true };
   } finally {
-    root.unmount(); Positions.prototype.packOverview = originalPack; window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);
+    root.unmount(); Positions.prototype.packOverview = originalPack; Scene.prototype.onBeforeRender = originalRender;
+    window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);
   }
 }
 
@@ -922,6 +972,11 @@ function checkSummaryGlyphMotion() {
 
 async function checkRenderedMotion() {
   const originalFetch = window.fetch, originalUrl = window.location.href, root = createRoot(host);
+  const originalMatchMedia = window.matchMedia;
+  let reduceMotion = false;
+  const motionPreference = Object.defineProperties(new EventTarget(), {
+    matches: { get: () => reduceMotion }, media: { value: "(prefers-reduced-motion: reduce)" },
+  }) as MediaQueryList;
   const originalRender = Scene.prototype.onBeforeRender, originalInstall = Positions.prototype.install, originalPack = Positions.prototype.packOverview;
   const originalControlsUpdate = OrbitControls.prototype.update;
   let cameraDistance = 0, overviewPacked = false, autoRotation = false;
@@ -934,6 +989,8 @@ async function checkRenderedMotion() {
   let model: Parameters<Positions["install"]>[0] | undefined, positions: Positions | undefined, camera: Camera | undefined;
   const sampled = new Map<string, { rotation: number; shimmer: number; wobble: number; depth: number; z: number }>(), wrapped = new WeakSet<Mesh>(), worldPosition = new Vector3();
   let edgeOpacities: number[] = [];
+  const lightSamples = new Map<string, { time: number; depth: number; opacity: number; z: number; pickable: boolean }>();
+  let renderCost = { calls: 0, triangles: 0, geometries: 0, textures: 0 };
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
   try {
     OrbitControls.prototype.update = function (this: OrbitControls, ...args: Parameters<OrbitControls["update"]>) {
@@ -953,8 +1010,22 @@ async function checkRenderedMotion() {
     Scene.prototype.onBeforeRender = function (renderer, scene, frameCamera, geometry, material, group) {
       camera = frameCamera;
       edgeOpacities = [];
+      renderCost = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles,
+        geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures };
       scene.traverse(object => {
         if (object instanceof Line && object.material instanceof LineBasicMaterial) edgeOpacities.push(object.material.opacity);
+        if (object instanceof Mesh && object.name === "stellar-light" && object.material instanceof ShaderMaterial && !wrapped.has(object)) {
+          wrapped.add(object);
+          const drawLight = object.onBeforeRender;
+          object.onBeforeRender = function (...args) {
+            drawLight.apply(this, args);
+            const uniforms = (object.material as ShaderMaterial).uniforms, id = object.parent?.userData.nodeId;
+            const hits: Parameters<Mesh["raycast"]>[1] = [];
+            object.raycast(new Raycaster(), hits);
+            if (id) lightSamples.set(id, { time: uniforms.uTime.value, depth: uniforms.uDepth.value,
+              opacity: uniforms.uOpacity.value, z: object.getWorldPosition(worldPosition).z, pickable: hits.length > 0 });
+          };
+        }
         if (!(object instanceof Mesh) || !(object.material instanceof ShaderMaterial) || !object.material.uniforms.uRotation || wrapped.has(object)) return;
         wrapped.add(object);
         const draw = object.onBeforeRender;
@@ -974,6 +1045,7 @@ async function checkRenderedMotion() {
       throw new Error(`Unexpected motion request: ${url.pathname}`);
     };
     window.history.replaceState(null, "", `${window.location.pathname}?scope=personal`);
+    window.matchMedia = query => query === motionPreference.media ? motionPreference : originalMatchMedia.call(window, query);
     root.render(<App />);
     await until(() => sampled.size === nodes.length && !!positions && overviewPacked && !positions.layoutMoving && !!camera, "actual Graph renders each luminous star after its compact initial layout settles");
     let initialPose = "", initialPoseSince = performance.now();
@@ -1014,6 +1086,12 @@ async function checkRenderedMotion() {
     details("보기 설정").summary.click();
     assert(new Set([...sampled.values()].map(star => star.z.toFixed(6))).size > 1, "the rendered stars retain depth instead of flattening their world positions");
     assert([...sampled.values()].every(star => Number.isFinite(star.depth) && star.depth >= 0 && star.depth <= 1), "each actual draw uploads a bounded depth light value");
+    assert(lightSamples.size === nodes.length && [...lightSamples].every(([id, value]) => !value.pickable &&
+      value.z === sampled.get(id)!.z && value.depth === sampled.get(id)!.depth),
+      "one non-pickable light follows each real star at its unchanged world depth");
+    const initialLight = new Map(lightSamples);
+    await until(() => [...lightSamples].every(([id, value]) => value.time > initialLight.get(id)!.time),
+      "the diffuse light advances with the mounted renderer's existing clock");
     const initial = new Map(sampled);
     await until(() => [...sampled].some(([id, value]) => Math.abs(value.rotation - initial.get(id)!.rotation) > .01 && Math.abs(value.shimmer - initial.get(id)!.shimmer) > .001), "the mounted renderer advances stellar surface and shimmer motion");
     const node = model!.nodes.find(node => sampled.has(node.id))!, canvas = host.querySelector("canvas")!, rect = canvas.getBoundingClientRect();
@@ -1105,12 +1183,21 @@ async function checkRenderedMotion() {
     await until(() => minimapDisclosure().getAttribute("aria-expanded") === "true" && !minimap.closest('[hidden]'), "minimap expands and restores navigation");
     assert(camera!.position.distanceTo(poseBeforeCollapse) < .00001, "disclosure preserves the settled camera pose");
     assert(JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z])) === layoutBeforeCollapse, "disclosure preserves the settled world layout");
-    return { renderedMotion: true, depthLight: true, connectionOutline: true, allConnections: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, minimapDisclosure: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
+    reduceMotion = true; motionPreference.dispatchEvent(new Event("change"));
+    await until(() => host.querySelector<HTMLButtonElement>('[aria-label="3D 회전 시작"]')?.disabled === true, "the mounted App receives reduced motion from its media preference");
+    const frozenLight = new Map(lightSamples), frozenStars = new Map(sampled);
+    await new Promise(resolve => setTimeout(resolve, 180));
+    assert([...lightSamples].every(([id, value]) => value.time === frozenLight.get(id)!.time) &&
+      [...sampled].every(([id, value]) => value.rotation === frozenStars.get(id)!.rotation && value.shimmer === frozenStars.get(id)!.shimmer),
+      "reduced motion freezes both the real star draw and its diffuse light clock");
+    reduceMotion = false; motionPreference.dispatchEvent(new Event("change"));
+    await until(() => [...lightSamples].every(([id, value]) => value.time > frozenLight.get(id)!.time), "restoring motion resumes the shared light clock");
+    return { renderedMotion: true, cosmicLight: true, reducedLightMotion: true, renderCost, depthLight: true, connectionOutline: true, allConnections: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, minimapDisclosure: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
   } finally {
     root.unmount(); Scene.prototype.onBeforeRender = originalRender; Positions.prototype.install = originalInstall;
     Positions.prototype.packOverview = originalPack;
     OrbitControls.prototype.update = originalControlsUpdate;
-    window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);
+    window.fetch = originalFetch; window.matchMedia = originalMatchMedia; window.history.replaceState(null, "", originalUrl);
   }
 }
 

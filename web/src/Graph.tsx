@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph3D from "react-force-graph-3d";
 import type { ForceGraphMethods } from "react-force-graph-3d";
-import { CanvasTexture, Color, Group, LineBasicMaterial, Mesh, MOUSE, PlaneGeometry, Raycaster, ShaderMaterial, Sprite, SpriteMaterial, TOUCH, Vector2, Vector3 } from "three";
+import { AdditiveBlending, CanvasTexture, Color, Group, LineBasicMaterial, Mesh, MOUSE, PlaneGeometry, Raycaster, ShaderMaterial, Sprite, SpriteMaterial, TOUCH, Vector2, Vector3 } from "three";
 import type { Camera, Object3D, PerspectiveCamera } from "three";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { active, constellationView, diagramLinks, expandedCoreCameraFrame, kindName, knowledge, linkColor, linkKey, linkName, overviewLinkKeys, stateName } from "./graph";
@@ -31,6 +31,17 @@ function texture(kind: "ring" | "selection" | "change") {
   context.beginPath(); context.arc(64, 64, 56, 0, Math.PI * 2); context.stroke();
   return new CanvasTexture(canvas);
 }
+const screenVertexShader = `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vec4 center = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        vec2 size = vec2(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz));
+        center.xy += position.xy * size * -center.z;
+        gl_Position = projectionMatrix * center;
+      }
+    `;
+
 /** One program and quad serve every star; only its spherical sampling field rotates. */
 // After shader/motion edits, run the actual GPU checks in web/star-check.html.
 export function starMaterial() {
@@ -41,16 +52,7 @@ export function starMaterial() {
       uRotation: { value: 0 }, uTilt: { value: 0 }, uDetail: { value: 0 }, uShimmer: { value: 1 }, uPixels: { value: 26 }, uShape: { value: 0 },
       uNear: { value: 0 }, uDepth: { value: 1 }, uWobble: { value: new Vector2() },
     },
-    vertexShader: `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        vec4 center = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-        vec2 size = vec2(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz));
-        center.xy += position.xy * size * -center.z;
-        gl_Position = projectionMatrix * center;
-      }
-    `,
+    vertexShader: screenVertexShader,
     fragmentShader: `
       varying vec2 vUv;
       uniform vec3 uColor;
@@ -124,6 +126,95 @@ export function starMaterial() {
       }
     `,
   });
+}
+/** Light belongs to an actual star/summary; it carries no graph data or hit target. */
+export function cosmicLightMaterial() {
+  return new ShaderMaterial({
+    transparent: true, blending: AdditiveBlending, depthWrite: false, depthTest: false, toneMapped: false,
+    uniforms: { uColor: { value: new Color() }, uOpacity: { value: 1 }, uPhase: { value: 0 },
+      uTime: { value: 0 }, uDepth: { value: 1 }, uCloud: { value: 0 } },
+    vertexShader: screenVertexShader,
+    fragmentShader: `
+      varying vec2 vUv;
+      uniform vec3 uColor;
+      uniform float uOpacity, uPhase, uTime, uDepth, uCloud;
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float noise(vec2 p) {
+        vec2 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i), hash(i + vec2(1,0)), f.x),
+          mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), f.x), f.y);
+      }
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float distance = length(p);
+        if (distance >= 1.0) discard;
+        float edge = 1.0 - smoothstep(0.66, 1.0, distance);
+        float depth = clamp(uDepth, 0.0, 1.0);
+        float field = exp(-dot(p,p) * 7.5);
+        if (uCloud > 0.0) {
+          float c = cos(uPhase), s = sin(uPhase);
+          vec2 q = mat2(c,-s,s,c) * p;
+          // Slow advection, with an independent phase per real summary. No expanding rings.
+          vec2 drift = vec2(uTime * 0.022, -uTime * 0.013);
+          float n = noise(q * 3.8 + drift + uPhase) * 0.67
+            + noise(q * 9.3 - drift * 0.7 + uPhase) * 0.33;
+          vec2 warped = q + vec2(n - 0.5, sin(q.x * 4.0 + uPhase) * 0.12);
+          float veil = exp(-dot(warped * vec2(0.85,1.5), warped * vec2(0.85,1.5)) * 3.2);
+          float lane = smoothstep(0.04,0.20,abs(q.y + sin(q.x * 4.5 + uPhase) * 0.16));
+          field = mix(field, veil * (0.24 + n * n * 2.1) * (0.3 + 0.7 * lane), uCloud);
+        }
+        // Preserve the star's hue; lift its chroma instead of washing the sky grey.
+        float grey = min(uColor.r, min(uColor.g, uColor.b));
+        vec3 chroma = max(vec3(0.0), uColor - grey * 0.75);
+        chroma /= max(0.001, max(chroma.r, max(chroma.g, chroma.b)));
+        vec3 color = mix(vec3(0.16,0.25,0.48), chroma, 0.55 + depth * 0.3);
+        float strength = mix(0.055, 0.16, depth) * mix(1.0, 2.4, uCloud);
+        gl_FragColor = vec4(color, field * edge * strength * uOpacity);
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+}
+type CloudFade = { from: number; to: number; at: number; value: number };
+/** Retarget from the observed light, including a reversed or interrupted disclosure. */
+function cloudOpacity(state: CloudFade, target: number, now: number, reduced: boolean) {
+  if (reduced) { state.from = state.to = state.value = target; state.at = now; return target; }
+  const t = Math.max(0, Math.min(1, (now - state.at) / REVEAL_DURATION));
+  const value = state.from + (state.to - state.from) * t * t * (3 - 2 * t);
+  if (state.to !== target) { state.from = value; state.to = target; state.at = now; }
+  state.value = value;
+  return value;
+}
+function screenCosmicLight(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode,
+  color: Color, count: number, clock: StarClock, isReduced: () => boolean, fade: () => number, retiringCloud = false) {
+  const mesh = new Mesh(geometry, material), viewport = new Vector2(), position = new Vector3();
+  const phase = starPhase(`${node.id}|light`), opacity = active(node) ? 1 : .35;
+  mesh.name = "stellar-light";
+  mesh.renderOrder = -1;
+  mesh.frustumCulled = false;
+  mesh.raycast = () => {};
+  mesh.onBeforeRender = (renderer, _scene, camera) => {
+    renderer.getSize(viewport);
+    mesh.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
+    const perspective = 14 * viewport.y * camera.projectionMatrix.elements[5] / (Math.max(.001, -position.z) * 2);
+    const depth = Math.max(0, Math.min(1, perspective / 12));
+    // The diffuse light is separate from the unchanged body/label/picking footprint.
+    const pixels = count > 0 ? summaryAppearance(count).pixels * 4
+      : Math.min(320, Math.max(24, perspective * 4));
+    mesh.scale.setScalar(spriteScale(pixels, viewport.y, camera.projectionMatrix.elements[5]));
+    mesh.updateMatrixWorld();
+    material.uniforms.uColor.value.copy(color);
+    material.uniforms.uOpacity.value = opacity * fade();
+    material.uniforms.uPhase.value = phase;
+    material.uniforms.uTime.value = advanceStarClock(clock, performance.now(), isReduced());
+    material.uniforms.uDepth.value = depth;
+    material.uniforms.uCloud.value = count > 0 ? 1 : 0;
+    material.uniformsNeedUpdate = true;
+    // A completed cloud performs no further draws; a new disclosure builds its mesh afresh.
+    if (retiringCloud && material.uniforms.uOpacity.value === 0) mesh.visible = false;
+  };
+  return mesh;
 }
 function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: PositionedNode, clock: StarClock, isReduced: () => boolean, cursor: { current: { x: number; y: number } | null }, dragged: { current: string | null }, minimumPixels = 0, haloMotion?: () => number, contactMotion?: () => { x: number; y: number; glow: number } | null, fade?: () => number) {
   const mesh = new Mesh(geometry, material), viewport = new Vector2(), position = new Vector3(), projected = new Vector3();
@@ -348,7 +439,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: visualLinks.map(l => ({ ...l })) }), [displayNodes, visualLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
-  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), ring: texture("ring"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>(), lines: new Map<string, LineBasicMaterial>(), summaries: new Map<string, ReturnType<typeof summaryGlyphTexture> & { signature: string; material: SpriteMaterial }>() }), []);
+  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), light: cosmicLightMaterial(), ring: texture("ring"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>(), lines: new Map<string, LineBasicMaterial>(), summaries: new Map<string, ReturnType<typeof summaryGlyphTexture> & { signature: string; material: SpriteMaterial }>(), clouds: new Map<string, { color: Color; count: number; fade: CloudFade }>() }), []);
   useEffect(() => {
     const element = container.current;
     if (!element) return;
@@ -366,13 +457,13 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     return () => { live = false; document.fonts.removeEventListener("loadingdone", update); };
   }, []);
   useEffect(() => () => {
-    resources.geometry.dispose(); resources.star.dispose(); resources.ring.dispose(); resources.selection.dispose(); resources.change.dispose();
+    resources.geometry.dispose(); resources.star.dispose(); resources.light.dispose(); resources.ring.dispose(); resources.selection.dispose(); resources.change.dispose();
     for (const material of resources.materials.values()) material.dispose();
     resources.materials.clear();
     for (const material of resources.lines.values()) material.dispose();
     resources.lines.clear();
     for (const summary of resources.summaries.values()) { summary.material.dispose(); summary.texture.dispose(); }
-    resources.summaries.clear();
+    resources.summaries.clear(); resources.clouds.clear();
   }, [resources]);
   useEffect(() => {
     // ForceGraph replaces old node objects during this commit. Retire absent
@@ -381,9 +472,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       for (const [id, glyph] of resources.summaries) if (!glyphMembers.has(id) && !reveal.entering.size && !reveal.retiring.size) {
         glyph.material.dispose(); glyph.texture.dispose(); resources.summaries.delete(id);
       }
+      const eligible = new Set(snapshot.nodes.map(node => node.id));
+      for (const id of resources.clouds.keys()) if (!eligible.has(id)) resources.clouds.delete(id);
     });
     return () => cancelAnimationFrame(frame);
-  }, [glyphMembers, resources, reveal]);
+  }, [glyphMembers, resources, reveal, snapshot.nodes]);
   const ready = size.width > 0 && size.height > 0;
   useEffect(() => {
     const instance = graph.current;
@@ -917,6 +1010,33 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     group.userData.opacity = fade;
     group.userData.retiring = () => revealRef.current.retiring.has(node.id);
     const members = glyphMembers.get(node.id);
+    const lightColor = new Color(starColor(node));
+    if (summary && members?.length) {
+      lightColor.setRGB(0, 0, 0);
+      for (const member of members) lightColor.add(new Color(starColor(member)));
+      lightColor.multiplyScalar(1 / members.length);
+    }
+    if (isKnowledge && !summary) {
+      group.add(screenCosmicLight(resources.geometry, resources.light, node, lightColor,
+        0, motionClock.current, () => motionReduced.current, fade));
+    }
+    let cloud = resources.clouds.get(node.id);
+    if (summary && members?.length) {
+      if (!cloud) {
+        const initial = members.some(member => reveal.retiring.has(member.id)) ? 0 : 1;
+        cloud = { color: lightColor.clone(), count: summaryCounts.get(node.id) ?? 0,
+          fade: { from: initial, to: 1, value: initial, at: performance.now() } };
+        resources.clouds.set(node.id, cloud);
+      }
+      cloud.color.copy(lightColor); cloud.count = summaryCounts.get(node.id) ?? 0;
+    }
+    if (cloud) {
+      const target = summary ? 1 : 0, retained = cloud;
+      const opacity = cloudOpacity(retained.fade, target, performance.now(), motionReduced.current);
+      if (summary || opacity > 0) group.add(screenCosmicLight(resources.geometry, resources.light, node,
+        retained.color, retained.count, motionClock.current, () => motionReduced.current,
+        () => fade() * cloudOpacity(retained.fade, target, performance.now(), motionReduced.current), !summary));
+    }
     if (summary && members?.length) {
       const samples = members.map(member => ({ id: member.id, kind: member.kind, taxonomyColor: member.taxonomyColor, opacity: active(member) ? 1 : .4 }));
       const signature = samples.map(member => `${member.id}:${starColor(member)}:${member.opacity}`).sort().join("|");
