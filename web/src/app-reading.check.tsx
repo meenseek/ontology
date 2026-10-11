@@ -1052,7 +1052,33 @@ async function checkRenderedMotion() {
     button("전체 맞춤").click();
     await until(() => camera!.getWorldDirection(new Vector3()).distanceTo(new Vector3(0, 0, -1)) < .00001, "the existing full fit resets the camera orientation");
     assert([...sampled.values()].some(star => star.z !== 0), "minimap navigation preserves stellar depth");
-    return { renderedMotion: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
+    let fittedPosition = camera!.position.clone(), fittedLayout = "", fittedSince = performance.now();
+    await until(() => {
+      const layout = JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z]));
+      if (positions!.layoutMoving || camera!.position.distanceTo(fittedPosition) > .000001 || layout !== fittedLayout) fittedSince = performance.now();
+      fittedPosition = camera!.position.clone(); fittedLayout = layout;
+      return performance.now() - fittedSince >= 250;
+    }, "full fit and its overview clearance settle before disclosure observations");
+    const minimapDisclosure = () => host.querySelector<HTMLButtonElement>(".minimap-disclosure")!;
+    const poseBeforeCollapse = camera!.position.clone(), layoutBeforeCollapse = JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z]));
+    const openHeight = host.querySelector('.graph-minimap')!.getBoundingClientRect().height;
+    minimapDisclosure().click();
+    await until(() => minimapDisclosure().getAttribute("aria-expanded") === "false", "minimap collapse exposes its accessible expansion control");
+    assert(minimap.closest<HTMLElement>('[hidden]')?.hidden, "collapsed navigation leaves the tab order and drawing area");
+    assert(host.querySelector('.graph-minimap')!.getBoundingClientRect().height < openHeight / 2, "collapse frees graph space");
+    assert(button("3D 회전 시작").getBoundingClientRect().height >= 32, "rotation remains reachable while collapsed");
+    await until(() => {
+      const chrome = host.querySelector('.graph-minimap')!.getBoundingClientRect();
+      return [...host.querySelectorAll<HTMLElement>('.node-label:not([hidden])')].every(label => {
+        const box = label.getBoundingClientRect();
+        return box.right <= chrome.left || box.left >= chrome.right || box.bottom <= chrome.top || box.top >= chrome.bottom;
+      });
+    }, "labels reflow around the collapsed minimap");
+    minimapDisclosure().click();
+    await until(() => minimapDisclosure().getAttribute("aria-expanded") === "true" && !minimap.closest('[hidden]'), "minimap expands and restores navigation");
+    assert(camera!.position.distanceTo(poseBeforeCollapse) < .00001, "disclosure preserves the settled camera pose");
+    assert(JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z])) === layoutBeforeCollapse, "disclosure preserves the settled world layout");
+    return { renderedMotion: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, minimapDisclosure: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
   } finally {
     root.unmount(); Scene.prototype.onBeforeRender = originalRender; Positions.prototype.install = originalInstall;
     Positions.prototype.packOverview = originalPack;

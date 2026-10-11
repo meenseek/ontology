@@ -285,7 +285,7 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 .original-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .original-editor-actions .primary { margin-top: 0; }
 .graph-minimap { position: absolute; right: 14px; bottom: 44px; width: 168px; padding: 8px; border: 1px solid #344353; border-radius: 9px; background: rgba(10, 18, 28, .88); color: #9fadb9; backdrop-filter: blur(10px); z-index: 2; }
-.minimap-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; min-height: 32px; font-size: 10px; letter-spacing: .04em; }
+.minimap-heading { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-bottom: 4px; min-height: 32px; font-size: 10px; letter-spacing: .04em; }
 .minimap-rotation { display: grid; place-items: center; width: 32px; height: 32px; padding: 6px; background: transparent; border-color: transparent; }
 .minimap-rotation svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .minimap-rotation[aria-pressed="true"] { color: #d9eaff; background: #233344; border-color: #51697f; }
@@ -295,3 +295,9 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 .minimap-actions button { display: grid; place-items: center; width: 32px; height: 32px; padding: 6px; border-color: transparent; background: transparent; }
 .minimap-actions svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 @media (max-width: 600px) { .graph-minimap { width: 152px; padding: 6px; bottom: 52px; } .graph-minimap canvas { height: 70px; } .minimap-actions button { height: 40px; } .minimap-rotation { width: 40px; height: 40px; } }
+
+.graph-minimap.collapsed .minimap-heading { margin-bottom: 0; }
+.minimap-disclosure { display: flex; align-items: center; gap: 4px; min-height: 32px; padding: 4px; color: inherit; background: transparent; border-color: transparent; font-size: 10px; }
+.minimap-disclosure svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.minimap-disclosure .minimap-chevron { width: 12px; height: 12px; }
+@media (max-width: 600px) { .minimap-disclosure { min-height: 40px; } }

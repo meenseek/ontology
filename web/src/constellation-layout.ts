@@ -4,6 +4,27 @@ type Slot = { x: number; y: number };
 /** These edges describe membership, not a relationship between two knowledge items. */
 export const classificationLink = (kind: string) => kind === "subject" || kind === "topic" || kind === "area" || kind === "parent";
 
+/** Offset the leaf cloud from its real hub; never add leaf-to-leaf edges. */
+export function constellationSlots(count: number, minimumRadius: number, separation: number, id: string): Slot[] {
+  if (!count) return [];
+  const outline = [[.8, 0], [.35, 1.2], [-.8, .7], [-.8, -.5], [.15, -1], [1.3, -1],
+    [1.7, .8], [.9, 1.9], [-.25, 1.85], [-1.7, .7], [-1.7, -.5], [-.7, -1.6]];
+  const slots = count <= outline.length ? outline.slice(0, count).map(([x, y]) => ({ x: x + 1.35, y })) :
+    Array.from({ length: count }, (_, index) => {
+      const radius = Math.sqrt(index + 1), angle = index * Math.PI * (3 - Math.sqrt(5));
+      const x = radius * Math.cos(angle), y = radius * Math.sin(angle);
+      return { x: x * 1.12 + .13 * y, y };
+    });
+  if (count > outline.length) {
+    const left = Math.min(...slots.map(slot => slot.x));
+    for (const slot of slots) slot.x += .8 - left;
+  }
+  let closest = Infinity;
+  for (const [index, slot] of slots.entries()) for (const other of slots.slice(index + 1)) closest = Math.min(closest, Math.hypot(slot.x - other.x, slot.y - other.y));
+  const scale = Math.max(minimumRadius / Math.min(...slots.map(slot => Math.hypot(slot.x, slot.y))), separation / closest);
+  const phase = [...id].reduce((value, char) => Math.imul(value ^ char.charCodeAt(0), 16777619) >>> 0, 2166136261) / 0xffffffff * 2 * Math.PI;
+  return slots.map(slot => ({ x: scale * (slot.x * Math.cos(phase) - slot.y * Math.sin(phase)), y: scale * (slot.x * Math.sin(phase) + slot.y * Math.cos(phase)) }));
+}
 /** Only actual edges shape the interior. Membership still groups the surrounding region. */
 export function topologySlots(ids: readonly string[], links: readonly GraphLink[], radii: ReadonlyMap<string, number>, spacing: number): Map<string, Slot> {
   if (!ids.length) return new Map();
@@ -32,13 +53,31 @@ export function topologySlots(ids: readonly string[], links: readonly GraphLink[
       const seen = new Set<string>();
       while (id && !seen.has(id)) { traversal.push(id); seen.add(id); id = [...adjacency.get(id)!].sort().find(other => !seen.has(other))!; }
     }
+    const branchHub = [...members].sort((a, b) => degree(b) - degree(a) || a.localeCompare(b))[0];
+    const dominant = degree(branchHub) >= 4 && degree(branchHub) >= (members.length - 1) / 3 ? branchHub : null;
     const sequence = traversal.length === members.length ? traversal : members;
-    const points = new Map(sequence.map((id, i) => {
+    let points = new Map(sequence.map((id, i) => {
       const angle = cycle ? i * 2 * Math.PI / members.length : path ? i * .5 : i * 2.399963;
       const reach = cycle ? Math.max(1, members.length * 1.35 / (2 * Math.PI)) * (1 + .1 * Math.sin(i * 1.7)) : path ? 2.5 + i * .13 : Math.sqrt(i + 1);
       return [id, { x: Math.cos(angle) * reach, y: Math.sin(angle) * reach }];
     }));
-    const steps = members.length <= 48 ? 96 : 40;
+    const hub = members.find(id => degree(id) === members.length - 1);
+    const leaves = hub ? members.filter(id => id !== hub).sort() : [];
+    const star = members.length > 3 && hub && leaves.every(id => degree(id) === 1);
+    if (star) {
+      const largestLeaf = Math.max(...leaves.map(radius));
+      const slots = constellationSlots(leaves.length, radius(hub) + largestLeaf + .4, 2 * largestLeaf + .4, hub);
+      points = new Map([[hub, { x: 0, y: 0 }], ...leaves.map((id, index) => [id, slots[index]] as const)]);
+    } else if (dominant) {
+      const branches = members.filter(id => id !== dominant).sort();
+      const slots = constellationSlots(branches.length, 1, 1, dominant);
+      points = new Map([[dominant, { x: 0, y: 0 }], ...branches.map((id, index) => [id, slots[index]] as const)]);
+      // Work in the hub's own frame while actual edges relax its branches.
+      const direction = slots.reduce((sum, slot) => ({ x: sum.x + slot.x, y: sum.y + slot.y }), { x: 0, y: 0 });
+      const angle = Math.atan2(direction.y, direction.x), cosine = Math.cos(angle), sine = Math.sin(angle);
+      for (const p of points.values()) { const x = p.x; p.x = x * cosine + p.y * sine; p.y = -x * sine + p.y * cosine; }
+    }
+    const steps = star ? 0 : members.length <= 48 ? 96 : 40;
     const largest = Math.max(...members.map(radius)), cellSize = Math.max(1, 2 * largest + .5);
     for (let step = 0; step < steps && members.length > 1; step++) {
       const delta = new Map(members.map(id => [id, { x: 0, y: 0 }]));
@@ -62,8 +101,15 @@ export function topologySlots(ids: readonly string[], links: readonly GraphLink[
       }
       for (const id of members) {
         const p = points.get(id)!, d = delta.get(id)!;
+        if (id === dominant) continue;
         p.x += Math.max(-.4, Math.min(.4, d.x - p.x * .002)); p.y += Math.max(-.4, Math.min(.4, d.y - p.y * .002));
+        if (dominant) p.x = Math.max(radius(dominant) + radius(id) + .4, p.x);
       }
+    }
+    if (dominant && !star) {
+      const phase = [...dominant].reduce((value, char) => Math.imul(value ^ char.charCodeAt(0), 16777619) >>> 0, 2166136261) / 0xffffffff * 2 * Math.PI;
+      const cosine = Math.cos(phase), sine = Math.sin(phase);
+      for (const p of points.values()) { const x = p.x; p.x = x * cosine - p.y * sine; p.y = x * sine + p.y * cosine; }
     }
     const mean = [...points.values()].reduce((a, p) => ({ x: a.x + p.x / members.length, y: a.y + p.y / members.length }), { x: 0, y: 0 });
     let extent = 0;

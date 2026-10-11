@@ -1,4 +1,4 @@
-import { classificationLink, topologySlots } from "./constellation-layout";
+import { classificationLink, constellationSlots, topologySlots } from "./constellation-layout";
 import { REVEAL_DURATION } from "./reveal-transition";
 import { constellationView, diagramLinks, visualSatellites } from "./graph";
 import type { GraphLink, GraphView, Model, PositionedNode } from "./graph";
@@ -403,23 +403,6 @@ function circularSlots(count: number, minimumRadius = 1, separation = 1): Slot[]
     const angle = 2 * Math.PI * at / ring.count + (index % 2 ? Math.PI / ring.count : 0);
     return { x: ring.radius * Math.cos(angle), y: ring.radius * Math.sin(angle) };
   }));
-}
-/** A compact, asymmetric sky silhouette. IDs give each cohort a stable bearing. */
-function constellationSlots(count: number, minimumRadius: number, separation: number, id: string): Slot[] {
-  if (!count) return [];
-  const outline = [[1, 0], [.35, 1.2], [-.8, .7], [-.8, -.5], [.15, -1], [1.3, -1],
-    [1.7, .8], [.9, 1.9], [-.25, 1.85], [-1.7, .7], [-1.7, -.5], [-.7, -1.6]];
-  const slots = count <= outline.length ? outline.slice(0, count).map(([x, y]) => ({ x, y })) :
-    Array.from({ length: count }, (_, index) => {
-      const radius = Math.sqrt(index + 1), angle = index * Math.PI * (3 - Math.sqrt(5));
-      const x = radius * Math.cos(angle), y = radius * Math.sin(angle);
-      return { x: x * 1.12 + .13 * y, y };
-    });
-  let closest = Infinity;
-  for (const [index, slot] of slots.entries()) for (const other of slots.slice(index + 1)) closest = Math.min(closest, Math.hypot(slot.x - other.x, slot.y - other.y));
-  const scale = Math.max(minimumRadius / Math.min(...slots.map(slot => Math.hypot(slot.x, slot.y))), separation / closest);
-  const phase = [...id].reduce((value, char) => Math.imul(value ^ char.charCodeAt(0), 16777619) >>> 0, 2166136261) / 0xffffffff * 2 * Math.PI;
-  return slots.map(slot => ({ x: scale * (slot.x * Math.cos(phase) - slot.y * Math.sin(phase)), y: scale * (slot.x * Math.sin(phase) + slot.y * Math.cos(phase)) }));
 }
 /** Identify one visible hub-and-leaf cohort without absorbing unrelated background. */
 export function starCohort(root: string, visible: ReadonlySet<string>, adjacency: ReadonlyMap<string, ReadonlySet<string>>) {

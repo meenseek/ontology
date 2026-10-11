@@ -2737,3 +2737,40 @@ test("small purpose chains and branches keep their measured 3D shape through til
     assert.deepEqual(model.links, reconcile(snapshot(nodes, links), undefined, false, "purpose").links);
   }
 });
+
+
+test("true hubs sit off center without changing edges or measured clearance", () => {
+  for (const count of [4, 8, 12, 36]) {
+    const ids = ["hub", ...Array.from({ length: count }, (_, i) => `leaf-${i}`)];
+    const links = ids.slice(1).map(id => edge("hub", id));
+    const original = structuredClone(links), radii = new Map(ids.map(id => [id, 5]));
+    const slots = topologySlots(ids, links, radii, 16);
+    const hub = slots.get("hub")!;
+    const leaves = ids.slice(1).map(id => slots.get(id)!);
+    const center = leaves.reduce((sum, at) => ({ x: sum.x + at.x / count, y: sum.y + at.y / count }), { x: 0, y: 0 });
+    const radius = Math.max(...leaves.map(at => Math.hypot(at.x - hub.x, at.y - hub.y)));
+    assert.ok(Math.hypot(center.x - hub.x, center.y - hub.y) > radius * .3, "hub stays away from the leaf cloud's center");
+    assert.ok(radius < 1.8 * Math.sqrt(count), "off-center shape remains bounded");
+    for (const [index, id] of ids.entries()) for (const other of ids.slice(index + 1)) {
+      const a = slots.get(id)!, b = slots.get(other)!;
+      assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= 10 / 16 + .4 - 1e-7);
+    }
+    assert.deepEqual(slots, topologySlots([...ids].reverse(), [...links].reverse(), radii, 16));
+    assert.deepEqual(links, original, "leaf placement cannot invent or replace real relationships");
+  }
+});
+
+
+test("a hub with connected branches keeps real crosslinks beside its off-center anchor", () => {
+  const ids = ["hub", ...Array.from({ length: 12 }, (_, i) => `leaf-${i}`)];
+  const links = [...ids.slice(1).map(id => edge("hub", id)), edge("leaf-0", "leaf-1"), edge("leaf-1", "leaf-2")];
+  const original = structuredClone(links), radii = new Map(ids.map(id => [id, 5]));
+  const slots = topologySlots(ids, links, radii, 16), hub = slots.get("hub")!;
+  const leaves = ids.slice(1).map(id => slots.get(id)!);
+  const bearings = leaves.map(at => Math.atan2(at.y - hub.y, at.x - hub.x)).sort((a, b) => a - b);
+  const gaps = bearings.map((angle, index) => (index + 1 < bearings.length ? bearings[index + 1] : bearings[0] + 2 * Math.PI) - angle);
+  assert.ok(Math.max(...gaps) > Math.PI, "branches grow beside the hub rather than encircling it");
+  assert.ok(links.every(link => { const a = slots.get(link.source)!, b = slots.get(link.target)!; return Math.hypot(a.x - b.x, a.y - b.y) < 4; }), "actual connections stay local");
+  assert.deepEqual(slots, topologySlots([...ids].reverse(), [...links].reverse(), radii, 16));
+  assert.deepEqual(links, original, "branch shaping retains every real crosslink");
+});

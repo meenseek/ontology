@@ -272,6 +272,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const pressedNode = useRef<{ id: string; pointerId: number; x: number; y: number } | null>(null);
   const cursor = useRef<{ x: number; y: number } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
+  const selectedId = useRef(selected); selectedId.current = selected;
+  const [minimapRevision, setMinimapRevision] = useState(0);
+  const resizeMinimap = useCallback(() => setMinimapRevision(value => value + 1), []);
   const [labelFontRevision, setLabelFontRevision] = useState(0);
   const [hover, setHover] = useState<{ title: string; detail: string } | null>(null);
   const snapshotLinks = useMemo(() => diagramLinks(snapshot), [snapshot]);
@@ -693,6 +696,15 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         .filter(element => element.offsetWidth && element.offsetHeight)
         .map(element => { const box = element.getBoundingClientRect(); return { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }; });
     };
+    const degrees = new Map<string, number>();
+    for (const link of displayLinks) if (!["subject", "topic", "area", "parent"].includes(link.kind)) {
+      for (const id of [String(endpoint(link.source)), String(endpoint(link.target))]) degrees.set(id, (degrees.get(id) ?? 0) + 1);
+    }
+    // Rebind when the displayed topology changes; renderer objects can survive a page.
+    for (const link of data.links) for (const key of ["__lineObj", "__arrowObj"]) {
+      const object = (link as unknown as Record<string, Object3D>)[key];
+      if (object) object.userData.revealFade = false;
+    }
     const projected = new Vector3();
     const draw = () => {
       const instance = graph.current;
@@ -704,7 +716,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         if (!object?.material || object.userData.revealFade) continue;
         object.userData.revealFade = true;
         const from = String(endpoint(link.source)), to = String(endpoint(link.target));
-        object.onBeforeRender = () => { if (object.material) object.material.opacity = opacity * Math.min(revealOpacity(revealRef.current, from, performance.now()), revealOpacity(revealRef.current, to, performance.now())); };
+        object.onBeforeRender = () => { if (object.material) {
+          const focus = dragged.current ?? selectedId.current ?? hoveredId.current;
+          const degree = Math.max(degrees.get(from) ?? 0, degrees.get(to) ?? 0);
+          const emphasis = key === "__lineObj" && opacity === .65
+            ? focus === from || focus === to ? .82 : focus ? .2 : Math.max(.3, .6 / Math.sqrt(Math.max(1, degree / 2)))
+            : opacity;
+          object.material.opacity = emphasis * Math.min(revealOpacity(revealRef.current, from, performance.now()), revealOpacity(revealRef.current, to, performance.now()));
+        } };
       }
       instance?.camera().updateMatrixWorld();
       positions.advance(performance.now(), reduced);
@@ -860,7 +879,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       frame = requestAnimationFrame(draw);
     };
     draw(); return () => cancelAnimationFrame(frame);
-  }, [ready, labelFontRevision, nodes, displayNodes, displayLinks, collapsedCounts, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal]);
+  }, [ready, labelFontRevision, minimapRevision, nodes, displayNodes, displayLinks, collapsedCounts, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;
@@ -1116,7 +1135,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     </div>}
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>근접 묶음 {spatialReveal.members.size}개 접기</button>}
     {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
-      rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} />}
+      rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} onResize={resizeMinimap} />}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
     <div className="graph-instructions" aria-hidden="true">빈 공간 끌기: 지도 이동 · 묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · 스크롤 확대·축소</div>
   </div>;
