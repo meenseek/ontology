@@ -149,6 +149,8 @@ Wrong store, missing source, pending apply와 아직 준비되지 않은 project
 
 ### Mac 로그인 후 온톨로지 자동 실행
 
+지원 결과 작업공간의 CLI·화면 연결과 갱신 검증은 [지원 결과 흐름](career-workflow.md#연결과-검증)을 따른다.
+
 Mac에 로그인하면 앱을 자동으로 켜 두어 [온톨로지 주소](http://127.0.0.1:47831)에
 바로 접속할 수 있게 한다. 앱이나 ChatGPT에 별도로 로그인하는 기능은 아니다.
 `cargo build --locked --offline`과 `pnpm --dir web build`로 현재 소스를 빌드·검증한 뒤

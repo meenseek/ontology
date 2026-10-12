@@ -207,7 +207,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     let preserved = preserved_sources(&store).await;
     // Exact pre-015 upgrade fixture: preserve originals and decisions, baseline
     // both app scopes even when a company binding has not been created yet.
-    sqlx::raw_sql("ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'").execute(store.pool()).await.unwrap();
+    sqlx::raw_sql("DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'").execute(store.pool()).await.unwrap();
     store.initialize().await.unwrap();
     assert_eq!(preserved_sources(&store).await, preserved);
     assert_eq!(
