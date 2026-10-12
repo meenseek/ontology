@@ -208,6 +208,11 @@ async function check(size: number) {
     const first = host.querySelector<HTMLButtonElement>(".graph-list > button")!;
     first.click();
     await until(() => bodyIs(records.meenseek.get(id(1))!.body), "selected memory");
+    const selectedRow = host.querySelector<HTMLButtonElement>('.graph-list > button[aria-pressed="true"]')!;
+    const selectedStyle = getComputedStyle(selectedRow);
+    assert(selectedRow === first && selectedStyle.backgroundColor !== "rgba(0, 0, 0, 0)" && selectedStyle.boxShadow.includes("inset"), "the read item retains both a filled selection and an inner edge marker");
+    const otherRow = host.querySelector<HTMLButtonElement>('.graph-list > button[aria-pressed="false"]');
+    if (otherRow) assert(selectedStyle.backgroundColor !== getComputedStyle(otherRow).backgroundColor, "selection remains distinguishable from an ordinary row");
     phase("session + graph + selected read; subjects closed", 0, { session: 1, graph: 2, read: 1 });
 
     button("닫기 ×").click();
@@ -887,6 +892,19 @@ async function checkSummaryOverview() {
     if (innerWidth <= 700) {
       const pinned = [...host.querySelectorAll<HTMLElement>(".graph-group-target.core-name")];
       assert(pinned.length === counts.length && pinned.every(target => target.offsetWidth > 1 && target.offsetHeight >= 38), "all four core names and counts are readable without pointing");
+      const navigation = host.querySelector<HTMLElement>(".graph-group-navigation")!;
+      assert(navigation.getBoundingClientRect().height <= 72 && getComputedStyle(navigation).overflowX === "auto", "mobile names occupy one compact scrollable row");
+      const markers = [...host.querySelectorAll<HTMLElement>(".graph-group-marker")];
+      assert(markers.length === pinned.length && new Set(markers.map(marker => marker.textContent)).size === pinned.length, "each mobile core has one distinct visual key");
+      const mapRect = host.querySelector("canvas")!.getBoundingClientRect();
+      for (const target of pinned) {
+        const marker = markers.find(marker => marker.dataset.nodeId === target.dataset.nodeId)!;
+        const sample = glyphSamples.get(target.dataset.nodeId!)!;
+        const box = marker.getBoundingClientRect();
+        assert(marker && !marker.hidden && marker.textContent === target.querySelector(".group-key")?.textContent, "the name and its actual rendered core share the same key");
+        const x = mapRect.left + (sample.x + 1) * mapRect.width / 2, y = mapRect.top + (1 - sample.y) * mapRect.height / 2;
+        assert(Math.hypot(box.x + box.width / 2 - x, box.y + box.height / 2 - y) < 100, "a key stays beside its own projected core");
+      }
       assert([...host.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].every(label => parseFloat(label.style.getPropertyValue("--leader-length")) <= 34.01), "resting mobile names use short leaders");
     }
     const keyboardGroups = labels().length;
@@ -894,6 +912,10 @@ async function checkSummaryOverview() {
       const id = target.dataset.nodeId, text = target.textContent;
       target.focus(); pointAt(null); await settle();
       assert(document.activeElement === target && target.offsetWidth > 1 && target.dataset.nodeId === id && target.textContent === text, "every group, including deferred proximity names, has a stable visible keyboard target");
+      if (innerWidth <= 700) {
+        const box = target.getBoundingClientRect();
+        assert(box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight && target.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)), "Tab focus reveals the entire name without clipping or covered controls");
+      }
       target.blur(); await settle();
     }
     assert(coordinates() === worldBeforeZoom && overviewPacks === packsBeforeZoom, "adaptive names and focus never reposition stars");

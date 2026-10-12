@@ -177,6 +177,8 @@ summary:hover { color: #e6edf6; }
 .list-sort select { width: auto; min-height: 36px; padding: 6px 34px 6px 9px; }
 .graph-list { padding: 18px 26px; flex: 1; overflow-y: auto; }
 .graph-list > button { display: flex; width: 100%; align-items: flex-start; text-align: left; gap: 12px; padding: 18px 4px; border-width: 0 0 1px; border-radius: 0; background: transparent; }
+.graph-list > button[aria-pressed="true"] { background: #223344; border-color: #9bb7d5; box-shadow: inset 3px 0 #9bb7d5; }
+.graph-list > button[aria-pressed="true"] > .node-symbol { color: #e2f1ff; }
 .graph-list > button > span:nth-child(2) { flex: 1; min-width: 0; }
 .graph-list strong { display: block; overflow-wrap: anywhere; font-size: 15px; font-weight: 600; line-height: 1.5; }
 .node-meta { display: block; margin-top: 9px; }
@@ -424,8 +426,18 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 .graph-group-target { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; pointer-events: none; }
 .graph-group-target:focus { position: absolute; left: 16px; bottom: 80px; width: max-content; max-width: min(320px, calc(100% - 200px)); height: auto; padding: 8px 10px; clip-path: none; overflow: visible; white-space: normal; overflow-wrap: anywhere; pointer-events: auto; outline: 1px solid #89bad2; outline-offset: 2px; background: #0b1725f2; }
 @media (max-width: 700px) {
-  .graph-group-target.core-name { position: static; width: auto; height: auto; min-height: 38px; padding: 5px 6px; clip-path: none; overflow: visible; white-space: normal; pointer-events: auto; text-align: left; font-size: 12px; line-height: 1.4; font-weight: 500; color: #dce8f0; background: #08121a88; border: 0; border-bottom: 1px solid #8dadb321; border-radius: 0; text-shadow: 0 1px 4px #050a10; word-break: keep-all; max-width: none; }
-  .graph-group-target.core-name:focus { outline-offset: 0; background: #142435ed; }
+  .graph-group-navigation.with-keys { inset: 10px 12px auto; height: 66px; display: flex; align-items: flex-start; gap: 8px; padding: 0 0 8px; overflow-x: auto; overflow-y: hidden; pointer-events: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: #46586c transparent; z-index: 2; }
+  .graph-group-target.core-name { position: static; flex: 0 0 172px; display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 7px; width: 172px; height: 54px; min-height: 54px; padding: 5px 8px; clip-path: none; overflow: hidden; white-space: normal; pointer-events: auto; text-align: left; font-size: 12px; line-height: 15px; font-weight: 500; color: #dce8f0; background: #0c1825ee; border: 1px solid #344353; border-radius: 5px; text-shadow: 0 1px 4px #050a10; max-width: calc(100% - 4px); }
+  .graph-group-target.core-name .group-name-copy { min-width: 0; }
+  .graph-group-target.core-name .group-name-copy > span:first-child { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+  .graph-group-target.core-name .group-count { display: block; line-height: 12px; }
+  .graph-group-target.core-name:focus { outline-offset: -2px; background: #223344; }
+  .graph-group-navigation.with-keys .graph-group-target:not(.core-name):focus { position: fixed; left: 16px; bottom: 80px; max-width: calc(100% - 32px); z-index: 3; }
 }
 
 .graph-group-target .group-count { font-size: .85em; font-weight: 400; color: #a0b0c1; white-space: nowrap; }
+.group-key { display: inline-grid; place-items: center; width: 20px; height: 20px; flex-shrink: 0; border: 1px solid #b4d1e5; border-radius: 50%; background: #0a1725e8; color: #e1f2ff; font-size: 11px; line-height: 1; font-weight: 600; }
+.graph-group-markers { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.graph-group-marker { position: absolute; transform: translate(-50%, -50%); box-shadow: 0 0 9px #a4d6ee33; }
+.graph-group-marker.active { background: #b4d1e5; color: #0a1725; box-shadow: 0 0 12px #a4d6ee80; }
+.graph-group-marker[hidden] { display: none; }

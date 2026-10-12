@@ -347,6 +347,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (reduced) { const pose = cameraMotion.current.finish(); if (pose) writeCamera(pose); }
   }, [reduced, writeCamera]);
   const labelLayer = useRef<HTMLDivElement>(null);
+  const groupMarkerLayer = useRef<HTMLDivElement>(null);
   const coreCloseButton = useRef<HTMLButtonElement>(null);
   const spatialCloseButton = useRef<HTMLButtonElement>(null);
   const hoveredId = useRef<string | null>(null);
@@ -986,6 +987,15 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             projected.applyMatrix4(camera.projectionMatrix);
             return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : namedGroup ? 1 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, body: pixels / 2, ...dimensions.get(node.id)![node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
           });
+          // Mobile name keys follow the actual projected body; they never move a star.
+          for (const marker of [...(groupMarkerLayer.current?.children ?? [])] as HTMLElement[]) {
+            const star = candidates.find(node => node.id === marker.dataset.nodeId);
+            marker.hidden = !star || star.depth < -1 || star.depth > 1 || star.x + star.radius < 0 || star.x - star.radius > size.width || star.y + star.radius < 0 || star.y - star.radius > size.height;
+            if (!star || marker.hidden) continue;
+            marker.style.left = `${Math.max(12, Math.min(size.width - 12, star.x + star.radius * .6))}px`;
+            marker.style.top = `${Math.max(12, Math.min(size.height - 12, star.y - star.radius * .6))}px`;
+            marker.classList.toggle("active", star.id === hoveredId.current || star.id === focusedSummary);
+          }
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
           const labelCandidates = candidates.filter(node => (!spatialCounts.has(node.id) || spatialLabels.has(node.id) || node.id === hoveredId.current || node.id === focusedSummary) &&
             (!pinnedNames.has(node.id) || node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current));
@@ -993,7 +1003,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           // An opened group or revealed nearby stars show their own titles; other star titles wait.
           const opened = activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : spatialReveal?.members.size ? spatialReveal.members : undefined;
           const starTitles = opened ? { limit: 0, exempt: opened } : { limit: MAX_RESTING_STAR_LABELS };
-          const environment = { stars: candidates, obstacles: chrome(), previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : undefined };
+          const origin = layer.getBoundingClientRect();
+          const markerBoxes = [...(groupMarkerLayer.current?.children ?? [])].filter(element => !(element as HTMLElement).hidden)
+            .map(element => { const box = element.getBoundingClientRect(); return { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }; });
+          const environment = { stars: candidates, obstacles: [...chrome(), ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : undefined };
           let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
           // Expanded metadata must not make an already usable keyboard target disappear.
           const compactFallback = new Set(labelCandidates.filter(node => (node.id === priorityId || node.id === hoveredId.current) && !visible.some(box => box.id === node.id)).map(node => node.id));
@@ -1321,23 +1334,29 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: coreLabel(node, collapsedCounts.get(node.id)!, snapshot.view), detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `근접 묶음 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
       onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.kind === "parent" ? "경로에서 계산 · 화살표는 상위 폴더 방향" : link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
     />}
-    <div className="graph-group-navigation" role="group" aria-label="지도의 묶음">
+    <div className={`graph-group-navigation${pinnedNames.size ? " with-keys" : ""}`} role="group" aria-label="지도의 묶음">
       {navigationGroups.map(node => {
         const title = groupTitle(node), count = title.match(/ · \d+개$/);
         return <button key={node.id} type="button" data-node-id={node.id}
         className={`graph-group-target${pinnedNames.has(node.id) ? " core-name" : ""}`} disabled={disabled}
         aria-label={`${title}, ${collapsedCounts.has(node.id) || spatialCounts.has(node.id) ? "눌러 펼치기" : "선택"}`}
-        onFocus={() => { hoveredId.current = node.id; }}
+        onFocus={event => { hoveredId.current = node.id; if (pinnedNames.has(node.id)) event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" }); }}
         onBlur={() => { if (hoveredId.current === node.id) hoveredId.current = null; }}
+        onPointerEnter={() => { if (pinnedNames.has(node.id)) hoveredId.current = node.id; }}
+        onPointerLeave={event => { if (event.currentTarget !== document.activeElement && hoveredId.current === node.id) hoveredId.current = null; }}
         onClick={event => {
           if (event.detail === 0) suppressClickUntil.current = 0;
           const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
           chooseNode(node.id);
           if (summary) requestAnimationFrame(() => (spatialCounts.has(node.id) ? spatialCloseButton : coreCloseButton).current?.focus());
         }}>
-        <span>{count ? title.slice(0, -count[0].length) : title}</span>
-        {count && <span className="group-count">{count[0]}</span>}
+        {pinnedNames.has(node.id) && <span className="group-key" aria-hidden="true">{[...pinnedNames].indexOf(node.id) + 1}</span>}
+        <span className="group-name-copy"><span>{count ? title.slice(0, -count[0].length) : title}</span>
+        {count && <span className="group-count">{count[0]}</span>}</span>
       </button>; })}
+    </div>
+    <div className="graph-group-markers" ref={groupMarkerLayer} aria-hidden="true">
+      {[...pinnedNames].map((id, index) => <span className="graph-group-marker group-key" key={id} data-node-id={id} hidden>{index + 1}</span>)}
     </div>
     <div className="node-labels" ref={labelLayer}
       onClick={event => { const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { if (event.detail === 0) suppressClickUntil.current = 0; chooseNode(label.dataset.nodeId); } }}>
