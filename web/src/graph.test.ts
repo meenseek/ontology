@@ -551,6 +551,16 @@ test("hovering any visible label preserves every box and its order", async () =>
   }
   assert.deepEqual(candidates, original, "layout does not retain hover state in the input");
 });
+test("overview titles wait for deliberate inspection while group names remain available", () => {
+  const group: ProjectedLabel = { id: "core", kind: "subject", active: true, summary: true, x: 80, y: 100, depth: 0, radius: 20, width: 90, height: 24 };
+  const document: ProjectedLabel = { id: "document", kind: "document", active: true, x: 280, y: 250, depth: 0, radius: 4, width: 90, height: 24 };
+  const environment = { starTitles: { limit: 0 } };
+  const names = (selected: string | null, hovered: string | null) => visibleLabels([group, document], 390, 600, selected, hovered, environment).map(box => box.id);
+  assert.deepEqual(names(null, null), ["core"]);
+  assert.ok(names("document", null).includes("document"));
+  assert.ok(names(null, "document").includes("document"));
+  assert.ok(visibleLabels([group, document], 390, 600, null, null, { starTitles: { limit: 0, exempt: new Set(["document"]) } }).some(box => box.id === "document"));
+});
 test("mobile resting summaries yield distant names while interaction preserves discovery", () => {
   const core: ProjectedLabel = { id: "core", kind: "document", active: true, summary: true, importance: 2, x: 195, y: 300, depth: 0, radius: 35, width: 150, height: 40 };
   const nodes = [core], original = structuredClone(nodes);

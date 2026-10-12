@@ -604,8 +604,8 @@ async function checkNativeConstellation() {
     eligible: { nodes: nodes.length, links: links.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
   let graphCalls = 0;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
-  const summary = () => [...host.querySelectorAll<HTMLElement>('.node-label[role="button"]')].find(node => !node.hidden && node.textContent?.includes("관계 묶음 · 121개"));
-  const folderSummary = () => [...host.querySelectorAll<HTMLElement>('.node-label[role="button"]')].find(node => !node.hidden && node.textContent?.includes("폴더 묶음 · 40개"));
+  const summary = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.textContent?.includes("관계 묶음 · 121개"));
+  const folderSummary = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.textContent?.includes("폴더 묶음 · 40개"));
   try {
     window.fetch = async input => {
       const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
@@ -672,7 +672,7 @@ async function checkPurposeDiagram() {
     eligible: { nodes: nodes.length, links: memberships.length + references.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
   let responseSnapshot = snapshot;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
-  const summary = (group: number) => [...host.querySelectorAll<HTMLElement>('.node-label[role="button"]')].find(node => !node.hidden && node.textContent?.includes(`${names[group]} · ${group ? 23 : 120}개`));
+  const summary = (group: number) => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.textContent?.includes(`${names[group]} · ${group ? 23 : 120}개`));
   try {
     Positions.prototype.packOverview = function (this: Positions, ...args: Parameters<Positions["packOverview"]>) {
       positions = this; return originalPack.apply(this, args);
@@ -689,19 +689,24 @@ async function checkPurposeDiagram() {
     await until(() => !!summary(0) && !!summary(1) && !!positions && !positions.layoutMoving, "default purpose diagram uses persisted memberships despite a cross-purpose reference hub");
     const firstCalls = graphCalls;
     const epoch = positions!.structureEpoch;
-    summary(0)!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes(`${names[0]} · 120개 · 1/10`) === true && !positions!.layoutMoving, "keyboard opens a 12-item purpose page without counting its subject marker");
+    summary(0)!.focus(); summary(0)!.click();
+    await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes(`${names[0]} · 120개 · 1/10`) === true && !positions!.layoutMoving, "native button activation opens a 12-item purpose page without counting its subject marker");
     button("다음", host.querySelector(".graph-core-actions")!).click();
     await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes("2/10") === true && !positions!.layoutMoving, "purpose members page locally");
     button("묶음 접기").click();
     await until(() => !!summary(0) && !!summary(1) && !positions!.layoutMoving, "purpose summaries restore their compact overview");
+    summary(1)!.focus(); summary(1)!.click();
+    await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes(`${names[1]} · 23개`) === true && !positions!.layoutMoving,
+      "a small opened purpose retains its literal name and knowledge count without paging controls");
+    button("묶음 접기").click();
+    await until(() => !!summary(0) && !!summary(1) && !positions!.layoutMoving, "the small purpose returns to the same named overview");
     assert(graphCalls === firstCalls, "purpose expansion and paging use no extra graph requests");
     responseSnapshot = { ...snapshot, links: memberships };
     details("보기 설정").summary.click(); button("새로고침").click();
     await until(() => graphCalls === firstCalls + 1 && host.querySelector(".galaxy")?.getAttribute("aria-busy") === "false" && !!summary(0) && !!summary(1) && !positions!.layoutMoving, "removing references retains both purpose summaries");
     assert(positions!.structureEpoch === epoch, "reference-only refresh keeps the purpose topology epoch");
     await chooseDiagramMode("relationships");
-    await until(() => [...host.querySelectorAll<HTMLElement>('.node-label[role="button"]')].some(node => !node.hidden && node.textContent?.includes("관계 묶음")), "relationship mode preserves adjacency-based summaries");
+    await until(() => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].some(node => !node.hidden && node.textContent?.includes("관계 묶음")), "relationship mode preserves adjacency-based summaries");
     await chooseDiagramMode("purpose");
     await until(() => !!summary(0) && !!summary(1), "returning to purpose mode restores stored names and counts");
     assert(graphCalls === firstCalls + 1, "diagram switches reuse the existing source response");
@@ -726,7 +731,7 @@ async function checkFirstProximityCollapse() {
   let positions: Positions | undefined, overviewPacks = 0;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
   const packedFrames: unknown[] = [];
-  const hasSummary = () => [...host.querySelectorAll<HTMLElement>('.node-label[role="button"]')].some(node => !node.hidden && node.textContent?.includes("근접 묶음"));
+  const hasSummary = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].some(node => !node.hidden && node.textContent?.includes("근접 묶음"));
   try {
     Positions.prototype.install = function (this: Positions, ...args: Parameters<Positions["install"]>) {
       positions = this; return originalInstall.apply(this, args);
@@ -794,10 +799,9 @@ async function checkSummaryOverview() {
     limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
   let graphCalls = 0;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
-  const labels = () => [...host.querySelectorAll<HTMLElement>('.node-label[role="button"]')].filter(node => !node.hidden);
+  const labels = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].filter(node => !node.hidden);
   const summary = (count: number) => labels().find(node => node.textContent?.includes(`관계 묶음 · ${count}개`));
-  const overviewReady = () => counts.every(count => innerWidth > 700 ? !!summary(count) :
-    (glyphSamples.get(`group-${count}-0`)?.opacity ?? 0) > .99);
+  const overviewReady = () => counts.every(count => !!summary(count) && (glyphSamples.get(`group-${count}-0`)?.opacity ?? 0) > .99);
   const pointAt = (count: number | null) => {
     // Synthetic PointerEvent page coordinates do not include the fixture's scroll offset.
     // Keep this standalone check at its origin so the renderer receives native-equivalent coordinates.
@@ -867,7 +871,8 @@ async function checkSummaryOverview() {
     const initialCalls = graphCalls;
     const placements = () => counts.map(count => {
       const node = summary(count);
-      return node ? `${count}:${Math.round(parseFloat(node.style.left) * 10)}:${Math.round(parseFloat(node.style.top) * 10)}` : `${count}:hidden`;
+      const glyph = glyphSamples.get(`group-${count}-0`);
+      return node && glyph ? `${count}:${glyph.x.toFixed(4)}:${glyph.y.toFixed(4)}` : `${count}:hidden`;
     }).join("|") + `|camera:${observedCamera?.position.toArray().map(value => value.toFixed(3)).join(",")}`;
     let lastPlacement = placements(), stableSince = performance.now();
     await until(() => {
@@ -880,15 +885,18 @@ async function checkSummaryOverview() {
     const coordinates = () => JSON.stringify(nodes.map(node => positions!.layoutTarget(node.id)));
     const worldBeforeZoom = coordinates(), packsBeforeZoom = overviewPacks;
     if (innerWidth <= 700) {
-      assert(labels().every(label => parseFloat(label.style.getPropertyValue("--leader-length")) <= 34.01), "resting mobile names use short leaders");
-      for (const count of counts) {
-        const label = await revealSummary(count);
-        label.focus(); pointAt(null); await settle();
-        assert(document.activeElement === label && !label.hidden, "keyboard focus retains a revealed name after pointer exit");
-        label.blur(); await settle();
-      }
-      assert(coordinates() === worldBeforeZoom && overviewPacks === packsBeforeZoom, "adaptive names and focus never reposition stars");
+      const pinned = [...host.querySelectorAll<HTMLElement>(".graph-group-target.core-name")];
+      assert(pinned.length === counts.length && pinned.every(target => target.offsetWidth > 1 && target.offsetHeight >= 38), "all four core names and counts are readable without pointing");
+      assert([...host.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].every(label => parseFloat(label.style.getPropertyValue("--leader-length")) <= 34.01), "resting mobile names use short leaders");
     }
+    const keyboardGroups = labels().length;
+    for (const target of labels()) {
+      const id = target.dataset.nodeId, text = target.textContent;
+      target.focus(); pointAt(null); await settle();
+      assert(document.activeElement === target && target.offsetWidth > 1 && target.dataset.nodeId === id && target.textContent === text, "every group, including deferred proximity names, has a stable visible keyboard target");
+      target.blur(); await settle();
+    }
+    assert(coordinates() === worldBeforeZoom && overviewPacks === packsBeforeZoom, "adaptive names and focus never reposition stars");
     const beforeZoom = lastPlacement, canvas = host.querySelector("canvas")!;
     const rect = canvas.getBoundingClientRect();
     canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 100,
@@ -986,7 +994,7 @@ async function checkSummaryOverview() {
     await until(() => graphCalls === initialCalls + 1 && host.querySelector(".galaxy")?.getAttribute("aria-busy") === "false" && overviewReady(), "refresh retains all overview images");
     return { summaryOverview: true, documents: nodes.length, relationCounts: counts, cloudCrossfade, glyphCrossfade, glyphBeforeClose, glyphAfterClose,
       reversedCloudOpacity: { beforeClose, afterClose, beforeReopen, afterReopen }, spatialCloudCrossfade,
-      proximityCohorts: true, adaptiveNames: innerWidth <= 700, zoomPreservesWorldCoordinates: true, zoomPacks, localExpansion: true, spatialRevealWithOpenCore: true, closingPreservesOverview: true, refresh: true };
+      proximityCohorts: true, keyboardGroups, adaptiveNames: innerWidth <= 700, zoomPreservesWorldCoordinates: true, zoomPacks, localExpansion: true, spatialRevealWithOpenCore: true, closingPreservesOverview: true, refresh: true };
   } finally {
     root.unmount(); Positions.prototype.packOverview = originalPack; Scene.prototype.onBeforeRender = originalRender;
     window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);

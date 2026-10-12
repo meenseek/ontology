@@ -416,6 +416,13 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const outlineLinks = useMemo(() => overviewLinkKeys(displayNodes, visualLinks), [displayNodes, visualLinks]);
   // Camera detail bands change visibility, not the content/status of the snapshot.
   const changedFootprints = useMemo(() => JSON.stringify(nodes.filter(node => node.changed).map(node => node.id).sort()), [nodes]);
+  const groupTitle = useCallback((node: PositionedNode) => collapsedCounts.has(node.id)
+    ? coreLabel(node, collapsedCounts.get(node.id)!, snapshot.view)
+    : spatialCounts.has(node.id) ? `근접 묶음 · ${spatialCounts.get(node.id)}개` : nodePresentation(node, true).title,
+  [collapsedCounts, spatialCounts, snapshot.view]);
+  const navigationGroups = useMemo(() => currentDisplayNodes.filter(node => collapsedCounts.has(node.id) || spatialCounts.has(node.id) || ["subject", "folder"].includes(node.kind))
+    .sort((a, b) => (collapsedCounts.get(b.id) ?? 0) - (collapsedCounts.get(a.id) ?? 0) || groupTitle(a).localeCompare(groupTitle(b)) || a.id.localeCompare(b.id)),
+  [currentDisplayNodes, collapsedCounts, spatialCounts, groupTitle]);
   const summaryCounts = useMemo(() => {
     const counts = new Map(spatialCounts), byId = new Map(nodes.map(node => [node.id, node]));
     for (const [id, count] of collapsedCounts) counts.set(id, count - Number(byId.get(id)?.kind === "folder"));
@@ -433,6 +440,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   }, [nodes, collapsedCounts, cores, spatialGroups, snapshot.view]);
   const collapsibleCore = useMemo(() => !selected && expandedCore && constellationView(nodes, links, null, null, undefined, snapshot.view).counts.has(expandedCore), [nodes, links, selected, expandedCore, snapshot.view]);
   const activeExpandedCore = collapsibleCore ? expandedCore : null;
+  const pinnedNames = useMemo(() => new Set(size.width <= 700 && !activeExpandedCore && !spatialReveal?.members.size && !selected ? navigationGroups.filter(node => collapsedCounts.has(node.id)).slice(0, 6).map(node => node.id) : []),
+    [navigationGroups, collapsedCounts, size.width, activeExpandedCore, spatialReveal, selected]);
   // A filter can remove a hub and expose members hidden in the full overview.
   // Give those visible nodes their own positions instead of stacking them at the missing hub.
   const exposesHiddenMembers = useMemo(() => {
@@ -789,7 +798,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const groupName = summary || label.node.kind === "subject" || label.node.kind === "folder";
       element.dataset.nodeId = id;
       element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive group-summary" : ""}${groupName ? " group-name" : ""}${detailed ? "" : " compact"}`;
-      const title = collapsedCounts.has(id) ? coreLabel(label.node, collapsedCounts.get(id)!, snapshot.view) : spatialCounts.has(id) ? `근접 묶음 · ${spatialCounts.get(id)}개` : label.title;
+      const title = groupTitle(label.node);
       element.children[0].textContent = title;
       const count = summary && title.match(/ · \d+개$/);
       if (count) {
@@ -802,7 +811,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       element.children[2].textContent = summary ? "" : label.status;
       if (summary) {
         element.setAttribute("role", "button"); element.setAttribute("aria-label", `${element.children[0].textContent}, 별을 끌어 함께 이동하거나 눌러 펼치기`);
-        element.setAttribute("aria-hidden", "false"); element.tabIndex = 0;
+        element.setAttribute("aria-hidden", "true"); element.tabIndex = -1;
       } else {
         element.removeAttribute("role"); element.removeAttribute("aria-label");
         element.setAttribute("aria-hidden", "true"); element.tabIndex = -1;
@@ -826,7 +835,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     let previousLabels = new Map<string, ReturnType<typeof visibleLabels>[number]>();
     const chrome = () => {
       const origin = layer.getBoundingClientRect();
-      return [...(container.current?.querySelectorAll<HTMLElement>(".graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions") ?? [])]
+      return [...(container.current?.querySelectorAll<HTMLElement>(".graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions, .graph-group-target.core-name, .graph-group-target:focus") ?? [])]
         .filter(element => element.offsetWidth && element.offsetHeight)
         .map(element => { const box = element.getBoundingClientRect(); return { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }; });
     };
@@ -899,9 +908,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         instance.d3ReheatSimulation();
       }
       const controls = instance?.controls() as OrbitControls | undefined;
-      const focusedElement = elements.find(element => element === document.activeElement);
-      const focusedId = focusedElement?.dataset.nodeId;
-      const focusedSummary = focusedId && (collapsedCounts.has(focusedId) || spatialCounts.has(focusedId)) ? focusedId : null;
+      const focusedElement = document.activeElement instanceof HTMLElement && document.activeElement.matches(".graph-group-target") && container.current?.contains(document.activeElement) ? document.activeElement : null;
+      const focusedSummary = focusedElement?.dataset.nodeId ?? null;
       if (controls) controls.autoRotate = rotate && !focusedSummary && !pointer.current && !navigationKeys.current.size && !positions.dragging && !positions.settling && !positions.layoutMoving && !cameraMotion.current.moving && controls.enabled;
       const camera = instance?.camera();
       if (camera) {
@@ -979,7 +987,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : namedGroup ? 1 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, body: pixels / 2, ...dimensions.get(node.id)![node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
           });
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
-          const labelCandidates = candidates.filter(node => !spatialCounts.has(node.id) || spatialLabels.has(node.id) || node.id === hoveredId.current || node.id === focusedSummary);
+          const labelCandidates = candidates.filter(node => (!spatialCounts.has(node.id) || spatialLabels.has(node.id) || node.id === hoveredId.current || node.id === focusedSummary) &&
+            (!pinnedNames.has(node.id) || node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current));
           const priorityId = focusedSummary ?? dragged.current ?? selected;
           // An opened group or revealed nearby stars show their own titles; other star titles wait.
           const opened = activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : spatialReveal?.members.size ? spatialReveal.members : undefined;
@@ -996,7 +1005,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             const box = remaining.get(element.dataset.nodeId ?? "");
             if (box) { assigned.set(element, box); remaining.delete(box.id); }
           }
-          if (focusedElement && (!assigned.has(focusedElement) || !focusedSummary)) focusedElement.blur();
+          // Keyboard targets live outside this recycled visual-label pool.
           for (const box of remaining.values()) {
             const slot = elements.find(element => !assigned.has(element));
             if (slot) assigned.set(slot, box);
@@ -1033,7 +1042,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       frame = requestAnimationFrame(draw);
     };
     draw(); return () => cancelAnimationFrame(frame);
-  }, [ready, labelFontRevision, minimapRevision, nodes, displayNodes, displayLinks, outlineLinks, allConnections, collapsedCounts, cores, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal]);
+  }, [ready, labelFontRevision, minimapRevision, nodes, displayNodes, displayLinks, outlineLinks, allConnections, collapsedCounts, cores, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal, groupTitle, pinnedNames]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;
@@ -1312,13 +1321,31 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: coreLabel(node, collapsedCounts.get(node.id)!, snapshot.view), detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `근접 묶음 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
       onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.kind === "parent" ? "경로에서 계산 · 화살표는 상위 폴더 방향" : link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
     />}
+    <div className="graph-group-navigation" role="group" aria-label="지도의 묶음">
+      {navigationGroups.map(node => {
+        const title = groupTitle(node), count = title.match(/ · \d+개$/);
+        return <button key={node.id} type="button" data-node-id={node.id}
+        className={`graph-group-target${pinnedNames.has(node.id) ? " core-name" : ""}`} disabled={disabled}
+        aria-label={`${title}, ${collapsedCounts.has(node.id) || spatialCounts.has(node.id) ? "눌러 펼치기" : "선택"}`}
+        onFocus={() => { hoveredId.current = node.id; }}
+        onBlur={() => { if (hoveredId.current === node.id) hoveredId.current = null; }}
+        onClick={event => {
+          if (event.detail === 0) suppressClickUntil.current = 0;
+          const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
+          chooseNode(node.id);
+          if (summary) requestAnimationFrame(() => (spatialCounts.has(node.id) ? spatialCloseButton : coreCloseButton).current?.focus());
+        }}>
+        <span>{count ? title.slice(0, -count[0].length) : title}</span>
+        {count && <span className="group-count">{count[0]}</span>}
+      </button>; })}
+    </div>
     <div className="node-labels" ref={labelLayer}
-      onClick={event => { const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { if (event.detail === 0) suppressClickUntil.current = 0; chooseNode(label.dataset.nodeId); } }}
-      onKeyDown={event => { if (event.key !== "Enter" && event.key !== " ") return; const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { event.preventDefault(); suppressClickUntil.current = 0; const id = label.dataset.nodeId, spatial = spatialCounts.has(id); chooseNode(id); requestAnimationFrame(() => (spatial ? spatialCloseButton : coreCloseButton).current?.focus()); } }}>
+      onClick={event => { const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { if (event.detail === 0) suppressClickUntil.current = 0; chooseNode(label.dataset.nodeId); } }}>
       {Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /></div>)}
     </div>
     {activeExpandedCore && !selected && !spatialReveal?.members.size && <div className="graph-core-actions">
       <button type="button" ref={coreCloseButton} onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); pendingReturn.current = coreReturn.current; restoringCoreReturn.current = coreReturn.current; coreReturn.current = null; setExpandedCore(null); }}>묶음 접기</button>
+      {!disclosure && <span>{coreLabel(nodes.find(node => node.id === activeExpandedCore), cores.find(core => core.hub === activeExpandedCore)?.count ?? 0, snapshot.view)}</span>}
       {disclosure?.hub === activeExpandedCore && <>
         <button type="button" disabled={disclosure.index === 0} onClick={() => setCorePage(disclosure.index - 1)}>이전</button>
         <span>{coreLabel(nodes.find(node => node.id === disclosure.hub), disclosure.total, snapshot.view)} · {disclosure.index + 1}/{disclosure.pages}</span>

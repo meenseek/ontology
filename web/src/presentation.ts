@@ -26,8 +26,8 @@ export function searchExcerpt(excerpt: string, title: string): string {
   return heading[1] + heading[3].replace(/^(?:[ \t]*\r?\n)+/, "");
 }
 export const MAX_VISIBLE_LABELS = 24;
-/** Group names lead the first view; only a few small star titles sit beside them. */
-export const MAX_RESTING_STAR_LABELS = 8;
+/** Group names lead the overview; individual titles appear through interaction, proximity or disclosure. */
+export const MAX_RESTING_STAR_LABELS = 0;
 // A star this close reads as an individual body, so its title is not rationed.
 const CLOSE_STAR_LABEL_RADIUS = 9;
 export type ProjectedLabel = { id: string; kind: string; active: boolean; summary?: boolean; importance?: number; x: number; y: number; depth: number; radius: number; width: number; height: number;

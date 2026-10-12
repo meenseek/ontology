@@ -362,3 +362,13 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 }
 
 .zoom-instruction { white-space: nowrap; }
+
+.graph-group-navigation { position: absolute; inset: 0; padding: 10px 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 10px; align-content: start; pointer-events: none; }
+.graph-group-target { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; pointer-events: none; }
+.graph-group-target:focus { position: absolute; left: 16px; bottom: 80px; width: max-content; max-width: min(320px, calc(100% - 200px)); height: auto; padding: 8px 10px; clip-path: none; overflow: visible; white-space: normal; overflow-wrap: anywhere; pointer-events: auto; outline: 1px solid #89bad2; outline-offset: 2px; background: #0b1725f2; }
+@media (max-width: 700px) {
+  .graph-group-target.core-name { position: static; width: auto; height: auto; min-height: 38px; padding: 5px 6px; clip-path: none; overflow: visible; white-space: normal; pointer-events: auto; text-align: left; font-size: 12px; line-height: 1.4; font-weight: 500; color: #dce8f0; background: #08121a88; border: 0; border-bottom: 1px solid #8dadb321; border-radius: 0; text-shadow: 0 1px 4px #050a10; word-break: keep-all; max-width: none; }
+  .graph-group-target.core-name:focus { outline-offset: 0; background: #142435ed; }
+}
+
+.graph-group-target .group-count { font-size: .85em; font-weight: 400; color: #a0b0c1; white-space: nowrap; }
