@@ -984,7 +984,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           // An opened group or revealed nearby stars show their own titles; other star titles wait.
           const opened = activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : spatialReveal?.members.size ? spatialReveal.members : undefined;
           const starTitles = opened ? { limit: 0, exempt: opened } : { limit: MAX_RESTING_STAR_LABELS };
-          const environment = { stars: candidates, obstacles: chrome(), previous: previousLabels, starTitles, preferredSummaryGap: size.width <= 700 ? 80 : undefined };
+          const environment = { stars: candidates, obstacles: chrome(), previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : undefined };
           let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
           // Expanded metadata must not make an already usable keyboard target disappear.
           const compactFallback = new Set(labelCandidates.filter(node => (node.id === priorityId || node.id === hoveredId.current) && !visible.some(box => box.id === node.id)).map(node => node.id));

@@ -776,7 +776,7 @@ async function checkSummaryOverview() {
   let lightPhase: "opening" | "closing" | null = null;
   const cloudCrossfade = { opening: false, closing: false };
   const cloudSamples = new Map<string, { opacity: number; at: number }>();
-  const glyphSamples = new Map<string, { pixels: number; opacity: number; at: number }>();
+  const glyphSamples = new Map<string, { pixels: number; opacity: number; at: number; x: number; y: number }>();
   const glyphCrossfade = { opening: false, closing: false }, wrappedGlyphs = new WeakSet<Sprite>();
   let spatialCloudId: string | undefined, spatialCloudCrossfade = false;
   let positions: Positions | undefined, overviewPacks = 0;
@@ -796,6 +796,23 @@ async function checkSummaryOverview() {
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
   const labels = () => [...host.querySelectorAll<HTMLElement>('.node-label[role="button"]')].filter(node => !node.hidden);
   const summary = (count: number) => labels().find(node => node.textContent?.includes(`관계 묶음 · ${count}개`));
+  const overviewReady = () => counts.every(count => innerWidth > 700 ? !!summary(count) :
+    (glyphSamples.get(`group-${count}-0`)?.opacity ?? 0) > .99);
+  const pointAt = (count: number | null) => {
+    // Synthetic PointerEvent page coordinates do not include the fixture's scroll offset.
+    // Keep this standalone check at its origin so the renderer receives native-equivalent coordinates.
+    window.scrollTo(0, 0);
+    const canvas = host.querySelector("canvas")!, rect = canvas.getBoundingClientRect();
+    const sample = count === null ? undefined : glyphSamples.get(`group-${count}-0`);
+    const at = sample ? { x: sample.x, y: sample.y } : { x: -2, y: -2 };
+    canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse",
+      clientX: rect.left + (at.x + 1) * rect.width / 2, clientY: rect.top + (1 - at.y) * rect.height / 2 }));
+  };
+  const revealSummary = async (count: number) => {
+    pointAt(count);
+    await until(() => !!summary(count), `pointing reveals the ${count}-item summary name`);
+    return summary(count)!;
+  };
   try {
     Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, material, group) {
       observedCamera = camera;
@@ -806,7 +823,8 @@ async function checkSummaryOverview() {
           object.onBeforeRender = function (...args) {
             drawGlyph.apply(this, args);
             const id = object.parent?.userData.nodeId, opacity = object.material.opacity;
-            glyphSamples.set(id, { pixels: object.scale.x * args[0].domElement.clientHeight * args[2].projectionMatrix.elements[5] / 2, opacity, at: performance.now() });
+            const point = object.getWorldPosition(new Vector3()).project(args[2]);
+            glyphSamples.set(id, { pixels: object.scale.x * args[0].domElement.clientHeight * args[2].projectionMatrix.elements[5] / 2, opacity, at: performance.now(), x: point.x, y: point.y });
             if (lightPhase && id === "group-120-0" && opacity > 0 && opacity < 1) glyphCrossfade[lightPhase] = true;
           };
         }
@@ -845,22 +863,32 @@ async function checkSummaryOverview() {
     root.render(<App />);
     await until(() => host.querySelector(".galaxy")?.getAttribute("aria-busy") === "false", "summary graph loaded");
     await chooseDiagramMode("relationships");
-    await until(() => counts.every(count => !!summary(count)) && labels().some(node => node.textContent?.includes("근접 묶음")), "four differently sized relation summaries and proximity cohorts remain readable");
+    await until(() => overviewReady() && labels().some(node => node.textContent?.includes("근접 묶음")), "four differently sized relation images and proximity cohorts remain available");
     const initialCalls = graphCalls;
     const placements = () => counts.map(count => {
       const node = summary(count);
       return node ? `${count}:${Math.round(parseFloat(node.style.left) * 10)}:${Math.round(parseFloat(node.style.top) * 10)}` : `${count}:hidden`;
-    }).join("|");
+    }).join("|") + `|camera:${observedCamera?.position.toArray().map(value => value.toFixed(3)).join(",")}`;
     let lastPlacement = placements(), stableSince = performance.now();
     await until(() => {
       const current = placements();
       if (current !== lastPlacement) { lastPlacement = current; stableSince = performance.now(); }
-      return !!positions && !positions.layoutMoving && counts.every(count => !!summary(count)) && performance.now() - stableSince > 350;
+      return !!positions && !positions.layoutMoving && overviewReady() && performance.now() - stableSince > 350;
     }, "initial compact overview settles").catch(error => {
       throw new Error(`${error.message}; ${JSON.stringify({ moving: positions?.layoutMoving, packs: overviewPacks, placements: placements(), lastPlacement, stableFor: performance.now() - stableSince, visible: labels().map(label => label.children[0].textContent) })}`);
     });
     const coordinates = () => JSON.stringify(nodes.map(node => positions!.layoutTarget(node.id)));
     const worldBeforeZoom = coordinates(), packsBeforeZoom = overviewPacks;
+    if (innerWidth <= 700) {
+      assert(labels().every(label => parseFloat(label.style.getPropertyValue("--leader-length")) <= 34.01), "resting mobile names use short leaders");
+      for (const count of counts) {
+        const label = await revealSummary(count);
+        label.focus(); pointAt(null); await settle();
+        assert(document.activeElement === label && !label.hidden, "keyboard focus retains a revealed name after pointer exit");
+        label.blur(); await settle();
+      }
+      assert(coordinates() === worldBeforeZoom && overviewPacks === packsBeforeZoom, "adaptive names and focus never reposition stars");
+    }
     const beforeZoom = lastPlacement, canvas = host.querySelector("canvas")!;
     const rect = canvas.getBoundingClientRect();
     canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 100,
@@ -870,8 +898,8 @@ async function checkSummaryOverview() {
       const current = placements();
       if (current !== beforeZoom) zoomMoved = true;
       if (current !== lastPlacement) { lastPlacement = current; stableSince = performance.now(); }
-      return zoomMoved && counts.every(count => !!summary(count)) && performance.now() - stableSince > 300;
-    }, "zoom-out settles with all differently sized summaries readable");
+      return zoomMoved && overviewReady() && performance.now() - stableSince > 300;
+    }, "zoom-out settles with all differently sized summary images available");
     assert(coordinates() === worldBeforeZoom && overviewPacks === packsBeforeZoom, "Wheel zoom changes the camera without repacking stars");
     for (const deltaY of [-1200, -1200, 1200, 1200, -100]) {
       const started = performance.now();
@@ -880,7 +908,7 @@ async function checkSummaryOverview() {
       await until(() => performance.now() - started > 650 && !positions!.layoutMoving, "camera zoom settles across proximity detail bands");
       assert(coordinates() === worldBeforeZoom && overviewPacks === packsBeforeZoom, "Crossing proximity detail bands preserves every world coordinate");
     }
-    await until(() => counts.every(count => !!summary(count)), "return zoom keeps all relation summaries available").catch(error => {
+    await until(overviewReady, "return zoom keeps all relation images available").catch(error => {
       throw new Error(`${error.message}; ${JSON.stringify({ placements: placements(), visible: labels().map(label => label.children[0].textContent), packs: overviewPacks, moving: positions?.layoutMoving })}`);
     });
     const zoomPacks = overviewPacks - packsBeforeZoom;
@@ -899,14 +927,14 @@ async function checkSummaryOverview() {
       return { count, x: projected.x, y: projected.y, z: projected.z };
     });
     const overviewProjections = hubProjections();
-    summary(120)!.click();
+    (await revealSummary(120)).click();
     await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes("관계 묶음 · 120개 · 1/10") === true, "large summary opens its compact page");
     await until(() => { const value = cloudSamples.get("group-120-0")?.opacity; return value !== undefined && value > .3 && value < .85; }, "the real summary cloud is midway through opening");
     const beforeClose = cloudSamples.get("group-120-0")!;
     const glyphBeforeClose = glyphSamples.get("group-120-0")!;
     assert(Math.abs(glyphBeforeClose.pixels - summaryAppearance(120).pixels) < .001, "opening retains the full count-sized glyph instead of jumping to 26px");
     button("묶음 접기").click();
-    await until(() => !!summary(120) && cloudSamples.get("group-120-0")!.at > beforeClose.at, "closing retargets the rendered cloud before opening finishes");
+    await until(() => cloudSamples.get("group-120-0")!.at > beforeClose.at, "closing retargets the rendered cloud before opening finishes");
     const afterClose = cloudSamples.get("group-120-0")!;
     const glyphAfterClose = glyphSamples.get("group-120-0")!;
     assert(Math.abs(glyphAfterClose.opacity - glyphBeforeClose.opacity) <= (glyphAfterClose.at - glyphBeforeClose.at) / 650 * 2 + .03, "reversing opening retargets the observed glyph opacity");
@@ -914,7 +942,7 @@ async function checkSummaryOverview() {
       "reversing opening preserves the observed cloud opacity within the 650ms motion bound");
     await until(() => cloudSamples.get("group-120-0")!.at - afterClose.at > 80, "the interrupted close renders several frames");
     const beforeReopen = cloudSamples.get("group-120-0")!;
-    summary(120)!.click();
+    (await revealSummary(120)).click();
     await until(() => !!host.querySelector(".graph-core-actions") && cloudSamples.get("group-120-0")!.at > beforeReopen.at, "reopening retains a rendered cloud during the reverse");
     const afterReopen = cloudSamples.get("group-120-0")!;
     assert(Math.abs(afterReopen.opacity - beforeReopen.opacity) <= (afterReopen.at - beforeReopen.at) / 650 * 2 + .03,
@@ -944,7 +972,8 @@ async function checkSummaryOverview() {
     lightPhase = "closing";
     button("묶음 접기").click();
     const closedAt = performance.now();
-    await until(() => !positions!.layoutMoving && performance.now() - closedAt > 1000 && counts.every(count => !!summary(count)), "closing restores all overview summaries").catch(error => {
+    pointAt(null);
+    await until(() => !positions!.layoutMoving && performance.now() - closedAt > 1000 && overviewReady(), "closing restores all overview images").catch(error => {
       throw new Error(`${error.message}; ${JSON.stringify({ moving: positions?.layoutMoving, packs: overviewPacks, placements: placements(), cameraDelta: observedCamera!.position.distanceTo(overviewCamera), rotationDelta: observedCamera!.quaternion.angleTo(overviewRotation), backgroundSame: background() === backgroundBeforeExpansion, overviewProjections, closedProjections: hubProjections(), visible: labels().map(label => label.children[0].textContent) })}`);
     });
     assert(observedCamera!.position.distanceTo(overviewCamera) < .01 && observedCamera!.quaternion.angleTo(overviewRotation) < .001, "a rapid reopen keeps the original overview camera as the return destination");
@@ -954,10 +983,10 @@ async function checkSummaryOverview() {
     assert(background() === backgroundBeforeExpansion && overviewPacks === packsBeforeZoom, "Closing restores the same overview without a new whole-map pack");
     assert(graphCalls === initialCalls, "overview packing and expansion reuse one response");
     details("보기 설정").summary.click(); button("새로고침").click();
-    await until(() => graphCalls === initialCalls + 1 && host.querySelector(".galaxy")?.getAttribute("aria-busy") === "false" && counts.every(count => !!summary(count)), "refresh retains all overview summaries");
+    await until(() => graphCalls === initialCalls + 1 && host.querySelector(".galaxy")?.getAttribute("aria-busy") === "false" && overviewReady(), "refresh retains all overview images");
     return { summaryOverview: true, documents: nodes.length, relationCounts: counts, cloudCrossfade, glyphCrossfade, glyphBeforeClose, glyphAfterClose,
       reversedCloudOpacity: { beforeClose, afterClose, beforeReopen, afterReopen }, spatialCloudCrossfade,
-      proximityCohorts: true, zoomPreservesWorldCoordinates: true, zoomPacks, localExpansion: true, spatialRevealWithOpenCore: true, closingPreservesOverview: true, refresh: true };
+      proximityCohorts: true, adaptiveNames: innerWidth <= 700, zoomPreservesWorldCoordinates: true, zoomPacks, localExpansion: true, spatialRevealWithOpenCore: true, closingPreservesOverview: true, refresh: true };
   } finally {
     root.unmount(); Positions.prototype.packOverview = originalPack; Scene.prototype.onBeforeRender = originalRender;
     window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl);

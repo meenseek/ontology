@@ -551,23 +551,25 @@ test("hovering any visible label preserves every box and its order", async () =>
   }
   assert.deepEqual(candidates, original, "layout does not retain hover state in the input");
 });
-test("mobile summary preference preserves large names when nearby space is occupied", () => {
+test("mobile resting summaries yield distant names while interaction preserves discovery", () => {
   const core: ProjectedLabel = { id: "core", kind: "document", active: true, summary: true, importance: 2, x: 195, y: 300, depth: 0, radius: 35, width: 150, height: 40 };
   const nodes = [core], original = structuredClone(nodes);
   const environment = { stars: nodes, obstacles: [{ left: 0, top: 240, right: 390, bottom: 360 }] };
   assert.ok(visibleLabels(nodes, 390, 600, null, null, environment).length, "unbounded desktop placement can use distant free space");
-  assert.ok(visibleLabels(nodes, 390, 600, null, null, { ...environment, preferredSummaryGap: 24 }).length, "a large name remains available when only distant clear space exists");
-  assert.ok(visibleLabels(nodes, 390, 600, core.id, null, { ...environment, preferredSummaryGap: 24 }).length, "keyboard selection still gets its name");
+  const mobile = { ...environment, restingSummaryGap: 24 };
+  assert.deepEqual(visibleLabels(nodes, 390, 600, null, null, mobile), [], "resting names do not need long leaders across occupied space");
+  assert.ok(visibleLabels(nodes, 390, 600, core.id, null, mobile).length, "selection or keyboard focus still gets its name");
+  assert.ok(visibleLabels(nodes, 390, 600, null, core.id, mobile).length, "pointing at the star reveals a deferred name");
   assert.deepEqual(nodes, original, "label placement cannot rearrange the constellation");
 });
 test("mobile summary placement rejects a detached previous label and retains local clear names", () => {
   const nodes: ProjectedLabel[] = [{ id: "group", kind: "document", active: true, summary: true, importance: 2, x: 195, y: 300, depth: 0, radius: 35, width: 150, height: 40 }];
   const previous = new Map([["group", { id: "group", left: 0, right: 150, top: 0, bottom: 40 }]]);
-  const [box] = visibleLabels(nodes, 390, 600, null, null, { stars: nodes, previous, preferredSummaryGap: 80 });
+  const [box] = visibleLabels(nodes, 390, 600, null, null, { stars: nodes, previous, restingSummaryGap: 40 });
   assert.ok(box, "a clear local name is retained");
   const core = nodes[0], distance = Math.hypot(core.x - Math.max(box.left, Math.min(box.right, core.x)), core.y - Math.max(box.top, Math.min(box.bottom, core.y)));
   assert.ok(distance <= core.radius + 8, "a distant retained label yields to free space beside its body");
-  assert.deepEqual(visibleLabels(nodes, 390, 600, null, "group", { stars: nodes, previous, preferredSummaryGap: 80 }), [box], "hover does not reshuffle an already visible name");
+  assert.deepEqual(visibleLabels(nodes, 390, 600, null, "group", { stars: nodes, previous, restingSummaryGap: 40 }), [box], "hover does not reshuffle an already visible name");
 });
 test("collapsed group labels stay visible among crowded document labels", async () => {
   const { visibleLabels } = await import("./presentation.ts");
