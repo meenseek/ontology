@@ -12,7 +12,7 @@ import type { Positions } from "./positions";
 import type { GraphLink, GraphView, Model, PositionedNode } from "./graph";
 import { LAYOUT_WORLD_SPACING, MAX_RESTING_STAR_LABELS, MAX_VISIBLE_LABELS, advanceStarClock, coreCameraDistance, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starPerspectiveSize, starShape, stellarDepth, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
-import { planCoreView, screenPlane, spatialCameraFrame } from "./view-layout";
+import { planCoreView, screenPlane, sparseOverviewFrame, spatialCameraFrame } from "./view-layout";
 import { CameraMotion, zoomCameraPose } from "./camera-motion";
 import type { CameraPose } from "./camera-motion";
 import MiniMap from "./MiniMap";
@@ -354,6 +354,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const packedOverview = useRef("");
   // The view whose overview was last packed into the viewport frame; reframing it keeps that spread on screen.
   const framedOverview = useRef("");
+  const sparseOverviewKey = useRef("");
   const overviewZoom = useRef({ scale: 0, changedAt: 0, checkedFootprints: "" });
   const frozenSpatial = useRef<NucleusView | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -783,8 +784,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     const fill = (element: HTMLElement, id: string, detailed = false) => {
       const label = labels.get(id)!;
       const summary = collapsedCounts.has(id) || spatialCounts.has(id);
+      const groupName = summary || label.node.kind === "subject" || label.node.kind === "folder";
       element.dataset.nodeId = id;
-      element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive" : ""}${detailed ? "" : " compact"}`;
+      element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive" : ""}${groupName ? " group-name" : ""}${detailed ? "" : " compact"}`;
       element.children[0].textContent = collapsedCounts.has(id) ? coreLabel(label.node, collapsedCounts.get(id)!, snapshot.view) : spatialCounts.has(id) ? `근접 묶음 · ${spatialCounts.get(id)}개` : label.title;
       const subtitle = element.children[1] as HTMLElement;
       subtitle.textContent = summary ? "별 끌기 · 눌러 펼치기" : label.subtitle; subtitle.hidden = !subtitle.textContent;
@@ -948,6 +950,13 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
               zoom.checkedFootprints = changedFootprints;
             }
             if (packed) {
+              const sparseKey = `${positions.structureEpoch}:${snapshot.view}:${viewKey}`;
+              if (overviewChanged && !summaryCounts.size && sparseOverviewKey.current !== sparseKey) {
+                sparseOverviewKey.current = sparseKey;
+                const frame = sparseOverviewFrame(camera as PerspectiveCamera, (instance!.controls() as OrbitControls).target,
+                  displayNodes.map(node => positions.layoutTarget(node.id) ?? node), size);
+                if (frame) moveCamera(frame.position, frame.target, reduced ? 0 : REVEAL_DURATION);
+              }
               setMovedGroups(previous => {
                 const next = new Map(previous);
                 for (const [id, group] of spatialGroups) next.set(id, { members: group.members, level: spatialLevel, epoch: positions.groupEpoch });
@@ -961,11 +970,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           lastProjection = key;
           const candidates = displayNodes.map(node => {
             projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
-            const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
+            const namedGroup = node.kind === "subject" || node.kind === "folder";
+            const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id) || namedGroup;
             const pixels = nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]);
             const radius = nodeVisualRadius(pixels, node.id === selected, node.changed, summaryCounts.get(node.id));
             projected.applyMatrix4(camera.projectionMatrix);
-            return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, body: pixels / 2, ...dimensions.get(node.id)![node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
+            return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : namedGroup ? 1 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, body: pixels / 2, ...dimensions.get(node.id)![node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
           });
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
           const labelCandidates = candidates.filter(node => !spatialCounts.has(node.id) || spatialLabels.has(node.id) || node.id === hoveredId.current || node.id === focusedSummary);

@@ -8,7 +8,29 @@ import { nucleusLevel, nucleusView } from "./nuclei.ts";
 import { Positions } from "./positions.ts";
 import type { LayoutView, Point } from "./positions.ts";
 import { LAYOUT_WORLD_SPACING } from "./presentation.ts";
-import { planCoreView, screenPlane } from "./view-layout.ts";
+import { planCoreView, screenPlane, sparseOverviewFrame } from "./view-layout.ts";
+
+test("sparse overview framing enlarges a small graph without changing coordinates or camera direction", () => {
+  for (const size of [{ width: 1440, height: 680 }, { width: 390, height: 560 }]) {
+    const camera = new PerspectiveCamera(60, size.width / size.height, .1, 20000);
+    const target = { x: 10, y: -20, z: 30 };
+    camera.position.set(310, 180, 1030); camera.lookAt(target.x, target.y, target.z); camera.updateMatrixWorld();
+    const nodes = Array.from({ length: 27 }, (_, i) => ({ x: target.x + Math.cos(i) * 90, y: target.y + Math.sin(i) * 70, z: target.z + i - 13 }));
+    const before = structuredClone(nodes), originalCamera = camera.position.clone();
+    const frame = sparseOverviewFrame(camera, target, nodes, size)!;
+    assert.ok(frame);
+    const original = originalCamera.clone().sub(new Vector3(target.x, target.y, target.z));
+    const next = new Vector3(frame.position.x, frame.position.y, frame.position.z).sub(new Vector3(target.x, target.y, target.z));
+    assert.ok(next.length() < original.length() && next.length() >= original.length() / 2.5 - 1e-7);
+    assert.ok(next.clone().normalize().distanceTo(original.normalize()) < 1e-7);
+    assert.deepEqual(nodes, before); assert.ok(camera.position.equals(originalCamera));
+    assert.deepEqual(frame.target, target);
+    assert.equal(sparseOverviewFrame(camera, target, [nodes[0]], size), null);
+    assert.equal(sparseOverviewFrame(camera, target, Array.from({ length: 61 }, () => nodes[0]), size), null);
+    const wide = nodes.map(node => ({ ...node, x: node.x * 100 }));
+    assert.equal(sparseOverviewFrame(camera, target, wide, size), null, "a graph that already fills the screen is never zoomed farther in");
+  }
+});
 
 const doc = (id: string): GraphNode => ({ id, scope: "personal", kind: "document", label: id, status: "ok", present: true, current: true });
 const edge = (source: string, target: string): GraphLink => ({ source, target, kind: "related", current: true });

@@ -319,7 +319,12 @@ async function checkSourceReferenceDirection() {
     window.history.replaceState(null, "", `${window.location.pathname}?scope=personal&focus=${originals[0].id}`);
     root.render(<App />);
     await until(() => !!host.querySelector(".original-detail .document-internal-link"), "outgoing authored link resolves in actual preview");
+    const context = host.querySelector<HTMLDetailsElement>(".document-context")!;
+    assert(!context.open, "document classification and links start collapsed after the body");
+    assert(!!(host.querySelector('.original-detail')!.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING), "title and body precede classification in the reading order");
     assert(!host.querySelector('.original-detail [aria-label="연결된 자료"]'), "original reference does not become an explicit semantic related item");
+    button("분류·연결").click(); await settle();
+    assert(context.open && document.activeElement === context.querySelector("summary"), "the header reaches classification with keyboard focus and no eager request");
     const before = graphCalls; details("원문 링크").summary.click(); await settle();
     const referenceButtons = [...host.querySelectorAll<HTMLButtonElement>(".source-references button")];
     assert(referenceButtons.length === 3, "selected source retains outgoing and incoming references");
@@ -378,6 +383,8 @@ async function checkPurposeAndOriginalBusy() {
     assert(purposeCalls === 0, "purpose panel has no eager request");
     button("편집").click(); await settle();
     enter(host.querySelector<HTMLTextAreaElement>("#original-draft")!, "# 합성 원문\n\n저장할 변경"); await settle();
+    button("분류·연결").click(); await settle();
+    assert(host.querySelector<HTMLTextAreaElement>("#original-draft")?.value.includes("저장할 변경"), "classification navigation preserves the original draft");
     button("목적 소속 관리").click(); await until(() => purposeCalls === 1, "purpose request held");
     const close = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find(value => value.textContent?.trim() === "닫기 ×")!;
     assert(close().disabled, "purpose request blocks navigation");

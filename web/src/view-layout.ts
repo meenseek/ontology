@@ -8,6 +8,30 @@ import { DEFAULT_LINK_PIXELS, LAYOUT_WORLD_SPACING, coreCameraDistance, focusedC
 import { starCohort } from "./positions";
 import type { Point, Positions } from "./positions";
 
+/** Enlarge a sparse, settled overview once, without moving stars or changing its viewing direction. */
+export function sparseOverviewFrame(camera: PerspectiveCamera, target: Point, nodes: readonly Point[], size: { width: number; height: number }) {
+  if (nodes.length < 2 || nodes.length > 60 || size.width <= 0 || size.height <= 0) return null;
+  camera.updateMatrixWorld();
+  const right = new Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+  const offset = camera.position.clone().sub(new Vector3(target.x, target.y, target.z)), distance = offset.length();
+  if (!Number.isFinite(distance) || distance <= 0) return null;
+  const forward = offset.clone().normalize(), relative = new Vector3();
+  let halfWidth = 0, halfHeight = 0, nearest = 0;
+  for (const node of nodes) {
+    relative.set(node.x - target.x, node.y - target.y, node.z - target.z);
+    halfWidth = Math.max(halfWidth, Math.abs(relative.dot(right)) + 8);
+    halfHeight = Math.max(halfHeight, Math.abs(relative.dot(up)) + 8);
+    nearest = Math.max(nearest, relative.dot(forward));
+  }
+  const vertical = Math.tan(camera.fov * Math.PI / 360), horizontal = vertical * size.width / size.height;
+  // Leave room for titles and map controls; cap the gain so a tiny graph remains a constellation.
+  const fitted = nearest + Math.max(halfWidth / (horizontal * .64), halfHeight / (vertical * .64));
+  const nextDistance = Math.max(distance / 2.5, fitted);
+  if (nextDistance >= distance * .96) return null;
+  offset.normalize().multiplyScalar(nextDistance);
+  return { position: { x: target.x + offset.x, y: target.y + offset.y, z: target.z + offset.z }, target: { ...target } };
+}
+
 /** Shared projection and footprints; a drag uses its live camera, a layout freezes a clone. */
 export function screenPlane(camera: Camera, viewport: () => { width: number; height: number }, selected: string | null,
   counts: ReadonlyMap<string, number>) {
