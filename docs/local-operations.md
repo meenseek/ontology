@@ -673,6 +673,8 @@ prepared/head, workspace·source-view identity, 적용 시도·미해결 journal
 과거 정책 binding의 차이를 허용하며, 다른 명령의 현재 설정 검증은 그대로 유지한다.
 원문 revision·history를 변경하지 않으며 terminal 정리는 native 운영 정책을 따른다.
 
+Native 원문만 변경하는 호출은 `--context-view`와 `--workspace-root`를 같은 이번 작업 소유 source view로 지정한다. 기존 원문은 prepare의 `targets[].state`가 `existing`인지 확인한다. 별도의 filesystem 작업 공간은 일반 파일 target을 위한 경계이며 Native 기존 원문의 조회 공간을 대신하지 않는다.
+
 세부 역할·수락·적용·복구 계약은 [Context Core](../crates/context-core/src/harness.rs)을 따른다.
 Source view나 DB를 직접 고치거나 별도 protocol·version 축·호환 실행 경로를 만들지 않는다.
 
