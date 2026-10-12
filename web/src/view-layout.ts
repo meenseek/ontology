@@ -75,7 +75,7 @@ type CoreView = {
   members: ReadonlySet<string>; selected: string | null; lod: number;
   cohorts?: ReadonlyMap<string, readonly string[]>;
   spatial?: { level: number; members: ReadonlySet<string>; camera: Point; target: Point } | null;
-  locks?: ReadonlyMap<string, { members: readonly string[]; level: number }>;
+  locks?: ReadonlyMap<string, { representative?: string; members: readonly string[]; level: number }>;
 };
 
 /** Plan coordinates and the exact camera used to clear them, without touching live render state. */
@@ -112,7 +112,7 @@ export function planCoreView(desired: ReadonlyMap<string, Point>, movable: Reado
   camera.updateMatrixWorld();
   const scale = view.size.height * camera.projectionMatrix.elements[5] / (2 * camera.position.distanceTo(target));
   const level = Math.max(nucleusLevel(LAYOUT_WORLD_SPACING * scale, view.lod), view.spatial?.members.size ? view.spatial.level : 0);
-  const locks = new Map([...view.locks ?? []].filter(([, group]) => group.level === level).map(([id, group]) => [id, group.members]));
+  const locks = new Map([...view.locks ?? []].filter(([, group]) => group.level === level).map(([id, group]) => [group.representative ?? id, group.members]));
   const spatial = nucleusView(nodes, view.links, level, view.selected, view.spatial?.members, locks);
   const counts = new Map(spatial.counts);
   for (const [id, count] of view.counts) counts.set(id, count - Number(nodes.find(node => node.id === id)?.kind === "folder"));

@@ -60,7 +60,7 @@ function fixture(sizes: number[], outside: number, size: { width: number; height
     ...[...spatial.groups].map(([id, group]) => [id, group.members] as const)]);
   positions.packOverview(spatial.nodes.map(node => ({ id: node.id, ...plane.project(node), radius: plane.radius(node, plane.project(node).depth) })), overview.links,
     cohorts, plane, 0, true);
-  const locks = new Map([...spatial.groups].map(([id, group]) => [id, { members: group.members, level: lod }]));
+  const locks = new Map<string, { representative?: string; members: readonly string[]; level: number }>([...spatial.groups].map(([id, group]) => [id, { members: group.members, level: lod }]));
   return { source, model, positions, camera, center, size, lod, locks };
 }
 function samePoints(nodes: PositionedNode[], before: ReadonlyMap<string, { x: number; y: number; z: number }>, message: string) {
@@ -238,6 +238,18 @@ test("a spatial reveal while a core is open clears the frame the user chose and 
   assert.deepEqual(closed.plan!.memberships.get(group.representative), group.members, "explicitly revealed bodies collapse back into their prior group");
 });
 
+
+test("a plan retains the chosen representative when another detail band holds its singleton", () => {
+  const f = fixture([22], 100, { width: 1280, height: 900 }, 1.6);
+  const [originalId, original] = [...f.locks].find(([, group]) => group.members.length >= 6)!;
+  const representative = original.members.find(id => id !== originalId)!;
+  f.locks.clear();
+  f.locks.set(JSON.stringify([f.lod, representative]), { representative, members: original.members, level: f.lod });
+  f.locks.set(JSON.stringify([0, representative]), { representative, members: [representative], level: 0 });
+  const opened = open(f, "g22-0", 0, { automatic: false, key: "multiple-detail-band-locks" });
+  assert.equal(opened.plan!.level, f.lod);
+  assert.deepEqual(opened.plan!.memberships.get(representative), original.members, "a different band's singleton cannot replace the current cohort or its representative");
+});
 
 test("content clearance commits spatial memberships formed after manual LOD changes", () => {
   for (const size of [{ width: 390, height: 800 }, { width: 1280, height: 900 }]) {

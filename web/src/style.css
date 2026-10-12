@@ -273,11 +273,11 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
   .map-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 12px; }
   .map-toolbar h1 { font-size: 16px; }
   .map-title .count-breakdown { margin: 0; font-size: 10px; }
-  .map-actions { gap: 8px; }
+  .map-actions { position: relative; gap: 8px; }
   .map-actions > button { min-height: 36px; }
-  .view-options { width: auto; }
+  .view-options { position: static; width: auto; }
   .view-options > summary { width: max-content; }
-  .view-options > div { left: auto; right: 0; max-width: calc(100vw - 36px); }
+  .view-options > div { left: 0; right: auto; max-width: 100%; }
   .map-status { padding-inline: 18px; }
   .map-legend { padding: 8px 16px; gap: 6px 12px; }
   .map-legend-hint { display: none; }

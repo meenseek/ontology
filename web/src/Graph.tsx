@@ -305,11 +305,13 @@ function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "bod
   return sprite;
 }
 const endpoint = (value: string | number | { id?: string | number } | undefined) => typeof value === "object" ? value.id : value;
+const membershipKey = (id: string, level: number) => JSON.stringify([level, id]);
 export default function Graph({ positions, snapshot, nodes, links, selected, rotate, allConnections = false, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onToggleRotation, onFailure }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
   const cameraMotion = useRef(new CameraMotion());
   const coreReturn = useRef<CameraPose | null>(null);
+  const restoringCoreReturn = useRef<CameraPose | null>(null);
   const pendingReturn = useRef<CameraPose | null>(null);
   const getCamera = useCallback(() => {
     const instance = graph.current;
@@ -332,12 +334,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       writeCamera(cameraMotion.current.move(view.pose, { position, target }, performance.now(), duration));
     }
   }, [getCamera, writeCamera]);
-  const panMiniMap = useCallback((pose: CameraPose) => { cameraMotion.current.stop(); pendingReturn.current = null; writeCamera(pose); }, [writeCamera]);
+  const panMiniMap = useCallback((pose: CameraPose) => { cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null; writeCamera(pose); }, [writeCamera]);
   const zoomMiniMap = useCallback((factor: number) => {
     const view = getCamera();
     if (!view) return;
     const controls = graph.current!.controls() as OrbitControls;
-    cameraMotion.current.stop(); pendingReturn.current = null;
+    cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null;
     const pose = zoomCameraPose(view.pose, factor, Math.max(1, controls.minDistance), controls.maxDistance);
     moveCamera(pose.position, pose.target, reduced ? 0 : 160);
   }, [getCamera, moveCamera, reduced]);
@@ -362,7 +364,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const [corePage, setCorePage] = useState(0);
   const [showAllCore, setShowAllCore] = useState(false);
   const [spatialReveal, setSpatialReveal] = useState<SpatialReveal | null>(null);
-  const [movedGroups, setMovedGroups] = useState<Map<string, { members: readonly string[]; level: number; epoch: number }>>(new Map());
+  const [movedGroups, setMovedGroups] = useState<Map<string, { representative: string; members: readonly string[]; level: number; epoch: number }>>(new Map());
   const [lodLevel, setLodLevel] = useState(0);
   const [settledRevision, setSettledRevision] = useState(0);
   const lodLevelRef = useRef(0), movingRef = useRef(false), settleMovingRef = useRef(false);
@@ -386,7 +388,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     [nodes, links, selected, expandedCore, showAllCore, corePage, snapshot.view]);
   const { nodes: semanticNodes, links: displayLinks, counts: collapsedCounts, cores, disclosure } = presentation;
   const spatialLevel = Math.max(lodLevel, spatialReveal?.level ?? 0);
-  const spatialLocks = useMemo(() => new Map([...movedGroups].filter(([, group]) => group.level === spatialLevel && group.epoch === positions.groupEpoch).map(([id, group]) => [id, group.members])), [movedGroups, spatialLevel, positions.groupEpoch]);
+  const spatialLocks = useMemo(() => new Map([...movedGroups.values()].filter(group => group.level === spatialLevel && group.epoch === positions.groupEpoch).map(group => [group.representative, group.members])), [movedGroups, spatialLevel, positions.groupEpoch]);
   const spatial = useMemo(() => frozenSpatial.current ?? nucleusView(semanticNodes, snapshotLinks,
     spatialLevel, selected, spatialReveal?.members, spatialLocks), [semanticNodes, snapshotLinks, spatialLevel, selected, settledRevision, spatialReveal, spatialLocks]);
   const { nodes: currentDisplayNodes, counts: spatialCounts, groups: spatialGroups } = spatial;
@@ -440,7 +442,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     return displayNodes.some(node => !visible.has(node.id));
   }, [nodes, snapshot, displayNodes]);
   const layoutCore = activeExpandedCore ?? cores.find(core => selected && core.members.has(selected))?.hub ?? (exposesHiddenMembers ? "*" : null);
-  useEffect(() => { if (expandedCore && !activeExpandedCore) { setExpandedCore(null); coreReturn.current = null; pendingReturn.current = null; } }, [expandedCore, activeExpandedCore]);
+  useEffect(() => { if (expandedCore && !activeExpandedCore) { setExpandedCore(null); coreReturn.current = null; pendingReturn.current = null; restoringCoreReturn.current = null; } }, [expandedCore, activeExpandedCore]);
   const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: visualLinks.map(l => ({ ...l })) }), [displayNodes, visualLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
@@ -561,7 +563,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           // cleared, even when their translation crosses a spatial cell boundary.
           if (plan.memberships.size) setMovedGroups(previous => {
             const next = new Map(previous);
-            for (const [id, members] of plan.memberships) next.set(id, { members, level: plan.level, epoch: positions.groupEpoch });
+            for (const [id, members] of plan.memberships) next.set(membershipKey(id, plan.level), { representative: id, members, level: plan.level, epoch: positions.groupEpoch });
             return next;
           });
           return plan.positions;
@@ -584,7 +586,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     // Empty members denotes a spatial return. Its own camera motion owns this interval.
     if (!fitChanged && spatialReveal && !spatialReveal.members.size) return;
     if (fitChanged) {
-      setSpatialReveal(null); setExpandedCore(null); coreReturn.current = null; pendingReturn.current = null;
+      setSpatialReveal(null); setExpandedCore(null); coreReturn.current = null; pendingReturn.current = null; restoringCoreReturn.current = null;
       positions.showCore(exposesHiddenMembers ? "*" : null, performance.now(), reduced);
     }
     // Frame the settled target while nodes travel there; framing their current
@@ -712,7 +714,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       positions.cancel();
       if (draggedSummary.current && moved && draggedSummary.current.epoch === positions.groupEpoch) {
         const group = draggedSummary.current;
-        setMovedGroups(current => new Map(current).set(group.id, { members: group.members, level: group.level, epoch: group.epoch }));
+        setMovedGroups(current => new Map(current).set(membershipKey(group.id, group.level), { representative: group.id, members: group.members, level: group.level, epoch: group.epoch }));
       }
       if (individual && moved) setMovedGroups(current => new Map([...current].filter(([, group]) => !group.members.includes(individual))));
       dragged.current = null; draggedSummary.current = null; summaryHalo.current = null; frozenSpatial.current = null; setDraggingId(null);
@@ -842,6 +844,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const instance = graph.current;
       const pose = cameraMotion.current.advance(performance.now());
       if (pose) writeCamera(pose);
+      if (!cameraMotion.current.moving && !pendingReturn.current) restoringCoreReturn.current = null;
       // Built-in uniforms need distinct materials for independently fading objects.
       for (const link of data.links) for (const [key, opacity] of [["__lineObj", link.kind === "subject" || link.kind === "parent" || link.kind === "topic" || link.kind === "area" ? .22 : .65], ["__arrowObj", 1.95]] as const) {
         const object = (link as unknown as Record<string, Object3D>)[key] as (Object3D & { material?: { opacity: number } }) | undefined;
@@ -881,7 +884,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           });
           if (shifted.length) setMovedGroups(previous => {
             const next = new Map(previous);
-            for (const [id, group] of shifted) next.set(id, { members: group.members, level: spatialLevel, epoch: positions.groupEpoch });
+            for (const [id, group] of shifted) next.set(membershipKey(id, spatialLevel), { representative: id, members: group.members, level: spatialLevel, epoch: positions.groupEpoch });
             return next;
           });
         }
@@ -957,7 +960,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
               }
               setMovedGroups(previous => {
                 const next = new Map(previous);
-                for (const [id, group] of spatialGroups) next.set(id, { members: group.members, level: spatialLevel, epoch: positions.groupEpoch });
+                for (const [id, group] of spatialGroups) next.set(membershipKey(id, spatialLevel), { representative: id, members: group.members, level: spatialLevel, epoch: positions.groupEpoch });
                 return next;
               });
             }
@@ -1138,7 +1141,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (disabled || !revealRef.current.current.has(id) || performance.now() < suppressClickUntil.current) return;
     if (collapsedCounts.has(id)) {
       if (selected && !onClearSelection()) return;
-      if (!coreReturn.current) coreReturn.current = getCamera()?.pose ?? null;
+      // A rapid reopen keeps the overview destination instead of capturing a halfway return pose.
+      if (!coreReturn.current) coreReturn.current = restoringCoreReturn.current ?? getCamera()?.pose ?? null;
+      restoringCoreReturn.current = null;
       pendingReturn.current = null;
       setSpatialReveal(null);
       setCorePage(0); setShowAllCore(false);
@@ -1159,6 +1164,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       moveCamera(frame.position, frame.target, reduced ? 0 : 650);
     } else {
       coreReturn.current = null;
+      restoringCoreReturn.current = null;
       if (!spatialReveal?.members.has(id)) setSpatialReveal(null);
       onSelect(id);
     }
@@ -1189,7 +1195,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       cursor.current = { x: event.clientX - rect.left, y: event.clientY - rect.top };
     }}
     onPointerLeave={() => { cursor.current = null; }}
-    onWheelCapture={event => { if (event.target === graph.current?.renderer().domElement) cameraMotion.current.stop(); }}
+    onWheelCapture={event => { if (event.target === graph.current?.renderer().domElement) { cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null; } }}
     onPointerDownCapture={event => {
       cursor.current = null;
       if (graph.current) (graph.current.controls() as OrbitControls).autoRotate = false;
@@ -1201,7 +1207,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       pressedNode.current = null;
       const instance = graph.current, canvas = instance?.renderer().domElement;
       if (canvas && event.target === canvas) {
-        cameraMotion.current.stop(); pendingReturn.current = null;
+        cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null;
         if (activePointers.current.size === 0) controlPointer.current = null;
         activePointers.current.set(event.pointerId, event.pointerType);
         const rect = canvas.getBoundingClientRect(), camera = instance!.camera();
@@ -1279,7 +1285,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         dragged.current = null; setDraggingId(null);
         if (moved) setMovedGroups(previous => {
           const next = new Map([...previous].filter(([, group]) => !individual || !group.members.includes(individual)));
-          if (summary?.epoch === positions.groupEpoch) next.set(summary.id, { members: summary.members, level: summary.level, epoch: summary.epoch });
+          if (summary?.epoch === positions.groupEpoch) next.set(membershipKey(summary.id, summary.level), { representative: summary.id, members: summary.members, level: summary.level, epoch: summary.epoch });
           for (const [id, group] of spatialGroups) {
             const representative = current.get(id), target = positions.settlingTarget(id);
             const shifted = group.members.reduce((sum, member) => {
@@ -1289,7 +1295,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             const willMove = target && representative && Math.hypot(target.x - representative.x, target.y - representative.y, target.z - representative.z) > .001;
             const hasMoved = Math.hypot(shifted.x - group.center.x, shifted.y - group.center.y, shifted.z - group.center.z) > .001;
             if (willMove || hasMoved) {
-              next.set(id, { members: group.members, level: spatialLevel, epoch: positions.groupEpoch });
+              next.set(membershipKey(id, spatialLevel), { representative: id, members: group.members, level: spatialLevel, epoch: positions.groupEpoch });
             }
           }
           return next;
@@ -1312,7 +1318,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       {Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /></div>)}
     </div>
     {activeExpandedCore && !selected && !spatialReveal?.members.size && <div className="graph-core-actions">
-      <button type="button" ref={coreCloseButton} onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); pendingReturn.current = coreReturn.current; coreReturn.current = null; setExpandedCore(null); }}>묶음 접기</button>
+      <button type="button" ref={coreCloseButton} onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); pendingReturn.current = coreReturn.current; restoringCoreReturn.current = coreReturn.current; coreReturn.current = null; setExpandedCore(null); }}>묶음 접기</button>
       {disclosure?.hub === activeExpandedCore && <>
         <button type="button" disabled={disclosure.index === 0} onClick={() => setCorePage(disclosure.index - 1)}>이전</button>
         <span>{coreLabel(nodes.find(node => node.id === disclosure.hub), disclosure.total, snapshot.view)} · {disclosure.index + 1}/{disclosure.pages}</span>

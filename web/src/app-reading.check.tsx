@@ -176,6 +176,11 @@ async function check(size: number) {
       assert(listOrder().length === size, "sorting preserves all displayed records");
     }
     assert(JSON.stringify(listOrder()) === JSON.stringify(initialOrder), "restoring the sort restores the list");
+    const viewSettings = details("보기 설정");
+    viewSettings.summary.click(); await settle();
+    const settingsBox = host.querySelector('.view-options > div')!.getBoundingClientRect();
+    assert(settingsBox.left >= 0 && settingsBox.right <= window.innerWidth, "list settings stay inside the viewport when toolbar actions wrap");
+    viewSettings.summary.click(); await settle();
     const explorerCalls = calls.length;
     narrowMedia.matches = true; narrowMedia.dispatchEvent(new Event("change")); await settle();
     button("필터·묶음").click(); await settle();
@@ -756,6 +761,7 @@ async function checkSummaryOverview() {
   const glyphCrossfade = { opening: false, closing: false }, wrappedGlyphs = new WeakSet<Sprite>();
   let spatialCloudId: string | undefined, spatialCloudCrossfade = false;
   let positions: Positions | undefined, overviewPacks = 0;
+  let observedCamera: Camera | undefined;
   const counts = [22, 40, 75, 120], nodes: GraphNode[] = [], links: Snapshot["links"] = [];
   for (const count of counts) for (let index = 0; index < count; index++) {
     const id = `group-${count}-${index}`;
@@ -773,6 +779,7 @@ async function checkSummaryOverview() {
   const summary = (count: number) => labels().find(node => node.textContent?.includes(`관계 묶음 · ${count}개`));
   try {
     Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, material, group) {
+      observedCamera = camera;
       scene.traverse(object => {
         if (object instanceof Sprite && ["summary-glyph", "retiring-summary-glyph"].includes(object.name) && !wrappedGlyphs.has(object)) {
           wrappedGlyphs.add(object);
@@ -867,6 +874,12 @@ async function checkSummaryOverview() {
       }
     };
     lightPhase = "opening";
+    const overviewCamera = observedCamera!.position.clone(), overviewRotation = observedCamera!.quaternion.clone();
+    const hubProjections = () => counts.map(count => {
+      const at = positions!.layoutTarget(`group-${count}-0`)!, projected = new Vector3(at.x, at.y, at.z).project(observedCamera!);
+      return { count, x: projected.x, y: projected.y, z: projected.z };
+    });
+    const overviewProjections = hubProjections();
     summary(120)!.click();
     await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes("관계 묶음 · 120개 · 1/10") === true, "large summary opens its compact page");
     await until(() => { const value = cloudSamples.get("group-120-0")?.opacity; return value !== undefined && value > .3 && value < .85; }, "the real summary cloud is midway through opening");
@@ -912,7 +925,10 @@ async function checkSummaryOverview() {
     lightPhase = "closing";
     button("묶음 접기").click();
     const closedAt = performance.now();
-    await until(() => !positions!.layoutMoving && performance.now() - closedAt > 1000 && counts.every(count => !!summary(count)), "closing restores all overview summaries");
+    await until(() => !positions!.layoutMoving && performance.now() - closedAt > 1000 && counts.every(count => !!summary(count)), "closing restores all overview summaries").catch(error => {
+      throw new Error(`${error.message}; ${JSON.stringify({ moving: positions?.layoutMoving, packs: overviewPacks, placements: placements(), cameraDelta: observedCamera!.position.distanceTo(overviewCamera), rotationDelta: observedCamera!.quaternion.angleTo(overviewRotation), backgroundSame: background() === backgroundBeforeExpansion, overviewProjections, closedProjections: hubProjections(), visible: labels().map(label => label.children[0].textContent) })}`);
+    });
+    assert(observedCamera!.position.distanceTo(overviewCamera) < .01 && observedCamera!.quaternion.angleTo(overviewRotation) < .001, "a rapid reopen keeps the original overview camera as the return destination");
     assert(cloudCrossfade.closing, "the actual summary light regathers as returning stars dissolve");
     assert(glyphCrossfade.opening && glyphCrossfade.closing, "the count-sized summary image shares the light's continuous opening and closing fade");
     lightPhase = null;
