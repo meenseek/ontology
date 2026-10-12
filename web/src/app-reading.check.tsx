@@ -791,7 +791,7 @@ async function checkSummaryOverview() {
   let spatialCloudId: string | undefined, spatialCloudCrossfade = false;
   let positions: Positions | undefined, overviewPacks = 0;
   let observedCamera: Camera | undefined;
-  const counts = [22, 40, 75, 120], nodes: GraphNode[] = [], links: Snapshot["links"] = [];
+  const counts = [20, 21, 22, 40, 75, 120], nodes: GraphNode[] = [], links: Snapshot["links"] = [];
   for (const count of counts) for (let index = 0; index < count; index++) {
     const id = `group-${count}-${index}`;
     nodes.push({ id, scope: "personal", kind: "document", label: `합성 ${count}개 묶음 자료 ${index}`, status: "ok", present: true, current: true });
@@ -889,9 +889,10 @@ async function checkSummaryOverview() {
     });
     const coordinates = () => JSON.stringify(nodes.map(node => positions!.layoutTarget(node.id)));
     const worldBeforeZoom = coordinates(), packsBeforeZoom = overviewPacks;
-    if (innerWidth <= 700) {
+    const assertMobileKeys = () => {
+      if (innerWidth > 700) return;
       const pinned = [...host.querySelectorAll<HTMLElement>(".graph-group-target.core-name")];
-      assert(pinned.length === counts.length && pinned.every(target => target.offsetWidth > 1 && target.offsetHeight >= 38), "all four core names and counts are readable without pointing");
+      assert(pinned.length === counts.length && pinned.every(target => target.offsetWidth > 1 && target.offsetHeight >= 38), "all six core names and counts are readable without pointing");
       const navigation = host.querySelector<HTMLElement>(".graph-group-navigation")!;
       assert(navigation.getBoundingClientRect().height <= 72 && getComputedStyle(navigation).overflowX === "auto", "mobile names occupy one compact scrollable row");
       const markers = [...host.querySelectorAll<HTMLElement>(".graph-group-marker")];
@@ -910,7 +911,8 @@ async function checkSummaryOverview() {
         }), "core keys remain visible outside the name row and minimap");
       }
       assert([...host.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].every(label => parseFloat(label.style.getPropertyValue("--leader-length")) <= 34.01), "resting mobile names use short leaders");
-    }
+    };
+    assertMobileKeys();
     const keyboardGroups = labels().length;
     for (const target of labels()) {
       const id = target.dataset.nodeId, text = target.textContent;
@@ -1015,6 +1017,7 @@ async function checkSummaryOverview() {
     assert(glyphCrossfade.opening && glyphCrossfade.closing, "the count-sized summary image shares the light's continuous opening and closing fade");
     lightPhase = null;
     assert(background() === backgroundBeforeExpansion && overviewPacks === packsBeforeZoom, "Closing restores the same overview without a new whole-map pack");
+    assertMobileKeys();
     assert(graphCalls === initialCalls, "overview packing and expansion reuse one response");
     details("보기 설정").summary.click(); button("새로고침").click();
     await until(() => graphCalls === initialCalls + 1 && host.querySelector(".galaxy")?.getAttribute("aria-busy") === "false" && overviewReady(), "refresh retains all overview images");

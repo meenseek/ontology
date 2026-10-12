@@ -993,12 +993,22 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             const star = candidates.find(node => node.id === marker.dataset.nodeId);
             marker.hidden = !star || star.depth < -1 || star.depth > 1 || star.x + star.radius < 0 || star.x - star.radius > size.width || star.y + star.radius < 0 || star.y - star.radius > size.height;
             if (!star || marker.hidden) continue;
+            const placeAt = (x: number, y: number) => ({ x, y, left: x - 12, top: y - 12, right: x + 12, bottom: y + 12 });
             const places = [[1, -1], [1, 1], [-1, -1], [-1, 1]].map(([dx, dy]) => {
               const x = Math.max(12, Math.min(size.width - 12, star.x + star.radius * .6 * dx));
               const y = Math.max(12, Math.min(size.height - 12, star.y + star.radius * .6 * dy));
-              return { x, y, left: x - 12, top: y - 12, right: x + 12, bottom: y + 12 };
+              return placeAt(x, y);
             });
-            const place = places.find(box => [...obstacles, ...markerBoxes].every(other => box.right <= other.left || box.left >= other.right || box.bottom <= other.top || box.top >= other.bottom));
+            const blockers = [...obstacles, ...markerBoxes];
+            const clear = (box: ReturnType<typeof placeAt>) => box.left >= 0 && box.right <= size.width && box.top >= 0 && box.bottom <= size.height &&
+              Math.hypot(box.x - star.x, box.y - star.y) <= Math.max(100, star.radius + 24) &&
+              blockers.every(other => box.right <= other.left || box.left >= other.right || box.bottom <= other.top || box.top >= other.bottom);
+            // A body can sit partly behind chrome after returning to the overview.
+            // Keep its key close, just outside the blocking edge, before deferring it.
+            const place = places.find(clear) ?? blockers.flatMap(other => [
+              placeAt(places[0].x, other.bottom + 12), placeAt(places[0].x, other.top - 12),
+              placeAt(other.right + 12, places[0].y), placeAt(other.left - 12, places[0].y),
+            ]).sort((a, b) => Math.hypot(a.x - star.x, a.y - star.y) - Math.hypot(b.x - star.x, b.y - star.y)).find(clear);
             marker.hidden = !place;
             if (!place) continue;
             marker.style.left = `${place.x}px`; marker.style.top = `${place.y}px`;
