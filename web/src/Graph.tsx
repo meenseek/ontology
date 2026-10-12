@@ -836,7 +836,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     let previousLabels = new Map<string, ReturnType<typeof visibleLabels>[number]>();
     const chrome = () => {
       const origin = layer.getBoundingClientRect();
-      return [...(container.current?.querySelectorAll<HTMLElement>(".graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions, .graph-group-target.core-name, .graph-group-target:focus") ?? [])]
+      return [...(container.current?.querySelectorAll<HTMLElement>(".graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions, .graph-group-navigation.with-keys, .graph-group-target.core-name, .graph-group-target:focus") ?? [])]
         .filter(element => element.offsetWidth && element.offsetHeight)
         .map(element => { const box = element.getBoundingClientRect(); return { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }; });
     };
@@ -988,12 +988,21 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : namedGroup ? 1 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, body: pixels / 2, ...dimensions.get(node.id)![node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
           });
           // Mobile name keys follow the actual projected body; they never move a star.
+          const obstacles = chrome(), markerBoxes: typeof obstacles = [];
           for (const marker of [...(groupMarkerLayer.current?.children ?? [])] as HTMLElement[]) {
             const star = candidates.find(node => node.id === marker.dataset.nodeId);
             marker.hidden = !star || star.depth < -1 || star.depth > 1 || star.x + star.radius < 0 || star.x - star.radius > size.width || star.y + star.radius < 0 || star.y - star.radius > size.height;
             if (!star || marker.hidden) continue;
-            marker.style.left = `${Math.max(12, Math.min(size.width - 12, star.x + star.radius * .6))}px`;
-            marker.style.top = `${Math.max(12, Math.min(size.height - 12, star.y - star.radius * .6))}px`;
+            const places = [[1, -1], [1, 1], [-1, -1], [-1, 1]].map(([dx, dy]) => {
+              const x = Math.max(12, Math.min(size.width - 12, star.x + star.radius * .6 * dx));
+              const y = Math.max(12, Math.min(size.height - 12, star.y + star.radius * .6 * dy));
+              return { x, y, left: x - 12, top: y - 12, right: x + 12, bottom: y + 12 };
+            });
+            const place = places.find(box => [...obstacles, ...markerBoxes].every(other => box.right <= other.left || box.left >= other.right || box.bottom <= other.top || box.top >= other.bottom));
+            marker.hidden = !place;
+            if (!place) continue;
+            marker.style.left = `${place.x}px`; marker.style.top = `${place.y}px`;
+            markerBoxes.push(place);
             marker.classList.toggle("active", star.id === hoveredId.current || star.id === focusedSummary);
           }
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
@@ -1003,10 +1012,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           // An opened group or revealed nearby stars show their own titles; other star titles wait.
           const opened = activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : spatialReveal?.members.size ? spatialReveal.members : undefined;
           const starTitles = opened ? { limit: 0, exempt: opened } : { limit: MAX_RESTING_STAR_LABELS };
-          const origin = layer.getBoundingClientRect();
-          const markerBoxes = [...(groupMarkerLayer.current?.children ?? [])].filter(element => !(element as HTMLElement).hidden)
-            .map(element => { const box = element.getBoundingClientRect(); return { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }; });
-          const environment = { stars: candidates, obstacles: [...chrome(), ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : undefined };
+          const environment = { stars: candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : undefined };
           let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
           // Expanded metadata must not make an already usable keyboard target disappear.
           const compactFallback = new Set(labelCandidates.filter(node => (node.id === priorityId || node.id === hoveredId.current) && !visible.some(box => box.id === node.id)).map(node => node.id));

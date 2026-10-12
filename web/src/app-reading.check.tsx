@@ -904,6 +904,10 @@ async function checkSummaryOverview() {
         assert(marker && !marker.hidden && marker.textContent === target.querySelector(".group-key")?.textContent, "the name and its actual rendered core share the same key");
         const x = mapRect.left + (sample.x + 1) * mapRect.width / 2, y = mapRect.top + (1 - sample.y) * mapRect.height / 2;
         assert(Math.hypot(box.x + box.width / 2 - x, box.y + box.height / 2 - y) < 100, "a key stays beside its own projected core");
+        assert([navigation, host.querySelector<HTMLElement>(".graph-minimap")!].every(chrome => {
+          const other = chrome.getBoundingClientRect();
+          return box.right <= other.left || box.left >= other.right || box.bottom <= other.top || box.top >= other.bottom;
+        }), "core keys remain visible outside the name row and minimap");
       }
       assert([...host.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].every(label => parseFloat(label.style.getPropertyValue("--leader-length")) <= 34.01), "resting mobile names use short leaders");
     }
