@@ -19,6 +19,12 @@ export function nodePresentation(node: { kind: string; label: string; title?: st
   const repository = compact ? node.repositoryLabel ?? node.repository : node.repository;
   return { title, subtitle: repository ? `${repository} · ${node.label}` : title !== node.label ? node.label : "" };
 }
+/** Omit a duplicate leading Markdown heading; keep the remaining text and line breaks. */
+export function searchExcerpt(excerpt: string, title: string): string {
+  const heading = excerpt.match(/^((?:…|\.\.\.)?)[ ]{0,3}#{1,6}[ \t]+([^\r\n]+)\r?\n([\s\S]+)$/);
+  if (!heading || heading[2].trim().replace(/[ \t]+#+$/, "") !== title.trim() || !heading[3].trim()) return excerpt;
+  return heading[1] + heading[3].replace(/^(?:[ \t]*\r?\n)+/, "");
+}
 export const MAX_VISIBLE_LABELS = 24;
 /** Group names lead the first view; only a few small star titles sit beside them. */
 export const MAX_RESTING_STAR_LABELS = 8;

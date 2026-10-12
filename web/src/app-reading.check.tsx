@@ -38,6 +38,10 @@ function details(text: string) {
   assert(summary?.parentElement instanceof HTMLDetailsElement, `Details: ${text}`);
   return { summary, element: summary.parentElement };
 }
+async function openExplorer() {
+  if (!host.querySelector(".map-sidebar")) button("필터·묶음").click();
+  await until(() => !!host.querySelector(".map-sidebar"), "explorer opens");
+}
 function enter(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const prototype = element instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
   Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(element, value);
@@ -45,14 +49,11 @@ function enter(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
   element.dispatchEvent(new Event("change", { bubbles: true }));
 }
 async function chooseDiagramMode(value: "purpose" | "relationships") {
-  button("필터·묶음").click();
-  await until(() => !!host.querySelector('select[aria-label="묶음 기준"]'), "diagram mode selector");
+  const options = details("보기 설정"); options.summary.click();
+  await settle();
   const select = host.querySelector<HTMLSelectElement>('select[aria-label="묶음 기준"]')!;
-  select.value = value;
-  select.dispatchEvent(new Event("change", { bubbles: true }));
-  await settle();
-  button("필터·묶음").click();
-  await settle();
+  select.value = value; select.dispatchEvent(new Event("change", { bubbles: true }));
+  await settle(); options.summary.click(); await settle();
 }
 const id = (index: number) => `m_00000000-0000-4000-8000-${index.toString().padStart(12, "0")}`;
 const subjectId = "p_00000000-0000-4000-8000-000000000001";
@@ -66,6 +67,9 @@ function graph(items: Item[], scope: Scope, query: string, focus: string | null,
 }
 
 async function check(size: number) {
+  const originalMatchMedia = window.matchMedia;
+  const narrowMedia = Object.assign(new EventTarget(), { matches: false, media: "(max-width: 900px)", onchange: null, addListener() {}, removeListener() {} });
+  window.matchMedia = query => query === narrowMedia.media ? narrowMedia as MediaQueryList : originalMatchMedia.call(window, query);
   const originalFetch = window.fetch;
   const originalUrl = window.location.href;
   const visibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
@@ -172,6 +176,20 @@ async function check(size: number) {
       assert(listOrder().length === size, "sorting preserves all displayed records");
     }
     assert(JSON.stringify(listOrder()) === JSON.stringify(initialOrder), "restoring the sort restores the list");
+    const explorerCalls = calls.length;
+    narrowMedia.matches = true; narrowMedia.dispatchEvent(new Event("change")); await settle();
+    button("필터·묶음").click(); await settle();
+    const explorer = host.querySelector<HTMLElement>('.map-sidebar[role="dialog"]')!;
+    const close = button("닫기", explorer);
+    assert(explorer?.getAttribute("aria-modal") === "true" && host.querySelector<HTMLElement>("header")?.inert && host.querySelector<HTMLElement>(".galaxy")?.inert, "narrow exploration has one active modal and an inert background");
+    assert(document.activeElement === close, "exploration focuses its close action");
+    const last = details("검색 방법").summary; last.focus();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    assert(document.activeElement === close, "Tab stays inside the explorer");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await settle();
+    assert(!host.querySelector(".map-sidebar") && document.activeElement === button("필터·묶음"), "Escape closes exploration and restores the opener");
+    assert(calls.length === explorerCalls, "opening and closing exploration reuses loaded data");
+    narrowMedia.matches = false; narrowMedia.dispatchEvent(new Event("change")); await settle();
     const first = host.querySelector<HTMLButtonElement>(".graph-list > button")!;
     first.click();
     await until(() => bodyIs(records.meenseek.get(id(1))!.body), "selected memory");
@@ -250,7 +268,7 @@ async function check(size: number) {
     return { size, passed: true, phases, calls, totalResponseBytes: calls.reduce((sum, call) => sum + call.responseBytes, 0), forbidden };
   } finally {
     root.unmount(); releaseGraph();
-    window.fetch = originalFetch;
+    window.fetch = originalFetch; window.matchMedia = originalMatchMedia;
     window.history.replaceState(null, "", originalUrl);
     if (visibility) Object.defineProperty(document, "visibilityState", visibility);
     else Reflect.deleteProperty(document, "visibilityState");
@@ -470,25 +488,27 @@ async function checkOriginalFolders() {
     state.value = "active";
     state.dispatchEvent(new Event("change", { bubbles: true }));
     await until(() => folderButtons().find(node => node.querySelector("strong")?.textContent === "personal · writing/2026")?.querySelector("small")?.textContent === "하위 원문 1개", "partially filtered folder count");
+    details("상위 폴더").summary.click(); await settle();
     const singleton = folderButtons().find(node => node.querySelector("strong")?.textContent === "personal · writing/2025");
     assert(singleton, "Single-document folder remains selectable");
     singleton.click();
     await until(() => host.querySelectorAll(".graph-list > button").length === 1, "single original in selected folder");
-    assert(source.value === "personal" && state.value === "active" && folderButtons().length === 4, "Folder click preserves source and state filters and other folder options");
+    await openExplorer();
+    assert(host.querySelector<HTMLSelectElement>(".topic-label select")?.value === "personal" && host.querySelector<HTMLSelectElement>(".filter-row label:nth-child(2) select")?.value === "active" && folderButtons().length === 4, "Folder click preserves source and state filters and other folder options after returning to exploration");
     const beforeStructure = graphCalls;
     await until(() => !!host.querySelector('.map-sidebar input[type="checkbox"]'), "folder overlay control is rendered");
-    const structure = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(input => input.parentElement?.textContent?.includes("폴더 연결 표시"))!;
-    structure.click();
+    const structure = () => [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(input => input.parentElement?.textContent?.includes("폴더 연결 표시"))!;
+    await openExplorer(); structure().click();
     await until(() => host.querySelectorAll(".graph-list > button").length === 2, "document plus its structural parent");
     assert(host.querySelector(".count-breakdown")?.textContent?.includes("문서 1 · 기록 0 · 관계 0 · 부모·소속 1"), "Parent links and folders do not inflate knowledge or semantic relation counts");
     const folderRow = [...host.querySelectorAll<HTMLButtonElement>(".graph-list > button")].find(node => node.querySelector(".node-symbol.folder"))!;
     folderRow.click();
     await settle();
     assert(!new URL(window.location.href).searchParams.has("focus") && graphCalls === beforeStructure, "Folder navigation stays local without synthetic backend focus or extra requests");
-    structure.click();
+    await openExplorer(); structure().click();
     await until(() => host.querySelectorAll(".graph-list > button").length === 1, "hide structural overlay");
     assert(graphCalls === beforeStructure, "Both structural toggles reuse the returned snapshot");
-    structure.click();
+    await openExplorer(); structure().click();
     await until(() => host.querySelectorAll(".graph-list > button").length === 2, "structural overlay before document selection");
     [...host.querySelectorAll<HTMLButtonElement>(".graph-list > button")].find(node => node.querySelector(".node-symbol.document"))!.click();
     await until(() => !!host.querySelector(".original-detail .document-preview"), "original detail preview");
@@ -1182,6 +1202,9 @@ async function checkRenderedMotion() {
       return restingSamples >= 4;
     }, "the existing damped rotation settles before isolated zoom observations");
     assert(JSON.stringify(model!.nodes.map(node => [node.id, node.x, node.y, node.z])) === restingLayout, "slow camera rotation preserves the compact world layout without repacking");
+    const disclosure = host.querySelector<HTMLButtonElement>(".minimap-disclosure")!;
+    if (disclosure.getAttribute("aria-expanded") === "false") disclosure.click();
+    await until(() => disclosure.getAttribute("aria-expanded") === "true", "open mobile minimap before measuring controls");
     const minimap = host.querySelector<HTMLCanvasElement>('.graph-minimap canvas')!;
     const controls = [...host.querySelectorAll<HTMLButtonElement>('.minimap-actions button')];
     assert(controls.length === 4 && controls.every(control => control.getAttribute("aria-label") && control.title), "four minimap controls expose accessible names and tooltips");

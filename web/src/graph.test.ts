@@ -2795,57 +2795,37 @@ test("a crowded group name falls back to the nearest free spot off its own body"
   assert.ok(gap >= group.radius + 4, "the name does not cover its own body");
 });
 
-test("a component's largest group keeps its name box clear of every linked body, and an unfitting view centers on the viewport", () => {
-  let seed = 7;
-  const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+test("overview clearance moves a colliding body and its hidden cohort, preserving unrelated coordinates", () => {
+  const model = reconcile(snapshot([doc("a"), doc("b"), doc("child"), doc("c")], [edge("a", "b")]));
+  const positions = new Positions(); positions.install(model, true);
+  const byId = new Map(model.nodes.map(node => [node.id, node]));
+  for (const [id, value] of Object.entries({ a: { x: 0, y: 0, z: 30 }, b: { x: 10, y: 0, z: -20 },
+    child: { x: 12, y: 9, z: -26 }, c: { x: 150, y: 80, z: 15 } })) fixPosition(byId.get(id)!, value);
+  const before = new Map(model.nodes.map(node => [node.id, coordinates(node)]));
   const plane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, worldPerPixel: () => 1 };
-  for (let trial = 0; trial < 40; trial++) {
-    // "q" is not the component root, and a smaller group "r" shares its component.
-    const members = Array.from({ length: 6 + Math.floor(random() * 10) }, (_, index) => `m-${String(index).padStart(2, "0")}`), ids = ["q", "r", ...members];
-    // Classification links take the topology slots, where a root most often lands below a group.
-    const pairs = [["q", "r"], ...members.flatMap((id, index) => random() < .7 ? [[random() < .5 ? "q" : [...members.slice(0, index), "r"][Math.floor(random() * (index + 1))], id]] : [])];
-    const links = pairs.map(([source, target]): GraphLink => ({ source, target, kind: random() < .6 ? "subject" : "related", current: true }));
-    const model = reconcile(snapshot(ids.map(doc), links.map(link => ({ ...link, kind: "related" })))), positions = new Positions(); positions.install(model, true);
-    const radius = (id: string) => id === "q" ? 30 : id === "r" ? 20 : 6;
-    const discs = model.nodes.map(node => ({ id: node.id, x: node.x, y: node.y, depth: 100, radius: radius(node.id), room: node.id === "q" || node.id === "r" ? { width: 120, height: 20, below: radius(node.id) + 5 } : undefined }));
-    assert.equal(positions.packOverview(discs, links, new Map(), plane, 0, true, { left: -600, right: 600, top: -300, bottom: 300 }), true);
-    const at = (id: string) => positions.layoutTarget(id)!, group = at("q"), box = { left: group.x - 60, right: group.x + 60, top: group.y + 35, bottom: group.y + 55 };
-    for (const id of ids.slice(1)) {
-      const star = at(id), gap = Math.hypot(star.x - Math.max(box.left, Math.min(box.right, star.x)), star.y - Math.max(box.top, Math.min(box.bottom, star.y)));
-      assert.ok(gap >= radius(id) + 4 - 1e-6, `trial ${trial}: ${id} leaves the reserved name box clear`);
-    }
-    if (trial) continue;
-    const current = discs.map(disc => ({ ...disc, x: at(disc.id).x, y: at(disc.id).y }));
-    assert.equal(positions.packOverview(current, links, new Map(), plane, 1, true, { left: 10, right: 40, top: -20, bottom: 20 }), true);
-    const left = Math.min(...current.map(disc => at(disc.id).x - disc.radius)), right = Math.max(...current.map(disc => at(disc.id).x + disc.radius));
-    const top = Math.min(...current.map(disc => at(disc.id).y - disc.radius)), bottom = Math.max(...current.map(disc => at(disc.id).y + disc.radius));
-    assert.ok(Math.abs((left + right) / 2) < 4 && Math.abs((top + bottom) / 2) < 4, `a view that cannot fit stays centered on the viewport: ${(left + right) / 2}, ${(top + bottom) / 2}`);
-  }
+  const discs = () => ["a", "b", "c"].map(id => ({ id, x: byId.get(id)!.x, y: byId.get(id)!.y, depth: 100, radius: 20 }));
+  assert.equal(positions.packOverview(discs(), model.links, new Map([["b", ["child"]]]), plane, 0, true, false), true);
+  assert.deepEqual(coordinates(byId.get("a")!), before.get("a"), "the largest anchor stays put");
+  assert.deepEqual(coordinates(byId.get("c")!), before.get("c"), "a clear unrelated body stays put");
+  assert.ok(Math.hypot(byId.get("a")!.x - byId.get("b")!.x, byId.get("a")!.y - byId.get("b")!.y) >= 46);
+  assert.deepEqual(coordinates(byId.get("child")!).map((v, axis) => v - coordinates(byId.get("b")!)[axis]),
+    before.get("child")!.map((v, axis) => v - before.get("b")![axis]), "hidden geometry follows its representative");
+  for (const node of model.nodes) assert.equal(node.z, before.get(node.id)![2], "screen-plane clearance retains depth");
+  const cleared = model.nodes.map(coordinates);
+  assert.equal(positions.packOverview(discs(), model.links, new Map(), plane, 1, true, false), false, "clear bodies need no layout motion");
+  assert.deepEqual(model.nodes.map(coordinates), cleared);
+  assert.deepEqual(model.links, reconcile(snapshot([doc("a"), doc("b"), doc("child"), doc("c")], [edge("a", "b")])).links);
 });
 
-test("a framed overview spreads unconnected groups without overlap and keeps each group name box clear", () => {
-  const nodes = Array.from({ length: 14 }, (_, index) => doc(`n-${String(index).padStart(2, "0")}`));
-  const model = reconcile(snapshot(nodes)), positions = new Positions(); positions.install(model, true);
-  const discs = model.nodes.map((node, index) => ({ id: node.id, x: node.x, y: node.y, depth: 100, radius: index ? 6 : 30, room: index ? undefined : { width: 120, height: 20, below: 35 } }));
+test("resized footprints do not spread or align a clear overview", () => {
+  const model = reconcile(snapshot(Array.from({ length: 14 }, (_, index) => doc(`n-${index}`))));
+  const positions = new Positions(); positions.install(model, true);
+  model.nodes.forEach((node, index) => fixPosition(node, { x: index * 60 + Math.sin(index) * 7, y: Math.cos(index) * 130, z: node.z }));
+  const before = model.nodes.map(coordinates);
   const plane = { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, worldPerPixel: () => 1 };
-  const frame = { left: -560, right: 560, top: -220, bottom: 220 };
-  const extent = () => {
-    const points = discs.map(disc => ({ ...disc, at: positions.layoutTarget(disc.id)! }));
-    return { points, width: Math.max(...points.map(p => p.at.x + p.radius)) - Math.min(...points.map(p => p.at.x - p.radius)) };
-  };
-  assert.equal(positions.packOverview(discs, [], new Map(), plane, 0, true), true);
-  const compact = extent().width;
-  assert.equal(positions.packOverview(discs, [], new Map(), plane, 1, true, frame), true);
-  const { points, width } = extent();
-  assert.ok(width > compact * 1.5, "unconnected bodies use the frame's free width");
-  for (const [index, a] of points.entries()) {
-    assert.ok(a.at.x - a.radius >= frame.left - 1e-6 && a.at.x + a.radius <= frame.right + 1e-6 && a.at.y - a.radius >= frame.top - 1e-6 && a.at.y + a.radius <= frame.bottom + 1e-6, `${a.id} stays in the frame`);
-    for (const b of points.slice(index + 1)) assert.ok(Math.hypot(a.at.x - b.at.x, a.at.y - b.at.y) >= a.radius + b.radius - 1e-6, `${a.id} and ${b.id} do not touch`);
-  }
-  const group = points[0], box = { left: group.at.x - 60, right: group.at.x + 60, top: group.at.y + 35, bottom: group.at.y + 55 };
-  for (const other of points.slice(1)) {
-    const gap = Math.hypot(other.at.x - Math.max(box.left, Math.min(box.right, other.at.x)), other.at.y - Math.max(box.top, Math.min(box.bottom, other.at.y)));
-    assert.ok(gap >= other.radius + 4 - 1e-6, `${other.id} leaves the group name box clear`);
+  for (const radius of [5, 12, 20, 5]) {
+    assert.equal(positions.packOverview(model.nodes.map(node => ({ id: node.id, x: node.x, y: node.y, depth: 100, radius })), [], new Map(), plane, radius, true, false), false);
+    assert.deepEqual(model.nodes.map(coordinates), before, "viewport footprints cannot replace an already clear constellation");
   }
 });
 
@@ -2905,4 +2885,13 @@ test("a hub with connected branches keeps real crosslinks beside its off-center 
   assert.ok(links.every(link => { const a = slots.get(link.source)!, b = slots.get(link.target)!; return Math.hypot(a.x - b.x, a.y - b.y) < 4; }), "actual connections stay local");
   assert.deepEqual(slots, topologySlots([...ids].reverse(), [...links].reverse(), radii, 16));
   assert.deepEqual(links, original, "branch shaping retains every real crosslink");
+});
+
+test("search excerpts omit only an identical leading heading and keep quoted/code content", async () => {
+  const { searchExcerpt } = await import("./presentation.ts");
+  assert.equal(searchExcerpt("…# UI 디자인 기준\n\n원문의 실제 문장\n다음 문장", "UI 디자인 기준"), "…원문의 실제 문장\n다음 문장");
+  assert.equal(searchExcerpt("...   # UI 디자인 기준\r\n \t\r\n    code\r\n\tmore", "UI 디자인 기준"), "...    code\r\n\tmore", "blank lines can recede while body indentation and line endings remain exact");
+  for (const value of ["# 다른 제목\n본문", "```md\n# UI 디자인 기준\n```", "> # UI 디자인 기준\n인용", "# UI 디자인 기준", "# UI 디자인 기준\n\n", "…    # UI 디자인 기준\n본문", "\t# UI 디자인 기준\n본문", "\n# UI 디자인 기준\n본문"]) {
+    assert.equal(searchExcerpt(value, "UI 디자인 기준"), value, "other headings, code, quotations and heading-only excerpts remain exact");
+  }
 });

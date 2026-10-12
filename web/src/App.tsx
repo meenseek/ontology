@@ -6,7 +6,7 @@ import Memory from "./Memory";
 import { DocumentPurpose, SubjectPurpose } from "./Purpose";
 import type { Item as MemoryItem } from "./Memory";
 import { Positions } from "./positions";
-import { nodePresentation, starColor } from "./presentation";
+import { nodePresentation, searchExcerpt, starColor } from "./presentation";
 import { graphUrl, isNativeOriginal, kindName, knowledge, linkName, listNodes, listTimestamp, nativeFolders, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph } from "./graph";
 import type { Filters, GraphNode, GraphView, ListSort, Model, Scope, Snapshot } from "./graph";
 const Graph = lazy(() => import("./Graph.tsx"));
@@ -89,6 +89,7 @@ export default function App() {
   const [explore, setExplore] = useState(false);
   const panelElement = useRef<HTMLElement>(null), closeButton = useRef<HTMLButtonElement>(null), manageButton = useRef<HTMLButtonElement>(null);
   const documentContext = useRef<HTMLDetailsElement>(null);
+  const explorerElement = useRef<HTMLElement>(null), explorerClose = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null), filterButton = useRef<HTMLButtonElement>(null);
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 900px)").matches);
   const selected = data?.model.nodes.find(n => n.id === route.focus) ?? null;
@@ -222,12 +223,12 @@ export default function App() {
   function fitView(cluster = filters.cluster) {
     if (busy || !confirmDiscard()) return;
     setFilters(f => ({ ...f, cluster, folder: null }));
-    closePanel(); setFit(v => v + 1);
+    closePanel(); if (narrow) closeExplorer(); setFit(v => v + 1);
   }
   function fitFolder(folder: string | null) {
     if (busy || !confirmDiscard()) return;
     setFilters(f => ({ ...f, folder, cluster: null }));
-    closePanel(); setFit(v => v + 1);
+    closePanel(); if (narrow) closeExplorer(); setFit(v => v + 1);
   }
   function toggleFolders(value: boolean) {
     showFoldersRef.current = value; setShowFolders(value);
@@ -268,13 +269,18 @@ export default function App() {
     const resize = () => setNarrow(media.matches);
     media.addEventListener("change", resize); return () => media.removeEventListener("change", resize);
   }, []);
+  function closeExplorer() {
+    setExplore(false); requestAnimationFrame(() => filterButton.current?.focus());
+  }
+  useEffect(() => { if (explore && narrow && !panel) explorerClose.current?.focus(); }, [explore, narrow, panel]);
   useEffect(() => { if (panel) closeButton.current?.focus(); }, [!!panel, !!session]);
   useEffect(() => {
-    if (!panel) return;
+    if (!panel && !(explore && narrow)) return;
+    const modal = panel ? panelElement.current : explorerElement.current;
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) { event.preventDefault(); closePanel(); }
+      if (event.key === "Escape" && !busy) { event.preventDefault(); if (panel) closePanel(); else closeExplorer(); }
       if (event.key !== "Tab" || !narrow) return;
-      const controls = [...(panelElement.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, [tabindex="0"]') ?? [])].filter(el => {
+      const controls = [...(modal?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, [tabindex="0"]') ?? [])].filter(el => {
         if (!el.getClientRects().length || getComputedStyle(el).visibility !== "visible") return false;
         for (let ancestor: HTMLElement | null = el; ancestor; ancestor = ancestor.parentElement) {
           if (ancestor.hidden || ancestor.inert || getComputedStyle(ancestor).opacity === "0") return false;
@@ -290,14 +296,14 @@ export default function App() {
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     };
     document.addEventListener("keydown", keydown); return () => document.removeEventListener("keydown", keydown);
-  }, [panel, narrow, busy]);
+  }, [panel, explore, narrow, busy]);
   const cluster = data?.model.clusters.find(c => c.id === filters.cluster);
   const clusterOptions = useMemo(() => data ? visibleClusterOptions(data.model, filters) : { listed: [], standalone: 0 }, [data, filters]);
   const listedClusters = clusterOptions.listed;
   const folders = useMemo(() => data ? nativeFolders(visibleGraph(data.model, { ...filters, cluster: null, folder: null }).nodes) : [], [data, filters]);
   const folder = data && filters.folder ? nativeFolders(data.model.nodes).find(value => value.id === filters.folder) : null;
   return <div className="app">
-    <header className="app-header" inert={!!panel && narrow}>
+    <header className="app-header" inert={(!!panel || explore) && narrow}>
       <a className="wordmark" href="/">개인 온톨로지</a>
       <div className="scope-switch" role="group" aria-label="탐색 범위">
         <button aria-pressed={route.scope === "personal"} disabled={busy} onClick={() => changeScope("personal")}>내 지식</button>
@@ -311,8 +317,8 @@ export default function App() {
       <button ref={manageButton} className="manage-button" disabled={!session || busy} onClick={startRecord}>기록 남기기</button>
     </header>
     <main className={`map-workspace ${panel ? "panel-open" : ""} ${explore ? "explorer-open" : ""}`}>
-      {explore && <aside className="map-sidebar" aria-label="지식 탐색" inert={!!panel && narrow}>
-        <div className="sidebar-heading"><h2>탐색 조건</h2><button className="quiet" aria-label="탐색 조건 닫기" onClick={() => { setExplore(false); filterButton.current?.focus(); }}>닫기</button></div>
+      {explore && <aside ref={explorerElement} className="map-sidebar" role={narrow ? "dialog" : undefined} aria-modal={narrow || undefined} aria-label="지식 탐색" inert={!!panel && narrow}>
+        <div className="sidebar-heading"><h2>탐색 조건</h2><button ref={explorerClose} className="quiet" aria-label="탐색 조건 닫기" onClick={closeExplorer}>닫기</button></div>
         <div className="filter-row">
           <label>표시 종류<select value={filters.kind} disabled={busy} onChange={e => setFilters(f => ({ ...f, kind: e.target.value as Filters["kind"] }))}><option value="all">모두</option><option value="knowledge">문서와 기록</option>{Object.entries(kindName).filter(([id]) => id !== "folder" || showFolders).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
           <label>표시 상태<select value={filters.state} disabled={busy} onChange={e => setFilters(f => ({ ...f, state: e.target.value as Filters["state"] }))}><option value="all">모든 상태</option><option value="active">현재 사용 가능</option><option value="proposed">제안</option><option value="withdrawn">철회</option><option value="attention">확인 필요·제외</option></select></label>
@@ -325,14 +331,14 @@ export default function App() {
           <p className="hint">{listedClusters.length}개 묶음 · 단독 항목 {clusterOptions.standalone}개</p>
           <p className="hint">{view === "purpose" ? "저장된 목적 소속을 표시합니다. 미분류는 개별 항목으로 남으며 검색·관계 변화로 소속이 바뀌지 않습니다." : "현재 관계로 계산한 군집입니다. 검색 범위와 관계 변화에 따라 달라질 수 있습니다."} 폴더 소속은 별도 구조입니다.</p>
         </section>
-        <section className="folder-list"><h2>상위 폴더</h2><div className="compact-list">{folders.map(value => <button className="cluster" key={value.id} disabled={busy} aria-pressed={filters.folder === value.id} onClick={() => fitFolder(value.id)}><strong>{value.label}</strong><small>하위 원문 {value.members.length}개</small></button>)}</div><p className="hint">조회된 원문 경로에서 계산한 부모·소속 구조입니다. 폴더를 누르면 하위 자료를 봅니다.</p></section>
+        <details className="folder-list"><summary>상위 폴더 · {folders.length}개</summary><div className="compact-list">{folders.map(value => <button className="cluster" key={value.id} disabled={busy} aria-pressed={filters.folder === value.id} onClick={() => fitFolder(value.id)}><strong>{value.label}</strong><small>하위 원문 {value.members.length}개</small></button>)}</div><p className="hint">조회된 원문 경로에서 계산한 부모·소속 구조입니다. 폴더를 누르면 하위 자료를 봅니다.</p></details>
         <details className="section"><summary>검색 방법</summary><p className="hint">단어를 띄어 쓰면 순서와 관계없이 모든 단어가 포함된 항목을 찾습니다. 경로와 검색 가능한 원문 내용도 함께 찾습니다. 첨부 파일은 연결된 원문 안에서 내려받습니다. 폴더 연결은 경로에서 계산하며 내용의 유사성을 뜻하지 않습니다.</p></details>
       </aside>}
-      <section className="galaxy" aria-label="지식 지도" aria-busy={loading} inert={!!panel && narrow}>
-        <div className="map-toolbar"><div className="map-title"><h1>{folder ? folder.label : cluster ? cluster.label : route.q ? `“${route.q}” 검색` : "지식 지도"}</h1><p className="count-breakdown">표시 중 · 문서 {data ? displayed.filter(n => n.kind === "document").length : "—"} · 기록 {data ? displayed.filter(n => n.kind === "memory").length : "—"} · 관계 {data ? shown.links.filter(link => link.kind !== "parent").length : "—"}{showFolders && data && <> · 부모·소속 {shown.links.filter(link => link.kind === "parent").length}</>}</p>{timing && data && !loading && sameGraphLocation(timing.location, route) && <p className="count-breakdown load-timing" title="응답은 자료 요청부터 JSON 수신까지, 목록 표시는 요청부터 목록의 첫 화면이 그려질 때까지입니다. 앱 실행·접속 시간은 제외합니다.">최근 조회 · 응답 {Math.round(timing.responseMs)}ms{timing.list && fallback && <> · 목록 표시 {Math.round(timing.displayMs)}ms</>}</p>}</div>
+      <section className="galaxy" aria-label="지식 지도" aria-busy={loading} inert={(!!panel || explore) && narrow}>
+        <div className="map-toolbar"><div className="map-title"><h1>{folder ? folder.label : cluster ? cluster.label : route.q ? `“${route.q}” 검색` : "지식 지도"}</h1><p className="count-breakdown">표시 중 · 문서 {data ? displayed.filter(n => n.kind === "document").length : "—"} · 기록 {data ? displayed.filter(n => n.kind === "memory").length : "—"} · 관계 {data ? shown.links.filter(link => link.kind !== "parent").length : "—"}{showFolders && data && <> · 부모·소속 {shown.links.filter(link => link.kind === "parent").length}</>}</p></div>
           <div className="map-actions">
             {fallback && !route.q && <label className="list-sort">표시 항목 정렬<select aria-label="표시 항목 정렬" value={listSort} disabled={busy} onChange={event => setListSort(event.target.value as ListSort)}><option value="updated">최근 수정순</option><option value="created">최근 추가순</option><option value="name">이름순</option></select></label>}
-            <button ref={filterButton} disabled={busy} aria-expanded={explore} onClick={() => setExplore(v => !v)}>필터·묶음</button>
+            <button ref={filterButton} disabled={busy} aria-expanded={explore} onClick={() => explore ? closeExplorer() : setExplore(true)}>필터·묶음</button>
             <button disabled={busy} aria-pressed={fallback} onClick={() => { if (webglFailed) { setWebglFailed(false); setListMode(false); } else setListMode(v => !v); }}>{fallback ? "3D 보기" : "목록 보기"}</button>
             <details className="view-options"><summary>보기 설정</summary><div>
               <label>묶음 기준<select aria-label="묶음 기준" value={view} disabled={busy} onChange={event => changeView(event.target.value as GraphView)}><option value="purpose">목적</option><option value="relationships">관계</option></select></label>
@@ -340,6 +346,7 @@ export default function App() {
               <button disabled={busy || !data} onClick={() => { positions.reset(); setFit(v => v + 1); }}>배치 초기화</button>
               <button disabled={busy || loading} aria-busy={loading} onClick={reload}>{loading ? "새로고침 중…" : "새로고침"}</button>
               {!fallback && <><button disabled={reduced || !!route.focus} aria-pressed={rotating} title={route.focus ? "자료 선택을 해제하면 설정한 지도 회전이 재개됩니다." : undefined} onClick={() => setRotate(v => !v)}>{reduced ? "동작 줄이기 · 지도 회전 멈춤" : route.focus ? "자료 선택 중 · 지도 회전 멈춤" : rotating ? "지도 회전 멈춤" : "지도 천천히 회전"}</button></>}
+              {timing && data && !loading && sameGraphLocation(timing.location, route) && <p className="count-breakdown load-timing" title="응답은 자료 요청부터 JSON 수신까지, 목록 표시는 요청부터 목록의 첫 화면이 그려질 때까지입니다. 앱 실행·접속 시간은 제외합니다.">최근 조회 · 응답 {Math.round(timing.responseMs)}ms{timing.list && fallback && <> · 목록 표시 {Math.round(timing.displayMs)}ms</>}</p>}
             </div></details>
           </div>
         </div>
@@ -354,8 +361,8 @@ export default function App() {
           {data && shown.nodes.length > 0 && !shown.links.length && <p className="hint no-relations">{data.snapshot.totals.links === 0 ? "아직 등록된 관계가 없습니다." : "현재 표시한 항목 사이에는 조회된 관계가 없습니다."}</p>}
           {selected && !shown.nodes.some(n => n.id === selected.id) && <p className="notice">선택한 자료가 현재 필터 밖에 있습니다. <button onClick={() => setFilters(initialFilters)}>필터 해제</button></p>}
         </div>
-        {data && !loading && !displayed.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{route.q || filters.kind !== "all" || filters.state !== "all" ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 저장한 기록이 이곳에 나타납니다."}</p><button disabled={!session || busy} onClick={startRecord}>기록 남기기</button></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{displayed.map(n => { const label = nodePresentation(n), at = listTimestamp(n, listSort); return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} style={{ color: knowledge(n) ? starColor(n) : n.taxonomyColor ?? n.color }} aria-hidden="true">{knowledge(n) ? "·" : "○"}</span><span><small>{kindName[n.kind]} · {stateName(n)}</small><strong>{label.title}</strong>{label.subtitle && <span className="node-location">{label.subtitle}</span>}{route.q && n.historical_match && <small className="warning">이전 내용에서 일치 · 현재 상태를 확인하세요</small>}{route.q && n.excerpt && <span className="search-excerpt">{n.excerpt}</span>}</span>{!route.q && knowledge(n) && listSort !== "name" && <small className="node-date">{at === null ? listSort === "created" ? "추가일 미확인" : "수정일 미확인" : <time dateTime={new Date(at).toISOString()} title={new Date(at).toLocaleString("ko-KR")}>{listSort === "created" ? "추가" : "수정"} · {new Date(at).toLocaleDateString("ko-KR")}</time>}</small>}{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph key={`${route.scope}:${route.q}`} positions={positions} snapshot={data.model} nodes={shown.nodes} links={shown.links} selected={route.focus} rotate={rotating} allConnections={allConnections} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onClearSelection={closePanel} onFit={() => fitView()} onToggleRotation={() => setRotate(value => !value)} onFailure={failed} /></Suspense></GraphBoundary>)}
-        <div className="map-legend"><span><i className="legend-star document" />문서</span><span><i className="legend-star memory" />기록</span><span>○ 분류 표식{showFolders ? " · 폴더" : ""}</span>{!fallback && <span>{allConnections ? "연결선 모두 보기" : "선 간략히 · 별을 가리키면 연결 보기"}</span>}<details><summary>관계·상태 읽기</summary><p>목적 보기에서는 저장된 목적 소속으로 묶고, 같은 목적 안의 실제 관련·원문 링크·출처 근거를 선으로 그립니다. 분류 소속선은 해당 별을 선택하거나 가리킬 때 확인하며, 켜 둔 폴더 연결은 계속 표시합니다. 목적 이름이 붙은 별은 같은 목적의 문서·기록 19개 이상을 접어 표시하며, 참조 관계가 바뀌어도 같은 소속을 유지합니다. 관계 보기에서는 조회된 전체 관련·원문 링크·출처 근거를 탐색합니다. 평소에는 짧은 실제 연결로 윤곽을 드러내고 한 별에 몰린 나머지 선과 화살표는 낮은 강조로 남깁니다. 선의 강약은 의미의 중요도나 관계 유무를 뜻하지 않습니다. 별을 가리키거나 선택·끌면 그 별의 연결을 모두 강조하며 보기 설정의 ‘연결선 모두 보기’로 전체 선을 계속 볼 수 있습니다. 분류 소속선은 두 보기 모두 해당 별을 선택하거나 가리키거나 끌 때 확인합니다. 원문의 들어오는·나가는 링크는 두 보기 모두 자료 상세에서 읽을 수 있습니다. ‘관계 묶음’은 한 별에 현재 연결된 이웃이 19개 이상인 묶음입니다. ‘근접 묶음’은 멀리서 볼 때 화면상 가까운 관계 없는 문서·기록 6개 이상을 잠시 합쳐 보인 것입니다. 근접 묶음은 내용의 유사성이나 관계를 뜻하지 않으며, 확대하거나 누르면 개별 별이 보입니다. 묶음 크기는 항목 수가 10·30·50·100개 이상인 구간에 따라 커집니다. 접힌 지도는 보이는 별과 묶음의 실제 크기에 맞춰 간격을 줄이며, 펼치면 구성원을 다시 봅니다. 가는 원은 선택, 바깥 점선 원은 이전 조회 이후의 기록·관계 변경입니다. 흐린 점은 제안·철회·유효기간·출처 확인 상태를 살펴보세요. 같은 분류 표식 하나에 속한 별은 표식과 색을 공유하고, 여러 분류에 속한 별은 고유색을 유지합니다. {Object.values(linkName).join(" · ")} 관계를 선으로 표시하며 선택하면 연결된 선을 강조합니다. 부모·소속은 조회된 경로에서 계산하며 관계 군집을 바꾸지 않습니다. ‘폴더 묶음’은 같은 폴더 바로 아래에서 다른 관계가 없는 원문 19개 이상을 접어 표시합니다. 다른 관계가 있는 원문과 하위 폴더는 계속 보이며, 묶음을 누르면 개별 부모 연결을 확인합니다. 폴더를 누르면 하위 자료를 봅니다. 접힌 묶음의 폴더 연결은 개별 항목을 펼쳐 확인할 수 있습니다. 과거 출처 근거는 갈색의 가는 선이며 군집에서 제외합니다. 단독 항목은 연결된 자료 곁에 배치될 수 있습니다. ‘저장’은 사실 검증을 뜻하지 않습니다. 출처 확인 시각만 바뀌면 변경으로 표시하지 않습니다.</p></details></div>
+        {data && !loading && !displayed.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{route.q || filters.kind !== "all" || filters.state !== "all" ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 저장한 기록이 이곳에 나타납니다."}</p><button disabled={!session || busy} onClick={startRecord}>기록 남기기</button></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{displayed.map(n => { const label = nodePresentation(n), at = listTimestamp(n, listSort), excerpt = route.q && n.excerpt ? searchExcerpt(n.excerpt, label.title) : null; return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} style={{ color: knowledge(n) ? starColor(n) : n.taxonomyColor ?? n.color }} aria-hidden="true">{knowledge(n) ? "·" : "○"}</span><span><strong>{label.title}</strong>{route.q && n.historical_match && <small className="warning">이전 내용에서 일치 · 현재 상태를 확인하세요</small>}{excerpt && <span className="search-excerpt">{excerpt}</span>}<small className="node-meta">{kindName[n.kind]} · {stateName(n)}</small>{label.subtitle && <span className="node-location" title={label.subtitle}>{label.subtitle}</span>}</span>{!route.q && knowledge(n) && listSort !== "name" && <small className="node-date">{at === null ? listSort === "created" ? "추가일 미확인" : "수정일 미확인" : <time dateTime={new Date(at).toISOString()} title={new Date(at).toLocaleString("ko-KR")}>{listSort === "created" ? "추가" : "수정"} · {new Date(at).toLocaleDateString("ko-KR")}</time>}</small>}{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph key={`${route.scope}:${route.q}`} positions={positions} snapshot={data.model} nodes={shown.nodes} links={shown.links} selected={route.focus} rotate={rotating} allConnections={allConnections} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onClearSelection={closePanel} onFit={() => fitView()} onToggleRotation={() => setRotate(value => !value)} onFailure={failed} /></Suspense></GraphBoundary>)}
+        <div className="map-legend"><span><i className="legend-star document" />문서</span><span><i className="legend-star memory" />기록</span><span>○ 분류 표식{showFolders ? " · 폴더" : ""}</span>{!fallback && <span>{allConnections ? "연결선 모두 보기" : <>선 간략히<span className="map-legend-hint"> · 별을 가리키면 연결 보기</span></>}</span>}<details><summary>관계·상태 읽기</summary><p>목적 보기에서는 저장된 목적 소속으로 묶고, 같은 목적 안의 실제 관련·원문 링크·출처 근거를 선으로 그립니다. 분류 소속선은 해당 별을 선택하거나 가리킬 때 확인하며, 켜 둔 폴더 연결은 계속 표시합니다. 목적 이름이 붙은 별은 같은 목적의 문서·기록 19개 이상을 접어 표시하며, 참조 관계가 바뀌어도 같은 소속을 유지합니다. 관계 보기에서는 조회된 전체 관련·원문 링크·출처 근거를 탐색합니다. 평소에는 짧은 실제 연결로 윤곽을 드러내고 한 별에 몰린 나머지 선과 화살표는 낮은 강조로 남깁니다. 선의 강약은 의미의 중요도나 관계 유무를 뜻하지 않습니다. 별을 가리키거나 선택·끌면 그 별의 연결을 모두 강조하며 보기 설정의 ‘연결선 모두 보기’로 전체 선을 계속 볼 수 있습니다. 분류 소속선은 두 보기 모두 해당 별을 선택하거나 가리키거나 끌 때 확인합니다. 원문의 들어오는·나가는 링크는 두 보기 모두 자료 상세에서 읽을 수 있습니다. ‘관계 묶음’은 한 별에 현재 연결된 이웃이 19개 이상인 묶음입니다. ‘근접 묶음’은 멀리서 볼 때 화면상 가까운 관계 없는 문서·기록 6개 이상을 잠시 합쳐 보인 것입니다. 근접 묶음은 내용의 유사성이나 관계를 뜻하지 않으며, 확대하거나 누르면 개별 별이 보입니다. 묶음 크기는 항목 수가 10·30·50·100개 이상인 구간에 따라 커집니다. 접힌 지도는 보이는 별과 묶음의 실제 크기에 맞춰 간격을 줄이며, 펼치면 구성원을 다시 봅니다. 가는 원은 선택, 바깥 점선 원은 이전 조회 이후의 기록·관계 변경입니다. 흐린 점은 제안·철회·유효기간·출처 확인 상태를 살펴보세요. 같은 분류 표식 하나에 속한 별은 표식과 색을 공유하고, 여러 분류에 속한 별은 고유색을 유지합니다. {Object.values(linkName).join(" · ")} 관계를 선으로 표시하며 선택하면 연결된 선을 강조합니다. 부모·소속은 조회된 경로에서 계산하며 관계 군집을 바꾸지 않습니다. ‘폴더 묶음’은 같은 폴더 바로 아래에서 다른 관계가 없는 원문 19개 이상을 접어 표시합니다. 다른 관계가 있는 원문과 하위 폴더는 계속 보이며, 묶음을 누르면 개별 부모 연결을 확인합니다. 폴더를 누르면 하위 자료를 봅니다. 접힌 묶음의 폴더 연결은 개별 항목을 펼쳐 확인할 수 있습니다. 과거 출처 근거는 갈색의 가는 선이며 군집에서 제외합니다. 단독 항목은 연결된 자료 곁에 배치될 수 있습니다. ‘저장’은 사실 검증을 뜻하지 않습니다. 출처 확인 시각만 바뀌면 변경으로 표시하지 않습니다.</p></details></div>
       </section>
       {panel && session && <aside ref={panelElement} className="management-panel" role="dialog" aria-modal={narrow || undefined} aria-label={panel === "manage" ? "기록 남기기" : "선택한 자료 상세"}>
         <div className="panel-heading"><span>{panel === "manage" ? "기록 남기기" : selected ? kindName[selected.kind] : memorySeed ? "기록" : "자료 상세"}</span><div className="panel-actions">{panel === "node" && selected?.kind === "document" && <button disabled={busy} onClick={() => { const section = documentContext.current; if (section) { section.open = true; section.scrollIntoView({ block: "start" }); section.querySelector("summary")?.focus(); } }}>분류·연결</button>}{panel === "node" && (memorySeed || selected && knowledge(selected) && !isNativeOriginal(selected)) && <button disabled={busy} aria-expanded={managing} onClick={toggleManagement}>{managing ? "읽기로 돌아가기" : "관리"}</button>}<button ref={closeButton} disabled={busy} aria-label="관리 패널 닫기" onClick={closePanel}>닫기 ×</button></div></div>

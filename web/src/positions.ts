@@ -542,27 +542,15 @@ const graphStructure = (nodes: readonly PositionedNode[], links: readonly GraphL
 ]);
 const layoutKey = (core: string, page: number | undefined, visible: string, scope: string) => `${core}:${page ?? "all"}:${visible}:${scope}`;
 const compareIds = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
-/** Screen-space box, centered on the viewport, that a packed overview may spread into. */
-export type PackFrame = { left: number; top: number; right: number; bottom: number };
-/** A group name's box, centered below its body at the given distance from the body center. */
-export type NameRoom = { width: number; height: number; below: number };
-// Spreading separates unconnected components only; connected shapes and their link lengths stay intact.
-const MAX_SPREAD_GAP = 96, MAX_SPREAD_ASPECT = 2.2;
+/** Initial compact shapes follow the links without reserving label boxes or filling the viewport. */
 function packInitialCoordinates(nodes: readonly PositionedNode[], links: readonly GraphLink[], footprints?: ReadonlyMap<string, number>): Map<string, Point> {
-  return packLayout(nodes, links, footprints).points;
-}
-function packLayout(nodes: readonly PositionedNode[], links: readonly GraphLink[], footprints?: ReadonlyMap<string, number>,
-  options: { frame?: PackFrame; spread?: boolean; names?: ReadonlyMap<string, NameRoom> } = {}): { points: Map<string, Point>; fits: boolean } {
-  const { frame, spread = true, names } = options;
   const byId = new Map(nodes.map(node => [node.id, node]));
   const adjacency = new Map(nodes.map(node => [node.id, new Set<string>()]));
   for (const link of links) {
     adjacency.get(link.source)?.add(link.target); adjacency.get(link.target)?.add(link.source);
   }
   const spacing = LAYOUT_WORLD_SPACING;
-  // Reserved name boxes travel with their group as a row of small bodies; they are dropped from the result.
-  const reserved = new Map<string, number>();
-  const radiusFor = (id: string) => reserved.get(id) ?? footprints?.get(id) ?? spacing / 2;
+  const radiusFor = (id: string) => footprints?.get(id) ?? spacing / 2;
   const visited = new Set<string>();
   const components: { root: string; coordinates: Map<string, Slot>; radius: number }[] = [];
   for (const root of [...byId.keys()].sort()) {
@@ -602,56 +590,11 @@ function packLayout(nodes: readonly PositionedNode[], links: readonly GraphLink[
         radius = Math.max(radius, Math.hypot(value.x, value.y) + radiusFor(id));
       }
     }
-    // One connected component reserves the name box of its largest group; that group anchors the clearing pass.
-    const named = ids.filter(id => names?.has(id)).sort((a, b) => radiusFor(b) - radiusFor(a) || compareIds(a, b))[0];
-    const room = named ? names!.get(named)! : undefined, at = named ? coordinates.get(named) : undefined;
-    if (named && room && at) {
-      // Overlapping bodies cover the whole box, including its corners, plus the label's star clearance.
-      const body = room.height / 2 + 4, span = Math.max(0, room.width - 8), count = Math.max(2, Math.ceil(span / body) + 1);
-      const held = new Set([named]);
-      for (let index = 0; index < count; index++) {
-        const key = `${named}\u0000name${index}`;
-        coordinates.set(key, { x: at.x - span / 2 + span * index / (count - 1), y: at.y + room.below + room.height / 2 });
-        reserved.set(key, body); held.add(key);
-      }
-      // Every other body of the component, including its root, moves out of the box while the group stays put.
-      if (ids.length > 1) {
-        const discs = [...coordinates].map(([id, value]) => ({ id, ...value, radius: radiusFor(id) }));
-        for (const [id, value] of separateDiscs(discs, named, new Set(ids), 0, held)) coordinates.set(id, value);
-      }
-    }
-    for (const [id, value] of coordinates) radius = Math.max(radius, Math.hypot(value.x, value.y) + radiusFor(id));
     components.push({ root, coordinates, radius });
   }
   components.sort((a, b) => b.radius - a.radius || a.root.localeCompare(b.root));
-  // The overview uses only screen-plane moves, so depth here is the plain compact value.
-  const result = (layout: ReadonlyMap<string, Slot>, shift: Slot) =>
-    new Map([...layout].filter(([id]) => !reserved.has(id)).map(([id, at]) => [id, { x: at.x + shift.x, y: at.y + shift.y, z: constellationDepth(at.x, at.y, spacing) }]));
-  if (!frame) return { points: result(placeComponents(components, radiusFor, 0, { x: 1, y: 1 }), { x: 0, y: 0 }), fits: true };
-  const width = frame.right - frame.left, height = frame.bottom - frame.top;
-  const overflow = (box: { width: number; height: number }) => Math.max(0, box.width - width) + Math.max(0, box.height - height);
-  // A fitting view centers in the frame; one that cannot fit centers on the viewport instead of the frame's offset.
-  const centered = (layout: ReadonlyMap<string, Slot>, bounds: ReturnType<typeof layoutBounds>) => {
-    const fits = overflow(bounds) === 0, target = fits ? { x: (frame.left + frame.right) / 2, y: (frame.top + frame.bottom) / 2 } : { x: 0, y: 0 };
-    return { points: result(layout, { x: target.x - bounds.x, y: target.y - bounds.y }), fits };
-  };
-  // Unconnected components spread with a uniform gap along a spiral shaped like the frame.
-  // Each placement is still collision-checked, so spreading never makes bodies touch.
-  const aspect = Math.min(MAX_SPREAD_ASPECT, Math.max(1 / MAX_SPREAD_ASPECT, width / Math.max(1, height)));
-  const stretch = components.length > 1 ? { x: Math.sqrt(aspect), y: 1 / Math.sqrt(aspect) } : { x: 1, y: 1 };
-  let best = placeComponents(components, radiusFor, 0, stretch), bounds = layoutBounds(best, radiusFor);
-  if (overflow(bounds) > 0 && components.length > 1) {
-    // A round spiral can still fit where the frame-shaped one does not.
-    const round = placeComponents(components, radiusFor, 0, { x: 1, y: 1 }), roundBounds = layoutBounds(round, radiusFor);
-    if (overflow(roundBounds) < overflow(bounds)) { best = round; bounds = roundBounds; }
-  } else if (spread && components.length > 1) {
-    let low = 0, high = MAX_SPREAD_GAP;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const gap = (low + high) / 2, layout = placeComponents(components, radiusFor, gap, stretch), next = layoutBounds(layout, radiusFor);
-      if (overflow(next) === 0) { low = gap; best = layout; bounds = next; } else high = gap;
-    }
-  }
-  return centered(best, bounds);
+  return new Map([...placeComponents(components, radiusFor, 0, { x: 1, y: 1 })]
+    .map(([id, at]) => [id, { x: at.x, y: at.y, z: constellationDepth(at.x, at.y, spacing) }]));
 }
 function placeComponents(components: readonly { root: string; coordinates: ReadonlyMap<string, Slot> }[], radiusFor: (id: string) => number, gap: number, stretch: Slot): Map<string, Slot> {
   const spacing = LAYOUT_WORLD_SPACING, step = spacing * .55, goldenAngle = Math.PI * (3 - Math.sqrt(5));
@@ -695,15 +638,6 @@ function placeComponents(components: readonly { root: string; coordinates: Reado
     }
   }
   return result;
-}
-function layoutBounds(layout: ReadonlyMap<string, Slot>, radiusFor: (id: string) => number) {
-  let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
-  for (const [id, at] of layout) {
-    const radius = radiusFor(id);
-    left = Math.min(left, at.x - radius); right = Math.max(right, at.x + radius);
-    top = Math.min(top, at.y - radius); bottom = Math.max(bottom, at.y + radius);
-  }
-  return { width: right - left, height: bottom - top, x: (left + right) / 2, y: (top + bottom) / 2 };
 }
 // Session-only coordinates. Reconcile owns semantic membership; the live graph
 // can pack its first view using the same link solver used after a drag.
@@ -963,9 +897,9 @@ export class Positions {
     }
     return this.clearedPositions({ ...plane, held, fixed }, next, movable);
   }
-  /** Pack the visible overview, translating each hidden cohort with its representative. */
-  packOverview(discs: readonly (ScreenPoint & { id: string; radius: number; room?: NameRoom })[], links: readonly GraphLink[], cohorts: ReadonlyMap<string, readonly string[]>,
-    plane: { right: Point; up: Point; worldPerPixel: (depth: number) => number }, now: number, reduced: boolean, frame?: PackFrame): boolean {
+  /** Compact a new overview once; later clearance moves only bodies that collide. */
+  packOverview(discs: readonly (ScreenPoint & { id: string; radius: number })[], links: readonly GraphLink[], cohorts: ReadonlyMap<string, readonly string[]>,
+    plane: { right: Point; up: Point; worldPerPixel: (depth: number) => number }, now: number, reduced: boolean, initialize = true): boolean {
     if (this.dragging || this.settling || this.layoutMoving || (this.activeCore && this.activeCore !== "*") || discs.length < 2) return false;
     const valid = discs.filter(disc => this.nodes.has(disc.id) && [disc.x, disc.y, disc.depth, disc.radius].every(Number.isFinite) && disc.depth > 0 && disc.radius > 0);
     if (valid.length !== discs.length) return false;
@@ -973,24 +907,12 @@ export class Positions {
     const footprint = new Map(valid.map(disc => [disc.id, disc.radius + 3]));
     const visible = new Set(valid.map(disc => disc.id));
     const visibleLinks = links.filter(link => visible.has(link.source) && visible.has(link.target));
-    // Group names get reserved boxes and the view spreads when everything still fits the frame.
-    // Otherwise the compact footprints stay, since spreading would scatter stars over the free space.
-    // On a crowded screen the largest groups keep their reserved names first.
-    const named = valid.filter(disc => disc.room).sort((a, b) => b.radius - a.radius || compareIds(a.id, b.id));
-    const reserving = (kept: number, spread: boolean) => packLayout(projected, visibleLinks, footprint, { frame, spread, names: new Map(named.slice(0, kept).map(disc => [disc.id, disc.room!])) });
-    let packed = frame && named.length ? reserving(named.length, true) : null;
-    if (frame && packed && !packed.fits) {
-      let low = 1, high = named.length - 1;
-      packed = null;
-      while (low <= high) {
-        const kept = (low + high) >> 1, attempt = reserving(kept, false);
-        if (attempt.fits) { packed = attempt; low = kept + 1; } else high = kept - 1;
-      }
-    }
-    if (!packed?.fits) packed = packLayout(projected, visibleLinks, footprint, { frame, spread: false });
+    const anchor = [...valid].sort((a, b) => b.radius - a.radius || compareIds(a.id, b.id))[0].id;
+    const packed = initialize ? packInitialCoordinates(projected, visibleLinks, footprint) :
+      separateDiscs(valid, anchor, visible, 6);
     const actual = new Map([...this.nodes].map(([id, node]) => [id, point(node)])), target = new Map(actual);
     for (const disc of valid) {
-      const at = packed.points.get(disc.id)!, scale = plane.worldPerPixel(disc.depth);
+      const at = packed.get(disc.id)!, scale = plane.worldPerPixel(disc.depth);
       if (!Number.isFinite(scale) || scale <= 0) return false;
       const delta = add(add(zero(), plane.right, (at.x - disc.x) * scale), plane.up, (at.y - disc.y) * scale);
       target.set(disc.id, add(actual.get(disc.id)!, delta));
@@ -998,6 +920,10 @@ export class Positions {
         if (id !== disc.id && !visible.has(id) && actual.has(id)) target.set(id, add(actual.get(id)!, delta));
       }
     }
+    if (!initialize && [...target].every(([id, value]) => {
+      const before = actual.get(id)!;
+      return Math.hypot(value.x - before.x, value.y - before.y, value.z - before.z) < 1e-6;
+    })) return false;
     this.layouts.set(layoutKey(this.activeCore, this.activePage, this.activeVisibleKey, this.activeScopeKey), target);
     this.layoutMotion = { from: actual, to: target, actual, start: now };
     if (reduced) this.advance(now, true);

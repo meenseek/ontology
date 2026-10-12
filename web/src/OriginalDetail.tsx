@@ -149,9 +149,11 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
     return target && kind ? { kind, url: contextUrl("preview", scope, target) } : undefined;
   }, [path, scope, selected]);
   const controls = <>
-    {scope === "profile" && <p className="hint">공통 운영 규칙은 검토된 변경 절차로 수정합니다.</p>}
-    <a href={contextUrl("download", scope, path)} download={originalFilename(path)}>현재 원본 다운로드</a>
+    <div className="original-tools">
     {markdown && showing !== undefined && <div className="original-view-switch" role="group" aria-label="문서 보기 방식"><button aria-pressed={!editing} disabled={saving} onClick={read}>읽기</button><button aria-pressed={editing} disabled={!editAllowed || !!selected || loadingVersion || saving} onClick={edit}>편집</button></div>}
+    <a href={contextUrl("download", scope, path)} download={originalFilename(path)}>현재 원본 다운로드</a>
+    </div>
+    {scope === "profile" && <p className="hint">공통 운영 규칙은 검토된 변경 절차로 수정합니다.</p>}
     {original && newlines === null && /\.(md|markdown)$/i.test(path) && <p className="hint">줄바꿈 형식이 섞인 원문은 바이트 보존을 위해 CLI에서 확인하세요.</p>}
     {original && original.metadata.byte_len > MAX_ORIGINAL_EDIT_BYTES && markdown && <p className="hint">이 원문은 앱에서 편집할 수 있는 크기를 넘었습니다. 원본 다운로드로 확인하세요.</p>}
     {!editing && dirty && <p className="notice" role="status">저장하지 않은 변경이 있습니다. 편집으로 돌아가 이어서 작성할 수 있습니다.</p>}

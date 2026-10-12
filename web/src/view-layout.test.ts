@@ -8,7 +8,7 @@ import { nucleusLevel, nucleusView } from "./nuclei.ts";
 import { Positions } from "./positions.ts";
 import type { LayoutView, Point } from "./positions.ts";
 import { LAYOUT_WORLD_SPACING } from "./presentation.ts";
-import { planCoreView, screenPlane, sparseOverviewFrame } from "./view-layout.ts";
+import { planCoreView, screenPlane, overviewFrame } from "./view-layout.ts";
 
 test("sparse overview framing enlarges a small graph without changing coordinates or camera direction", () => {
   for (const size of [{ width: 1440, height: 680 }, { width: 390, height: 560 }]) {
@@ -17,7 +17,7 @@ test("sparse overview framing enlarges a small graph without changing coordinate
     camera.position.set(310, 180, 1030); camera.lookAt(target.x, target.y, target.z); camera.updateMatrixWorld();
     const nodes = Array.from({ length: 27 }, (_, i) => ({ x: target.x + Math.cos(i) * 90, y: target.y + Math.sin(i) * 70, z: target.z + i - 13 }));
     const before = structuredClone(nodes), originalCamera = camera.position.clone();
-    const frame = sparseOverviewFrame(camera, target, nodes, size)!;
+    const frame = overviewFrame(camera, target, nodes, size)!;
     assert.ok(frame);
     const original = originalCamera.clone().sub(new Vector3(target.x, target.y, target.z));
     const next = new Vector3(frame.position.x, frame.position.y, frame.position.z).sub(new Vector3(target.x, target.y, target.z));
@@ -25,10 +25,10 @@ test("sparse overview framing enlarges a small graph without changing coordinate
     assert.ok(next.clone().normalize().distanceTo(original.normalize()) < 1e-7);
     assert.deepEqual(nodes, before); assert.ok(camera.position.equals(originalCamera));
     assert.deepEqual(frame.target, target);
-    assert.equal(sparseOverviewFrame(camera, target, [nodes[0]], size), null);
-    assert.equal(sparseOverviewFrame(camera, target, Array.from({ length: 61 }, () => nodes[0]), size), null);
+    assert.equal(overviewFrame(camera, target, [nodes[0]], size), null);
+    assert.equal(overviewFrame(camera, target, Array.from({ length: 61 }, () => nodes[0]), size), null);
     const wide = nodes.map(node => ({ ...node, x: node.x * 100 }));
-    assert.equal(sparseOverviewFrame(camera, target, wide, size), null, "a graph that already fills the screen is never zoomed farther in");
+    assert.equal(overviewFrame(camera, target, wide, size), null, "a graph that already fills the screen is never zoomed farther in");
   }
 });
 

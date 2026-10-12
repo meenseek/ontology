@@ -12,7 +12,7 @@ import type { Positions } from "./positions";
 import type { GraphLink, GraphView, Model, PositionedNode } from "./graph";
 import { LAYOUT_WORLD_SPACING, MAX_RESTING_STAR_LABELS, MAX_VISIBLE_LABELS, advanceStarClock, coreCameraDistance, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starPerspectiveSize, starShape, stellarDepth, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
-import { planCoreView, screenPlane, sparseOverviewFrame, spatialCameraFrame } from "./view-layout";
+import { planCoreView, screenPlane, overviewFrame, spatialCameraFrame } from "./view-layout";
 import { CameraMotion, zoomCameraPose } from "./camera-motion";
 import type { CameraPose } from "./camera-motion";
 import MiniMap from "./MiniMap";
@@ -351,10 +351,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const dragged = useRef<string | null>(null);
   const draggedSummary = useRef<{ id: string; members: readonly string[]; level: number; epoch: number } | null>(null);
   const summaryHalo = useRef<SummaryHaloMotion | null>(null);
-  const packedOverview = useRef("");
+  const packedOverview = useRef({ epoch: -1, views: new Set<string>() });
   // The view whose overview was last packed into the viewport frame; reframing it keeps that spread on screen.
   const framedOverview = useRef("");
-  const sparseOverviewKey = useRef("");
+  const overviewFrameKey = useRef("");
   const overviewZoom = useRef({ scale: 0, changedAt: 0, checkedFootprints: "" });
   const frozenSpatial = useRef<NucleusView | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -786,8 +786,15 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       const summary = collapsedCounts.has(id) || spatialCounts.has(id);
       const groupName = summary || label.node.kind === "subject" || label.node.kind === "folder";
       element.dataset.nodeId = id;
-      element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive" : ""}${groupName ? " group-name" : ""}${detailed ? "" : " compact"}`;
-      element.children[0].textContent = collapsedCounts.has(id) ? coreLabel(label.node, collapsedCounts.get(id)!, snapshot.view) : spatialCounts.has(id) ? `근접 묶음 · ${spatialCounts.get(id)}개` : label.title;
+      element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive group-summary" : ""}${groupName ? " group-name" : ""}${detailed ? "" : " compact"}`;
+      const title = collapsedCounts.has(id) ? coreLabel(label.node, collapsedCounts.get(id)!, snapshot.view) : spatialCounts.has(id) ? `근접 묶음 · ${spatialCounts.get(id)}개` : label.title;
+      element.children[0].textContent = title;
+      const count = summary && title.match(/ · \d+개$/);
+      if (count) {
+        element.children[0].textContent = title.slice(0, -count[0].length);
+        const value = document.createElement("span"); value.className = "group-count"; value.textContent = count[0];
+        element.children[0].append(value);
+      }
       const subtitle = element.children[1] as HTMLElement;
       subtitle.textContent = summary ? "별 끌기 · 눌러 펼치기" : label.subtitle; subtitle.hidden = !subtitle.textContent;
       element.children[2].textContent = summary ? "" : label.status;
@@ -913,47 +920,38 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           !positions.dragging && !positions.settling && !positions.layoutMoving && !cameraMotion.current.moving && !reveal.retiring.size) {
           const cohorts = new Map([...glyphMembers].map(([id, members]) => [id, members.map(member => member.id)]));
           // Compact a new view once. Zoom/LOD only reveals the existing world positions.
-          const packingKey = JSON.stringify([positions.structureEpoch, viewKey, fit, size]);
-          const overviewChanged = packedOverview.current !== packingKey;
-          if (performance.now() - zoom.changedAt >= 150 && (overviewChanged || zoom.checkedFootprints !== changedFootprints)) {
+          const packingKey = JSON.stringify([positions.structureEpoch, viewKey]);
+          const footprintKey = `${changedFootprints}:${size.width}:${size.height}`;
+          if (packedOverview.current.epoch !== positions.structureEpoch) packedOverview.current = { epoch: positions.structureEpoch, views: new Set() };
+          const overviewChanged = !packedOverview.current.views.has(packingKey);
+          if (performance.now() - zoom.changedAt >= 150 && (overviewChanged || zoom.checkedFootprints !== footprintKey)) {
             const discs = displayNodes.map(node => {
               projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
               const depth = -projected.z, pixels = nodeScreenSize(node.kind, depth, size.height, camera.projectionMatrix.elements[5]);
               const body = nodeVisualRadius(pixels, false, node.changed, summaryCounts.get(node.id));
-              const name = summaryCounts.has(node.id) ? dimensions.get(node.id)!.compact : null;
-              const radius = body + (name ? name.height / 2 + 4 : 0);
-              // Where the view has space, a group also reserves the box for its name centered below it.
-              const room = name ? { width: name.width, height: name.height, below: body + 5 } : undefined;
               projected.applyMatrix4(camera.projectionMatrix);
-              return { id: node.id, x: projected.x * size.width / 2, y: -projected.y * size.height / 2, depth, radius, room };
+              return { id: node.id, x: projected.x * size.width / 2, y: -projected.y * size.height / 2, depth, radius: body };
             });
-            // Only real content/status changes can require clearance in an existing view.
+            // Content footprints or a resized viewport may need clearance, without rebuilding a settled shape.
             const overlap = discs.some((a, index) => discs.slice(index + 1).some(b =>
               Math.hypot(a.x - b.x, a.y - b.y) < a.radius + b.radius + 6 - .01));
-            // The first view fits groups and their names into the free viewport, clear of the hint line and an open minimap.
-            const inset = size.width < 600 ? .04 : .08;
-            const frame = { left: -size.width / 2 + size.width * inset, right: size.width / 2 - size.width * inset, top: -size.height / 2 + size.height * .05, bottom: size.height / 2 - size.height * .05 };
-            for (const box of chrome()) {
-              if (box.top > size.height * .6 && box.right - box.left > size.width * .6) frame.bottom = Math.min(frame.bottom, box.top - 8 - size.height / 2);
-              else if (box.bottom > size.height * .6 && box.left > size.width * .55 && box.bottom - box.top > 80) frame.right = Math.min(frame.right, box.left - 16 - size.width / 2);
-            }
             const packed = (overviewChanged || overlap) && positions.packOverview(discs, displayLinks, cohorts, {
               right: new Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
               up: new Vector3().setFromMatrixColumn(camera.matrixWorld, 1).multiplyScalar(-1),
               worldPerPixel: depth => 2 * depth / (size.height * camera.projectionMatrix.elements[5]),
-            }, performance.now(), reduced, frame);
+            }, performance.now(), reduced, overviewChanged);
             if (packed) framedOverview.current = `${positions.structureEpoch}:${snapshot.view}:${viewKey}:${fit}`;
             if (packed || !overlap) {
               // Ungrouped views also compact once; a later first nucleus uses
               // the same coordinates instead of restarting the layout.
-              packedOverview.current = packingKey;
-              zoom.checkedFootprints = changedFootprints;
+              packedOverview.current.views.add(packingKey);
+              zoom.checkedFootprints = footprintKey;
             }
             if (packed) {
-              const sparseKey = `${positions.structureEpoch}:${snapshot.view}:${viewKey}`;
-              if (overviewChanged && !summaryCounts.size && sparseOverviewKey.current !== sparseKey) {
-                sparseOverviewKey.current = sparseKey;
-                const frame = sparseOverviewFrame(camera as PerspectiveCamera, (instance!.controls() as OrbitControls).target,
+              const frameKey = `${positions.structureEpoch}:${snapshot.view}:${viewKey}`;
+              if (overviewChanged && overviewFrameKey.current !== frameKey) {
+                overviewFrameKey.current = frameKey;
+                const frame = overviewFrame(camera as PerspectiveCamera, (instance!.controls() as OrbitControls).target,
                   displayNodes.map(node => positions.layoutTarget(node.id) ?? node), size);
                 if (frame) moveCamera(frame.position, frame.target, reduced ? 0 : REVEAL_DURATION);
               }

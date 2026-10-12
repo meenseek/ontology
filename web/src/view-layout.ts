@@ -8,8 +8,8 @@ import { DEFAULT_LINK_PIXELS, LAYOUT_WORLD_SPACING, coreCameraDistance, focusedC
 import { starCohort } from "./positions";
 import type { Point, Positions } from "./positions";
 
-/** Enlarge a sparse, settled overview once, without moving stars or changing its viewing direction. */
-export function sparseOverviewFrame(camera: PerspectiveCamera, target: Point, nodes: readonly Point[], size: { width: number; height: number }) {
+/** Frame a settled overview of at most 60 visible bodies once, without moving stars or changing its viewing direction. */
+export function overviewFrame(camera: PerspectiveCamera, target: Point, nodes: readonly Point[], size: { width: number; height: number }) {
   if (nodes.length < 2 || nodes.length > 60 || size.width <= 0 || size.height <= 0) return null;
   camera.updateMatrixWorld();
   const right = new Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
