@@ -309,11 +309,13 @@ function GraphApp() {
   return <div className="app">
     <header className="app-header" inert={(!!panel || explore) && narrow}>
       <a className="wordmark" href="/">개인 온톨로지</a>
+      <nav className="app-navigation" aria-label="주요 탐색">
       <div className="scope-switch" role="group" aria-label="탐색 범위">
         <button aria-pressed={route.scope === "personal"} disabled={busy} onClick={() => changeScope("personal")}>내 지식</button>
         <button aria-pressed={route.scope === "meenseek"} disabled={busy} onClick={() => changeScope("meenseek")}>meenseek 사업</button>
-        <a className="career-nav" href="/career" aria-disabled={busy} onClick={event => { if (busy || dirtyRef.current && !confirm("수정 중인 내용을 닫고 지원 작업공간으로 이동할까요?")) event.preventDefault(); }}>지원 작업공간</a>
       </div>
+      <a className="career-nav" href="/career" aria-disabled={busy} onClick={event => { if (busy || dirtyRef.current && !confirm("수정 중인 내용을 닫고 지원 작업공간으로 이동할까요?")) event.preventDefault(); }}>지원 작업공간</a>
+      </nav>
       <form className="map-search" role="search" onSubmit={e => { e.preventDefault(); search(input); }}>
         <label className="sr-only" htmlFor="graph-search">현재 범위의 지식 검색</label>
         <input id="graph-search" value={input} onChange={e => setInput(e.target.value)} maxLength={120} placeholder="지식 검색" />

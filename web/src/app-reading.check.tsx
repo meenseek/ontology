@@ -1347,10 +1347,63 @@ async function checkRenderedMotion() {
   }
 }
 
+async function checkHeaderLayout() {
+  const originalFetch = window.fetch, originalUrl = window.location.href, originalZoom = host.style.zoom;
+  const root = createRoot(host), samples: { name: string; controls: number; height: number }[] = [];
+  try {
+    window.history.replaceState(null, "", "/?scope=personal");
+    window.fetch = async input => {
+      const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+      const value = url.pathname === "/api/session" ? { csrf: "synthetic-only", areas: [] }
+        : url.pathname === "/api/graph" ? graph([item(1, "personal")], "personal", "", null, false)
+        : { enabled: false, running: false, error: null, report: null };
+      return new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+    };
+    root.render(<App />);
+    await until(() => !!host.querySelector(".app-navigation") && host.querySelector<HTMLButtonElement>(".map-search button")?.disabled === false, "header is ready");
+    const header = host.querySelector<HTMLElement>(".app-header")!, nav = header.querySelector<HTMLElement>(".app-navigation")!;
+    const career = nav.querySelector<HTMLAnchorElement>(".career-nav")!;
+    assert(!header.querySelector(".scope-switch a"), "workflow navigation is separate from scope selection");
+    const inspect = async (name: string) => {
+      header.scrollIntoView({ block: "start" }); await settle();
+      const controls = [...header.querySelectorAll<HTMLElement>("a, button, input")];
+      const boxes = controls.map(control => control.getBoundingClientRect());
+      for (const [index, control] of controls.entries()) {
+        const box = boxes[index];
+        assert(box.width > 1 && box.left >= -.5 && box.right <= innerWidth + .5, `${name}: every header control stays inside the width`);
+        assert(box.top >= -.5 && box.bottom <= innerHeight + .5, `${name}: header controls can be reached in the viewport`);
+        assert(boxes.every((other, otherIndex) => index === otherIndex || box.right <= other.left + .5 || box.left >= other.right - .5 || box.bottom <= other.top + .5 || box.top >= other.bottom - .5), `${name}: header hit areas do not overlap`);
+        const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+        assert(hit && control.contains(hit), `${name}: the visible control receives its own pointer target`);
+        control.focus(); assert(document.activeElement === control, `${name}: every control remains keyboard reachable`);
+        const focused = control.getBoundingClientRect();
+        assert(Math.abs(focused.width - box.width) < .5 && Math.abs(focused.height - box.height) < .5, `${name}: focus does not resize the control`);
+      }
+      samples.push({ name, controls: controls.length, height: header.getBoundingClientRect().height });
+    };
+    await inspect("normal");
+    career.textContent = "지원 결과 복기·새 문서 반영을 확인하는 작업공간";
+    await inspect("long-menu");
+    const extra = career.cloneNode(true) as HTMLAnchorElement;
+    extra.textContent = "자료·작성 기준 관리"; nav.append(extra);
+    await inspect("additional-menu");
+    if (innerWidth <= 700) { host.style.zoom = "2"; await inspect("mobile-css-zoom-200-percent"); }
+    return { headerLayout: true, viewport: { width: innerWidth, height: innerHeight }, samples };
+  } finally {
+    root.unmount(); window.fetch = originalFetch; host.style.zoom = originalZoom;
+    window.history.replaceState(null, "", originalUrl);
+  }
+}
+
 async function run() {
   const results: unknown[] = [];
   try {
     assert(import.meta.env.DEV, "Run this fixture through the development server");
+    if (new URLSearchParams(window.location.search).get("scenario") === "header") {
+      results.push(await checkHeaderLayout());
+      output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
+      return;
+    }
     if (new URLSearchParams(window.location.search).get("scenario") === "motion") {
       results.push(await checkRenderedMotion());
       output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
