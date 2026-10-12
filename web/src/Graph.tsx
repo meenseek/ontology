@@ -1333,7 +1333,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} onResize={resizeMinimap} />}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
     <div className="graph-instructions" aria-hidden="true">
-      <span className="pointer-instructions">빈 공간 끌기: 지도 이동 · 묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · 스크롤 확대·축소</span>
+      <span className="pointer-instructions">빈 공간 끌기: 이동 · 묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · <span className="zoom-instruction">스크롤 확대·축소</span></span>
       <span className="touch-instructions">빈 공간 끌기: 이동 · 두 손가락: 확대·이동<br />묶음 누르기: 펼치기 · 묶음 별 끌기: 함께 이동</span>
     </div>
   </div>;
