@@ -984,7 +984,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           // An opened group or revealed nearby stars show their own titles; other star titles wait.
           const opened = activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : spatialReveal?.members.size ? spatialReveal.members : undefined;
           const starTitles = opened ? { limit: 0, exempt: opened } : { limit: MAX_RESTING_STAR_LABELS };
-          const environment = { stars: candidates, obstacles: chrome(), previous: previousLabels, starTitles };
+          const environment = { stars: candidates, obstacles: chrome(), previous: previousLabels, starTitles, preferredSummaryGap: size.width <= 700 ? 80 : undefined };
           let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
           // Expanded metadata must not make an already usable keyboard target disappear.
           const compactFallback = new Set(labelCandidates.filter(node => (node.id === priorityId || node.id === hoveredId.current) && !visible.some(box => box.id === node.id)).map(node => node.id));
@@ -1232,7 +1232,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       chooseNode(press.id);
       suppressClickUntil.current = performance.now() + 350;
     }}
-    aria-label="3D 지식 지도. 빈 공간을 끌면 지도가 이동합니다. 묶음 별을 끌면 함께 이동하고 누르면 펼쳐 개별 별을 끌 수 있습니다. 스크롤로 확대·축소하고 미니맵 회전 버튼이나 보기 설정에서 느린 3D 회전을 켤 수 있습니다. Tab과 Enter로 묶음을 펼칠 수 있으며 전체 항목은 목록 보기에서 탐색할 수 있습니다.">
+    aria-label="3D 지식 지도. 빈 공간을 끌면 지도가 이동합니다. 묶음 별을 끌면 함께 이동하고 누르면 펼쳐 개별 별을 끌 수 있습니다. 스크롤로 확대·축소하고 미니맵 회전 버튼이나 보기 설정에서 느린 3D 회전을 켤 수 있습니다. 두 손가락으로 확대·이동할 수 있습니다. Tab과 Enter로 묶음을 펼칠 수 있으며 전체 항목은 목록 보기에서 탐색할 수 있습니다.">
     {ready && <ForceGraph3D<PositionedNode, RenderLink>
       ref={graph} width={size.width} height={size.height} graphData={data}
       backgroundColor="rgba(0,0,0,0)" controlType="orbit" showNavInfo={false}
@@ -1332,6 +1332,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
       rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} onResize={resizeMinimap} />}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
-    <div className="graph-instructions" aria-hidden="true">빈 공간 끌기: 지도 이동 · 묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · 스크롤 확대·축소</div>
+    <div className="graph-instructions" aria-hidden="true">
+      <span className="pointer-instructions">빈 공간 끌기: 지도 이동 · 묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · 스크롤 확대·축소</span>
+      <span className="touch-instructions">빈 공간 끌기: 이동 · 두 손가락: 확대·이동<br />묶음 누르기: 펼치기 · 묶음 별 끌기: 함께 이동</span>
+    </div>
   </div>;
 }

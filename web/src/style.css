@@ -109,7 +109,11 @@ summary:hover { color: #e6edf6; }
 .legend-star.memory { background: radial-gradient(circle, #efd8ac 0 13%, #efd8ac70 25%, transparent 70%); }
 .map-legend details { margin-left: auto; }
 .map-legend summary { font-size: 11px; }
-.map-legend details p { max-width: 440px; background: #151f2b; border: 1px solid #40516a; padding: 16px; position: absolute; bottom: 44px; right: 16px; left: 16px; margin-left: auto; }
+.legend-guide { max-width: 480px; max-height: calc(100% - 160px); overflow-y: auto; overscroll-behavior: contain; background: #151f2b; border: 1px solid #40516a; border-radius: 6px; padding: 18px; position: absolute; bottom: 72px; right: 16px; left: 16px; margin-left: auto; font-size: 13px; line-height: 1.75; color: #bdcadb; }
+.legend-guide section + section { margin-top: 20px; }
+.legend-guide h3 { margin: 0 0 7px; font-size: 14px; font-weight: 600; color: #e0e9f3; }
+.legend-guide p { margin: 0; }
+.legend-guide:focus-visible { outline: 1px solid #89bad2; outline-offset: 2px; }
 .map-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; color: #9daec2; }
 .map-empty h2 { color: #d5dfeb; font-size: 18px; margin-bottom: 0; }
 .map-empty p { font-size: 13px; }
@@ -340,4 +344,19 @@ dt { color: #98aac0; } dd { margin: 0; color: #c3d0e0; overflow-wrap: anywhere; 
 .node-label .group-count { display: inline; font-size: .85em; font-weight: 400; color: #a0b0c1; white-space: nowrap; overflow: visible; }
 .node-label:not(.group-name) { font-size: 12px; }
 .node-label:where(.compact:not(.group-name)) strong { font-weight: 400; color: #a3b3c6; }
-@media (max-width: 700px) { .node-label.group-name { max-width: 190px; } .node-label.group-summary { font-size: 13px; max-width: 200px; } }
+@media (max-width: 700px) { .node-label.group-name { max-width: 190px; } .node-label.group-summary { font-size: 13px; max-width: 160px; } }
+
+.touch-instructions { display: none; }
+@media (pointer: coarse) {
+  .pointer-instructions { display: none; }
+  .touch-instructions { display: inline; }
+}
+@media (max-width: 700px) {
+  .graph-instructions { padding-inline: 12px; font-size: 11px; line-height: 1.6; }
+}
+@media (max-width: 700px) {
+  .node-label.group-name strong { word-break: keep-all; }
+  .node-label.interactive:focus-visible { outline-offset: -1px; }
+  .node-label.offset-label:where(.hovered, :hover, :focus-visible)::before { border-top-style: solid; border-top-color: #b2d2e8; }
+  .node-label.offset-label:where(.hovered, :hover, :focus-visible)::after { content: ""; position: absolute; left: var(--leader-x); top: var(--leader-y); width: 4px; height: 4px; border-radius: 50%; background: #b2d2e8; transform: translate(-50%, -50%); pointer-events: none; }
+}

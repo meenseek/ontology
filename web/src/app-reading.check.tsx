@@ -181,6 +181,16 @@ async function check(size: number) {
     const settingsBox = host.querySelector('.view-options > div')!.getBoundingClientRect();
     assert(settingsBox.left >= 0 && settingsBox.right <= window.innerWidth, "list settings stay inside the viewport when toolbar actions wrap");
     viewSettings.summary.click(); await settle();
+    const legend = details("관계·상태 읽기");
+    legend.summary.click(); await settle();
+    const guide = host.querySelector<HTMLElement>('.legend-guide')!;
+    const guideBox = guide.getBoundingClientRect(), mapBox = host.querySelector('.galaxy')!.getBoundingClientRect();
+    assert(guideBox.top >= mapBox.top && guideBox.bottom <= legend.summary.getBoundingClientRect().top && guideBox.left >= 0 && guideBox.right <= innerWidth, "relationship guide remains inside the map and leaves its close control visible");
+    assert(guide.scrollHeight > guide.clientHeight && getComputedStyle(guide).overflowY === "auto", "long guide is internally scrollable");
+    guide.focus(); guide.scrollTop = guide.scrollHeight;
+    assert(guide.scrollTop > 0 && guide.scrollTop + guide.clientHeight >= guide.scrollHeight - 1, "the last guidance is reachable");
+    guide.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    assert(!legend.element.open && document.activeElement === legend.summary, "Escape closes guidance and returns focus");
     const explorerCalls = calls.length;
     narrowMedia.matches = true; narrowMedia.dispatchEvent(new Event("change")); await settle();
     button("필터·묶음").click(); await settle();
@@ -346,6 +356,15 @@ async function checkSourceReferenceDirection() {
     assert(!context.open, "document classification and links start collapsed after the body");
     assert(!!(host.querySelector('.original-detail')!.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING), "title and body precede classification in the reading order");
     assert(!host.querySelector('.original-detail [aria-label="연결된 자료"]'), "original reference does not become an explicit semantic related item");
+    if (innerWidth > 900) {
+      const legend = details("관계·상태 읽기"); legend.summary.click(); await settle();
+      const guide = host.querySelector<HTMLElement>('.legend-guide')!;
+      guide.focus(); guide.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await settle();
+      assert(!legend.element.open && !!host.querySelector('.management-panel') && document.activeElement === legend.summary, "guide Escape preserves the selected detail and its local focus");
+      legend.summary.click(); await settle();
+      legend.summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await settle();
+      assert(!legend.element.open && !!host.querySelector('.management-panel') && document.activeElement === legend.summary, "summary Escape also closes only its open guide");
+    }
     button("분류·연결").click(); await settle();
     assert(context.open && document.activeElement === context.querySelector("summary"), "the header reaches classification with keyboard focus and no eager request");
     const before = graphCalls; details("원문 링크").summary.click(); await settle();

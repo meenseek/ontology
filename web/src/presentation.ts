@@ -38,6 +38,8 @@ export type LabelEnvironment = {
   stars?: readonly Pick<ProjectedLabel, "id" | "x" | "y" | "depth" | "radius">[];
   obstacles?: readonly { left: number; top: number; right: number; bottom: number }[];
   previous?: ReadonlyMap<string, LabelBox>;
+  /** Prefer nearby summary names before retaining a distant position, in CSS pixels. */
+  preferredSummaryGap?: number;
   /** Small star titles beyond the limit yield. Group names, the selection, the hovered star and exempt stars are not counted;
    * close stars are not counted unless an exempt set (an opened group) is given. */
   starTitles?: { limit: number; exempt?: ReadonlySet<string> };
@@ -59,6 +61,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     if (memories[i]) ordered.push(memories[i]);
   }
   ordered.push(...ordinary.filter(n => n.kind !== "document" && n.kind !== "memory").sort(nearby));
+  const fromStar = (node: ProjectedLabel, box: LabelBox) => Math.hypot(node.x - Math.max(box.left, Math.min(box.right, node.x)), node.y - Math.max(box.top, Math.min(box.bottom, node.y)));
   const positionsFor = (node: ProjectedLabel): LabelBox[] => {
     const clearance = node.radius + 5;
     const sides = node.x > width * .66 ? [-1, 1] : [1, -1];
@@ -79,7 +82,9 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     }
     const boxes = positions.map(({ left, top }) => ({ id: node.id, left, top, right: left + node.width, bottom: top + node.height }));
     const previous = environment.previous?.get(node.id);
-    if (previous) boxes.sort((a, b) => Math.hypot(a.left - previous.left, a.top - previous.top) - Math.hypot(b.left - previous.left, b.top - previous.top));
+    if (node.summary && environment.preferredSummaryGap !== undefined && (!previous || fromStar(node, previous) > node.radius + environment.preferredSummaryGap))
+      boxes.sort((a, b) => fromStar(node, a) - fromStar(node, b));
+    else if (previous) boxes.sort((a, b) => Math.hypot(a.left - previous.left, a.top - previous.top) - Math.hypot(b.left - previous.left, b.top - previous.top));
     return boxes;
   };
   const inBounds = (box: LabelBox) => box.left >= 0 && box.top >= 0 && box.right <= width && box.bottom <= height;
@@ -115,7 +120,6 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
       (b.importance ?? 0) - (a.importance ?? 0) || optionsFor(a).length - optionsFor(b).length || nearby(a, b));
     ordered.splice(priority.length, summaries.length, ...summaries);
   }
-  const fromStar = (node: ProjectedLabel, box: LabelBox) => Math.hypot(node.x - Math.max(box.left, Math.min(box.right, node.x)), node.y - Math.max(box.top, Math.min(box.bottom, node.y)));
   // The fallback keeps the label off its own body, reuses last frame's spot within reach, then takes the nearest grid spot within reach.
   const nearestFree = (node: ProjectedLabel, placed: readonly LabelBox[]): LabelBox | undefined => {
     const usable = (box: LabelBox) => fromStar(node, box) >= node.radius + 4 && clear(box) && !placed.some(other => overlaps(box, other));
