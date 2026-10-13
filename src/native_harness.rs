@@ -638,10 +638,16 @@ impl Command {
             .iter()
             .map(|path| read_harness_json(path, "owner career review receipt"))
             .collect::<Result<Vec<CareerExecutionReviewReceipt>>>()?;
-        let engine = HarnessEngine::with_source(
+        let router = HarnessRouter::with_execution_profile(
+            holistic_review.resolved.plan.max_revisions,
+            holistic_review.resolved.plan.execution_profile,
+        )
+        .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+        let engine = HarnessEngine::with_source_and_router(
             context_view,
             workspace_root,
             self.source.clone(),
+            router,
             self.policy_configuration.clone(),
         )
         .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
@@ -2078,11 +2084,23 @@ mod tests {
     }
 
     #[test]
+    fn career_review_receipt_schema_feeds_compose_command_successfully() {
+        assert_career_review_receipts_compose(HarnessExecutionProfile::Standard, 2);
+    }
+
+    #[test]
+    fn career_composition_preserves_strict_review_profile_and_revision_limit() {
+        assert_career_review_receipts_compose(HarnessExecutionProfile::Strict, 1);
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "career CLI smoke scenario and receipt digest ordering remain auditable together"
     )]
-    fn career_review_receipt_schema_feeds_compose_command_successfully() {
+    fn assert_career_review_receipts_compose(
+        execution_profile: HarnessExecutionProfile,
+        max_revisions: u32,
+    ) {
         let temp = TempDirectory::new("career-cli-smoke");
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("career workspace must be created");
@@ -2137,7 +2155,9 @@ mod tests {
         let manifest_path = temp.path().join("manifest.json");
         write_test_json(&manifest_path, &manifest);
 
-        let engine = test_engine_default(&repository_root, &workspace)
+        let router = HarnessRouter::with_execution_profile(max_revisions, execution_profile)
+            .expect("career review router must be valid");
+        let engine = test_engine(&repository_root, &workspace, router)
             .expect("career CLI smoke engine must open");
         let request = HarnessRequest {
             action: HarnessAction::DocumentReview,
@@ -2165,7 +2185,7 @@ mod tests {
             },
             vec![grant.clone()],
             vec![source.clone()],
-            HarnessExecutionProfile::Standard,
+            execution_profile,
         );
         let owner_envelope: RequestEnvelope =
             read_harness_json(&request_envelope_path, "test request envelope")
@@ -2185,7 +2205,7 @@ mod tests {
             },
             Vec::new(),
             vec!["vault/personal/profile.md".to_owned()],
-            HarnessExecutionProfile::Standard,
+            execution_profile,
         );
         let holistic_envelope: RequestEnvelope =
             read_harness_json(&holistic_envelope_path, "test request envelope")
@@ -5275,16 +5295,6 @@ wait
             source.clone(),
             router,
             context_fixture::configuration(),
-        )
-    }
-    fn test_engine_default(
-        root: impl AsRef<Path>,
-        workspace: impl AsRef<Path>,
-    ) -> std::result::Result<HarnessEngine, HarnessError> {
-        test_engine(
-            root,
-            workspace,
-            HarnessRouter::with_execution_profile(2, HarnessExecutionProfile::Standard)?,
         )
     }
     fn run(arguments: impl IntoIterator<Item = String>) -> Result<()> {
