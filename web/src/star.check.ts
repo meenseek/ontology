@@ -126,6 +126,10 @@ try {
         record(`${label}: visible secondary glint changes`, swing(secondary) >= 8, swing(secondary), ">=8 RGB luminance levels");
         record(`${label}: corona changes between glints`, swing(corona) >= 2, swing(corona), ">=2 RGB luminance levels");
       } else {
+        draw(size, color, 1.75);
+        const resolved = pixels();
+        const glint = region(resolved, size * .29, size * .43, primaryAxis).peak - region(resolved, size * .29, size * .43, betweenGlints).peak;
+        record(`${label}: resolved star retains its glint`, glint >= 5, glint, "axis is >=5 RGB luminance levels brighter than the corona beyond the resolved surface");
         for (const { id, phase } of variants) for (const time of [0, 7, 19]) {
           const sample = `${label} / ${id} / ${time}–${time + 2}s`;
           draw(size, color, time, phase); const before = pixels();
@@ -172,7 +176,7 @@ try {
   };
   for (dpr of [1,2]) {
     renderer.setPixelRatio(dpr); renderer.setSize(width,width);
-    for (const color of colors) for (const cloud of [0,1]) {
+    for (const color of [...colors, "#f3ac77", "#e4d17d"]) for (const cloud of [0,1]) {
       light.uniforms.uColor.value.copy(new Color(color)); light.uniforms.uPhase.value = 2.3;
       const label = `light / ${color} / cloud ${cloud} / DPR ${dpr}`;
       const background = drawLight(1,cloud,0,0);

@@ -2771,6 +2771,22 @@ test("membership does not turn a real chain, branch or cycle into a fan", () => 
   }
 });
 
+test("purpose paths remain visibly open while real cycles keep their closing edge", () => {
+  for (const count of [4, 12, 13, 24, 48]) {
+    const ids = Array.from({ length: count }, (_, i) => `node-${String(i).padStart(2, "0")}`);
+    const path = ids.slice(1).map((id, i) => edge(ids[i], id));
+    const radii = new Map(ids.map(id => [id, 12]));
+    const slots = topologySlots(ids, path, radii, 24);
+    const distance = (a: string, b: string) => Math.hypot(slots.get(a)!.x - slots.get(b)!.x, slots.get(a)!.y - slots.get(b)!.y);
+    const step = path.reduce((sum, link) => sum + distance(link.source, link.target), 0) / path.length;
+    assert.ok(distance(ids[0], ids.at(-1)!) > step * 2, "the missing closing edge is visibly wider than an ordinary path step");
+    assert.deepEqual(slots, topologySlots([...ids].reverse(), [...path].reverse(), radii, 24));
+    const cycle = [...path, edge(ids.at(-1)!, ids[0])], loop = topologySlots(ids, cycle, radii, 24);
+    const closing = Math.hypot(loop.get(ids[0])!.x - loop.get(ids.at(-1)!)!.x, loop.get(ids[0])!.y - loop.get(ids.at(-1)!)!.y);
+    assert.ok(closing < 2.5, "the genuine closing edge remains local");
+  }
+});
+
 test("labels avoid unlabeled stars and measured chrome while preserving a safe previous side", () => {
   const candidate: ProjectedLabel = { id: "a", kind: "document", active: true, x: 100, y: 100, depth: 0, radius: 10, width: 70, height: 20 };
   const stars = [{ ...candidate }, { id: "unlabeled", x: 140, y: 100, depth: 0, radius: 10 }];
@@ -2781,6 +2797,19 @@ test("labels avoid unlabeled stars and measured chrome while preserving a safe p
   assert.deepEqual(visibleLabels([candidate], 300, 240, "a", null, { stars, obstacles, previous }), boxes);
   const covered = [{ left: 0, top: 0, right: 300, bottom: 240 }];
   assert.deepEqual(visibleLabels([candidate], 300, 240, "a", "a", { stars, obstacles: covered }), []);
+});
+
+test("resting titles stay beside their stars and defer when only distant space is free", () => {
+  const star: ProjectedLabel = { id: "star", kind: "document", active: true, x: 200, y: 120, depth: 0, radius: 10, width: 80, height: 20 };
+  const environment = { stars: [star], obstacles: [{ left: 0, top: 0, right: 245, bottom: 240 }] };
+  assert.deepEqual(visibleLabels([star], 400, 240, null, null, environment), [], "a free but distant title must not suggest another star");
+  for (const selected of [true, false]) {
+    const [box] = visibleLabels([star], 400, 240, selected ? star.id : null, selected ? null : star.id, environment);
+    assert.ok(box, "selection and hover retain access to the deferred title");
+  }
+  const [close] = visibleLabels([star], 400, 240, null, null, { stars: [star] });
+  const gap = Math.hypot(star.x - Math.max(close.left, Math.min(close.right, star.x)), star.y - Math.max(close.top, Math.min(close.bottom, star.y)));
+  assert.ok(gap <= star.radius + 18, "an ordinary title has a bounded, local association");
 });
 
 test("first-view star titles yield to group names while focus, close stars and opened groups keep theirs", () => {

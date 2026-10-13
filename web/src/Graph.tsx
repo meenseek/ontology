@@ -75,9 +75,9 @@ export function starMaterial() {
         vec2 p = vUv * 2.0 - 1.0 - uWobble;
         float distance = length(p);
         float spokes = uShape < 1.5 ? 4.0 : uShape < 2.5 ? 5.0 : 6.0;
-        float silhouette = uShape < 0.5 ? 1.0 : 1.0 + 0.12 * cos(spokes * atan(p.y, p.x) + uPhase);
+        float silhouette = uShape < 0.5 ? 1.0 : 1.0 + 0.03 * cos(spokes * atan(p.y, p.x) + uPhase);
         float depth = clamp(uDepth, 0.0, 1.0);
-        float radius = mix(mix(0.26, 0.38, depth), 0.54, uDetail) * silhouette;
+        float radius = mix(mix(0.26, 0.38, depth), 0.50, uDetail) * silhouette;
         float r = distance / radius;
         if (distance >= 1.0) discard;
         float edge = fwidth(r);
@@ -113,9 +113,10 @@ export function starMaterial() {
         float secondary = (exp(-pow(abs(diagonal.x) / 0.42, 1.4))
           + exp(-pow(abs(diagonal.y) / 0.42, 1.4))) * exp(-distance * distance * 3.5)
           * (0.02 + 0.22 * pulse);
-        // A brighter crest stays inside the same footprint and fades out at close range.
+        // A brighter crest stays inside the same footprint and settles at close range.
         halo *= 1.0 + 0.70 * pulse * (1.0 - uDetail) + 1.1 * uNear;
-        halo = (halo + (primary + secondary) * (1.0 - uDetail)) * fade * uShimmer;
+        // A resolved surface retains the same glint family as a distant star.
+        halo = (halo + (primary + secondary) * mix(1.0, 0.35, uDetail)) * fade * uShimmer;
         float alpha = clamp(disc + halo * (1.0 - disc), 0.0, 1.0);
         // A hot white core, a colored inner corona, then a soft tinted falloff.
         // Everything stays inside the existing quad; depth never changes picking or layout.
@@ -171,6 +172,8 @@ export function cosmicLightMaterial() {
         vec3 chroma = max(vec3(0.0), uColor - grey * 0.75);
         chroma /= max(0.001, max(chroma.r, max(chroma.g, chroma.b)));
         vec3 color = mix(vec3(0.16,0.25,0.48), chroma, 0.55 + depth * 0.3);
+        // A little white light keeps warm clouds luminous without increasing their opacity.
+        color = mix(color, vec3(1.0), 0.18 * uCloud);
         float strength = mix(0.025, 0.19, depth) * mix(1.0, 2.7, uCloud);
         gl_FragColor = vec4(color, field * edge * strength * uOpacity);
         #include <colorspace_fragment>
@@ -1050,7 +1053,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             const star = candidates.find(node => node.id === box.id)!;
             const x = Math.max(box.left, Math.min(box.right, star.x)), y = Math.max(box.top, Math.min(box.bottom, star.y));
             const dx = x - star.x, dy = y - star.y, distance = Math.hypot(dx, dy), length = distance - star.radius - 6;
-            element.classList.toggle("offset-label", star.summary && length > 14);
+            element.classList.toggle("offset-label", length > 14);
             element.style.setProperty("--leader-x", `${star.x - box.left + dx / distance * (star.radius + 3)}px`);
             element.style.setProperty("--leader-y", `${star.y - box.top + dy / distance * (star.radius + 3)}px`);
             element.style.setProperty("--leader-length", `${Math.max(0, length)}px`);
@@ -1379,24 +1382,28 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       {Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /></div>)}
     </div>
     {activeExpandedCore && !selected && !spatialReveal?.members.size && <div className="graph-core-actions">
-      <button type="button" ref={coreCloseButton} onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); pendingReturn.current = coreReturn.current; restoringCoreReturn.current = coreReturn.current; coreReturn.current = null; setExpandedCore(null); }}>묶음 접기</button>
-      {!disclosure && <span>{coreLabel(nodes.find(node => node.id === activeExpandedCore), cores.find(core => core.hub === activeExpandedCore)?.count ?? 0, snapshot.view)}</span>}
-      {disclosure?.hub === activeExpandedCore && <>
-        <button type="button" disabled={disclosure.index === 0} onClick={() => setCorePage(disclosure.index - 1)}>이전</button>
-        <span>{coreLabel(nodes.find(node => node.id === disclosure.hub), disclosure.total, snapshot.view)} · {disclosure.index + 1}/{disclosure.pages}</span>
-        <button type="button" disabled={disclosure.index + 1 === disclosure.pages} onClick={() => setCorePage(disclosure.index + 1)}>다음</button>
-        <button type="button" onClick={() => setShowAllCore(true)}>전체 보기</button>
-      </>}
-      {showAllCore && cores.find(core => core.hub === activeExpandedCore && core.count > 36) &&
-        <button type="button" onClick={() => setShowAllCore(false)}>나눠 보기</button>}
+      <div className="graph-core-heading">
+        <button type="button" ref={coreCloseButton} onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); pendingReturn.current = coreReturn.current; restoringCoreReturn.current = coreReturn.current; coreReturn.current = null; setExpandedCore(null); }}>묶음 접기</button>
+        <span>{coreLabel(nodes.find(node => node.id === activeExpandedCore), cores.find(core => core.hub === activeExpandedCore)?.count ?? 0, snapshot.view)}</span>
+      </div>
+      <div className="graph-core-navigation" role="group" aria-label="묶음 페이지">
+        {disclosure?.hub === activeExpandedCore && <>
+          <button type="button" disabled={disclosure.index === 0} onClick={() => setCorePage(disclosure.index - 1)}>이전</button>
+          <span className="graph-core-page">{disclosure.index + 1}/{disclosure.pages}</span>
+          <button type="button" disabled={disclosure.index + 1 === disclosure.pages} onClick={() => setCorePage(disclosure.index + 1)}>다음</button>
+          <button type="button" onClick={() => setShowAllCore(true)}>전체 보기</button>
+        </>}
+        {showAllCore && cores.find(core => core.hub === activeExpandedCore && core.count > 36) &&
+          <button type="button" onClick={() => setShowAllCore(false)}>나눠 보기</button>}
+      </div>
     </div>}
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>근접 묶음 {spatialReveal.members.size}개 접기</button>}
     {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
       rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} onResize={resizeMinimap} />}
     {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
     <div className="graph-instructions" aria-hidden="true">
-      <span className="pointer-instructions">빈 공간 끌기: 이동 · 묶음 별 끌기: 함께 이동 · 누르기: 펼치기 · <span className="zoom-instruction">스크롤 확대·축소</span></span>
-      <span className="touch-instructions">빈 공간 끌기: 이동 · 두 손가락: 확대·이동<br />묶음 누르기: 펼치기 · 묶음 별 끌기: 함께 이동</span>
+      <span className="pointer-instructions">빈 공간 끌어 이동 · 묶음 눌러 펼치기·끌어 이동 · <span className="zoom-instruction">스크롤 확대·축소</span></span>
+      <span className="touch-instructions">빈 공간 끌어 이동 · 두 손가락 확대·이동<br />묶음 눌러 펼치기·끌어 이동</span>
     </div>
   </div>;
 }

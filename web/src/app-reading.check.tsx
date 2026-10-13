@@ -643,7 +643,8 @@ async function checkNativeConstellation() {
     button("묶음 접기").click();
     await until(() => !!summary(), "core returns to its overview summary");
     folderSummary()!.click();
-    await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes("폴더 묶음 · 40개 · 1/4") === true, "folder opens a compact structural page without counting its marker");
+    await until(() => host.querySelector(".graph-core-heading")?.textContent?.includes("폴더 묶음 · 40개") === true &&
+      host.querySelector(".graph-core-page")?.textContent === "1/4", "folder opens a compact structural page without counting its marker");
     button("다음", host.querySelector(".graph-core-actions")!).click();
     await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes("2/4") === true, "folder pages its original children");
     button("묶음 접기").click();
@@ -695,7 +696,18 @@ async function checkPurposeDiagram() {
     const firstCalls = graphCalls;
     const epoch = positions!.structureEpoch;
     summary(0)!.focus(); summary(0)!.click();
-    await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes(`${names[0]} · 120개 · 1/10`) === true && !positions!.layoutMoving, "native button activation opens a 12-item purpose page without counting its subject marker");
+    await until(() => host.querySelector(".graph-core-heading")?.textContent?.includes(`${names[0]} · 120개`) === true &&
+      host.querySelector(".graph-core-page")?.textContent === "1/10" && !positions!.layoutMoving, "native button activation opens a 12-item purpose page without counting its subject marker");
+    if (innerWidth <= 700) {
+      const previous = [...host.querySelectorAll<HTMLButtonElement>(".graph-core-navigation button")].find(control => control.textContent === "이전")!;
+      assert(previous.disabled, "the first purpose page has no previous page");
+      const controls = [previous, host.querySelector<HTMLElement>(".graph-core-page")!,
+        button("다음", host.querySelector(".graph-core-actions")!)];
+      const boxes = controls.map(control => control.getBoundingClientRect()), center = boxes[0].y + boxes[0].height / 2;
+      assert(boxes.every(box => Math.abs(box.y + box.height / 2 - center) < .5 && box.left >= 0 && box.right <= innerWidth),
+        "mobile previous, page and next stay together in a visible row");
+      assert(boxes[0].height >= 44 && boxes[2].height >= 44, "mobile paging has usable touch targets");
+    }
     button("다음", host.querySelector(".graph-core-actions")!).click();
     await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes("2/10") === true && !positions!.layoutMoving, "purpose members page locally");
     button("묶음 접기").click();
@@ -964,7 +976,8 @@ async function checkSummaryOverview() {
     });
     const overviewProjections = hubProjections();
     (await revealSummary(120)).click();
-    await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes("관계 묶음 · 120개 · 1/10") === true, "large summary opens its compact page");
+    await until(() => host.querySelector(".graph-core-heading")?.textContent?.includes("관계 묶음 · 120개") === true &&
+      host.querySelector(".graph-core-page")?.textContent === "1/10", "large summary opens its compact page");
     await until(() => { const value = cloudSamples.get("group-120-0")?.opacity; return value !== undefined && value > .3 && value < .85; }, "the real summary cloud is midway through opening");
     const beforeClose = cloudSamples.get("group-120-0")!;
     const glyphBeforeClose = glyphSamples.get("group-120-0")!;
@@ -1084,21 +1097,19 @@ async function checkSummaryContentRefresh() {
     responseSnapshot = { ...snapshot, nodes: nodes.map(node => ({ ...node, revision: "content-only-update" })) };
     await refresh();
     await until(settled, "larger change rings settle");
-    // Graph's own footprint: the change ring plus half the group name's height and 4px, kept 6px apart.
-    const clearance = (gap: number, withName: boolean) => {
+    // Graph clears the actual body/ring footprint; names find their own space without moving stars.
+    const clearance = (gap: number) => {
       const rect = host.querySelector("canvas")!.getBoundingClientRect();
-      const names = [...host.querySelectorAll<HTMLElement>(".node-label.interactive")].map(label => label.offsetHeight).filter(Boolean);
-      const name = withName ? Math.max(0, ...names) / 2 + 4 : 0;
       const rings = counts.map(count => {
         const at = positions!.layoutTarget(`refresh-${count}-0`)!, point = new Vector3(at.x, at.y, at.z).project(camera!);
-        return { x: (point.x + 1) * rect.width / 2, y: (1 - point.y) * rect.height / 2, radius: nodeVisualRadius(1, false, true, count) + name };
+        return { x: (point.x + 1) * rect.width / 2, y: (1 - point.y) * rect.height / 2, radius: nodeVisualRadius(1, false, true, count) };
       });
       return rings.every((a, index) => rings.slice(index + 1).every(b => Math.hypot(a.x - b.x, a.y - b.y) >= a.radius + b.radius + gap - .01));
     };
     const growthRepacked = overviewPacks > beforeGrowth;
     // A spread first view may already have room for larger rings; then clearance needs no repack.
-    assert(growthRepacked || clearance(6, true), "growing change rings either trigger clearance or already have Graph's footprint clearance");
-    assert(clearance(0, false), "larger change rings do not overlap after clearance");
+    assert(growthRepacked || clearance(6), "growing change rings either trigger clearance or already have Graph's footprint clearance");
+    assert(clearance(0), "larger change rings do not overlap after clearance");
     assert(pose() === poseBefore, "a content refresh keeps the overview camera");
     assert(positions!.structureEpoch === structureEpoch, "content changes preserve the topology epoch");
     const afterGrowth = overviewPacks;

@@ -57,8 +57,9 @@ export function topologySlots(ids: readonly string[], links: readonly GraphLink[
     const dominant = degree(branchHub) >= 4 && degree(branchHub) >= (members.length - 1) / 3 ? branchHub : null;
     const sequence = traversal.length === members.length ? traversal : members;
     let points = new Map(sequence.map((id, i) => {
-      const angle = cycle ? i * 2 * Math.PI / members.length : path ? i * .5 : i * 2.399963;
-      const reach = cycle ? Math.max(1, members.length * 1.35 / (2 * Math.PI)) * (1 + .1 * Math.sin(i * 1.7)) : path ? 2.5 + i * .13 : Math.sqrt(i + 1);
+      // Keep short paths open; cyclic components use their actual closing edge.
+      const angle = cycle ? i * 2 * Math.PI / members.length : path ? i * .24 : i * 2.399963;
+      const reach = cycle ? Math.max(1, members.length * 1.35 / (2 * Math.PI)) * (1 + .1 * Math.sin(i * 1.7)) : path ? 4 + i * .13 : Math.sqrt(i + 1);
       return [id, { x: Math.cos(angle) * reach, y: Math.sin(angle) * reach }];
     }));
     const hub = members.find(id => degree(id) === members.length - 1);

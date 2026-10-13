@@ -63,8 +63,8 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   }
   ordered.push(...ordinary.filter(n => n.kind !== "document" && n.kind !== "memory").sort(nearby));
   const fromStar = (node: ProjectedLabel, box: LabelBox) => Math.hypot(node.x - Math.max(box.left, Math.min(box.right, node.x)), node.y - Math.max(box.top, Math.min(box.bottom, node.y)));
-  const restingReach = (node: ProjectedLabel) => node.summary && node.id !== selected && node.id !== hovered && environment.restingSummaryGap !== undefined
-    ? node.radius + environment.restingSummaryGap : Infinity;
+  const restingReach = (node: ProjectedLabel) => node.id === selected || node.id === hovered ? Infinity :
+    node.summary ? environment.restingSummaryGap === undefined ? Infinity : node.radius + environment.restingSummaryGap : node.radius + 18;
   const positionsFor = (node: ProjectedLabel): LabelBox[] => {
     const clearance = node.radius + 5;
     const sides = node.x > width * .66 ? [-1, 1] : [1, -1];
@@ -175,8 +175,8 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
         box = candidate; break;
       }
     }
-    // Use a nearby grid pocket before letting a resting mobile name yield.
-    if (!box && node.summary && (node.importance ?? 0) > 0 && environment.stars) box = nearestFree(node, boxes);
+    // Fill a close diagonal pocket before deferring a title or a prominent group name.
+    if (!box && environment.stars && (!node.summary || (node.importance ?? 0) > 0)) box = nearestFree(node, boxes);
     if (box) { boxes.push(box); if (rationed(node)) rationedTitles++; }
     if (boxes.length === MAX_VISIBLE_LABELS) break;
   }
