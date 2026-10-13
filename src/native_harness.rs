@@ -1530,6 +1530,7 @@ mod tests {
             max_concurrent_roles: plan.resolved_request.plan.required_concurrent_roles,
             separate_contexts: true,
             file_reading: true,
+            review_artifacts: true,
             tool_execution: plan.requires_tool_capability(),
             deterministic_validation: true,
             max_role_bundle_bytes: 8 * 1024 * 1024,
@@ -2126,6 +2127,7 @@ mod tests {
             max_concurrent_roles: 2,
             separate_contexts: true,
             file_reading: true,
+            review_artifacts: true,
             tool_execution: true,
             max_role_bundle_bytes: 8 * 1024 * 1024,
             max_role_invocation_bytes: 16 * 1024 * 1024,
@@ -2494,6 +2496,7 @@ mod tests {
             }))
         } else {
             let common = DraftTaskCommon {
+                review_artifact_paths: None,
                 owner: test_user_value(
                     request.owner,
                     &statement_identifier,
@@ -2768,6 +2771,18 @@ mod tests {
         action: HarnessAction,
         concurrency: usize,
     ) -> (HarnessEngine, PreparedHarnessRun, Vec<u8>, PathBuf) {
+        codex_fixture_with_inputs(temp, documents, repetitions, action, concurrency, false)
+    }
+
+    #[cfg(unix)]
+    fn codex_fixture_with_inputs(
+        temp: &TempDirectory,
+        documents: usize,
+        repetitions: usize,
+        action: HarnessAction,
+        concurrency: usize,
+        review_artifacts: bool,
+    ) -> (HarnessEngine, PreparedHarnessRun, Vec<u8>, PathBuf) {
         let workspace = temp.path().join("workspace");
         fs::create_dir(&workspace).expect("synthetic workspace must be created");
         let extension = if matches!(action, HarnessAction::CodeReview | HarnessAction::CodeWrite) {
@@ -2813,8 +2828,40 @@ mod tests {
             Vec::new(),
             HarnessExecutionProfile::Strict,
         );
-        let envelope = read_harness_json(&envelope_path, "synthetic review envelope")
-            .expect("synthetic request must decode strictly");
+        let mut envelope: RequestEnvelope =
+            read_harness_json(&envelope_path, "synthetic review envelope")
+                .expect("synthetic request must decode strictly");
+        if review_artifacts {
+            fs::create_dir(workspace.join("review-artifacts")).unwrap();
+            let artifacts: [(&str, &[u8]); 3] = [
+                ("review-artifacts/page.png", b"\x89PNG\r\n\x1a\nPNG fixture"),
+                ("review-artifacts/page.jpg", b"\xff\xd8\xffJPEG fixture"),
+                ("review-artifacts/document.pdf", b"%PDF-1.7 PDF fixture"),
+            ];
+            for (path, bytes) in artifacts {
+                fs::write(workspace.join(path), bytes).unwrap();
+            }
+            let RequestSource::UserLanguage { statements } = &mut envelope.source else {
+                unreachable!()
+            };
+            statements[0]
+                .text
+                .push_str(" Review the explicitly supplied PDF and PNG/JPEG renders.");
+            let mut next = 1000;
+            let value = test_user_value(
+                artifacts
+                    .iter()
+                    .map(|(p, _)| (*p).to_owned())
+                    .collect::<Vec<_>>(),
+                &statements[0].identifier,
+                &mut envelope.decision_trace.records,
+                &mut next,
+            );
+            let DraftTaskRequest::Review(draft) = &mut envelope.draft else {
+                unreachable!()
+            };
+            draft.common.review_artifact_paths = Some(value);
+        }
         let repository = temp.path().join("source-placeholder");
         let router = HarnessRouter::with_execution_profile(2, HarnessExecutionProfile::Strict)
             .expect("strict router must be valid");
@@ -4993,6 +5040,7 @@ wait
                 &binary,
                 &prepared,
                 &head.ready_role_invocations[0],
+                &[],
                 &std::sync::atomic::AtomicBool::new(false),
                 &RoleObservations::default(),
             )
@@ -5296,5 +5344,138 @@ wait
     }
     fn run_apply_harness_command(arguments: impl IntoIterator<Item = String>) -> Result<()> {
         run_harness_command(std::iter::once("apply".to_owned()).chain(arguments))
+    }
+    #[cfg(unix)]
+    #[test]
+    fn codex_transports_bound_images_and_pdf_without_changing_stdin() {
+        let temp = TempDirectory::new("codex-review-artifacts");
+        let (engine, prepared, raw, _) =
+            codex_fixture_with_inputs(&temp, 1, 2, HarnessAction::DocumentReview, 1, true);
+        let body = CODEX_CAPTURE.replace(
+            "cat > \"$0.stdin.$$\"",
+            r#"cat > "$0.stdin.$$"
+python3 - "$0" "$$" "$@" <<'PY'
+import hashlib,json,pathlib,stat,sys
+binary,pid=sys.argv[1:3]
+segments=json.loads(pathlib.Path(binary+'.stdin.'+pid).read_bytes())
+artifacts=[s['artifact'] for s in segments if s['kind']=='bound-review-artifact']
+args=sys.argv[3:]
+images=[args[i+1] for i,a in enumerate(args) if a=='--image']
+assert len(images)==2
+assert sorted(pathlib.Path(p).suffix for p in images)==['.jpg','.png']
+proof=[]
+for a in artifacts:
+    path=pathlib.Path(a['workspace_relative_path'])
+    data=path.read_bytes()
+    assert hashlib.sha256(data).hexdigest()==a['content_digest']
+    assert len(data)==a['size_bytes']
+    assert stat.S_IMODE(path.stat().st_mode)==0o600
+    if a['format']!='pdf': assert str(path.resolve()) in images
+    proof.append(a['workspace_relative_path'])
+pathlib.Path(binary+'.artifacts.'+pid).write_text(json.dumps(proof))
+PY"#,
+        );
+        let binary = codex_test_script(&temp, &body);
+        for (index, role) in [HarnessRole::Verifier, HarnessRole::Reviewer]
+            .into_iter()
+            .enumerate()
+        {
+            let mut outcome = codex_completed(&prepared, role, false);
+            let RoleExecutionOutcome::Completed { result } = &mut outcome else {
+                unreachable!()
+            };
+            let (CompletedRoleResult::Verifier {
+                subject_evidence, ..
+            }
+            | CompletedRoleResult::Reviewer {
+                subject_evidence, ..
+            }) = result
+            else {
+                unreachable!()
+            };
+            for artifact in &prepared.plan.resolved_request.plan.review_artifacts {
+                subject_evidence.push(ResultEvidenceReference::BoundReviewArtifact {
+                    relative_path: artifact.workspace_relative_path.clone(),
+                    content_digest: artifact.content_digest.clone(),
+                    locator: "synthetic page".into(),
+                });
+            }
+            codex_test_events(&binary, index + 1, outcome);
+        }
+        let head =
+            HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "artifact-review")
+                .unwrap();
+        let issued = head.ready_role_invocations.clone();
+        assert!(
+            execute_codex_role(
+                &binary,
+                &prepared,
+                &issued[0],
+                &[],
+                &std::sync::atomic::AtomicBool::new(false),
+                &RoleObservations::default()
+            )
+            .is_err()
+        );
+        assert!(
+            codex_calls(&binary).is_empty(),
+            "missing bound bytes must fail before spawning"
+        );
+        let evaluated = execute_codex_frontier(
+            &engine,
+            &prepared,
+            head,
+            &binary,
+            None,
+            &RoleObservations::default(),
+        )
+        .unwrap();
+        assert_eq!(evaluated.role_execution.role_results.len(), 2);
+        let calls = codex_calls(&binary);
+        assert_eq!(calls.len(), 2);
+        for (pid, invocation) in calls.iter().zip(&issued) {
+            let input = fs::read(format!("{}.stdin.{pid}", binary.display())).unwrap();
+            assert_eq!(input, serde_json::to_vec(&invocation.segments).unwrap());
+            let proof: Vec<String> = serde_json::from_slice(
+                &fs::read(format!("{}.artifacts.{pid}", binary.display())).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(proof.len(), 3);
+            let cwd = fs::read_to_string(format!("{}.cwd.{pid}", binary.display())).unwrap();
+            assert!(!Path::new(cwd.lines().next().unwrap()).exists());
+            assert!(cwd.lines().nth(1).unwrap().starts_with("drwx------"));
+            let args = fs::read_to_string(format!("{}.args.{pid}", binary.display())).unwrap();
+            assert_eq!(args.lines().filter(|arg| *arg == "--image").count(), 2);
+            assert!(args.ends_with("-\n"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_does_not_spawn_with_stale_review_artifacts() {
+        let temp = TempDirectory::new("codex-stale-review-artifacts");
+        let (engine, prepared, raw, _) =
+            codex_fixture_with_inputs(&temp, 1, 2, HarnessAction::DocumentReview, 1, true);
+        let binary = codex_test_script(&temp, CODEX_CAPTURE);
+        let head =
+            HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "stale-artifacts")
+                .unwrap();
+        fs::write(
+            temp.path().join("workspace/review-artifacts/document.pdf"),
+            b"%PDF-1.7 replaced",
+        )
+        .unwrap();
+        assert!(
+            execute_codex_frontier(
+                &engine,
+                &prepared,
+                head,
+                &binary,
+                None,
+                &RoleObservations::default()
+            )
+            .is_err()
+        );
+        assert!(codex_calls(&binary).is_empty());
     }
 }

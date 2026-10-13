@@ -673,6 +673,28 @@ prepared/head, workspace·source-view identity, 적용 시도·미해결 journal
 과거 정책 binding의 차이를 허용하며, 다른 명령의 현재 설정 검증은 그대로 유지한다.
 원문 revision·history를 변경하지 않으며 terminal 정리는 native 운영 정책을 따른다.
 
+문서의 실제 PDF·페이지 렌더가 검토에 필요하면 요청 `common.review_artifact_paths`에
+`workspace-root/review-artifacts/` 아래의 파일 경로를 decision-traced 목록으로 명시한다.
+경로는 `review-artifacts/document.pdf`처럼 workspace 상대 경로이며, 미사용 시 `null`이다.
+지원 형식은 `.pdf`, `.png`, `.jpg`, `.jpeg`이고 확장자와 파일 시그니처가 일치해야 한다.
+최대 16개, 파일당 8 MiB, 합계 24 MiB이며, 중복·target 겹침·symlink·hard link는 거부한다.
+이 파일들은 출력물 검토 근거다. Native 원문·정책·사실 근거·context grant나 쓰기 대상이 아니다.
+Native source view를 쓰는 경우에도 첨부는 `vault/` 밖의 `review-artifacts/`에 별도로 둔다.
+
+Runtime capabilities의 필수 bool `review_artifacts`는 실제 파일·이미지 전달 지원을 나타낸다.
+첨부가 있는데 `false`이면 prepare가 거부되며, 필드를 생략하면 현재 JSON 형식 검사에서 거부된다.
+Core는 경로·형식·크기·SHA-256을 plan과 역할 입력에 결합하고 기존 실행·적용 경계에서
+다시 검사한다. 파일이 바뀌면 기존 run을 그대로 진행하지 않고 새 입력으로 resolve/prepare한다.
+형식 시그니처와 digest 검사는 PDF의 정상 렌더링이나 후보 원문과의 일치를 대신하지 않는다.
+
+Native Codex 실행기는 source read gate를 놓기 전에 Core가 검증한 bytes를 고정한다.
+역할마다 전용 private cwd에 같은 상대 경로와 권한 `0600`으로 파일을 만들고, PNG/JPEG는
+`codex exec --image`로 첨부한다. PDF는 그 cwd에서 읽기 전용 파일 도구로 검사한다.
+기존 JSON segments는 그대로 stdin에 전달한다. 검토 결과는 `bound-review-artifact` 근거로
+경로·digest·page 등 locator를 인용할 수 있으며, 평가 대상 자체에 대한 근거도 계속 필요하다.
+모든 역할의 임시 cwd와 첨부는 기존 프로세스 종료 절차에서 함께 정리한다. 이전 runtime의
+prepared run은 새 실행기에 이식하지 않고, 복구가 필요하면 원래 runtime과 기록을 보존한다.
+
 Native 원문만 변경하는 호출은 `--context-view`와 `--workspace-root`를 같은 이번 작업 소유 source view로 지정한다. 기존 원문은 prepare의 `targets[].state`가 `existing`인지 확인한다. 별도의 filesystem 작업 공간은 일반 파일 target을 위한 경계이며 Native 기존 원문의 조회 공간을 대신하지 않는다.
 
 세부 역할·수락·적용·복구 계약은 [Context Core](../crates/context-core/src/harness.rs)을 따른다.

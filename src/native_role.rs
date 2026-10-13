@@ -2,9 +2,10 @@ use crate::native_harness::{
     MAX_HARNESS_JSON_BYTES, NativeHarnessError, NativeHarnessResult as Result,
 };
 use context_core::harness::{
-    HarnessEngine, HarnessExecutionEvent, HarnessExecutionRecord, HarnessRole, PreparedHarnessRun,
-    ReportedRoleLifecycle, RoleExecutionOutcome, RoleExecutionResult, RoleInvocationContract,
-    RoleLifecycleLimits, RoleTerminalState, decode_current_json,
+    FrozenReviewArtifact, HarnessEngine, HarnessExecutionEvent, HarnessExecutionRecord,
+    HarnessRole, PreparedHarnessRun, ReportedRoleLifecycle, ReviewArtifactFormat,
+    RoleExecutionOutcome, RoleExecutionResult, RoleInvocationContract, RoleLifecycleLimits,
+    RoleTerminalState, decode_current_json,
 };
 use std::{
     env, fs,
@@ -98,6 +99,14 @@ pub(crate) fn execute_codex_frontier(
                 ));
             }
         }
+        let artifacts = engine
+            .freeze_review_artifacts(
+                &prepared.plan.resolved_request,
+                &prepared.role_run,
+                &invocations,
+            )
+            .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+        let artifacts = artifacts.as_slice();
         let cancelled = AtomicBool::new(false);
         if let Some(source) = source {
             source
@@ -118,6 +127,7 @@ pub(crate) fn execute_codex_frontier(
                                         binary,
                                         prepared,
                                         invocation,
+                                        artifacts,
                                         cancelled,
                                         observations,
                                     )
@@ -224,7 +234,7 @@ pub(crate) fn codex_output_schema() -> &'static str {
   "required": ["outcome"],
   "additionalProperties": false,
   "$defs": {
-    "evidence": {"anyOf":[{"type":"object","properties":{"source":{"type":"string","enum":["target"]},"workspace_relative_path":{"type":"string"},"content_digest":{"type":"string"},"locator":{"type":"string"}},"required":["source","workspace_relative_path","content_digest","locator"],"additionalProperties":false},{"type":"object","properties":{"source":{"type":"string","enum":["bound-document"]},"relative_path":{"type":"string"},"content_digest":{"type":"string"},"locator":{"type":"string"}},"required":["source","relative_path","content_digest","locator"],"additionalProperties":false},{"type":"object","properties":{"source":{"type":"string","enum":["tool-result"]},"unit":{"type":"string"},"result_digest":{"type":"string"}},"required":["source","unit","result_digest"],"additionalProperties":false},{"type":"object","properties":{"source":{"type":"string","enum":["produced-artifact"]},"artifact_digest":{"type":"string"},"locator":{"type":"string"}},"required":["source","artifact_digest","locator"],"additionalProperties":false}]},
+    "evidence": {"anyOf":[{"type":"object","properties":{"source":{"type":"string","enum":["target"]},"workspace_relative_path":{"type":"string"},"content_digest":{"type":"string"},"locator":{"type":"string"}},"required":["source","workspace_relative_path","content_digest","locator"],"additionalProperties":false},{"type":"object","properties":{"source":{"type":"string","enum":["bound-document","bound-review-artifact"]},"relative_path":{"type":"string"},"content_digest":{"type":"string"},"locator":{"type":"string"}},"required":["source","relative_path","content_digest","locator"],"additionalProperties":false},{"type":"object","properties":{"source":{"type":"string","enum":["tool-result"]},"unit":{"type":"string"},"result_digest":{"type":"string"}},"required":["source","unit","result_digest"],"additionalProperties":false},{"type":"object","properties":{"source":{"type":"string","enum":["produced-artifact"]},"artifact_digest":{"type":"string"},"locator":{"type":"string"}},"required":["source","artifact_digest","locator"],"additionalProperties":false}]},
     "requirement": {"type":"object","properties":{"unit":{"type":"string"},"passed":{"type":"boolean"},"detail":{"type":"string"},"evidence":{"type":"array","items":{"$ref":"#/$defs/evidence"}}},"required":["unit","passed","detail","evidence"],"additionalProperties":false},
     "observation": {"type":"object","properties":{"message":{"type":"string"},"evidence":{"type":"array","items":{"$ref":"#/$defs/evidence"}}},"required":["message","evidence"],"additionalProperties":false},
     "learning": {"type":"object","properties":{"title":{"type":"string"},"guidance":{"type":"string"},"failed_unit":{"type":"string"},"requirement_result_digest":{"type":"string"},"evidence":{"type":"array","items":{"$ref":"#/$defs/evidence"}}},"required":["title","guidance","failed_unit","requirement_result_digest","evidence"],"additionalProperties":false},
@@ -499,10 +509,31 @@ pub(crate) fn execute_codex_role(
     binary: &Path,
     prepared: &PreparedHarnessRun,
     invocation: &RoleInvocationContract,
+    artifacts: &[FrozenReviewArtifact],
     cancelled: &AtomicBool,
     observations: &RoleObservations,
 ) -> Result<RoleExecutionResult> {
     validate_codex_producer_frontier(prepared, [invocation.role])?;
+    let expected_artifacts = invocation
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            context_core::harness::RoleInvocationSegment::BoundReviewArtifact { artifact } => {
+                Some(artifact)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if expected_artifacts
+        != artifacts
+            .iter()
+            .map(FrozenReviewArtifact::binding)
+            .collect::<Vec<_>>()
+    {
+        return Err(NativeHarnessError::invalid_input(
+            "frozen review artifacts do not match the invocation",
+        ));
+    }
     // Serialize the exact typed segments once: no wrapper, prompt preamble, target
     // reread, summary, content replacement or argument-length-dependent transport.
     let input = serde_json::to_vec(&invocation.segments)
@@ -533,6 +564,7 @@ pub(crate) fn execute_codex_role(
         let (lifecycle, outcome) = run_codex_process_observed(
             binary,
             &input,
+            artifacts,
             invocation.role,
             &limits,
             cancelled,
@@ -544,7 +576,7 @@ pub(crate) fn execute_codex_role(
     }
     #[cfg(not(unix))]
     {
-        let _ = (binary, input, cancelled, observations);
+        let _ = (binary, input, artifacts, cancelled, observations);
         Err(NativeHarnessError::invalid_input(
             "unsupported runtime: Codex requires Unix process groups",
         ))
@@ -649,7 +681,43 @@ pub(crate) fn run_codex_process(
     limits: &RoleLifecycleLimits,
     cancelled: &AtomicBool,
 ) -> Result<(ReportedRoleLifecycle, RoleExecutionOutcome)> {
-    run_codex_process_observed(binary, input, role, limits, cancelled, None)
+    run_codex_process_observed(binary, input, &[], role, limits, cancelled, None)
+}
+
+#[cfg(unix)]
+fn materialize_review_artifacts(
+    directory: &Path,
+    artifacts: &[FrozenReviewArtifact],
+) -> Result<Vec<PathBuf>> {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+    let mut images = Vec::new();
+    for artifact in artifacts {
+        // Paths and bytes come exclusively from Core's prepared-scope loader.
+        let path = directory.join(&artifact.binding().workspace_relative_path);
+        let parent = path
+            .parent()
+            .ok_or_else(|| NativeHarnessError::invalid_input("missing review artifact parent"))?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(|error| {
+                NativeHarnessError::io("create private review artifact directory", parent, error)
+            })?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut file| file.write_all(artifact.bytes()))
+            .map_err(|error| {
+                NativeHarnessError::io("write frozen review artifact", &path, error)
+            })?;
+        if artifact.binding().format != ReviewArtifactFormat::Pdf {
+            images.push(path);
+        }
+    }
+    Ok(images)
 }
 
 #[cfg(unix)]
@@ -660,6 +728,7 @@ pub(crate) fn run_codex_process(
 fn run_codex_process_observed(
     binary: &Path,
     input: &[u8],
+    artifacts: &[FrozenReviewArtifact],
     role: HarnessRole,
     limits: &RoleLifecycleLimits,
     cancelled: &AtomicBool,
@@ -671,6 +740,7 @@ fn run_codex_process_observed(
     };
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     let directory = CodexDirectory::create()?;
+    let image_paths = materialize_review_artifacts(&directory.0, artifacts)?;
     let schema_path = directory.0.join("outcome-schema.json");
     let schema = codex_output_schema().as_bytes();
     fs::OpenOptions::new()
@@ -729,7 +799,8 @@ fn run_codex_process_observed(
         delivered_bytes: 0,
         terminal_state: None,
     };
-    let child = process::Command::new(binary)
+    let mut command = process::Command::new(binary);
+    command
         .args([
             "exec",
             "--ephemeral",
@@ -741,7 +812,11 @@ fn run_codex_process_observed(
             "read-only",
         ])
         .arg("--output-schema")
-        .arg(&schema_path)
+        .arg(&schema_path);
+    for path in image_paths {
+        command.arg("--image").arg(path);
+    }
+    let child = command
         .arg("-")
         .current_dir(&directory.0)
         .process_group(0)
@@ -1176,6 +1251,7 @@ mod observation_tests {
             let result = run_codex_process_observed(
                 &binary,
                 b"[]",
+                &[],
                 HarnessRole::Reviewer,
                 &limits,
                 &AtomicBool::new(false),

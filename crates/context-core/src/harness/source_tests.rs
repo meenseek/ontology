@@ -825,6 +825,7 @@ fn capabilities() -> RoleRuntimeCapabilities {
         max_concurrent_roles: 5,
         separate_contexts: true,
         file_reading: true,
+        review_artifacts: true,
         tool_execution: true,
         max_role_bundle_bytes: MAX_ROLE_BUNDLE_BYTES,
         max_role_invocation_bytes: MAX_ROLE_INVOCATION_BYTES,

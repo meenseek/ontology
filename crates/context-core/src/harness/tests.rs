@@ -302,6 +302,7 @@ fn complete_runtime_capabilities() -> RoleRuntimeCapabilities {
         max_concurrent_roles: 5,
         separate_contexts: true,
         file_reading: true,
+        review_artifacts: true,
         tool_execution: true,
         max_role_bundle_bytes: default_max_role_bundle_bytes(),
         max_role_invocation_bytes: default_max_role_invocation_bytes(),
@@ -398,6 +399,7 @@ fn user_profile_code_envelope(statement_text: &str) -> RequestEnvelope {
                 execution_profile,
                 context_grants: None,
                 evidence_source_paths: None,
+                review_artifact_paths: None,
             },
             write_kind,
             targets,
@@ -817,6 +819,7 @@ fn capabilities_for(roles: Vec<HarnessRole>, tool_execution: bool) -> RoleRuntim
         available_roles: roles,
         separate_contexts: true,
         file_reading: true,
+        review_artifacts: true,
         tool_execution,
         max_role_bundle_bytes: default_max_role_bundle_bytes(),
         max_role_invocation_bytes: default_max_role_invocation_bytes(),
@@ -12339,6 +12342,7 @@ fn harness_capabilities(plan: &HarnessPlan) -> HarnessRuntimeCapabilities {
         available_roles,
         separate_contexts: true,
         file_reading: true,
+        review_artifacts: true,
         tool_execution: plan.requires_tool_capability(),
         deterministic_validation: true,
         max_role_bundle_bytes: default_max_role_bundle_bytes(),
@@ -12353,6 +12357,7 @@ fn role_runtime_capabilities(capabilities: &HarnessRuntimeCapabilities) -> RoleR
         max_concurrent_roles: capabilities.max_concurrent_roles,
         separate_contexts: capabilities.separate_contexts,
         file_reading: capabilities.file_reading,
+        review_artifacts: capabilities.review_artifacts,
         tool_execution: capabilities.tool_execution,
         max_role_bundle_bytes: capabilities.max_role_bundle_bytes,
         max_role_invocation_bytes: capabilities.max_role_invocation_bytes,
@@ -16772,4 +16777,381 @@ fn pre_apply_close_rejects_owned_run_lock_and_pending_journal() {
         .is_err()
     );
     assert!(session.calls.is_empty());
+}
+
+fn review_artifact_envelope(paths: Vec<String>) -> RequestEnvelope {
+    let request = HarnessRequest {
+        action: HarnessAction::DocumentReview,
+        owner: DataOwner::Personal,
+        targets: vec!["README.md".to_owned()],
+        objective: "Review the document against the supplied output artifacts".to_owned(),
+        curation_kind: None,
+        explicit_user_confirmation_reported: false,
+        curation_sources: Vec::new(),
+        delete_targets: Vec::new(),
+    };
+    let mut envelope = RequestEnvelope::from_structured_request(
+        request,
+        HarnessIntent::General,
+        vec![],
+        vec![],
+        HarnessExecutionProfile::Standard,
+        "synthetic artifact test",
+    )
+    .unwrap();
+    let decision_identifier = "decision-000000000000ffff".to_owned();
+    envelope
+        .decision_trace
+        .records
+        .push(DecisionRecord::StructuredCaller {
+            identifier: decision_identifier.clone(),
+            value_digest: serialized_digest(&paths).unwrap(),
+            description: "explicit synthetic attachments".to_owned(),
+        });
+    let DraftTaskRequest::Review(draft) = &mut envelope.draft else {
+        unreachable!()
+    };
+    draft.common.review_artifact_paths = Some(DraftValue::Resolved {
+        value: paths,
+        decision_identifier,
+    });
+    envelope
+}
+
+fn write_review_artifact(root: &Path, name: &str, bytes: &[u8]) -> String {
+    let path = format!("review-artifacts/{name}");
+    fs::create_dir_all(root.join("review-artifacts")).unwrap();
+    fs::write(root.join(&path), bytes).unwrap();
+    path
+}
+
+#[test]
+fn review_artifacts_bind_exact_bytes_and_reject_forged_evidence() {
+    let (workspace, engine) = external_engine();
+    let png = b"\x89PNG\r\n\x1a\nsynthetic render";
+    let path = write_review_artifact(&workspace.0, "page.png", png);
+    let envelope = review_artifact_envelope(vec![path.clone()]);
+    let resolved = engine.resolve_test_envelope(&envelope, None).unwrap();
+    let binding = &resolved.plan.review_artifacts[0];
+    assert_eq!(binding.content_digest, byte_digest(png));
+    assert_eq!(resolved.plan.targets.len(), 1);
+    assert!(resolved.plan.evidence_sources.is_empty());
+    let prepared = prepared_run_with(&engine, &resolved);
+    let step = engine.begin_execution(&resolved, &prepared, &[]).unwrap();
+    let frozen = engine
+        .freeze_review_artifacts(&resolved, &prepared, &step.ready_role_invocations)
+        .unwrap();
+    assert_eq!(frozen[0].bytes(), png);
+    assert_eq!(frozen[0].binding(), binding);
+    let mut forged = step.ready_role_invocations.clone();
+    forged[0]
+        .segments
+        .retain(|s| !matches!(s, RoleInvocationSegment::BoundReviewArtifact { .. }));
+    assert!(
+        engine
+            .freeze_review_artifacts(&resolved, &prepared, &forged)
+            .is_err()
+    );
+    let invocation = step
+        .ready_role_invocations
+        .iter()
+        .find(|i| i.role == HarnessRole::Reviewer)
+        .unwrap();
+    for valid in [true, false] {
+        let mut event = completed_role_event(&resolved, &prepared, invocation, vec![], "artifact");
+        let HarnessExecutionEvent::RoleResult { result } = &mut event else {
+            unreachable!()
+        };
+        let RoleExecutionOutcome::Completed {
+            result:
+                CompletedRoleResult::Reviewer {
+                    subject_evidence, ..
+                },
+        } = &mut result.outcome
+        else {
+            unreachable!()
+        };
+        subject_evidence.push(ResultEvidenceReference::BoundReviewArtifact {
+            relative_path: path.clone(),
+            content_digest: if valid {
+                binding.content_digest.clone()
+            } else {
+                "0".repeat(64)
+            },
+            locator: "page 1 visual inspection".to_owned(),
+        });
+        refresh_role_event_digest(&mut event);
+        assert_eq!(
+            engine
+                .advance_execution(&resolved, &prepared, &[], &step.record, event)
+                .is_ok(),
+            valid
+        );
+    }
+    let mut artifact_only =
+        completed_role_event(&resolved, &prepared, invocation, vec![], "artifact-only");
+    let HarnessExecutionEvent::RoleResult { result } = &mut artifact_only else {
+        unreachable!()
+    };
+    let RoleExecutionOutcome::Completed {
+        result:
+            CompletedRoleResult::Reviewer {
+                requirement_results,
+                ..
+            },
+    } = &mut result.outcome
+    else {
+        unreachable!()
+    };
+    requirement_results[0].evidence = vec![ResultEvidenceReference::BoundReviewArtifact {
+        relative_path: path.clone(),
+        content_digest: binding.content_digest.clone(),
+        locator: "supporting render without candidate reference".to_owned(),
+    }];
+    refresh_role_event_digest(&mut artifact_only);
+    assert!(matches!(
+        engine.advance_execution(&resolved, &prepared, &[], &step.record, artifact_only),
+        Err(HarnessError::InvalidSubmission(message))
+            if message == "role requirement evidence does not bind the evaluated subject"
+    ));
+    fs::write(workspace.0.join(path), b"\x89PNG\r\n\x1a\nchanged render").unwrap();
+    assert_eq!(
+        frozen[0].bytes(),
+        png,
+        "an adapter only holds the verified frozen bytes"
+    );
+    assert!(
+        engine
+            .freeze_review_artifacts(&resolved, &prepared, &step.ready_role_invocations)
+            .is_err()
+    );
+}
+
+#[test]
+fn review_artifact_changes_stop_prepare_begin_advance_evaluate_and_apply() {
+    let (workspace, engine) = external_engine();
+    let original = b"%PDF-1.7 synthetic";
+    let path = write_review_artifact(&workspace.0, "document.pdf", original);
+    let mut envelope = review_artifact_envelope(vec![path.clone()]);
+    // Use the existing write lifecycle to test the final mutation gate as well.
+    let DraftTaskRequest::Review(draft) = envelope.draft else {
+        unreachable!()
+    };
+    let DraftValue::Resolved {
+        decision_identifier,
+        ..
+    } = &draft.review_kind
+    else {
+        unreachable!()
+    };
+    let id = decision_identifier.clone();
+    let record = envelope.decision_trace.records.iter_mut().find(|r| matches!(r, DecisionRecord::StructuredCaller { identifier, .. } if identifier == &id)).unwrap();
+    let DecisionRecord::StructuredCaller { value_digest, .. } = record else {
+        unreachable!()
+    };
+    *value_digest = serialized_digest(&WriteKind::Document).unwrap();
+    envelope.draft = DraftTaskRequest::Write(DraftWriteContract {
+        common: draft.common,
+        write_kind: DraftValue::Resolved {
+            value: WriteKind::Document,
+            decision_identifier: id,
+        },
+        targets: draft.targets,
+        delete_targets: None,
+    });
+    let resolved = engine.resolve_test_envelope(&envelope, None).unwrap();
+    let prepared = prepared_run_with(&engine, &resolved);
+    let step = engine.begin_execution(&resolved, &prepared, &[]).unwrap();
+    let event = completed_role_event(
+        &resolved,
+        &prepared,
+        &step.ready_role_invocations[0],
+        vec![],
+        "artifact-drift",
+    );
+    let complete =
+        complete_execution_record(&engine, &resolved, &prepared, &[], "artifact-complete");
+    assert!(
+        engine
+            .validate_execution(&resolved, &prepared, &[], &complete)
+            .is_ok()
+    );
+    for changed in [Some(b"%PDF-1.7 replaced".as_slice()), None] {
+        if let Some(bytes) = changed {
+            fs::write(workspace.0.join(&path), bytes).unwrap();
+        } else {
+            fs::remove_file(workspace.0.join(&path)).unwrap();
+        }
+        assert!(
+            engine
+                .prepare(&resolved, &complete_runtime_capabilities(), None)
+                .is_err()
+        );
+        assert!(engine.begin_execution(&resolved, &prepared, &[]).is_err());
+        assert!(
+            engine
+                .advance_execution(&resolved, &prepared, &[], &step.record, event.clone())
+                .is_err()
+        );
+        assert!(
+            engine
+                .evaluate_execution(&resolved, &prepared, &[], &complete)
+                .is_err()
+        );
+        assert!(
+            engine
+                .apply_validated_execution(&resolved, &prepared, &[], &complete)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.0.join("README.md")).unwrap(),
+            "# External project\n"
+        );
+    }
+}
+
+#[test]
+fn review_artifacts_require_explicit_authority_capability_and_finite_safe_files() {
+    let (workspace, engine) = external_engine();
+    let path = write_review_artifact(&workspace.0, "page.jpg", b"\xff\xd8\xffsynthetic");
+    let envelope = review_artifact_envelope(vec![path.clone()]);
+    let resolved = engine.resolve_test_envelope(&envelope, None).unwrap();
+    let mut unsupported = complete_runtime_capabilities();
+    unsupported.review_artifacts = false;
+    assert!(matches!(
+        engine.prepare(&resolved, &unsupported, None),
+        Err(HarnessError::UnsupportedRuntime(_))
+    ));
+    let mut unauthorized = envelope.clone();
+    let record = unauthorized.decision_trace.records.last_mut().unwrap();
+    let DecisionRecord::StructuredCaller {
+        identifier,
+        value_digest,
+        ..
+    } = record
+    else {
+        unreachable!()
+    };
+    *record = DecisionRecord::ModelProposal {
+        identifier: identifier.clone(),
+        value_digest: value_digest.clone(),
+        based_on_record_identifiers: vec![],
+    };
+    assert!(engine.resolve_test_envelope(&unauthorized, None).is_err());
+    for paths in [
+        vec![path.clone(), path.clone()],
+        vec!["review-artifacts/missing.png".to_owned()],
+        vec!["../page.png".to_owned()],
+        vec!["vault/personal/page.png".to_owned()],
+        vec!["review-artifacts/../page.png".to_owned()],
+        vec!["review-artifacts//page.jpg".to_owned()],
+        vec!["review-artifacts/./page.jpg".to_owned()],
+        vec!["review-artifacts/page.svg".to_owned()],
+        (0..17)
+            .map(|i| format!("review-artifacts/{i}.png"))
+            .collect(),
+    ] {
+        assert!(
+            engine
+                .resolve_test_envelope(&review_artifact_envelope(paths), None)
+                .is_err()
+        );
+    }
+    let wrong = write_review_artifact(&workspace.0, "wrong.png", b"%PDF-1.7 wrong format");
+    assert!(
+        engine
+            .resolve_test_envelope(&review_artifact_envelope(vec![wrong]), None)
+            .is_err()
+    );
+    let huge = workspace.0.join(&path);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&huge)
+        .unwrap()
+        .set_len(8 * 1024 * 1024 + 1)
+        .unwrap();
+    assert!(engine.resolve_test_envelope(&envelope, None).is_err());
+}
+
+#[test]
+fn review_artifacts_reject_total_size_target_overlap_and_link_aliases() {
+    let (workspace, engine) = external_engine();
+    let mut paths = Vec::new();
+    for index in 0..4 {
+        let path = write_review_artifact(&workspace.0, &format!("{index}.pdf"), b"%PDF-1.7");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(workspace.0.join(&path))
+            .unwrap()
+            .set_len(8 * 1024 * 1024)
+            .unwrap();
+        paths.push(path);
+    }
+    assert!(
+        engine
+            .resolve_test_envelope(&review_artifact_envelope(paths), None)
+            .is_err()
+    );
+    let path = write_review_artifact(&workspace.0, "original.pdf", b"%PDF-1.7");
+    let target = TargetBinding {
+        workspace_relative_path: path.clone(),
+        state: TargetState::Existing {
+            content_digest: byte_digest(b"%PDF-1.7"),
+        },
+        operation: TargetOperation::Update,
+        parent_directories_to_create: vec![],
+    };
+    assert!(
+        engine
+            .bind_review_artifacts(std::slice::from_ref(&path), &[target])
+            .is_err()
+    );
+    let hard = "review-artifacts/hard.pdf".to_owned();
+    fs::hard_link(workspace.0.join(&path), workspace.0.join(&hard)).unwrap();
+    assert!(
+        engine
+            .resolve_test_envelope(&review_artifact_envelope(vec![hard]), None)
+            .is_err()
+    );
+    #[cfg(unix)]
+    {
+        let link = "review-artifacts/link.pdf".to_owned();
+        std::os::unix::fs::symlink(workspace.0.join(&path), workspace.0.join(&link)).unwrap();
+        assert!(
+            engine
+                .resolve_test_envelope(&review_artifact_envelope(vec![link]), None)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn review_artifacts_reject_existing_file_aliases_on_case_insensitive_filesystems() {
+    let (workspace, engine) = external_engine();
+    let path = write_review_artifact(&workspace.0, "page.pdf", b"%PDF-1.7");
+    let alias = "review-artifacts/Page.pdf".to_owned();
+    let Ok(alias_metadata) = fs::metadata(workspace.0.join(&alias)) else {
+        // A case-sensitive filesystem has no alias, and may hold two distinct files.
+        write_review_artifact(&workspace.0, "Page.pdf", b"%PDF-1.7 distinct");
+        assert!(engine.bind_review_artifacts(&[path, alias], &[]).is_ok());
+        return;
+    };
+    assert!(repository::same_file(
+        &fs::metadata(workspace.0.join(&path)).unwrap(),
+        &alias_metadata,
+    ));
+    assert!(
+        engine
+            .bind_review_artifacts(&[path.clone(), alias.clone()], &[])
+            .is_err()
+    );
+    let target = TargetBinding {
+        workspace_relative_path: alias,
+        state: TargetState::Existing {
+            content_digest: byte_digest(b"%PDF-1.7"),
+        },
+        operation: TargetOperation::Update,
+        parent_directories_to_create: vec![],
+    };
+    assert!(engine.bind_review_artifacts(&[path], &[target]).is_err());
 }

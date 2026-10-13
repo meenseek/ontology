@@ -1077,6 +1077,7 @@ async fn native_core_resolve_prepare_uses_only_canonical_store_source_versions()
                 max_concurrent_roles: 1,
                 separate_contexts: true,
                 file_reading: true,
+                review_artifacts: true,
                 tool_execution: true,
                 deterministic_validation: true,
                 max_role_bundle_bytes: 8 * 1024 * 1024,
@@ -2767,12 +2768,24 @@ async fn composed_cli_fixture_for_target(
     live: bool,
     target: &str,
 ) -> (tempfile::TempDir, context_core::harness::PreparedHarnessRun) {
+    composed_cli_fixture_with_artifacts(store, root, statement, live, target, None).await
+}
+async fn composed_cli_fixture_with_artifacts(
+    store: &Store,
+    root: &Path,
+    statement: &str,
+    live: bool,
+    target: &str,
+    review_artifact_paths: Option<Vec<String>>,
+) -> (tempfile::TempDir, context_core::harness::PreparedHarnessRun) {
     use context_core::harness::*;
     let sha = harness_fixture::seed(store).await;
     let mut request = harness_fixture::envelope(&sha, vec![target.into()], vec![], false);
     let DraftTaskRequest::Write(task) = &mut request.draft else {
         unreachable!()
     };
+    task.common.review_artifact_paths = review_artifact_paths
+        .map(|paths| harness_fixture::value(paths, 10, &mut request.decision_trace.records));
     let DraftValue::Resolved { value, .. } = &mut task.common.task_statement else {
         unreachable!()
     };
@@ -2797,12 +2810,15 @@ async fn composed_cli_fixture_for_target(
     fs::write(&request_path, serde_json::to_vec(&input).unwrap()).unwrap();
     let mut capabilities = harness_fixture::capabilities();
     if live {
-        capabilities.lifecycle.max_role_execution_millis = 180_000;
+        // Authenticated artifact inspection completed near 150s and also exceeded
+        // 180s under observed service load. Keep a finite integration-only budget;
+        // deterministic timeout/cancellation fixtures retain their short deadlines.
+        capabilities.lifecycle.max_role_execution_millis = 300_000;
         // The observed CLI did not exit within 500ms of turn.completed.
         // Declare a finite real-process closing budget; fixture/fault tests retain
         // their short deadlines and the adapter's termination checks are unchanged.
         capabilities.lifecycle.max_role_close_millis = 10_000;
-        capabilities.lifecycle.max_total_role_millis = 191_000;
+        capabilities.lifecycle.max_total_role_millis = 311_000;
     }
     fs::write(
         &capabilities_path,
@@ -3382,8 +3398,38 @@ async fn native_cli_real_codex_producer_and_reviewer() {
     let store = store().await;
     let view = harness_fixture::view();
     let root = view.path().canonicalize().unwrap();
-    let (files, prepared) = composed_cli_fixture(&store, &root,
-        "Create only vault/personal/knowledge/composed-cli.md with exactly this Markdown: # Synthetic CLI probe\nVerified fixture content.\n. Independently review the proposed document using the supplied policies and assigned requirements.", true,
+    // Initialize the source view while empty, before adding private review evidence.
+    store
+        .with_native_context(root.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    fs::create_dir(root.join("review-artifacts")).unwrap();
+    fs::set_permissions(
+        root.join("review-artifacts"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::write(
+        root.join("review-artifacts/image.png"),
+        include_bytes!("fixtures/review-artifact.png"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("review-artifacts/document.pdf"),
+        include_bytes!("fixtures/review-artifact.pdf"),
+    )
+    .unwrap();
+    for name in ["image.png", "document.pdf"] {
+        fs::set_permissions(
+            root.join("review-artifacts").join(name),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    let (files, prepared) = composed_cli_fixture_with_artifacts(&store, &root,
+        "Create only vault/personal/knowledge/composed-cli.md. Use the heading '# Synthetic CLI probe', then transcribe the text visible in the attached PNG and the phrase from the supplied PDF on separate lines. Read the actual artifacts; their contents are not stated here. Independently verify both phrases against the PNG and PDF, cite both bound-review-artifact references with their digests in subject_evidence, and review the proposed document using the supplied policies and assigned requirements.", true,
+        "vault/personal/knowledge/composed-cli.md",
+        Some(vec!["review-artifacts/image.png".into(), "review-artifacts/document.pdf".into()]),
     ).await;
     let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
         .fetch_one(store.pool())
@@ -3455,6 +3501,37 @@ async fn native_cli_real_codex_producer_and_reviewer() {
         Err(Error::NotFound)
     );
     assert!(prepared.accepted_tool_plan.is_none());
+    let RoleExecutionOutcome::Completed {
+        result:
+            CompletedRoleResult::Writer {
+                artifact: WriterArtifact::Changes { changes },
+            },
+    } = &head.role_execution.role_results[0].outcome
+    else {
+        panic!("real writer must produce the requested document")
+    };
+    let FileChange::Create { content, .. } = &changes[0] else {
+        panic!("expected synthetic create")
+    };
+    assert!(
+        content.contains("VIOLET TRIANGLE 47"),
+        "PNG text must be read from the actual image"
+    );
+    assert!(
+        content.contains("COPPER RIVER 83"),
+        "PDF phrase must be read from the actual file"
+    );
+    let RoleExecutionOutcome::Completed {
+        result: CompletedRoleResult::Reviewer {
+            subject_evidence, ..
+        },
+    } = &head.role_execution.role_results[1].outcome
+    else {
+        panic!("real independent reviewer must complete")
+    };
+    for artifact in &prepared.plan.resolved_request.plan.review_artifacts {
+        assert!(subject_evidence.iter().any(|e| matches!(e, ResultEvidenceReference::BoundReviewArtifact { relative_path, content_digest, .. } if relative_path == &artifact.workspace_relative_path && content_digest == &artifact.content_digest)), "real review must bind each inspected artifact");
+    }
     for result in &head.role_execution.role_results {
         assert_eq!(result.lifecycle.context_id, result.context_id);
         assert_eq!(
@@ -4882,6 +4959,7 @@ async fn native_primary_only_career_composes_without_foreign_receipts_and_binds_
         },
         draft: DraftTaskRequest::Review(DraftReviewContract {
             common: DraftTaskCommon {
+                review_artifact_paths: None,
                 owner: harness_fixture::value(DataOwner::Personal, 1, &mut records),
                 intent: harness_fixture::value(
                     HarnessIntent::CareerArtifact {

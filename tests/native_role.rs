@@ -67,6 +67,7 @@ async fn verify_independent_cli_frontier(
                 ),
                 context_grants: None,
                 evidence_source_paths: None,
+                review_artifact_paths: None,
             },
             review_kind: fixtures::value(ReviewKind::Document, 5, &mut records),
             targets: fixtures::value(vec!["document.md".into()], 6, &mut records),

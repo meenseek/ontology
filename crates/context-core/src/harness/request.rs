@@ -164,6 +164,7 @@ pub struct DraftTaskCommon {
     pub execution_profile: DraftValue<HarnessExecutionProfile>,
     pub context_grants: Option<DraftValue<Vec<ContextGrant>>>,
     pub evidence_source_paths: Option<DraftValue<Vec<String>>>,
+    pub review_artifact_paths: Option<DraftValue<Vec<String>>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -236,6 +237,7 @@ pub struct TaskContractCommon {
     pub execution_profile: HarnessExecutionProfile,
     pub context_grants: Vec<ContextGrant>,
     pub evidence_source_paths: Vec<String>,
+    pub review_artifact_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -633,6 +635,7 @@ impl RequestEnvelope {
             context_grants: decisions.optional_value("context-grants", context_grants)?,
             evidence_source_paths: decisions
                 .optional_value("evidence-source-paths", evidence_source_paths)?,
+            review_artifact_paths: None,
         };
         let draft = match request.action {
             HarnessAction::CodeWrite | HarnessAction::DocumentWrite => {
@@ -933,7 +936,8 @@ impl DraftTaskCommon {
         composer.value("task_statement", &mut self.task_statement)?;
         composer.value("execution_profile", &mut self.execution_profile)?;
         composer.optional("context_grants", &mut self.context_grants)?;
-        composer.optional("evidence_source_paths", &mut self.evidence_source_paths)
+        composer.optional("evidence_source_paths", &mut self.evidence_source_paths)?;
+        composer.optional("review_artifact_paths", &mut self.review_artifact_paths)
     }
 }
 
@@ -1692,6 +1696,11 @@ impl DraftTaskCommon {
             self.evidence_source_paths.as_ref(),
             questions,
         );
+        collect_optional_unresolved(
+            "review_artifact_paths",
+            self.review_artifact_paths.as_ref(),
+            questions,
+        );
     }
 
     fn resolve(&self, trace: &DecisionTrace) -> HarnessResult<TaskContractCommon> {
@@ -1712,6 +1721,12 @@ impl DraftTaskCommon {
                 trace,
             )?
             .unwrap_or_default(),
+            review_artifact_paths: resolve_optional_value(
+                "review_artifact_paths",
+                self.review_artifact_paths.as_ref(),
+                trace,
+            )?
+            .unwrap_or_default(),
         })
     }
 
@@ -1722,6 +1737,7 @@ impl DraftTaskCommon {
         collect_decision_identifier(&self.execution_profile, identifiers);
         collect_optional_decision_identifier(self.context_grants.as_ref(), identifiers);
         collect_optional_decision_identifier(self.evidence_source_paths.as_ref(), identifiers);
+        collect_optional_decision_identifier(self.review_artifact_paths.as_ref(), identifiers);
     }
 
     fn validate_required_policy_authorities(&self, trace: &DecisionTrace) -> HarnessResult<()> {
@@ -1881,6 +1897,16 @@ impl ResolvedTaskContract {
             Self::Write(contract) => &contract.common.evidence_source_paths,
             Self::Review(contract) => &contract.common.evidence_source_paths,
             Self::Analysis(contract) => &contract.common.evidence_source_paths,
+            Self::VaultRead(_) | Self::Curation(_) => &[],
+        }
+    }
+
+    #[must_use]
+    pub fn review_artifact_paths(&self) -> &[String] {
+        match self {
+            Self::Write(contract) => &contract.common.review_artifact_paths,
+            Self::Review(contract) => &contract.common.review_artifact_paths,
+            Self::Analysis(contract) => &contract.common.review_artifact_paths,
             Self::VaultRead(_) | Self::Curation(_) => &[],
         }
     }
@@ -2285,6 +2311,7 @@ mod tests {
                     execution_profile: resolved_value(execution_profile, "execution-profile"),
                     context_grants: None,
                     evidence_source_paths: None,
+                    review_artifact_paths: None,
                 },
                 write_kind: resolved_value(write_kind, "write-kind"),
                 targets: resolved_value(targets, "targets"),
@@ -2328,6 +2355,7 @@ mod tests {
                     execution_profile: resolved_value(execution_profile, &decision_identifier(4)),
                     context_grants: None,
                     evidence_source_paths: None,
+                    review_artifact_paths: None,
                 },
                 write_kind: resolved_value(write_kind, &decision_identifier(5)),
                 targets: resolved_value(targets, &decision_identifier(6)),

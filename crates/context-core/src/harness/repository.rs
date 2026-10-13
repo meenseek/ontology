@@ -4016,11 +4016,11 @@ pub(super) fn digest_file(mut file: File, max_bytes: u64, path: &Path) -> Harnes
     Ok(finalize_content_digest(hasher))
 }
 
-pub(super) fn read_text_file(
+pub(super) fn read_file_bytes(
     mut file: File,
     max_bytes: u64,
     path: &Path,
-) -> HarnessResult<(String, String)> {
+) -> HarnessResult<(Vec<u8>, String)> {
     let before = file.metadata().map_err(|source| HarnessError::FileRead {
         path: path.to_path_buf(),
         message: source.to_string(),
@@ -4041,7 +4041,7 @@ pub(super) fn read_text_file(
         let next = bytes
             .len()
             .checked_add(read)
-            .ok_or_else(|| HarnessError::InvalidRepository("text file size overflow".to_owned()))?;
+            .ok_or_else(|| HarnessError::InvalidRepository("file size overflow".to_owned()))?;
         if next as u64 > max_bytes {
             return Err(HarnessError::InvalidRepository(format!(
                 "file `{}` exceeds the {max_bytes} byte limit",
@@ -4061,11 +4061,19 @@ pub(super) fn read_text_file(
             path.display()
         )));
     }
+    Ok((bytes, finalize_content_digest(hasher)))
+}
+
+pub(super) fn read_text_file(
+    file: File,
+    max_bytes: u64,
+    path: &Path,
+) -> HarnessResult<(String, String)> {
+    let (bytes, content_digest) = read_file_bytes(file, max_bytes, path)?;
     let content = String::from_utf8(bytes).map_err(|error| HarnessError::FileRead {
         path: path.to_path_buf(),
         message: format!("file is not valid UTF-8: {error}"),
     })?;
-    let content_digest = finalize_content_digest(hasher);
     Ok((content, content_digest))
 }
 

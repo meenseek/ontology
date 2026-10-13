@@ -45,6 +45,11 @@ pub enum ResultEvidenceReference {
         content_digest: String,
         locator: String,
     },
+    BoundReviewArtifact {
+        relative_path: String,
+        content_digest: String,
+        locator: String,
+    },
     ToolResult {
         unit: VerificationUnit,
         result_digest: String,
@@ -196,6 +201,9 @@ pub enum RoleInvocationSegment {
     },
     BoundDocument {
         document: HarnessBoundDocument,
+    },
+    BoundReviewArtifact {
+        artifact: ReviewArtifactBinding,
     },
     DynamicContext {
         content: String,
@@ -943,6 +951,11 @@ fn role_invocation_segments(
                     document: document.clone(),
                 });
             }
+            HarnessRoleSegment::BoundReviewArtifact { artifact } => {
+                segments.push(RoleInvocationSegment::BoundReviewArtifact {
+                    artifact: artifact.clone(),
+                });
+            }
             HarnessRoleSegment::ControlTail {
                 content,
                 content_digest,
@@ -979,6 +992,9 @@ fn role_invocation_segments(
             | RoleInvocationSegment::DynamicContext { content, .. }
             | RoleInvocationSegment::ControlTail { content, .. } => content.len(),
             RoleInvocationSegment::BoundDocument { document } => document.content.len(),
+            RoleInvocationSegment::BoundReviewArtifact { artifact } => serde_json::to_vec(artifact)
+                .map_err(|e| HarnessError::InvalidPlan(e.to_string()))?
+                .len(),
         };
         total.checked_add(bytes).ok_or_else(|| {
             HarnessError::UnsupportedRuntime("role invocation context size overflow".to_owned())
@@ -2445,6 +2461,7 @@ fn role_evidence_is_allowed(
         } => role_bundle.bound_documents().any(|document| {
             document.relative_path == *relative_path && document.content_digest == *content_digest
         }),
+        ResultEvidenceReference::BoundReviewArtifact { relative_path, content_digest, .. } => role_bundle.segments.iter().any(|segment| matches!(segment, HarnessRoleSegment::BoundReviewArtifact { artifact } if artifact.workspace_relative_path == *relative_path && artifact.content_digest == *content_digest)),
         ResultEvidenceReference::ProducedArtifact { .. } => {
             evidence_binds_subject(plan, reference, subject)
         }
@@ -2503,7 +2520,12 @@ fn validate_result_evidence(evidence: &[ResultEvidenceReference]) -> HarnessResu
                 validate_plan_digest("evidence target digest", content_digest)?;
                 validate_artifact_text("evidence locator", locator)?;
             }
-            ResultEvidenceReference::BoundDocument {
+            ResultEvidenceReference::BoundReviewArtifact {
+                relative_path,
+                content_digest,
+                locator,
+            }
+            | ResultEvidenceReference::BoundDocument {
                 relative_path,
                 content_digest,
                 locator,

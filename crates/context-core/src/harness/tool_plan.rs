@@ -508,6 +508,7 @@ fn role_runtime_capabilities(capabilities: &HarnessRuntimeCapabilities) -> RoleR
         max_concurrent_roles: capabilities.max_concurrent_roles,
         separate_contexts: capabilities.separate_contexts,
         file_reading: capabilities.file_reading,
+        review_artifacts: capabilities.review_artifacts,
         tool_execution: capabilities.tool_execution,
         max_role_bundle_bytes: capabilities.max_role_bundle_bytes,
         max_role_invocation_bytes: capabilities.max_role_invocation_bytes,
