@@ -387,6 +387,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const [labelFontRevision, setLabelFontRevision] = useState(0);
   const [hover, setHover] = useState<{ title: string; detail: string } | null>(null);
   const hoverPointer = useRef(true);
+  const rendererHover = useRef<{ id: string | null; content: typeof hover }>({ id: null, content: null });
+  const showRendererHover = () => {
+    if (!hoverPointer.current || disabled) return;
+    hoveredId.current = rendererHover.current.id;
+    setHover(rendererHover.current.content);
+  };
   useEffect(() => { hoveredId.current = null; setHover(null); }, [selected, disabled]);
   const snapshotLinks = useMemo(() => diagramLinks(snapshot), [snapshot]);
   // Renderer endpoint mutation stays out of the reconciled model.
@@ -1240,6 +1246,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       if (disabled || positions.dragging || (event.pointerType !== "mouse" && event.pointerType !== "pen")) { cursor.current = null; return; }
       const rect = event.currentTarget.getBoundingClientRect();
       cursor.current = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+      // The renderer emits hover only when its hit changes, including during touch.
+      if (event.target === graph.current?.renderer().domElement) showRendererHover();
     }}
     onPointerLeave={() => { cursor.current = null; }}
     onWheelCapture={event => { if (event.target === graph.current?.renderer().domElement) { cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null; } }}
@@ -1358,8 +1366,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       }} enablePointerInteraction={!disabled}
       cooldownTicks={0} warmupTicks={0} onEngineStop={positionCamera}
       onNodeClick={node => chooseNode(node.id)}
-      onNodeHover={node => { if (!hoverPointer.current || disabled) return; hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: coreLabel(node, collapsedCounts.get(node.id)!, snapshot.view), detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `근접 묶음 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
-      onLinkHover={link => { if (!hoverPointer.current || disabled) return; if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.kind === "parent" ? "경로에서 계산 · 화살표는 상위 폴더 방향" : link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
+      onNodeHover={node => {
+        rendererHover.current = { id: node?.id ?? null, content: node ? collapsedCounts.has(node.id) ? { title: coreLabel(node, collapsedCounts.get(node.id)!, snapshot.view), detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `근접 묶음 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null };
+        showRendererHover();
+      }}
+      onLinkHover={link => {
+        rendererHover.current = { id: null, content: link ? { title: linkName[link.kind], detail: link.kind === "parent" ? "경로에서 계산 · 화살표는 상위 폴더 방향" : link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null };
+        showRendererHover();
+      }}
     />}
     <div className={`graph-group-navigation${pinnedNames.size ? " with-keys" : ""}`} role="group" aria-label="지도의 묶음">
       {navigationGroups.map(node => {

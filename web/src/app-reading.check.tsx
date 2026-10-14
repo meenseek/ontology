@@ -1277,17 +1277,26 @@ async function checkRenderedMotion() {
       "the diffuse light advances with the mounted renderer's existing clock");
     const initial = new Map(sampled);
     await until(() => [...sampled].some(([id, value]) => Math.abs(value.rotation - initial.get(id)!.rotation) > .01 && Math.abs(value.shimmer - initial.get(id)!.shimmer) > .001), "the mounted renderer advances stellar surface and shimmer motion");
-    const node = model!.nodes.find(node => sampled.has(node.id))!, canvas = host.querySelector("canvas")!, rect = canvas.getBoundingClientRect();
+    const node = model!.nodes.find(node => node.id === nodes[0].id)!, canvas = host.querySelector("canvas")!, rect = canvas.getBoundingClientRect();
     const at = new Vector3(node.x, node.y, node.z).project(camera!);
     canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: rect.left + (at.x + 1) * rect.width / 2, clientY: rect.top + (1 - at.y) * rect.height / 2 }));
     await until(() => (sampled.get(node.id)?.wobble ?? 0) > .01, "pointer proximity drives wobble in the actual star draw");
     await until(() => !!host.querySelector(".graph-tooltip"), "mouse pointing exposes the actual hover guidance");
-    const map = host.querySelector<HTMLElement>(".graph-canvas")!;
-    map.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", pointerId: 19, button: 0 }));
-    window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "touch", pointerId: 19, button: 0 }));
-    await settle();
-    assert(!host.querySelector(".graph-tooltip"), "touch clears guidance even while the renderer retains its last pointed star");
-    assert([...host.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].every(label => !label.classList.contains("hovered")), "touch does not retain a detailed hovered title");
+    for (const pointerType of ["mouse", "pen"]) {
+      const minimap = host.querySelector<HTMLButtonElement>(".minimap-disclosure")!;
+      minimap.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", pointerId: 19, button: 0 }));
+      minimap.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "touch", pointerId: 19, button: 0 }));
+      minimap.click();
+      await settle();
+      assert(!host.querySelector(".graph-tooltip"), "touch clears guidance even while the renderer retains its last pointed star");
+      assert([...host.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].every(label => !label.classList.contains("hovered")), "touch does not retain a detailed hovered title");
+      await until(() => edgeOpacities.filter(value => value < .1).length === 2, "touch restores the resting connection emphasis");
+      canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType, clientX: rect.left + (at.x + 1) * rect.width / 2, clientY: rect.top + (1 - at.y) * rect.height / 2 }));
+      await until(() => host.querySelector(".graph-tooltip strong")?.textContent === node.label &&
+        !!host.querySelector(`.node-label.hovered:not(.compact)[data-node-id="${node.id}"]`) &&
+        edgeOpacities.length === links.length && edgeOpacities.every(value => value > .7),
+        `${pointerType} restores guidance, the detailed title and every actual connection on the same star after touch without leaving its hit area`);
+    }
     canvas.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: host }));
     await until(() => sampled.get(node.id)?.wobble === 0, "pointer exit restores the star without leaving a wobble behind");
     details("보기 설정").summary.click();
@@ -1385,7 +1394,7 @@ async function checkRenderedMotion() {
       "reduced motion freezes both the real star draw and its diffuse light clock");
     reduceMotion = false; motionPreference.dispatchEvent(new Event("change"));
     await until(() => [...lightSamples].every(([id, value]) => value.time > frozenLight.get(id)!.time), "restoring motion resumes the shared light clock");
-    return { renderedMotion: true, cosmicLight: true, reducedLightMotion: true, renderCost, depthLight: true, connectionOutline: true, allConnections: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, minimapDisclosure: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
+    return { renderedMotion: true, cosmicLight: true, reducedLightMotion: true, renderCost, depthLight: true, connectionOutline: true, allConnections: true, labelsClearStarsAndChrome: true, stars: nodes.length, initialCompacted: overviewPacked, depth: true, surfaceAndShimmer: true, hoverWobble: true, touchHoverCleared: true, sameStarPointerRestored: ["mouse", "pen"], slow3DRotation: true, rotationPreservesLayout: true, minimapControls: true, minimapDisclosure: true, zoomRoundTrip: true, centerPreservesZoom: true, fullFit: true };
   } finally {
     root.unmount(); Scene.prototype.onBeforeRender = originalRender; Positions.prototype.install = originalInstall;
     Positions.prototype.packOverview = originalPack;
