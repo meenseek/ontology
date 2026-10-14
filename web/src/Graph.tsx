@@ -10,7 +10,7 @@ import type { NucleusView } from "./nuclei";
 import { fixPosition } from "./positions";
 import type { Positions } from "./positions";
 import type { GraphLink, GraphView, Model, PositionedNode } from "./graph";
-import { LAYOUT_WORLD_SPACING, MAX_RESTING_STAR_LABELS, MAX_VISIBLE_LABELS, advanceStarClock, coreCameraDistance, focusedCameraDistance, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starPerspectiveSize, starShape, stellarDepth, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
+import { LAYOUT_WORLD_SPACING, MAX_RESTING_STAR_LABELS, MAX_VISIBLE_LABELS, advanceStarClock, coreCameraDistance, focusedCameraDistance, labelLeader, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starPerspectiveSize, starShape, stellarDepth, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
 import { planCoreView, screenPlane, overviewFrame, spatialCameraFrame } from "./view-layout";
 import { CameraMotion, zoomCameraPose } from "./camera-motion";
@@ -19,9 +19,9 @@ import MiniMap from "./MiniMap";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
-type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; rotate: boolean; allConnections?: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onToggleRotation?: () => void; onFailure: () => void };
+type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; filteredGroup?: string | null; rotate: boolean; allConnections?: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onToggleRotation?: () => void; onFailure: () => void };
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
-const coreLabel = (node: PositionedNode | undefined, count: number, view?: GraphView) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : view === "purpose" ? `${node?.subject_name ?? node?.label ?? "목적 묶음"} · ${count}개` : `관계 묶음 · ${count}개`;
+const coreLabel = (node: PositionedNode | undefined, count: number, view?: GraphView) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : view === "purpose" ? `${node?.subject_name ?? node?.label ?? "목적 묶음"} · ${count}개` : `관계 묶음${node ? ` · ${nodePresentation(node, true).title}` : ""} · ${count}개`;
 function texture(kind: "ring" | "selection" | "change") {
   const canvas = document.createElement("canvas"); canvas.width = canvas.height = 128;
   const context = canvas.getContext("2d");
@@ -309,7 +309,7 @@ function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "bod
 }
 const endpoint = (value: string | number | { id?: string | number } | undefined) => typeof value === "object" ? value.id : value;
 const membershipKey = (id: string, level: number) => JSON.stringify([level, id]);
-export default function Graph({ positions, snapshot, nodes, links, selected, rotate, allConnections = false, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onToggleRotation, onFailure }: Props) {
+export default function Graph({ positions, snapshot, nodes, links, selected, filteredGroup = null, rotate, allConnections = false, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onToggleRotation, onFailure }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
   const cameraMotion = useRef(new CameraMotion());
@@ -368,6 +368,16 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const [corePage, setCorePage] = useState(0);
   const [showAllCore, setShowAllCore] = useState(false);
   const [spatialReveal, setSpatialReveal] = useState<SpatialReveal | null>(null);
+  const groupRequest = filteredGroup ? JSON.stringify([filteredGroup, fit]) : "";
+  const [appliedGroupRequest, setAppliedGroupRequest] = useState("");
+  if (groupRequest !== appliedGroupRequest) {
+    // A sidebar choice uses the same paged disclosure as clicking its actual core.
+    const core = filteredGroup ? constellationView(nodes, links, null, null, undefined, snapshot.view).cores
+      .sort((a, b) => b.count - a.count || a.hub.localeCompare(b.hub))[0] : null;
+    setAppliedGroupRequest(groupRequest); setExpandedCore(core?.hub ?? null);
+    setCorePage(0); setShowAllCore(false); setSpatialReveal(null);
+    coreReturn.current = null; pendingReturn.current = null; restoringCoreReturn.current = null;
+  }
   const [movedGroups, setMovedGroups] = useState<Map<string, { representative: string; members: readonly string[]; level: number; epoch: number }>>(new Map());
   const [lodLevel, setLodLevel] = useState(0);
   const [settledRevision, setSettledRevision] = useState(0);
@@ -597,7 +607,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (!ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
     const hadCamera = Boolean(appliedCamera.current);
     appliedCamera.current = cameraKey;
-    const fitChanged = appliedFit.current !== fit;
+    // Fitting a sidebar group frames its disclosure; fitting the full view resets it.
+    const fitChanged = appliedFit.current !== fit && !filteredGroup;
     appliedFit.current = fit;
     if (!fitChanged && pendingReturn.current) {
       const pose = pendingReturn.current; pendingReturn.current = null;
@@ -700,7 +711,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     offset.normalize().multiplyScalar(distance);
     // Establish the overview before packing fixed-size glyphs in its screen plane.
     moveCamera({ x: lookAt.x + offset.x, y: lookAt.y + offset.y, z: lookAt.z + offset.z }, lookAt, 0);
-  }, [ready, cameraKey, viewKey, nodes, semanticNodes, links, selected, activeExpandedCore, cores, disclosure, reduced, size, positions, fit, snapshot.nodes.length, snapshot.view, spatialReveal, exposesHiddenMembers, moveCamera]);
+  }, [ready, cameraKey, viewKey, nodes, semanticNodes, links, selected, filteredGroup, activeExpandedCore, cores, disclosure, reduced, size, positions, fit, snapshot.nodes.length, snapshot.view, spatialReveal, exposesHiddenMembers, moveCamera]);
   useEffect(() => {
     let second = 0;
     const first = requestAnimationFrame(() => { second = requestAnimationFrame(positionCamera); });
@@ -1063,13 +1074,20 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             if (!box) continue;
             element.style.left = `${box.left}px`; element.style.top = `${box.top}px`;
             const star = candidates.find(node => node.id === box.id)!;
-            const x = Math.max(box.left, Math.min(box.right, star.x)), y = Math.max(box.top, Math.min(box.bottom, star.y));
-            const dx = x - star.x, dy = y - star.y, distance = Math.hypot(dx, dy), length = distance - star.radius - 6;
-            element.classList.toggle("offset-label", length > 14);
-            element.style.setProperty("--leader-x", `${star.x - box.left + dx / distance * (star.radius + 3)}px`);
-            element.style.setProperty("--leader-y", `${star.y - box.top + dy / distance * (star.radius + 3)}px`);
-            element.style.setProperty("--leader-length", `${Math.max(0, length)}px`);
-            element.style.setProperty("--leader-angle", `${Math.atan2(dy, dx)}rad`);
+            const leader = labelLeader(star, box);
+            const route = box.guide;
+            element.classList.toggle("offset-label", !!leader || !!route?.length);
+            element.classList.toggle("routed-label", !!route?.length);
+            const svg = element.children[3] as SVGSVGElement;
+            svg.style.display = route?.length ? "" : "none";
+            if (route?.length) {
+              svg.children[0].setAttribute("points", [[route[0].x1, route[0].y1], ...route.map(line => [line.x2, line.y2])].map(([x, y]) => `${x - box.left},${y - box.top}`).join(" "));
+              svg.children[1].setAttribute("cx", String(route[0].x1 - box.left)); svg.children[1].setAttribute("cy", String(route[0].y1 - box.top));
+            }
+            element.style.setProperty("--leader-x", `${(leader?.x1 ?? star.x) - box.left}px`);
+            element.style.setProperty("--leader-y", `${(leader?.y1 ?? star.y) - box.top}px`);
+            element.style.setProperty("--leader-length", `${leader?.length ?? 0}px`);
+            element.style.setProperty("--leader-angle", `${leader ? Math.atan2(leader.y2 - leader.y1, leader.x2 - leader.x1) : 0}rad`);
           }
           refreshLabels = false;
         }
@@ -1402,7 +1420,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     </div>
     <div className="node-labels" ref={labelLayer}
       onClick={event => { const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { if (event.detail === 0) suppressClickUntil.current = 0; chooseNode(label.dataset.nodeId); } }}>
-      {Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /></div>)}
+      {Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /><svg className="label-leader" aria-hidden="true" style={{ display: "none" }}><polyline /><circle r="1.5" /></svg></div>)}
     </div>
     {activeExpandedCore && !selected && !spatialReveal?.members.size && <div className="graph-core-actions">
       <div className="graph-core-heading">
@@ -1424,9 +1442,5 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
       rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} onResize={resizeMinimap} />}
     {hover && (!selected || hoveredId.current !== selected) && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
-    <div className="graph-instructions" aria-hidden="true">
-      <span className="pointer-instructions">빈 공간 끌어 이동 · 묶음 눌러 펼치기·끌어 이동 · <span className="zoom-instruction">스크롤 확대·축소</span></span>
-      <span className="touch-instructions">빈 공간 끌어 이동 · 두 손가락 확대·이동<br />묶음 눌러 펼치기·끌어 이동</span>
-    </div>
   </div>;
 }

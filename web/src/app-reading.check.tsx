@@ -1,4 +1,4 @@
-import { nodeScreenSize, nodeVisualRadius, summaryAppearance } from "./presentation";
+import { leaderHitsBox, leadersCross, nodeScreenSize, nodeVisualRadius, summaryAppearance, type LabelLeader } from "./presentation";
 import { createRoot } from "react-dom/client";
 import { Line, LineBasicMaterial, Mesh, Raycaster, Scene, ShaderMaterial, Sprite, Vector3 } from "three";
 import type { Camera } from "three";
@@ -37,6 +37,25 @@ function details(text: string) {
   const summary = [...host.querySelectorAll<HTMLElement>("summary")].find(node => node.textContent?.startsWith(text));
   assert(summary?.parentElement instanceof HTMLDetailsElement, `Details: ${text}`);
   return { summary, element: summary.parentElement };
+}
+function checkLabelAssociations() {
+  const boxes = [...host.querySelectorAll<HTMLElement>('.node-label:not([hidden])')].filter(element => +element.style.opacity > .99).map(element => {
+    const box = element.getBoundingClientRect(), length = parseFloat(element.style.getPropertyValue("--leader-length"));
+    const x1 = box.left + parseFloat(element.style.getPropertyValue("--leader-x")), y1 = box.top + parseFloat(element.style.getPropertyValue("--leader-y"));
+    const angle = parseFloat(element.style.getPropertyValue("--leader-angle"));
+    const polyline = element.querySelector("polyline");
+    const points = element.classList.contains("routed-label") ? polyline!.getAttribute("points")!.split(" ").map(value => value.split(",").map(Number)) : [];
+    const lines: LabelLeader[] = points.length ? points.slice(1).map(([x, y], index) => ({ x1: box.left + points[index][0], y1: box.top + points[index][1], x2: box.left + x, y2: box.top + y, length: Math.hypot(x - points[index][0], y - points[index][1]) })) :
+      element.classList.contains("offset-label") ? [{ x1, y1, x2: x1 + length * Math.cos(angle), y2: y1 + length * Math.sin(angle), length }] : [];
+    if (points.length) assert(lines.reduce((sum, line) => sum + line.length, 0) <= 240.01, "a rendered title guide has a bounded detour");
+    if (lines.length) assert(points.length ? getComputedStyle(polyline!).strokeDasharray !== "none" : getComputedStyle(element, "::before").borderTopStyle === "dashed", "title guides are distinguishable from actual relation lines");
+    return { id: element.dataset.nodeId!, left: box.left, right: box.right, top: box.top, bottom: box.bottom, lines };
+  });
+  for (const [index, box] of boxes.entries()) for (const line of box.lines) {
+    assert(boxes.every(other => box.id === other.id || !leaderHitsBox(line, other, 0)), `guide from ${box.id} does not penetrate another rendered name`);
+    assert(boxes.slice(index + 1).every(other => other.lines.every(otherLine => !leadersCross(line, otherLine))), `guide from ${box.id} does not cross another rendered guide`);
+  }
+  return { titles: boxes.length, guides: boxes.filter(box => box.lines.length).length };
 }
 async function openExplorer() {
   if (!host.querySelector(".map-sidebar")) button("필터·묶음").click();
@@ -165,6 +184,7 @@ async function check(size: number) {
     await until(() => idleGraph() && host.querySelectorAll(".graph-list > button").length === size, "initial list");
     await until(() => host.querySelector(".load-timing")?.textContent?.includes("목록 표시") === true, "list timing");
     assert(/응답 \d+ms · 목록 표시 \d+ms/.test(host.querySelector(".load-timing")?.textContent ?? ""), "Timing names both measured phases");
+    assert(host.querySelector<HTMLElement>(".load-timing")?.hidden === true, "development measurements never appear as a user-facing setting");
     const listOrder = () => [...host.querySelectorAll(".graph-list > button strong")].map(value => value.textContent);
     const initialOrder = listOrder();
     const sorter = host.querySelector<HTMLSelectElement>('select[aria-label="표시 항목 정렬"]')!;
@@ -581,6 +601,8 @@ async function checkOriginalFolders() {
     button("기록 남기기", host.querySelector(".map-empty")!).click();
     await until(() => host.querySelector(".management-panel")?.getAttribute("aria-label") === "기록 남기기", "confirmed record entry");
     assert(promptCount() === 3 && !host.querySelector(".original-detail") && !new URL(window.location.href).searchParams.has("focus"), "Confirmed entry discards the original and clears its selection");
+    button("검색·조건 초기화", host.querySelector(".map-empty")!).click();
+    await until(() => !host.querySelector(".map-empty") && host.querySelector<HTMLSelectElement>(".filter-row label:first-child select")?.value === "all", "empty results provide a guarded return to the full scope");
     return { originalFolders: true, listedFolders: 4, visibleOriginals: 1, titleCount: 1, draftGuard: true, localFolderStructure: true };
   } finally {
     root.unmount();
@@ -609,7 +631,7 @@ async function checkNativeConstellation() {
     eligible: { nodes: nodes.length, links: links.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
   let graphCalls = 0;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
-  const summary = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.textContent?.includes("관계 묶음 · 121개"));
+  const summary = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.textContent?.includes("관계 묶음 · 합성 상위 자료 · 121개"));
   const folderSummary = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.textContent?.includes("폴더 묶음 · 40개"));
   try {
     window.fetch = async input => {
@@ -698,6 +720,9 @@ async function checkPurposeDiagram() {
     summary(0)!.focus(); summary(0)!.click();
     await until(() => host.querySelector(".graph-core-heading")?.textContent?.includes(`${names[0]} · 120개`) === true &&
       host.querySelector(".graph-core-page")?.textContent === "1/10" && !positions!.layoutMoving, "native button activation opens a 12-item purpose page without counting its subject marker");
+    await until(() => [...host.querySelectorAll<HTMLElement>('.node-label:not([hidden])')].filter(label => label.dataset.nodeId?.startsWith("purpose-0-") && +label.style.opacity > .99).length >= 12,
+      "every disclosed member retains its title in the first purpose page");
+    checkLabelAssociations();
     if (innerWidth <= 700) {
       const previous = [...host.querySelectorAll<HTMLButtonElement>(".graph-core-navigation button")].find(control => control.textContent === "이전")!;
       assert(previous.disabled, "the first purpose page has no previous page");
@@ -715,9 +740,22 @@ async function checkPurposeDiagram() {
     summary(1)!.focus(); summary(1)!.click();
     await until(() => host.querySelector(".graph-core-actions")?.textContent?.includes(`${names[1]} · 23개`) === true && !positions!.layoutMoving,
       "a small opened purpose retains its literal name and knowledge count without paging controls");
+    checkLabelAssociations();
     button("묶음 접기").click();
     await until(() => !!summary(0) && !!summary(1) && !positions!.layoutMoving, "the small purpose returns to the same named overview");
     assert(graphCalls === firstCalls, "purpose expansion and paging use no extra graph requests");
+    await openExplorer();
+    const filteredPurpose = [...host.querySelectorAll<HTMLButtonElement>(".cluster-list button")].find(control => control.querySelector("strong")?.textContent === names[1]);
+    assert(filteredPurpose, "the selected purpose has an actual sidebar entry");
+    filteredPurpose.click();
+    await until(() => !host.querySelector(".map-sidebar") && host.querySelector(".graph-core-heading")?.textContent?.includes(`${names[1]} · 23개`) === true && !positions!.layoutMoving,
+      "choosing a purpose in the sidebar opens its members through the existing core disclosure");
+    assert([...host.querySelectorAll<HTMLElement>('.node-label:not([hidden])')].some(label => label.dataset.nodeId?.startsWith("purpose-1-")), "the filtered map contains member titles, not just the core marker");
+    button("묶음 접기").click(); await settle();
+    assert(!host.querySelector(".graph-core-actions"), "explicit collapse remains collapsed under the same filter");
+    button("묶음 해제").click();
+    await until(() => !!summary(0) && !!summary(1) && !positions!.layoutMoving, "clearing the group filter restores the full overview");
+    assert(graphCalls === firstCalls, "group filtering and disclosure reuse the current snapshot");
     responseSnapshot = { ...snapshot, links: memberships };
     details("보기 설정").summary.click(); button("새로고침").click();
     await until(() => graphCalls === firstCalls + 1 && host.querySelector(".galaxy")?.getAttribute("aria-busy") === "false" && !!summary(0) && !!summary(1) && !positions!.layoutMoving, "removing references retains both purpose summaries");
@@ -817,7 +855,7 @@ async function checkSummaryOverview() {
   let graphCalls = 0;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
   const labels = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].filter(node => !node.hidden);
-  const summary = (count: number) => labels().find(node => node.textContent?.includes(`관계 묶음 · ${count}개`));
+  const summary = (count: number) => labels().find(node => node.textContent?.includes(`관계 묶음 · 합성 ${count}개 묶음 자료 0 · ${count}개`));
   const overviewReady = () => counts.every(count => !!summary(count) && (glyphSamples.get(`group-${count}-0`)?.opacity ?? 0) > .99);
   const pointAt = (count: number | null) => {
     // Synthetic PointerEvent page coordinates do not include the fixture's scroll offset.
@@ -976,7 +1014,7 @@ async function checkSummaryOverview() {
     });
     const overviewProjections = hubProjections();
     (await revealSummary(120)).click();
-    await until(() => host.querySelector(".graph-core-heading")?.textContent?.includes("관계 묶음 · 120개") === true &&
+    await until(() => host.querySelector(".graph-core-heading")?.textContent?.includes("관계 묶음 · 합성 120개 묶음 자료 0 · 120개") === true &&
       host.querySelector(".graph-core-page")?.textContent === "1/10", "large summary opens its compact page");
     await until(() => { const value = cloudSamples.get("group-120-0")?.opacity; return value !== undefined && value > .3 && value < .85; }, "the real summary cloud is midway through opening");
     const beforeClose = cloudSamples.get("group-120-0")!;

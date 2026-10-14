@@ -8,7 +8,7 @@ import { PerspectiveCamera, Vector3 } from "three";
 import { active, constellationView, denseConstellationCores, diagramLinks, expandedCoreCameraFrame, graphUrl, isNativeOriginal, knowledge, linkKey, listNodes, nativeFolders, overviewLinkKeys, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph, visualSatellites } from "./graph.ts";
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
-import { visibleLabels, type ProjectedLabel } from "./presentation.ts";
+import { labelLeader, leaderHitsBox, leadersCross, visibleLabels, type ProjectedLabel } from "./presentation.ts";
 import { CameraMotion, zoomCameraPose } from "./camera-motion.ts";
 import { miniMapTransform } from "./MiniMap.tsx";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition.ts";
@@ -2828,6 +2828,41 @@ test("resting titles stay beside their stars and defer when only distant space i
   const [close] = visibleLabels([star], 400, 240, null, null, { stars: [star] });
   const gap = Math.hypot(star.x - Math.max(close.left, Math.min(close.right, star.x)), star.y - Math.max(close.top, Math.min(close.bottom, star.y)));
   assert.ok(gap <= star.radius + 18, "an ordinary title has a bounded, local association");
+});
+
+test("opened titles keep readable associations instead of reusing crossed leaders", () => {
+  const stars: ProjectedLabel[] = [100, 170].map((y, index) => ({ id: `opened-${index}`, kind: "document", active: true, x: 70, y, depth: 0, radius: 6, width: 130, height: 21 }));
+  const previous = new Map(stars.map((star, index) => [star.id, { id: star.id, left: 210, right: 340, top: 165 - index * 70, bottom: 186 - index * 70 }]));
+  const crossed = stars.map(star => labelLeader(star, previous.get(star.id)!)!);
+  assert.ok(leadersCross(crossed[0], crossed[1]), "the retained sides would cross before placement considers their paths");
+  const environment = { stars, previous, starTitles: { limit: 0, exempt: new Set(stars.map(star => star.id)) } };
+  const boxes = visibleLabels(stars, 390, 480, null, null, environment);
+  assert.equal(boxes.length, stars.length, "disclosed titles are preserved rather than hidden to remove their lines");
+  const lines = boxes.map(box => labelLeader(stars.find(star => star.id === box.id)!, box));
+  for (const [index, line] of lines.entries()) if (line) {
+    assert.ok(boxes.every((box, other) => other === index || !leaderHitsBox(line, box)));
+    assert.ok(lines.slice(index + 1).every(other => !other || !leadersCross(line, other)));
+  }
+  assert.deepEqual(visibleLabels(stars, 390, 480, null, null, { ...environment, previous: new Map(boxes.map(box => [box.id, box])) }), boxes,
+    "safe resting titles retain their positions on the next frame");
+});
+
+test("a crowded mobile page can turn a guide while preserving all twelve long titles", () => {
+  const points = [[202, 314], [203, 263], [131, 295], [286, 280], [294, 231], [255, 324], [180, 214], [157, 365], [105, 250], [237, 370], [236, 178], [93, 352]];
+  const nodes: ProjectedLabel[] = points.map(([x, y], index) => ({ id: `page-${index}`, kind: "document", active: true, x, y, depth: 0, radius: 6, width: 145, height: 21 }));
+  const original = structuredClone(nodes);
+  const boxes = visibleLabels(nodes, 390, 568, null, null, { stars: nodes,
+    obstacles: [{ left: 14, top: 14, right: 376, bottom: 106 }, { left: 220, top: 452, right: 376, bottom: 506 }],
+    starTitles: { limit: 0, exempt: new Set(nodes.map(node => node.id)) } });
+  assert.equal(boxes.length, 12, "a route constraint must not solve the crowded page by hiding its titles");
+  assert.ok(boxes.some(box => box.guide), "the fixture needs an actual turn, not only a different straight side");
+  const paths = boxes.map(box => box.guide ?? [labelLeader(nodes.find(node => node.id === box.id)!, box)].filter(line => line !== null));
+  assert.ok(paths.every(path => path.reduce((sum, line) => sum + line.length, 0) <= 240), "a turn cannot take a long detour around the page");
+  for (const [index, path] of paths.entries()) for (const line of path) {
+    assert.ok(boxes.every((box, other) => other === index || !leaderHitsBox(line, box, 0)));
+    assert.ok(paths.slice(index + 1).every(other => other.every(segment => !leadersCross(line, segment))));
+  }
+  assert.deepEqual(nodes, original, "turning a title guide cannot move a real star");
 });
 
 test("first-view star titles yield to group names while focus, close stars and opened groups keep theirs", () => {
