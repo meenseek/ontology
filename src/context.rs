@@ -1025,7 +1025,10 @@ mod filesystem {
             }
             let mut file = open_at(directory.as_raw_fd(), &name, libc::O_RDONLY, 0)?;
             let before = file.metadata().map_err(|_| Error::Invalid)?;
-            if before.dev() != observed.st_dev as u64
+            // dev_t has different widths across Unix platforms; retain the same conversion.
+            #[allow(clippy::unnecessary_cast)]
+            let observed_device = observed.st_dev as u64;
+            if before.dev() != observed_device
                 || u128::from(before.ino()) != u128::from(observed.st_ino)
             {
                 return Err(Error::Conflict);
