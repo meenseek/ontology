@@ -307,6 +307,21 @@ test("one explicit taxonomy marker shares its star color without recoloring ambi
   assert.equal(byId.get("c")!.taxonomyColor, undefined, "multiple taxonomy memberships keep a neutral star color");
   assert.deepEqual(model, reconcile(snapshot([topicB, topicA, doc("c"), doc("b"), doc("a")], [...links].reverse())));
 });
+test("purpose filter dots share the subject marker and unambiguous member color", () => {
+  const subject: GraphNode = { id: "purpose-a", scope: "meenseek", kind: "subject", label: "목적" };
+  const member = { ...doc("member"), subject_id: subject.id, subject_name: subject.label };
+  const model = reconcile(snapshot([subject, member], [{ source: member.id, target: subject.id, kind: "subject", current: true }]), undefined, false, "purpose");
+  const marker = model.nodes.find(node => node.id === subject.id)!;
+  assert.equal(model.clusters.find(cluster => cluster.purpose)!.color, marker.taxonomyColor);
+  assert.equal(model.nodes.find(node => node.id === member.id)!.taxonomyColor, marker.taxonomyColor);
+  const withoutMarker = reconcile(snapshot([member]), undefined, false, "purpose");
+  assert.equal(withoutMarker.clusters.find(cluster => cluster.purpose)!.color, marker.taxonomyColor);
+  assert.equal(withoutMarker.nodes[0].taxonomyColor, marker.taxonomyColor, "stored purpose owns the color even when its marker is outside the response");
+  const topic: GraphNode = { id: "extra-topic", scope: "meenseek", kind: "topic", label: "보조 태그" };
+  const tagged = snapshot([subject, member, topic], [{ source: member.id, target: subject.id, kind: "subject", current: true }, { source: member.id, target: topic.id, kind: "topic", current: true }]);
+  assert.equal(reconcile(tagged, undefined, false, "purpose").nodes.find(node => node.id === member.id)!.taxonomyColor, marker.taxonomyColor);
+  assert.equal(reconcile(tagged).nodes.find(node => node.id === member.id)!.taxonomyColor, undefined, "relationship views retain the ambiguous taxonomy color rule");
+});
 test("unclassified stars have stable but varied colors and silhouettes", async () => {
   const { starColor, starShape } = await import("./presentation.ts");
   const ids = Array.from({ length: 24 }, (_, index) => `star-${index}`);
@@ -2803,6 +2818,8 @@ test("resting titles stay beside their stars and defer when only distant space i
   const star: ProjectedLabel = { id: "star", kind: "document", active: true, x: 200, y: 120, depth: 0, radius: 10, width: 80, height: 20 };
   const environment = { stars: [star], obstacles: [{ left: 0, top: 0, right: 245, bottom: 240 }] };
   assert.deepEqual(visibleLabels([star], 400, 240, null, null, environment), [], "a free but distant title must not suggest another star");
+  assert.equal(visibleLabels([star], 400, 240, null, null, { ...environment, starTitles: { limit: 0, exempt: new Set([star.id]) } }).length, 1,
+    "an explicitly opened member keeps its title and leader even beyond the resting reach");
   for (const selected of [true, false]) {
     const [box] = visibleLabels([star], 400, 240, selected ? star.id : null, selected ? null : star.id, environment);
     assert.ok(box, "selection and hover retain access to the deferred title");

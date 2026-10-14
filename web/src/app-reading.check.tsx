@@ -1281,6 +1281,13 @@ async function checkRenderedMotion() {
     const at = new Vector3(node.x, node.y, node.z).project(camera!);
     canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: rect.left + (at.x + 1) * rect.width / 2, clientY: rect.top + (1 - at.y) * rect.height / 2 }));
     await until(() => (sampled.get(node.id)?.wobble ?? 0) > .01, "pointer proximity drives wobble in the actual star draw");
+    await until(() => !!host.querySelector(".graph-tooltip"), "mouse pointing exposes the actual hover guidance");
+    const map = host.querySelector<HTMLElement>(".graph-canvas")!;
+    map.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", pointerId: 19, button: 0 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "touch", pointerId: 19, button: 0 }));
+    await settle();
+    assert(!host.querySelector(".graph-tooltip"), "touch clears guidance even while the renderer retains its last pointed star");
+    assert([...host.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].every(label => !label.classList.contains("hovered")), "touch does not retain a detailed hovered title");
     canvas.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: host }));
     await until(() => sampled.get(node.id)?.wobble === 0, "pointer exit restores the star without leaving a wobble behind");
     details("보기 설정").summary.click();

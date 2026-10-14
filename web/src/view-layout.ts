@@ -101,11 +101,12 @@ export function planCoreView(desired: ReadonlyMap<string, Point>, movable: Reado
       const offset = camera.position.clone().sub(target);
       const vertical = camera.fov * Math.PI / 180;
       const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * view.size.width / view.size.height);
-      const radius = expandedCoreCameraFrame(nodes, view.links, hub, view.members)?.radius ?? 18;
+      const frame = expandedCoreCameraFrame(nodes, view.links, hub, view.members);
+      const radius = frame?.radius ?? 18;
       const distance = view.selected ? focusedCameraDistance(offset.length(), view.size.height, camera.projectionMatrix.elements[5]) :
-        coreCameraDistance(radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2), view.size.height, camera.projectionMatrix.elements[5]);
+        coreCameraDistance(radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2), view.size.height, camera.projectionMatrix.elements[5], offset.length());
       if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
-      target.copy(focus); camera.position.copy(target).add(offset.normalize().multiplyScalar(distance));
+      target.copy(view.selected || !frame ? focus : frame.center); camera.position.copy(target).add(offset.normalize().multiplyScalar(distance));
     }
     camera.lookAt(target);
   }

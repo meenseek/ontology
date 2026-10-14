@@ -84,6 +84,7 @@ function hash(text: string): number {
   for (const char of text) value = Math.imul(value ^ (char.codePointAt(0) ?? 0), 16777619);
   return value >>> 0;
 }
+const taxonomyColorFor = (scope: Scope, kind: string, id: string) => colors[hash(`${scope}|taxonomy|${kind}|${id}`) % colors.length];
 function random(seed: number): () => number {
   let state = seed;
   return () => { state = (Math.imul(1664525, state) + 1013904223) >>> 0; return state / 4294967296; };
@@ -178,6 +179,7 @@ export function reconcile(snapshot: Snapshot, previous?: Model, showFolders = fa
   const structure = showFolders ? folderStructure(originals) : { nodes: [], links: [] };
   const nodes = [...originals, ...structure.nodes].sort((a, b) => compare(a.id, b.id));
   const byId = new Map(nodes.map(n => [n.id, n]));
+  const taxonomyColors = new Map(nodes.filter(n => !knowledge(n)).map(n => [n.id, n.kind === "folder" ? linkColor.parent : taxonomyColorFor(snapshot.scope, n.kind, n.id)]));
   const links = [...snapshot.links, ...structure.links].filter(l => byId.has(l.source) && byId.has(l.target)).sort((a, b) => compare(linkKey(a), linkKey(b)));
   const graph = new UndirectedGraph();
   for (const node of originals) graph.addNode(node.id);
@@ -205,14 +207,14 @@ export function reconcile(snapshot: Snapshot, previous?: Model, showFolders = fa
     const first = markers[0] ?? members[0];
     const repositoryLabel = repositories.get(first.repository ?? "");
     const label = purpose ? members.find(node => node.kind === "subject")?.label ?? members.find(node => node.subject_name)?.subject_name ?? "목적 묶음" : first.kind === "document" ? [repositoryLabel, nodePresentation(first).title].filter(Boolean).join(" · ") : first.label;
-    return { id, label, color: colors[hash(id) % colors.length], members: members.map(n => n.id), knowledge: members.filter(knowledge).length,
+    const subject = purpose ? members.find(node => node.kind === "subject")?.id ?? members.find(node => node.subject_id)?.subject_id : undefined;
+    return { id, label, color: subject ? taxonomyColors.get(subject) ?? taxonomyColorFor(snapshot.scope, "subject", subject) : colors[hash(id) % colors.length], members: members.map(n => n.id), knowledge: members.filter(knowledge).length,
       ...(purpose ? { purpose: true, totalKnowledge: Math.max(members.filter(knowledge).length, ...members.map(node => node.purpose_total ?? 0)) } : {}) };
   });
   for (const folder of structure.nodes) clusters.push({ id: folder.id, label: folder.label,
     color: linkColor.parent, members: [folder.id], knowledge: 0 });
   clusters.sort((a, b) => compare(a.id, b.id));
   const old = new Map((previous?.scope === snapshot.scope ? previous.nodes : []).map(n => [n.id, n]));
-  const taxonomyColors = new Map(nodes.filter(n => !knowledge(n)).map(n => [n.id, n.kind === "folder" ? linkColor.parent : colors[hash(`${snapshot.scope}|taxonomy|${n.kind}|${n.id}`) % colors.length]]));
   const taxonomyMembership = new Map<string, Set<string>>();
   for (const link of links) {
     if (!link.current || !["topic", "subject", "area"].includes(link.kind)) continue;
@@ -249,7 +251,8 @@ export function reconcile(snapshot: Snapshot, previous?: Model, showFolders = fa
       }
       const signature = JSON.stringify([node.revision, node.content_digest, node.source_revision, node.generation, node.relation_digest, node.classification_revision]);
       const groups = taxonomyMembership.get(id);
-      const taxonomyColor = knowledge(node) ? groups?.size === 1 ? taxonomyColors.get([...groups][0]) : undefined : taxonomyColors.get(id);
+      const taxonomyColor = knowledge(node) ? view === "purpose" && node.subject_id ? taxonomyColors.get(node.subject_id) ?? taxonomyColorFor(snapshot.scope, "subject", node.subject_id)
+        : groups?.size === 1 ? taxonomyColors.get([...groups][0]) : undefined : taxonomyColors.get(id);
       positioned.set(id, { ...node, repositoryLabel: repositories.get(node.repository ?? ""), x, y, z, fx: x, fy: y, fz: z, cluster: cluster.id, relationshipCluster: relationshipClusters.get(id), color: cluster.color, taxonomyColor, signature, changed: !!prior && signature !== prior.signature });
     }
   }
@@ -393,10 +396,13 @@ export function constellationView(nodes: PositionedNode[], links: GraphLink[], s
 export function expandedCoreCameraFrame(nodes: readonly PositionedNode[], links: readonly GraphLink[], hubId: string, members: ReadonlySet<string>) {
   const hub = nodes.find(node => node.id === hubId);
   if (!hub) return null;
-  const radius = Math.max(18, ...nodes.filter(node => members.has(node.id)).map(node => Math.hypot(node.x - hub.x, node.y - hub.y, node.z - hub.z) + 6));
+  const visible = nodes.filter(node => members.has(node.id) || node.id === hubId);
+  const center = { x: 0, y: 0, z: 0 };
+  for (const axis of ["x", "y", "z"] as const) center[axis] = (Math.min(...visible.map(node => node[axis])) + Math.max(...visible.map(node => node[axis]))) / 2;
+  const radius = Math.max(18, ...visible.map(node => Math.hypot(node.x - center.x, node.y - center.y, node.z - center.z) + 6));
   const internalLinks = links.filter(link => members.has(link.source) && members.has(link.target))
     .map(link => JSON.stringify([link.source, link.target, link.kind, link.current])).sort();
-  return { radius, key: JSON.stringify([[...members].sort(), internalLinks]) };
+  return { center, radius, key: JSON.stringify([[...members].sort(), internalLinks]) };
 }
 /** Put filename matches ahead of broad body/path matches in the searchable list. */
 export function searchResults<T extends GraphNode>(nodes: T[], query: string): T[] {

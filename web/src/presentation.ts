@@ -52,10 +52,11 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   const nearby = (a: ProjectedLabel, b: ProjectedLabel) => distance(a) - distance(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const priority = visible.filter(n => n.id === selected);
   const ordinary = visible.filter(n => n.id !== selected && !n.summary);
-  const ordered = [...priority, ...visible.filter(n => n.id !== selected && n.summary).sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0) || nearby(a, b))];
+  const disclosed = ordinary.filter(n => environment.starTitles?.exempt?.has(n.id)).sort(nearby);
+  const ordered = [...priority, ...disclosed, ...visible.filter(n => n.id !== selected && n.summary).sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0) || nearby(a, b))];
   const readable = (a: ProjectedLabel, b: ProjectedLabel) => Number(b.active) - Number(a.active) || nearby(a, b);
-  const documents = ordinary.filter(n => n.kind === "document").sort(readable);
-  const memories = ordinary.filter(n => n.kind === "memory").sort(readable);
+  const documents = ordinary.filter(n => n.kind === "document" && !environment.starTitles?.exempt?.has(n.id)).sort(readable);
+  const memories = ordinary.filter(n => n.kind === "memory" && !environment.starTitles?.exempt?.has(n.id)).sort(readable);
   // Each kind gets a turn before the other kind can consume the label budget.
   for (let i = 0; i < Math.max(documents.length, memories.length); i++) {
     if (documents[i]) ordered.push(documents[i]);
@@ -63,7 +64,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   }
   ordered.push(...ordinary.filter(n => n.kind !== "document" && n.kind !== "memory").sort(nearby));
   const fromStar = (node: ProjectedLabel, box: LabelBox) => Math.hypot(node.x - Math.max(box.left, Math.min(box.right, node.x)), node.y - Math.max(box.top, Math.min(box.bottom, node.y)));
-  const restingReach = (node: ProjectedLabel) => node.id === selected || node.id === hovered ? Infinity :
+  const restingReach = (node: ProjectedLabel) => node.id === selected || node.id === hovered || environment.starTitles?.exempt?.has(node.id) ? Infinity :
     node.summary ? environment.restingSummaryGap === undefined ? Infinity : node.radius + environment.restingSummaryGap : node.radius + 18;
   const positionsFor = (node: ProjectedLabel): LabelBox[] => {
     const clearance = node.radius + 5;
@@ -121,7 +122,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   if (environment.stars) {
     const summaries = ordered.filter(node => node.summary && node.id !== selected).slice(0, MAX_VISIBLE_LABELS * 2).sort((a, b) =>
       (b.importance ?? 0) - (a.importance ?? 0) || optionsFor(a).length - optionsFor(b).length || nearby(a, b));
-    ordered.splice(priority.length, summaries.length, ...summaries);
+    ordered.splice(priority.length + disclosed.length, summaries.length, ...summaries);
   }
   // The fallback keeps the label off its own body, reuses last frame's spot within reach, then takes the nearest grid spot within reach.
   const nearestFree = (node: ProjectedLabel, placed: readonly LabelBox[]): LabelBox | undefined => {
@@ -141,7 +142,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   const rationed = (node: ProjectedLabel) => !!environment.starTitles && !node.summary && node.id !== selected && node.id !== hovered &&
     !environment.starTitles.exempt?.has(node.id) && (!!environment.starTitles.exempt || (node.body ?? node.radius) < CLOSE_STAR_LABEL_RADIUS);
   let rationedTitles = 0;
-  const important = environment.stars ? ordered.filter(node => node.summary && (node.importance ?? 0) > 0 && node.id !== selected).slice(0, 8) : [];
+  const important = environment.stars && !disclosed.length ? ordered.filter(node => node.summary && (node.importance ?? 0) > 0 && node.id !== selected).slice(0, 8) : [];
   if (important.length > 1) {
     for (const node of priority) { const box = optionsFor(node)[0]; if (box) boxes.push(box); }
     // A bounded beam resolves competing sides together instead of hiding a large core.
@@ -240,9 +241,9 @@ export function nodeScreenSize(kind: string, depth: number, viewportHeight: numb
 }
 export const LAYOUT_WORLD_SPACING = 31;
 export const DEFAULT_LINK_PIXELS = 24;
-/** Default core framing keeps the canonical step at the ordinary screen scale. */
-export function coreCameraDistance(fitDistance: number, viewportHeight: number, projectionY: number): number {
-  return Math.max(fitDistance, LAYOUT_WORLD_SPACING * viewportHeight * projectionY / (2 * DEFAULT_LINK_PIXELS));
+/** Keep a readable existing zoom; otherwise bound magnification by the ordinary step. Large content still fits. */
+export function coreCameraDistance(fitDistance: number, viewportHeight: number, projectionY: number, currentDistance = Infinity): number {
+  return Math.max(fitDistance, Math.min(currentDistance, LAYOUT_WORLD_SPACING * viewportHeight * projectionY / (2 * DEFAULT_LINK_PIXELS)));
 }
 /** Keep an already close camera; otherwise reach the visible surface on selection. */
 export function focusedCameraDistance(currentDistance: number, viewportHeight: number, projectionY: number): number {

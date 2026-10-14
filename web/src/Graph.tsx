@@ -386,6 +386,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
   const resizeMinimap = useCallback(() => setMinimapRevision(value => value + 1), []);
   const [labelFontRevision, setLabelFontRevision] = useState(0);
   const [hover, setHover] = useState<{ title: string; detail: string } | null>(null);
+  const hoverPointer = useRef(true);
+  useEffect(() => { hoveredId.current = null; setHover(null); }, [selected, disabled]);
   const snapshotLinks = useMemo(() => diagramLinks(snapshot), [snapshot]);
   // Renderer endpoint mutation stays out of the reconciled model.
   const presentation = useMemo(() => constellationView(nodes, links, selected, expandedCore, showAllCore ? undefined : corePage, snapshot.view),
@@ -637,8 +639,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     if (target && activeExpandedCore) {
       const members = cores.find(core => core.hub === activeExpandedCore)?.members;
       if (members) {
-        const radius = expandedCoreCameraFrame(cameraNodes, links, activeExpandedCore,
-          disclosure?.hub === activeExpandedCore ? disclosure.visible : members)?.radius ?? 18;
+        const frame = expandedCoreCameraFrame(cameraNodes, links, activeExpandedCore,
+          disclosure?.hub === activeExpandedCore ? disclosure.visible : members);
+        const radius = frame?.radius ?? 18;
         const camera = instance.camera() as PerspectiveCamera;
         const controls = instance.controls() as OrbitControls;
         const vertical = camera.fov * Math.PI / 180;
@@ -646,11 +649,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         // Fit large cores, but do not magnify a compact page until ordinary
         // 31-unit layout steps look like stretched links. Manual zoom stays free.
         const distance = coreCameraDistance(radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2),
-          size.height, camera.projectionMatrix.elements[5]);
+          size.height, camera.projectionMatrix.elements[5], camera.position.distanceTo(controls.target));
         const offset = camera.position.clone().sub(controls.target);
         if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
         offset.normalize().multiplyScalar(distance);
-        moveCamera({ x: target.x + offset.x, y: target.y + offset.y, z: target.z + offset.z }, { x: target.x, y: target.y, z: target.z }, reduced ? 0 : 650);
+        const center = frame?.center ?? target;
+        moveCamera({ x: center.x + offset.x, y: center.y + offset.y, z: center.z + offset.z }, { x: center.x, y: center.y, z: center.z }, reduced ? 0 : 650);
         return;
       }
     }
@@ -839,7 +843,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     let previousLabels = new Map<string, ReturnType<typeof visibleLabels>[number]>();
     const chrome = () => {
       const origin = layer.getBoundingClientRect();
-      return [...(container.current?.querySelectorAll<HTMLElement>(".graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions, .graph-group-navigation.with-keys, .graph-group-target.core-name, .graph-group-target:focus") ?? [])]
+      return [...(container.current?.querySelectorAll<HTMLElement>(".graph-minimap, .graph-tooltip, .graph-core-actions, .graph-core-close, .graph-instructions, .graph-group-navigation.with-keys, .graph-group-target.core-name, .graph-group-target:focus") ?? [])]
         .filter(element => element.offsetWidth && element.offsetHeight)
         .map(element => { const box = element.getBoundingClientRect(); return { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }; });
     };
@@ -978,7 +982,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             }
           }
         }
-        const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}|${focusedSummary}|${dragged.current}|${positions.revision}`;
+        const obstacles = chrome();
+        const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}|${focusedSummary}|${dragged.current}|${positions.revision}|${JSON.stringify(obstacles)}`;
         if (key !== lastProjection) {
           lastProjection = key;
           const candidates = displayNodes.map(node => {
@@ -991,7 +996,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : namedGroup ? 1 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, body: pixels / 2, ...dimensions.get(node.id)![node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
           });
           // Mobile name keys follow the actual projected body; they never move a star.
-          const obstacles = chrome(), markerBoxes: typeof obstacles = [];
+          const markerBoxes: typeof obstacles = [];
           for (const marker of [...(groupMarkerLayer.current?.children ?? [])] as HTMLElement[]) {
             const star = candidates.find(node => node.id === marker.dataset.nodeId);
             marker.hidden = !star || star.depth < -1 || star.depth > 1 || star.x + star.radius < 0 || star.x - star.radius > size.width || star.y + star.radius < 0 || star.y - star.radius > size.height;
@@ -1019,13 +1024,13 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             marker.classList.toggle("active", star.id === hoveredId.current || star.id === focusedSummary);
           }
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
-          const labelCandidates = candidates.filter(node => (!spatialCounts.has(node.id) || spatialLabels.has(node.id) || node.id === hoveredId.current || node.id === focusedSummary) &&
+          const labelCandidates = candidates.filter(node => (!spatialCounts.has(node.id) || (!activeExpandedCore && spatialLabels.has(node.id)) || node.id === hoveredId.current || node.id === focusedSummary) &&
             (!pinnedNames.has(node.id) || node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current));
           const priorityId = focusedSummary ?? dragged.current ?? selected;
           // An opened group or revealed nearby stars show their own titles; other star titles wait.
           const opened = activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : spatialReveal?.members.size ? spatialReveal.members : undefined;
           const starTitles = opened ? { limit: 0, exempt: opened } : { limit: MAX_RESTING_STAR_LABELS };
-          const environment = { stars: candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : undefined };
+          const environment = { stars: candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : 120 };
           let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
           // Expanded metadata must not make an already usable keyboard target disappear.
           const compactFallback = new Set(labelCandidates.filter(node => (node.id === priorityId || node.id === hoveredId.current) && !visible.some(box => box.id === node.id)).map(node => node.id));
@@ -1231,6 +1236,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     onBlurCapture={() => { navigationKeys.current.clear(); }}
     onLostPointerCapture={event => { if (pointer.current?.pointerId === event.pointerId) pointer.current = null; }}
     onPointerMoveCapture={event => {
+      hoverPointer.current = event.pointerType === "mouse" || event.pointerType === "pen";
       if (disabled || positions.dragging || (event.pointerType !== "mouse" && event.pointerType !== "pen")) { cursor.current = null; return; }
       const rect = event.currentTarget.getBoundingClientRect();
       cursor.current = { x: event.clientX - rect.left, y: event.clientY - rect.top };
@@ -1238,6 +1244,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     onPointerLeave={() => { cursor.current = null; }}
     onWheelCapture={event => { if (event.target === graph.current?.renderer().domElement) { cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null; } }}
     onPointerDownCapture={event => {
+      hoverPointer.current = event.pointerType === "mouse" || event.pointerType === "pen";
+      if (!hoverPointer.current) { hoveredId.current = null; setHover(null); }
       cursor.current = null;
       if (graph.current) (graph.current.controls() as OrbitControls).autoRotate = false;
       // A new press is a new action; the guard only belongs to the prior drag's click.
@@ -1350,8 +1358,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
       }} enablePointerInteraction={!disabled}
       cooldownTicks={0} warmupTicks={0} onEngineStop={positionCamera}
       onNodeClick={node => chooseNode(node.id)}
-      onNodeHover={node => { hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: coreLabel(node, collapsedCounts.get(node.id)!, snapshot.view), detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `근접 묶음 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
-      onLinkHover={link => { if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.kind === "parent" ? "경로에서 계산 · 화살표는 상위 폴더 방향" : link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
+      onNodeHover={node => { if (!hoverPointer.current || disabled) return; hoveredId.current = node?.id ?? null; setHover(node ? collapsedCounts.has(node.id) ? { title: coreLabel(node, collapsedCounts.get(node.id)!, snapshot.view), detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `근접 묶음 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null); }}
+      onLinkHover={link => { if (!hoverPointer.current || disabled) return; if (link) hoveredId.current = null; setHover(link ? { title: linkName[link.kind], detail: link.kind === "parent" ? "경로에서 계산 · 화살표는 상위 폴더 방향" : link.current ? "등록된 관계" : "과거 출처 근거 · 군집 계산에서 제외" } : null); }}
     />}
     <div className={`graph-group-navigation${pinnedNames.size ? " with-keys" : ""}`} role="group" aria-label="지도의 묶음">
       {navigationGroups.map(node => {
@@ -1361,7 +1369,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
         aria-label={`${title}, ${collapsedCounts.has(node.id) || spatialCounts.has(node.id) ? "눌러 펼치기" : "선택"}`}
         onFocus={event => { hoveredId.current = node.id; if (pinnedNames.has(node.id)) event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" }); }}
         onBlur={() => { if (hoveredId.current === node.id) hoveredId.current = null; }}
-        onPointerEnter={() => { if (pinnedNames.has(node.id)) hoveredId.current = node.id; }}
+        onPointerEnter={event => { if (event.pointerType !== "touch" && pinnedNames.has(node.id)) hoveredId.current = node.id; }}
         onPointerLeave={event => { if (event.currentTarget !== document.activeElement && hoveredId.current === node.id) hoveredId.current = null; }}
         onClick={event => {
           if (event.detail === 0) suppressClickUntil.current = 0;

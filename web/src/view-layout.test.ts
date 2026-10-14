@@ -7,8 +7,13 @@ import type { GraphLink, GraphNode, PositionedNode, Snapshot } from "./graph.ts"
 import { nucleusLevel, nucleusView } from "./nuclei.ts";
 import { Positions } from "./positions.ts";
 import type { LayoutView, Point } from "./positions.ts";
-import { LAYOUT_WORLD_SPACING } from "./presentation.ts";
+import { coreCameraDistance, LAYOUT_WORLD_SPACING } from "./presentation.ts";
 import { planCoreView, screenPlane, overviewFrame } from "./view-layout.ts";
+
+test("opening an already readable page retains its zoom while large content still fits", () => {
+  assert.equal(coreCameraDistance(300, 700, 1.7, 500), 500);
+  assert.equal(coreCameraDistance(900, 700, 1.7, 500), 900);
+});
 
 test("sparse overview framing enlarges a small graph without changing coordinates or camera direction", () => {
   for (const size of [{ width: 1440, height: 680 }, { width: 390, height: 560 }]) {
