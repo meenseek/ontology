@@ -2381,7 +2381,8 @@ test("a background layout preserves linked geometry until exact slots arrive", a
         }
         const adjacency = new Map([request.root, ...request.members].map(id => [id, new Set<string>()]));
         for (const [a, b] of request.edges) { adjacency.get(a)!.add(b); adjacency.get(b)!.add(a); }
-        const solved = compactSlots(request.root, request.members, adjacency, 1000, 100000);
+        // The fake worker tests result delivery; a finite proposal limit bounds solver work across CPU speeds.
+        const solved = compactSlots(request.root, request.members, adjacency, Infinity, 100000);
         this.onmessage?.({ data: { token: request.token, slots: solved ? [...solved] : null } } as MessageEvent<{ token: number; slots: [string, { x: number; y: number }][] | null }>);
       });
     }

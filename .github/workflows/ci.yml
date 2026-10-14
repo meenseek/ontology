@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - 'schema/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'web/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'package.json'
+      - 'AGENTS.md'
+      - 'docs/document-grouping.md'
+      - 'docs/personal-memory-grouping.md'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - 'schema/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'web/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'package.json'
+      - 'AGENTS.md'
+      - 'docs/document-grouping.md'
+      - 'docs/personal-memory-grouping.md'
+      - '.github/workflows/ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '26'
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+      # rust-toolchain.toml owns the Rust version and required components.
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install the Rust dependency auditor
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      # verify.sh owns a disposable PostgreSQL container and removes it on exit.
+      # It never loads owner policy, native context, production data or a Codex producer.
+      - name: Run the canonical isolated verification
+        run: bash scripts/verify.sh
