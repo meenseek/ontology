@@ -1163,7 +1163,7 @@ async function checkRenderedMotion() {
   const originalRender = Scene.prototype.onBeforeRender, originalInstall = Positions.prototype.install, originalPack = Positions.prototype.packOverview;
   const originalControlsUpdate = OrbitControls.prototype.update;
   let cameraDistance = 0, overviewPacked = false, autoRotation = false;
-  const nodes: GraphNode[] = Array.from({ length: 5 }, (_, index) => ({ id: `motion-${index}`, scope: "personal", kind: "document", label: `합성 모션 자료 ${index}`, subject_id: "p_motion", subject_name: "합성 모션 목적", purpose_total: 5, status: "ok", present: true, current: true }));
+  const nodes: GraphNode[] = Array.from({ length: 5 }, (_, index) => ({ id: `motion-${index}`, scope: "personal", kind: "document", title: `합성 모션 자료 ${index}`, label: `synthetic/rendering/긴 원문 경로/${index}.md`, repository: "synthetic-workspace", subject_id: "p_motion", subject_name: "합성 모션 목적", purpose_total: 5, status: "ok", present: true, current: true }));
   const links: Snapshot["links"] = [1, 2, 3, 4].map(index => ({ source: nodes[0].id, target: nodes[index].id, kind: "related", current: true }));
   const snapshot: Snapshot = { scope: "personal", query: "", focus: { id: null, found: false }, nodes, links,
     matched: nodes.length, totals: { documents: nodes.length, memories: 0, markers: 0, links: links.length },
@@ -1279,9 +1279,18 @@ async function checkRenderedMotion() {
     await until(() => [...sampled].some(([id, value]) => Math.abs(value.rotation - initial.get(id)!.rotation) > .01 && Math.abs(value.shimmer - initial.get(id)!.shimmer) > .001), "the mounted renderer advances stellar surface and shimmer motion");
     const node = model!.nodes.find(node => node.id === nodes[0].id)!, canvas = host.querySelector("canvas")!, rect = canvas.getBoundingClientRect();
     const at = new Vector3(node.x, node.y, node.z).project(camera!);
+    const titleBox = () => host.querySelector<HTMLElement>(`.node-label:not([hidden])[data-node-id="${node.id}"] strong`)?.getBoundingClientRect();
+    const restingTitle = titleBox();
+    assert(restingTitle, "the pointed star already has a resting title");
     canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: rect.left + (at.x + 1) * rect.width / 2, clientY: rect.top + (1 - at.y) * rect.height / 2 }));
     await until(() => (sampled.get(node.id)?.wobble ?? 0) > .01, "pointer proximity drives wobble in the actual star draw");
     await until(() => !!host.querySelector(".graph-tooltip"), "mouse pointing exposes the actual hover guidance");
+    const pointedTitle = titleBox();
+    assert(pointedTitle && Math.hypot(pointedTitle.left - restingTitle.left, pointedTitle.top - restingTitle.top) < 1,
+      `pointing keeps the visible title at its resting position: ${pointedTitle ? Math.hypot(pointedTitle.left - restingTitle.left, pointedTitle.top - restingTitle.top).toFixed(1) : "missing"}px`);
+    assert(host.querySelector(".graph-tooltip span")?.textContent?.includes(node.label) &&
+      [...host.querySelectorAll<HTMLElement>(`.node-label[data-node-id="${node.id}"] > span, .node-label[data-node-id="${node.id}"] > small`)].every(element => element.offsetHeight === 0),
+      "the full source path and state remain in the guidance without duplicating them beside the anchored title");
     for (const pointerType of ["mouse", "pen"]) {
       const minimap = host.querySelector<HTMLButtonElement>(".minimap-disclosure")!;
       minimap.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", pointerId: 19, button: 0 }));
@@ -1292,10 +1301,13 @@ async function checkRenderedMotion() {
       assert([...host.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].every(label => !label.classList.contains("hovered")), "touch does not retain a detailed hovered title");
       await until(() => edgeOpacities.filter(value => value < .1).length === 2, "touch restores the resting connection emphasis");
       canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType, clientX: rect.left + (at.x + 1) * rect.width / 2, clientY: rect.top + (1 - at.y) * rect.height / 2 }));
-      await until(() => host.querySelector(".graph-tooltip strong")?.textContent === node.label &&
-        !!host.querySelector(`.node-label.hovered:not(.compact)[data-node-id="${node.id}"]`) &&
+      await until(() => host.querySelector(".graph-tooltip strong")?.textContent === node.title &&
+        !!host.querySelector(`.node-label.hovered[data-node-id="${node.id}"]`) &&
         edgeOpacities.length === links.length && edgeOpacities.every(value => value > .7),
-        `${pointerType} restores guidance, the detailed title and every actual connection on the same star after touch without leaving its hit area`);
+        `${pointerType} restores the anchored title, guidance and every actual connection on the same star after touch without leaving its hit area`);
+      const restoredTitle = titleBox();
+      assert(restoredTitle && Math.hypot(restoredTitle.left - restingTitle.left, restoredTitle.top - restingTitle.top) < 1,
+        `${pointerType} keeps the title anchored after touch`);
     }
     canvas.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: host }));
     await until(() => sampled.get(node.id)?.wobble === 0, "pointer exit restores the star without leaving a wobble behind");

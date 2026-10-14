@@ -174,7 +174,7 @@ export function cosmicLightMaterial() {
         vec3 color = mix(vec3(0.16,0.25,0.48), chroma, 0.55 + depth * 0.3);
         // A little white light keeps warm clouds luminous without increasing their opacity.
         color = mix(color, vec3(1.0), 0.18 * uCloud);
-        float strength = mix(0.025, 0.19, depth) * mix(1.0, 2.7, uCloud);
+        float strength = mix(0.025, 0.19, depth) * mix(1.0, 2.0, uCloud);
         gl_FragColor = vec4(color, field * edge * strength * uOpacity);
         #include <colorspace_fragment>
       }
@@ -999,7 +999,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
             const pixels = nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]);
             const radius = nodeVisualRadius(pixels, node.id === selected, node.changed, summaryCounts.get(node.id));
             projected.applyMatrix4(camera.projectionMatrix);
-            return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : namedGroup ? 1 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, body: pixels / 2, ...dimensions.get(node.id)![node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
+            return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : namedGroup ? 1 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, body: pixels / 2, ...dimensions.get(node.id)![node.id === selected || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
           });
           // Mobile name keys follow the actual projected body; they never move a star.
           const markerBoxes: typeof obstacles = [];
@@ -1039,7 +1039,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           const environment = { stars: candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : 120 };
           let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
           // Expanded metadata must not make an already usable keyboard target disappear.
-          const compactFallback = new Set(labelCandidates.filter(node => (node.id === priorityId || node.id === hoveredId.current) && !visible.some(box => box.id === node.id)).map(node => node.id));
+          const compactFallback = new Set(labelCandidates.filter(node => node.id === priorityId && !visible.some(box => box.id === node.id)).map(node => node.id));
           if (compactFallback.size) visible = visibleLabels(labelCandidates.map(node => compactFallback.has(node.id) ? { ...node, ...dimensions.get(node.id)!.compact } : node), size.width, size.height, priorityId, hoveredId.current, environment);
           previousLabels = new Map(visible.map(box => [box.id, box]));
           const remaining = new Map(visible.map(box => [box.id, box]));
@@ -1055,7 +1055,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
           }
           for (const element of elements) {
             const box = assigned.get(element);
-            const detailed = !!box && !compactFallback.has(box.id) && (box.id === selected || box.id === hoveredId.current || box.id === focusedSummary || box.id === dragged.current);
+            // Pointing keeps the title anchored; its metadata lives in the guidance.
+            const detailed = !!box && !compactFallback.has(box.id) && (box.id === selected || box.id === focusedSummary || box.id === dragged.current);
             if (box && (refreshLabels || element.dataset.nodeId !== box.id || element.classList.contains("compact") === detailed)) fill(element, box.id, detailed);
             element.hidden = !box;
             element.classList.toggle("hovered", !!box && box.id === hoveredId.current);
@@ -1422,7 +1423,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, rot
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>근접 묶음 {spatialReveal.members.size}개 접기</button>}
     {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
       rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} onResize={resizeMinimap} />}
-    {hover && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
+    {hover && (!selected || hoveredId.current !== selected) && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
     <div className="graph-instructions" aria-hidden="true">
       <span className="pointer-instructions">빈 공간 끌어 이동 · 묶음 눌러 펼치기·끌어 이동 · <span className="zoom-instruction">스크롤 확대·축소</span></span>
       <span className="touch-instructions">빈 공간 끌어 이동 · 두 손가락 확대·이동<br />묶음 눌러 펼치기·끌어 이동</span>

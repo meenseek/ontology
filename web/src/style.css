@@ -129,7 +129,9 @@ summary:hover { color: #e6edf6; }
 .map-actions select { min-height: 36px; font-size: 12px; padding-block: 7px; padding-inline-start: 10px; }
 .map-actions > button { min-height: 36px; font-size: 12px; padding: 7px 10px; background: transparent; white-space: nowrap; }
 .view-options { position: relative; }
-.view-options > summary { min-height: 36px; padding: 8px; font-size: 12px; white-space: nowrap; }
+.view-options > summary { min-height: 36px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; line-height: 1.4; white-space: nowrap; }
+.view-options > summary:hover { background: #222e3b; border-color: #77899e; }
+.view-options[open] > summary { background: #283646; border-color: #9bb7d5; color: #fff; }
 .view-options > div { position: absolute; right: 0; top: calc(100% + 6px); width: 220px; display: grid; gap: 8px; padding: 12px; border: 1px solid #425064; border-radius: 5px; background: #151f2c; z-index: 4; }
 .view-options button { text-align: left; font-size: 12px; }
 .map-status { padding: 0 26px; z-index: 2; font-size: 12px; }
