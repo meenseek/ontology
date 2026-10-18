@@ -902,6 +902,69 @@ cargo run --locked -- sync-once && bash scripts/dev.sh
 
 ## 백업과 복원 확인
 
+### 암호화 자동 백업
+
+`python3 scripts/local_backup.py`는 기존 로컬 DB를 GnuPG AES256으로 직접 암호화한다.
+Python 3.11 이상, Docker CLI와 GnuPG가 필요하다. 평문 dump 파일을 디스크에 만들지
+않으며, 설치별 설정·실행본은 `~/Library/Application Support/ontology-backup`에 둔다.
+앱 자동 실행과 별도 설치이므로 기존 HTTP 앱·DB·원문과 다른 자동화 일정을 바꾸지 않는다.
+
+```bash
+python3 scripts/local_backup.py install --mount /Volumes/backup-volume \
+  --destination /Volumes/backup-volume/ontology/backups/encrypted \
+  --store-id EXISTING_STORE_ID --container EXISTING_ONTOLOGY_CONTAINER
+python3 scripts/local_backup.py run --force
+python3 scripts/local_backup.py enable
+python3 scripts/local_backup.py status
+python3 scripts/local_backup.py verify --key-file /absolute/private/recovery-key.txt
+```
+
+실제 기존 볼륨과 저장소 신원을 확인한 값만 전달한다. 설치 시 기록한 볼륨 UUID·DB 신원과
+일치할 때만 저장하며 외장 디스크가 없으면 내부 디스크에 대신 저장하지 않는다. 무작위
+암호는 macOS Keychain의 `ontology.encrypted-backup` 항목에 저장한다. 비밀번호·원문은
+로그나 명령 인자로 출력하지 않는다. Keychain 접근이 거절되거나 잠겨 있으면 실패한다.
+
+각 백업은 원 DB와 같은 transaction snapshot의 전체 table 행·column·제약·index,
+large object와 sequence를 기준으로 별도 빈 DB에 실제 복원하여 대조한다. Sequence는
+MVCC snapshot 밖에서 변하므로 dump 전후 값이 달라지면 실패한다. 일치한 암호화 파일만
+완성 백업으로 공개하며, 확인이 끝난 임시 DB는 삭제한다. Native 반영의 `pending` 또는
+`committed`가 있으면 실패한다. 이 백업은 DB 원문·첨부·revision·history·앱 기록의 복구용이며,
+진행 중 Core 파일 저널·실행 상태, 설정 비밀값이나 전체 Mac의 복구본은 아니다.
+
+`enable`은 실제 복원 성공 뒤에만 launchd를 등록한다. 로그인 때와 이후 매시간 실행하되
+한국시간 날짜 기준 이미 성공한 날은 백업하지 않는다. 잠자기·전원 종료 중에는 실행되지
+않으며 다음 실제 호출에서 미처리 날짜의 현재 상태를 백업한다. 과거 시점의 데이터를
+복원한 것으로 표시하지 않는다. 결과와 실패 사유는 설치 폴더의 `status.json`, 예약 실행은
+`schedule.log`에서 확인한다. 등록만으로 미래 예약 실행이나 실패 알림 전달을 보장하지 않는다.
+
+보존은 최신 일별 14개·ISO 주별 8개·월별 6개의 합집합이다. 같은 파일을 중복 복사하지
+않는다. 현재 생성한 백업의 복원 검증을 통과한 뒤에만 이 도구가 만든 완성 백업을 정리한다.
+서명이 아닌 암호화된 manifest와 파일 hash로 생성 신원을 대조하며, 알 수 없는 파일·다른
+키·변경된 파일이 있으면 삭제하지 않는다. 기존 수동·평문 백업은 이 정책의 대상이 아니다.
+보존 정리가 실패해도 이미 검증한 새 백업의 성공 시각은 유지하며 그날 다시 전체 백업을
+만들지 않는다. 이때 백업 검증 성공과 보존 실패를 별도로 기록하고 호출은 실패 코드를 반환한다.
+
+복구 암호는 백업 파일과 분리해 별도 비밀번호 관리자 또는 오프라인 매체에도 보관한다.
+`export-key --output /absolute/private/recovery-key.txt`는 새 파일에만 0600으로 기록하며
+화면에 값을 출력하지 않는다. 보관을 확인한 뒤 전달용 평문 파일은 소유자가 제거한다.
+Mac에만 있는 Keychain 항목은 기기 분실에 대비한 별도 복구 키를 대신하지 않는다.
+
+소스 갱신은 검증·독립 리뷰 후 같은 `install`로 기존 binding·키를 유지하며 실행본을
+갱신한다. 다른 destination·볼륨·저장소·키로 덮어쓰지 않는다. 작업 중단 시 임시 복원 DB는
+고유 이름·OID·nonce가 일치할 때만 다음 호출에서 정리한다. 생성 결과가 불명확하거나
+알 수 없는 임시 파일이 있으면 자동 삭제를 멈추고 해당 lease를 보존한다.
+
+```bash
+python3 -B -m unittest discover -s tests -p 'test_local_backup.py' -v
+```
+
+합성 테스트는 암호화·변조 검출, 보존 선택, 볼륨 신원·중단 복구의 실패 경계를 다룬다.
+운영 준비 확인은 승인된 실제 DB의 암호화 파일로 수행한 전체 복원·재조회와 정확한
+임시 자원 삭제, 설치본 일치·launchd 호출을 별도로 확인한다. 아래 수동 전체 백업 절차는
+자동 도구의 지원 범위 밖인 업그레이드·다른 Mac 인계에도 계속 적용한다.
+
+### 수동 전체 백업과 업그레이드 검증
+
 Git 원문 사본(`source_records`)은 해당 저장소와 커밋으로 다시 만들 수 있다. **Native 원문·첨부·revision·history와 앱 기억·기억 묶음·분류·연결·이력·과거 근거는 원문 재가져오기로 복구할 수 없다.** Custom 형식의 전체 `pg_dump`에 canonical originals, immutable origin, source/store binding, projection metadata, native apply 기록과 앱 memory/evidence를 함께 보존한다. SHA만으로 과거 bytes를 복원할 수 없으며, 선택 material export나 retired filesystem 사본은 전체 백업을 대신하지 않는다.
 
 Pending native 효과는 대응하는 Core journals·attempts·heads와 함께 canonical `harness recover` 경계로 해결한다. DB dump만으로 미해결 Core evidence까지 재생성할 수 있다고 보지 않는다. 복구 확인에 필요한 미해결 근거는 해당 작업과 함께 보존한다.
