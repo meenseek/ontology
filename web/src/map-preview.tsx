@@ -1,10 +1,10 @@
 import { createRoot } from "react-dom/client";
-import { Group, Scene, Vector3 } from "three";
+import { Group, Line, Scene, Vector3 } from "three";
 import App from "./App";
 import type { GraphNode, Scope, Snapshot } from "./graph";
 import { Positions } from "./positions";
 import { COLLISION_GAP } from "./clearance";
-import { nodeScreenSize, nodeVisualRadius } from "./presentation";
+import { leaderHitsBox, nodeScreenSize, nodeVisualRadius, type LabelLeader } from "./presentation";
 import "./style.css";
 
 // Development-only visual fixture. No request reaches a server or a user's store.
@@ -22,7 +22,20 @@ Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, ma
   lastSample = performance.now();
   const rect = renderer.domElement.getBoundingClientRect();
   const stars: { id: string; x: number; y: number; z: number; px: number; py: number; radius: number; opacity: number; retiring: boolean }[] = [];
+  const relations: LabelLeader[] = [];
   this.traverse(object => {
+    if (object instanceof Line && object.visible && !Array.isArray(object.material) && object.material.opacity > 0) {
+      const points = object.geometry.getAttribute("position");
+      if (points?.count === 2) {
+        const a = new Vector3().fromBufferAttribute(points, 0).applyMatrix4(object.matrixWorld).project(camera);
+        const b = new Vector3().fromBufferAttribute(points, 1).applyMatrix4(object.matrixWorld).project(camera);
+        if (Math.abs(a.z) <= 1 && Math.abs(b.z) <= 1) {
+          const x1 = (a.x + 1) * rect.width / 2, y1 = (1 - a.y) * rect.height / 2;
+          const x2 = (b.x + 1) * rect.width / 2, y2 = (1 - b.y) * rect.height / 2;
+          relations.push({ x1, y1, x2, y2, length: Math.hypot(x2 - x1, y2 - y1) });
+        }
+      }
+    }
     if (!(object instanceof Group) || !object.userData.nodeId || !object.visible) return;
     object.getWorldPosition(world);
     const { x, y, z } = world;
@@ -36,7 +49,7 @@ Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, ma
   });
   const notice = document.querySelector<HTMLElement>(".fixture-notice")!;
   notice.dataset.frameSequence = String(Number(notice.dataset.frameSequence ?? 0) + 1);
-  notice.dataset.frame = JSON.stringify({ stars, camera: camera.position, width: rect.width, height: rect.height });
+  notice.dataset.frame = JSON.stringify({ stars, relations, camera: camera.position, width: rect.width, height: rect.height });
   const groups = stars.filter(star => star.id.startsWith("preview-purpose-")).map(hub => {
     const members = stars.filter(star => star.id.startsWith(`preview-${hub.id.slice("preview-purpose-".length)}-`));
     return { id: hub.id, count: members.length, radius: Math.max(0, ...members.map(star => Math.hypot(star.px - hub.px, star.py - hub.py))),
@@ -114,7 +127,7 @@ createRoot(document.getElementById("root")!).render(<App />);
 // placement tests cannot detect an animation interrupted by a changing status row.
 if (new URLSearchParams(window.location.search).has("check")) void (async () => {
   const notice = document.querySelector<HTMLElement>(".fixture-notice")!;
-  type Frame = { stars: { id: string; px: number; py: number; radius: number; retiring: boolean; opacity: number }[]; camera: { x: number; y: number; z: number }; width: number; height: number };
+  type Frame = { stars: { id: string; px: number; py: number; radius: number; retiring: boolean; opacity: number }[]; relations: LabelLeader[]; camera: { x: number; y: number; z: number }; width: number; height: number };
   const frame = () => JSON.parse(notice.dataset.frame!) as Frame;
   const assert = (value: unknown, message: string) => { if (!value) throw new Error(message); };
   const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -138,6 +151,13 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     assert(element && !element.disabled, `조작 버튼: ${text}`); return element!;
   };
   const labels = () => [...document.querySelectorAll<HTMLElement>(".node-label:not([hidden])")];
+  const backdrop = (protectedNames: boolean) => {
+    assert(document.querySelector<HTMLElement>(".graph-canvas")!.dataset.labelBackdrop === (protectedNames ? "protected" : "clear"), "탐색 상태의 제목 배경이 다릅니다.");
+    for (const label of labels().filter(label => label.classList.contains("compact") && !label.matches(".hovered, .focused, :hover, :focus-visible"))) {
+      const style = getComputedStyle(label), painted = style.backgroundColor !== "rgba(0, 0, 0, 0)" || style.backgroundImage !== "none";
+      assert(painted === protectedNames, "평상시 전체보기와 읽기 화면의 제목 배경이 구분되지 않습니다.");
+    }
+  };
   const names = () => labels().filter(node => node.dataset.nodeId!.startsWith("preview-purpose-")).map(node => [node.dataset.nodeId, node.style.left, node.style.top]);
   const members = (group: number) => frame().stars.filter(star => star.id.startsWith(`preview-${group}-`) && !star.retiring);
   const separated = (stars: Frame["stars"]) => {
@@ -155,7 +175,9 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     }
     for (const label of labels()) {
       const box = label.getBoundingClientRect();
-      assert(box.left >= origin.left - 1 && box.right <= origin.right + 1 && box.top >= origin.top - 1 && box.bottom <= origin.bottom + 1, "제목이 화면 경계에서 잘렸습니다.");
+      const gap = innerWidth <= 700 ? 8 : 0;
+      assert(box.left >= origin.left + gap - .1 && box.right <= origin.right - gap + .1 && box.top >= origin.top + gap - .1 && box.bottom <= origin.bottom - gap + .1,
+        `${label.dataset.nodeId}: 제목의 화면 끝 여백 ${Math.min(box.left - origin.left, origin.right - box.right, box.top - origin.top, origin.bottom - box.bottom).toFixed(2)}px`);
     }
     return { members: stars.length, titles: labels().length,
       width: Math.round(Math.max(...stars.map(star => star.px)) - Math.min(...stars.map(star => star.px))),
@@ -163,7 +185,25 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
   };
   const results: unknown[] = [];
   try {
-    await settled();
+    await settled(); backdrop(false);
+    const origin = document.querySelector(".graph-canvas")!.getBoundingClientRect();
+    const overviewCrossings = labels().flatMap(label => {
+      const box = label.getBoundingClientRect();
+      return frame().relations.filter(line => leaderHitsBox(line, { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }, 0));
+    }).length;
+    assert(overviewCrossings === 0, "첫 화면의 관계선이 투명한 제목을 지나갑니다.");
+    results.push({ overviewRelationTitleCrossings: overviewCrossings });
+    const options = document.querySelector<HTMLDetailsElement>(".view-options")!;
+    options.querySelector("summary")!.click();
+    const connections = [...options.querySelectorAll<HTMLInputElement>("input[type=checkbox]")].find(input => input.closest("label")!.textContent!.includes("연결선 모두 보기"))!;
+    connections.click(); await settled(); backdrop(true);
+    connections.click(); options.querySelector("summary")!.click(); await settled(); backdrop(false);
+    const keyboardTarget = document.querySelector<HTMLButtonElement>(".graph-group-target[data-node-id=preview-purpose-0]")!;
+    keyboardTarget.focus(); await wait(240);
+    const focusedName = document.querySelector<HTMLElement>(".node-label.focused:not([hidden])") ?? (keyboardTarget.classList.contains("core-name") ? keyboardTarget : null);
+    assert(focusedName && (getComputedStyle(focusedName).backgroundColor !== "rgba(0, 0, 0, 0)" || getComputedStyle(focusedName).backgroundImage !== "none"), "키보드 초점 제목의 보호 배경이 없습니다.");
+    keyboardTarget.blur(); await settled(); backdrop(false);
+    results.push({ overviewBackdrop: "clear", allConnectionsBackdrop: "protected", keyboardFocusBackdrop: "protected" });
     const baseline = JSON.stringify(names());
     const canvas = document.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, rect = canvas.getBoundingClientRect();
     const hoverTargets = frame().stars.filter(star => star.id.startsWith("preview-single-") && !star.retiring &&
@@ -173,6 +213,8 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
       canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: rect.left + star.px, clientY: rect.top + star.py }));
       await wait(240);
       assert(document.querySelector(".graph-tooltip"), "실제 렌더러의 가리키기 반응이 없습니다.");
+      const hoveredLabel = document.querySelector<HTMLElement>(".node-label.hovered");
+      if (hoveredLabel) assert(getComputedStyle(hoveredLabel).backgroundImage !== "none" || getComputedStyle(hoveredLabel).backgroundColor !== "rgba(0, 0, 0, 0)", "가리킨 제목의 보호 배경이 없습니다.");
       assert(JSON.stringify(names()) === baseline, "가리키기로 묶음 이름이 이동했습니다.");
       canvas.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
       await wait(240);
@@ -182,7 +224,7 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     results.push({ hoverRestoresNames: true });
     for (const group of [0, 1]) {
       document.querySelector<HTMLButtonElement>(`.graph-group-target[data-node-id="preview-purpose-${group}"]`)!.click();
-      await settled(); results.push({ group, page: 1, ...inspect(group) });
+      await settled(); backdrop(true); results.push({ group, page: 1, ...inspect(group) });
       const hovered = document.querySelector<HTMLElement>(".graph-tooltip")?.dataset.nodeId;
       assert(frame().stars.filter(star => !star.id.startsWith(`preview-${group}-`) && star.id !== `preview-purpose-${group}` && !star.retiring && star.id !== hovered).every(star => star.opacity <= .13), "주변 별이 펼친 구성원과 구분되지 않습니다.");
       button("다음").click(); await settled(); results.push({ group, page: 2, ...inspect(group) });
@@ -214,6 +256,7 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
       button("필터·묶음").click(); await wait(40);
       [...document.querySelectorAll<HTMLButtonElement>(".cluster-list button")].find(node => node.querySelector("strong")?.textContent === "개발과 품질")!.click();
       await settled();
+      backdrop(true);
       const coordinates = members(2).map(star => [star.id, Math.round(star.px * 10), Math.round(star.py * 10)]);
       const current = JSON.stringify(coordinates);
       assert(!reference || current === reference, "같은 필터 재진입의 구도가 달라졌습니다."); reference = current;
@@ -225,8 +268,14 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     }
     results.push({ repeatedFilterEntries: 4, sameProjection: true, sameLabelsAndGuides: true });
     const input = document.querySelector<HTMLInputElement>("#graph-search")!;
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "검색결과없음");
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "사용자의 맥락");
     input.dispatchEvent(new Event("input", { bubbles: true })); await wait(40);
+    document.querySelector<HTMLButtonElement>(".map-search button")!.click(); await settled(); backdrop(true);
+    button("검색 해제").click(); await settled(); backdrop(false);
+    results.push({ searchBackdrop: "protected", clearedSearchBackdrop: "clear" });
+    const emptyInput = document.querySelector<HTMLInputElement>("#graph-search")!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(emptyInput, "검색결과없음");
+    emptyInput.dispatchEvent(new Event("input", { bubbles: true })); await wait(40);
     document.querySelector<HTMLButtonElement>(".map-search button")!.click(); await wait(160);
     assert(document.querySelector(".map-empty") && !document.querySelector(".active-filters"), "빈 화면에 중복 초기화 동작이 남았습니다.");
     assert(!document.querySelector(".map-status")!.textContent!.includes("일치 구절"), "검색 0건에 일치 구절 안내가 남았습니다.");

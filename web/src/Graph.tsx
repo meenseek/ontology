@@ -19,7 +19,7 @@ import MiniMap from "./MiniMap";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
-type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; filteredGroup?: string | null; rotate: boolean; allConnections?: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onToggleRotation?: () => void; onFailure: () => void };
+type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; filteredGroup?: string | null; hasDisplayFilters?: boolean; rotate: boolean; allConnections?: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onToggleRotation?: () => void; onFailure: () => void };
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
 const coreLabel = (node: PositionedNode | undefined, count: number, view?: GraphView) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : view === "purpose" ? `${node?.subject_name ?? node?.label ?? "목적 묶음"} · ${count}개` : `관계 묶음${node ? ` · ${nodePresentation(node, true).title}` : ""} · ${count}개`;
 function texture(kind: "ring" | "selection" | "change") {
@@ -309,7 +309,7 @@ function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "bod
 }
 const endpoint = (value: string | number | { id?: string | number } | undefined) => typeof value === "object" ? value.id : value;
 const membershipKey = (id: string, level: number) => JSON.stringify([level, id]);
-export default function Graph({ positions, snapshot, nodes, links, selected, filteredGroup = null, rotate, allConnections = false, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onToggleRotation, onFailure }: Props) {
+export default function Graph({ positions, snapshot, nodes, links, selected, filteredGroup = null, hasDisplayFilters = false, rotate, allConnections = false, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onToggleRotation, onFailure }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
   const cameraMotion = useRef(new CameraMotion());
@@ -855,13 +855,18 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     // Measure each literal label once per model/viewport change using an existing slot.
     // Animation frames only project points and reposition the same bounded DOM pool.
     const dimensions = new Map<string, { compact: { width: number; height: number }; detail: { width: number; height: number } }>();
+    const measure = () => {
+      const box = measuring.getBoundingClientRect();
+      // offsetWidth/Height round down some fractional glyph extents at the gutter.
+      return size.width <= 700 ? { width: Math.ceil(box.width), height: Math.ceil(box.height) } : { width: measuring.offsetWidth, height: measuring.offsetHeight };
+    };
     const measuredId = measuring.dataset.nodeId, measuredHidden = measuring.hidden;
     measuring.hidden = false; measuring.style.visibility = "hidden";
     for (const node of displayNodes) {
       fill(measuring, node.id, false);
-      const compact = { width: measuring.offsetWidth, height: measuring.offsetHeight };
+      const compact = measure();
       fill(measuring, node.id, true);
-      dimensions.set(node.id, { compact, detail: { width: measuring.offsetWidth, height: measuring.offsetHeight } });
+      dimensions.set(node.id, { compact, detail: measure() });
     }
     if (measuredId && labels.has(measuredId)) fill(measuring, measuredId);
     else { delete measuring.dataset.nodeId; measuring.className = "node-label"; measuring.removeAttribute("role"); measuring.removeAttribute("aria-label"); measuring.setAttribute("aria-hidden", "true"); measuring.tabIndex = -1; }
@@ -1082,6 +1087,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
             if (box && (refreshLabels || element.dataset.nodeId !== box.id || element.classList.contains("compact") === detailed)) fill(element, box.id, detailed);
             element.hidden = !box;
             element.classList.toggle("hovered", !!box && box.id === hoveredId.current);
+            element.classList.toggle("focused", !!box && box.id === focusedSummary);
             if (!box) continue;
             element.style.left = `${box.left}px`; element.style.top = `${box.top}px`;
             const star = candidates.find(node => node.id === box.id)!;
@@ -1264,6 +1270,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     }, reduced ? 0 : REVEAL_DURATION + 16);
   };
   return <div className="graph-canvas" ref={container} tabIndex={-1}
+    data-label-backdrop={hasDisplayFilters || selected || activeExpandedCore || spatialReveal?.members.size || allConnections ? "protected" : "clear"}
     onKeyDownCapture={event => {
       if (disabled || !(event.target as HTMLElement).closest(".graph-minimap") ||
         !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "Enter", " "].includes(event.key)) return;

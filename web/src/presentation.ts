@@ -75,6 +75,7 @@ export type LabelEnvironment = {
 };
 /** Rank the current projection before bounding the visible set. No ID window excludes later nodes. */
 export function visibleLabels(candidates: ProjectedLabel[], width: number, height: number, selected: string | null, hovered: string | null, environment: LabelEnvironment = {}): LabelBox[] {
+  const edgeGap = width <= 700 ? 8 : 0;
   const visible = candidates.filter(n => [n.x, n.y, n.depth, n.radius, n.width, n.height].every(Number.isFinite) && n.radius > 0 && n.depth >= -1 && n.depth <= 1 && n.x >= 0 && n.x <= width && n.y >= 0 && n.y <= height);
   const distance = (n: ProjectedLabel) => Math.hypot(n.x - width / 2, n.y - height / 2);
   const nearby = (a: ProjectedLabel, b: ProjectedLabel) => distance(a) - distance(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -98,15 +99,15 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     const clearance = node.radius + 5;
     const sides = node.x > width * .66 ? [-1, 1] : [1, -1];
     const positions = sides.map(side => ({ left: node.x + (side === -1 ? -clearance - node.width : clearance), top: node.y - node.height / 2 }));
-    const centered = Math.max(0, Math.min(width - node.width, node.x - node.width / 2));
+    const centered = Math.max(edgeGap, Math.min(width - edgeGap - node.width, node.x - node.width / 2));
     positions.push({ left: centered, top: node.y - clearance - node.height }, { left: centered, top: node.y + clearance });
     if (environment.stars || environment.obstacles) {
       // Keep the label near its star, but let it slide along an occupied side.
       const shifts = environment.starTitles?.exempt?.has(node.id) ? [-24, 24, -48, 48, -72, 72, -96, 96, -120, 120, -144, 144, -168, 168] : [-24, 24, -48, 48, -72, 72, -96, 96];
       for (const shift of shifts) {
         for (const side of sides) positions.push({ left: node.x + (side === -1 ? -clearance - node.width : clearance), top: node.y - node.height / 2 + shift });
-        positions.push({ left: Math.max(0, Math.min(width - node.width, centered + shift)), top: node.y - clearance - node.height },
-          { left: Math.max(0, Math.min(width - node.width, centered + shift)), top: node.y + clearance });
+        positions.push({ left: Math.max(edgeGap, Math.min(width - edgeGap - node.width, centered + shift)), top: node.y - clearance - node.height },
+          { left: Math.max(edgeGap, Math.min(width - edgeGap - node.width, centered + shift)), top: node.y + clearance });
       }
     }
     if (node.summary && environment.stars) for (const gap of [24, 48, 72, 96, 128, 160, 208]) {
@@ -114,6 +115,12 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
       positions.push({ left: centered, top: node.y - clearance - gap - node.height }, { left: centered, top: node.y + clearance + gap });
     }
     const boxes = positions.map(({ left, top }) => ({ id: node.id, left, top, right: left + node.width, bottom: top + node.height }));
+    // A close-up ring can leave only diagonal pockets inside the mobile gutter.
+    if (edgeGap) for (const top of [edgeGap, height - edgeGap - node.height])
+      for (const left of [edgeGap, width - edgeGap - node.width]) {
+        const box = { id: node.id, left, top, right: left + node.width, bottom: top + node.height };
+        if (fromStar(node, box) >= clearance) boxes.push(box);
+      }
     // A projection has one answer, including its first frame. History-dependent
     // candidate order made a hover commit a different resting arrangement.
     if (node.summary && environment.restingSummaryGap !== undefined)
@@ -125,7 +132,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
       });
     return boxes;
   };
-  const inBounds = (box: LabelBox) => box.left >= 0 && box.top >= 0 && box.right <= width && box.bottom <= height;
+  const inBounds = (box: LabelBox) => box.left >= edgeGap && box.top >= edgeGap && box.right <= width - edgeGap && box.bottom <= height - edgeGap;
   const overlaps = (a: LabelBox, b: LabelBox) => a.left < b.right + 8 && a.right + 8 > b.left && a.top < b.bottom + 6 && a.bottom + 6 > b.top;
   const starCells = new Map<string, NonNullable<LabelEnvironment["stars"]>[number][]>();
   let largestStar = 0;
@@ -228,8 +235,8 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     const usable = (box: LabelBox) => fromStar(node, box) >= node.radius + 4 && clear(box) && !placed.some(other => overlaps(box, other));
     const arrange = (box: LabelBox) => usable(box) ? fitsTogether(box, placed) ? box : allowTurn ? routed(node, box, placed) : undefined : undefined;
     const reach = Math.min(240, Math.max(width, height), restingReach(node)), spots: LabelBox[] = [];
-    for (let top = Math.max(0, Math.floor((node.y - reach - node.height) / 12) * 12); top <= Math.min(height - node.height, node.y + reach); top += 12)
-      for (let left = Math.max(0, Math.floor((node.x - reach - node.width) / 12) * 12); left <= Math.min(width - node.width, node.x + reach); left += 12)
+    for (let top = Math.max(edgeGap, Math.floor((node.y - reach - node.height) / 12) * 12); top <= Math.min(height - edgeGap - node.height, node.y + reach); top += 12)
+      for (let left = Math.max(edgeGap, Math.floor((node.x - reach - node.width) / 12) * 12); left <= Math.min(width - edgeGap - node.width, node.x + reach); left += 12)
         spots.push({ id: node.id, left, top, right: left + node.width, bottom: top + node.height });
     for (const { box } of spots.map(box => ({ box, distance: fromStar(node, box) })).filter(spot => spot.distance <= reach).sort((a, b) => a.distance - b.distance)) {
       const arranged = arrange(box); if (arranged) return arranged;

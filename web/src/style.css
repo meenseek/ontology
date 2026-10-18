@@ -151,6 +151,7 @@ summary:hover { color: #e6edf6; }
 .node-label { line-height: 1.4; padding: 2px 4px; border-radius: 3px; background: linear-gradient(90deg, #0b131cdd, #0b131c99); }
 .node-label.compact > span, .node-label.compact > small { display: none; }
 .node-label.compact:not(.hovered):not(:focus-visible) { background: #07101bcc; }
+.graph-canvas[data-label-backdrop="clear"] .node-label.compact:not(.hovered):not(.focused):not(:hover):not(:focus-visible) { background: transparent; }
 .view-options label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .node-label.offset-label::before { content: ""; position: absolute; left: var(--leader-x); top: var(--leader-y); width: var(--leader-length); height: 0; border-top: 1px dashed #91aec7; transform: rotate(var(--leader-angle)); transform-origin: 0 0; pointer-events: none; }
 .node-label.offset-label:where(.hovered, :hover, :focus-visible)::before { border-top-color: #c4e4f8; }

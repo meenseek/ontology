@@ -768,18 +768,25 @@ test("summary sizes share count boundaries with collision, hit and label footpri
 test("390px closeups keep the selected name visible above or below its enlarged rings", async () => {
   const { nodeScreenMetrics, nodeScreenSize, visibleLabels } = await import("./presentation.ts");
   const metrics = nodeScreenMetrics(nodeScreenSize("document", 20, 300, 2), true, true);
-  const node = { id: "closeup", kind: "document", active: true, x: 195, y: 150, depth: 0, radius: metrics.radius, width: 145, height: 45 };
-  const [above] = visibleLabels([node], 390, 300, node.id, null);
+  const node = { id: "closeup", kind: "document", active: true, x: 195, y: 160, depth: 0, radius: metrics.radius, width: 145, height: 45 };
+  const [above] = visibleLabels([node], 390, 320, node.id, null);
   assert.ok(above, "neither horizontal side fits, but the name remains visible");
-  assert.ok(above.left >= 0 && above.right <= 390 && above.top >= 0 && above.bottom <= 300);
+  assert.ok(above.left >= 8 && above.right <= 382 && above.top >= 8 && above.bottom <= 312);
   assert.ok(above.bottom <= node.y - metrics.radius - 5);
   const nearTop = { ...node, y: 100 };
-  const [below] = visibleLabels([nearTop], 390, 300, node.id, null);
-  assert.ok(below && below.top >= nearTop.y + metrics.radius + 5 && below.bottom <= 300);
+  const [below] = visibleLabels([nearTop], 390, 320, node.id, null);
+  assert.ok(below && below.top >= nearTop.y + metrics.radius + 5 && below.bottom <= 312);
   const overlapping = Array.from({ length: 6 }, (_, i) => ({ ...node, id: `star-${i}` }));
-  const boxes = visibleLabels(overlapping, 390, 300, "star-5", "star-4");
+  const boxes = visibleLabels(overlapping, 390, 320, "star-5", "star-4");
   assert.deepEqual(boxes.map(box => box.id), ["star-5", "star-4"]);
   assert.ok(boxes[0].bottom + 6 <= boxes[1].top, "vertical fallback retains collision culling and priority");
+  const constrained = { ...node, y: 150 };
+  const [diagonal] = visibleLabels([constrained], 390, 300, constrained.id, null);
+  assert.ok(diagonal, "the selected name remains visible when only a diagonal pocket fits the 8px gutter");
+  assert.ok(diagonal.left >= 8 && diagonal.right <= 382 && diagonal.top >= 8 && diagonal.bottom <= 292);
+  const nearestX = Math.max(diagonal.left, Math.min(diagonal.right, constrained.x));
+  const nearestY = Math.max(diagonal.top, Math.min(diagonal.bottom, constrained.y));
+  assert.ok(Math.hypot(constrained.x - nearestX, constrained.y - nearestY) >= metrics.radius + 5, "the name clears its enlarged rings");
   assert.deepEqual(visibleLabels([{ ...node, radius: 0 }, { ...node, id: "invalid", radius: NaN }], 390, 300, null, null), []);
 });
 
@@ -3055,4 +3062,17 @@ test("search excerpts omit only an identical leading heading and keep quoted/cod
   for (const value of ["# 다른 제목\n본문", "```md\n# UI 디자인 기준\n```", "> # UI 디자인 기준\n인용", "# UI 디자인 기준", "# UI 디자인 기준\n\n", "…    # UI 디자인 기준\n본문", "\t# UI 디자인 기준\n본문", "\n# UI 디자인 기준\n본문"]) {
     assert.equal(searchExcerpt(value, "UI 디자인 기준"), value, "other headings, code, quotations and heading-only excerpts remain exact");
   }
+});
+
+// The same close title used to land at x=0 when the side was blocked.
+test("mobile titles keep an edge gutter through rest, hover and selection", () => {
+  const node: ProjectedLabel = { id: "edge-title", kind: "document", active: true, x: 5, y: 50, depth: 0, radius: 4, width: 100, height: 20 };
+  const environment = { stars: [node], obstacles: [{ left: 8, top: 48, right: 150, bottom: 80 }] };
+  for (const [selected, hovered] of [[null, null], [null, node.id], [node.id, null]]) {
+    const boxes = visibleLabels([node], 390, 300, selected, hovered, environment);
+    assert.equal(boxes.length, 1, "a safe close title remains discoverable");
+    assert.ok(boxes.every(box => box.left >= 8 && box.top >= 8 && box.right <= 382 && box.bottom <= 292));
+  }
+  const desktop = visibleLabels([node], 1440, 900, null, null, environment);
+  assert.equal(desktop[0].left, 0, "the mobile gutter does not move desktop titles");
 });
