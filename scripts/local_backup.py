@@ -615,9 +615,10 @@ def verify(config, key_file=None):
     manifest = encrypted_json(config, value, generation / "manifest.gpg")
     require(manifest["id"] == record["id"] and manifest["store_id"] == config["store_id"],
             "manifest_identity_mismatch")
+    verification = restore_check(config, value, generation, manifest["fingerprint"])
     result = {"verified_at": now().isoformat(), "generation": str(generation),
               "key_source": "recovery_file" if key_file else "keychain",
-              **restore_check(config, value, generation, manifest["fingerprint"])}
+              **verification}
     write_json(RUNTIME / "recovery-verification.json", result)
     return result
 
