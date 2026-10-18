@@ -8,7 +8,7 @@ import { nucleusLevel, nucleusView } from "./nuclei.ts";
 import { Positions } from "./positions.ts";
 import type { LayoutView, Point } from "./positions.ts";
 import { coreCameraDistance, LAYOUT_WORLD_SPACING } from "./presentation.ts";
-import { planCoreView, screenPlane, overviewFrame, coreReadingFrame } from "./view-layout.ts";
+import { planCoreView, screenPlane, overviewFrame, coreReadingFrame, coreReadingInsets } from "./view-layout.ts";
 
 test("opening an already readable page retains its zoom while large content still fits", () => {
   assert.equal(coreCameraDistance(300, 700, 1.7, 500), 500);
@@ -144,6 +144,25 @@ test("a render invalidation during disclosure preserves its intended destination
     } });
     f.positions.advance(2000, true);
     samePoints(f.model.nodes, destination!, "render invalidation cannot freeze a partly opened page");
+  }
+});
+
+test("short mobile reading frames use real space beside the expanded minimap", () => {
+  for (const height of [364.7578125, 480, 560]) {
+    const size = { width: 390, height }, actions = { left: 14, top: 14, right: 376, bottom: 117 };
+    const minimap = { left: 220, top: height - 228, right: 376, bottom: height - 52 };
+    const insets = coreReadingInsets(size, actions, minimap);
+    const camera = new PerspectiveCamera(60, size.width / size.height, .1, 20000);
+    camera.position.set(0, 0, 500); camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
+    const nodes = [{ x: 0, y: 0, z: 0 }, ...Array.from({ length: 12 }, (_, i) => ({ x: 90 * Math.cos(i * Math.PI / 6), y: 100 * Math.sin(i * Math.PI / 6), z: 0 }))];
+    const frame = coreReadingFrame(camera, { x: 0, y: 0, z: 0 }, nodes, size, insets);
+    camera.position.copy(frame.position); camera.lookAt(frame.target); camera.updateMatrixWorld();
+    for (const node of nodes) {
+      const at = new Vector3(node.x, node.y, node.z).project(camera), x = (at.x + 1) * size.width / 2, y = (1 - at.y) * size.height / 2;
+      assert.ok(x >= 8 && x <= size.width - 8 && y >= 8 && y <= size.height - 8);
+      assert.ok([actions, minimap].every(box => x < box.left - 6 || x > box.right + 6 || y < box.top - 6 || y > box.bottom + 6));
+    }
+    assert.equal(insets.right !== undefined, height - 141 - 252 < 100);
   }
 });
 
@@ -416,4 +435,37 @@ test("purpose pages keep their real chain and preserve the held marker and backg
   }
   positions.showCore(null, 3000, true);
   samePoints(model.nodes, before, "closing restores the original 3D overview");
+});
+
+test("a short purpose view preserves final body clearance and actual control space after paging", () => {
+  const f = fixture([39], 23, { width: 390, height: 364.7578125 }), hub = "purpose";
+  f.source.nodes = f.source.nodes.map(node => node.id.startsWith("g39-") ? { ...node, subject_id: hub } : node);
+  f.source.nodes.push({ id: hub, scope: "personal", kind: "subject", label: "긴 이름의 목적 묶음" });
+  f.source.links = f.source.nodes.filter(node => node.subject_id).map(node => ({ source: node.id, target: hub, kind: "subject", current: true }));
+  for (let i = 0; i < 12; i++) f.source.links.push(edge(`g39-${i}`, `g39-${i + 1}`));
+  const model = reconcile(f.source, undefined, false, "purpose"), positions = new Positions(); positions.install(model, true);
+  const actions = { left: 14, top: 14, right: 376, bottom: 117 }, minimap = { left: 220, top: f.size.height - 228, right: 376, bottom: f.size.height - 52 };
+  const insets = coreReadingInsets(f.size, actions, minimap);
+  for (const page of [0, 1, 0, 1]) {
+    const semantic = constellationView(model.nodes, model.links, null, hub, page, "purpose");
+    let plan: ReturnType<typeof planCoreView> | undefined;
+    positions.showCore(hub, page * 1000, true, page, semantic.disclosure!.visible, undefined, { key: String(page), resolve: (desired, moving, anchor) => {
+      plan = planCoreView(desired, moving, anchor, { camera: f.camera, cameraTarget: f.center, size: f.size, automatic: true,
+        nodes: semantic.nodes, links: model.links, counts: semantic.counts, members: semantic.disclosure!.visible,
+        selected: null, lod: f.lod, reading: true, insets }, (desired, moving, held, plane) => positions.clearLayout(desired, moving, held, plane));
+      return plan.positions;
+    } });
+    const plane = screenPlane(plan!.camera, () => f.size, null, plan!.counts);
+    const members = semantic.nodes.filter(node => semantic.disclosure!.visible.has(node.id)).map(node => {
+      const at = plane.project(plan!.positions.get(node.id)!);
+      return { ...at, radius: plane.radius(node, at.depth) };
+    });
+    for (const [index, at] of members.entries()) {
+      const x = at.x + f.size.width / 2, y = f.size.height / 2 - at.y;
+      assert.ok(x >= 8 && x <= f.size.width - 8 && y >= 8 && y <= f.size.height - 8);
+      assert.ok([actions, minimap].every(box => x < box.left - 6 || x > box.right + 6 || y < box.top - 6 || y > box.bottom + 6));
+      for (const other of members.slice(index + 1)) assert.ok(Math.hypot(at.x - other.x, at.y - other.y) >= at.radius + other.radius + 1 - 1e-6,
+        "the final camera must preserve body clearance instead of shrinking a cleared layout");
+    }
+  }
 });

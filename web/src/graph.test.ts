@@ -2815,6 +2815,24 @@ test("labels avoid unlabeled stars and measured chrome while preserving a safe p
   assert.deepEqual(visibleLabels([candidate], 300, 240, "a", "a", { stars, obstacles: covered }), []);
 });
 
+test("hover at the label budget preserves group names and yields only an ordinary title", () => {
+  const members: ProjectedLabel[] = Array.from({ length: 23 }, (_, i) => ({ id: `member-${i}`, kind: "document", active: true,
+    x: 100 + i % 5 * 240, y: 100 + Math.floor(i / 5) * 140, depth: 0, radius: 6, width: 80, height: 21 }));
+  const group: ProjectedLabel = { id: "group", kind: "subject", active: true, summary: true, importance: 1,
+    x: 1300, y: 730, depth: 0, radius: 6, width: 80, height: 21 };
+  const deferred: ProjectedLabel = { ...members[0], id: "deferred", x: 1100, y: 840 };
+  for (const protectedOnly of [false, true]) {
+    const candidates = [...members.map(node => protectedOnly ? { ...node, kind: "subject", summary: true } : node), group, deferred];
+    const environment = { stars: candidates, starTitles: { limit: 0, exempt: new Set(members.map(node => node.id)), reach: 38 }, restingSummaryGap: 120 };
+    const base = visibleLabels(candidates, 1440, 900, null, null, environment);
+    assert.equal(base.length, 24);
+    const pointed = visibleLabels(candidates, 1440, 900, null, deferred.id, environment);
+    assert.deepEqual(pointed.find(box => box.id === group.id), base.find(box => box.id === group.id));
+    assert.equal(pointed.some(box => box.id === deferred.id), !protectedOnly);
+    assert.deepEqual(visibleLabels(candidates, 1440, 900, null, null, environment), base);
+    if (protectedOnly) assert.deepEqual(pointed, base, "a full protected set keeps its names; the hover tooltip remains available");
+  }
+});
 test("equidistant summary label sides keep their order across projection roundoff", () => {
   const summary: ProjectedLabel = { id: "group", kind: "subject", active: true, summary: true, importance: 1,
     x: 100.692, y: 100.876, depth: 0, radius: 5.052, width: 120, height: 31 };

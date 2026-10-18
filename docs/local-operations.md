@@ -124,6 +124,9 @@ docker run --rm --network none --user 0:0 \
 `alert`는 상태를 확인하고 연결 실패 시 설치된 Desktop launcher를 연다.
 앱 점검은 `GET /api/health`로 기존 DB 지도 조회를 실행하고 정상 여부만 받는다.
 사용자 세션을 만들거나 자료 내용을 반환하지 않으며 로컬 Host·Origin 보호를 유지한다.
+HTTP 전체 점검 한도는 9초다. 서버의 연결 풀 대기 3초와 SQL 실행 5초에 전송 여유
+1초를 더하며, 응답을 조금씩 보내도 전체 한도를 넘길 수 없다. 정상 조회를 2초에
+끊어 재시도하던 오판을 막되 DB 오류·잘못된 응답은 실패로 유지한다.
 
 승인된 기존 설치에서 native 호출을 할 때는 DB-only 준비 후 별도의 identity를 확인한다.
 `python3 scripts/connection.py repair --target database`는 정상 DB를 그대로 사용하며,

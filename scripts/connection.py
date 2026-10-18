@@ -44,7 +44,10 @@ DATA_PATH = "/var/lib/postgresql"
 PORTS = {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "55432"}]}
 APP_URL = "http://127.0.0.1:47831"
 COMMAND_TIMEOUT = 4
-HTTP_TIMEOUT = 2
+# Store allows 3s to acquire a connection and 5s for a statement. Leave 1s
+# for HTTP delivery; a 2s socket timeout falsely rejected successful projections
+# and left their queries running while installation retried the same work.
+HTTP_TIMEOUT = 9
 MAX_HTTP_BYTES = 1_048_576
 DOCKER_ATTEMPTS = 12
 START_ATTEMPTS = 8
@@ -184,7 +187,7 @@ def app_health(url=APP_URL):
         raise TimeoutError("HTTP deadline exceeded")
     started = time.monotonic()
     previous = signal.signal(signal.SIGALRM, expired)
-    timer = signal.setitimer(signal.ITIMER_REAL, HTTP_TIMEOUT * 2)
+    timer = signal.setitimer(signal.ITIMER_REAL, HTTP_TIMEOUT)
     try:
         _app_health(url)
     except TimeoutError:
@@ -207,6 +210,8 @@ def _app_health(url):
             if len(raw) > MAX_HTTP_BYTES:
                 raise ValueError()
             health = json.loads(raw)
+    except TimeoutError:
+        raise
     except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as error:
         if isinstance(error, urllib.error.HTTPError):
             error.close()

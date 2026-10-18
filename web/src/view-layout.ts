@@ -77,12 +77,22 @@ type CoreView = {
   spatial?: { level: number; members: ReadonlySet<string>; camera: Point; target: Point } | null;
   locks?: ReadonlyMap<string, { representative?: string; members: readonly string[]; level: number }>;
   reading?: boolean;
-  insets?: { top: number; bottom: number };
+  insets?: ReadingInsets;
 };
+
+type ReadingInsets = { top: number; bottom: number; left?: number; right?: number };
+/** When the minimap leaves no vertical room, read beside it rather than behind it. */
+export function coreReadingInsets(size: { width: number; height: number }, actions?: { bottom: number }, minimap?: { left: number; top: number }): ReadingInsets {
+  const top = actions ? actions.bottom + 24 : 82;
+  if (size.width > 700 || !minimap) return { top, bottom: 70 };
+  const bottom = size.height - minimap.top + 24;
+  return size.height - top - bottom >= 100 ? { top, bottom }
+    : { top, bottom: 70, right: size.width - minimap.left + 24 };
+}
 
 /** Fit the final disclosed coordinates, with space for names and the actual map controls.
  * The result depends on the page, viewport and viewing direction, never the previous zoom. */
-export function coreReadingFrame(camera: PerspectiveCamera, cameraTarget: Point, nodes: readonly Point[], size: { width: number; height: number }, insets?: { top: number; bottom: number }) {
+export function coreReadingFrame(camera: PerspectiveCamera, cameraTarget: Point, nodes: readonly Point[], size: { width: number; height: number }, insets?: ReadingInsets) {
   camera.updateMatrixWorld();
   const right = new Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
   const backward = camera.position.clone().sub(new Vector3(cameraTarget.x, cameraTarget.y, cameraTarget.z)).normalize();
@@ -91,9 +101,9 @@ export function coreReadingFrame(camera: PerspectiveCamera, cameraTarget: Point,
   const middle = (axis: Vector3) => (Math.min(...coordinates.map(at => at.dot(axis))) + Math.max(...coordinates.map(at => at.dot(axis)))) / 2;
   const center = right.clone().multiplyScalar(middle(right)).addScaledVector(up, middle(up)).addScaledVector(backward, middle(backward));
   const mobile = size.width <= 700;
-  const left = mobile ? 82 : 150, rightInset = mobile ? 82 : 210;
+  const left = insets?.left ?? (mobile ? 82 : 150), rightInset = insets?.right ?? (mobile ? 82 : 210);
   const top = insets?.top ?? (mobile ? 136 : 82), bottom = insets?.bottom ?? (mobile ? 100 : 70);
-  const availableWidth = Math.max(80, size.width - left - rightInset), availableHeight = Math.max(100, size.height - top - bottom);
+  const availableWidth = Math.max(1, size.width - left - rightInset), availableHeight = Math.max(1, size.height - top - bottom);
   const pixelScale = size.height * camera.projectionMatrix.elements[5] / 2;
   // Avoid huge bodies in a small page. The bounds, including depth, can only increase this distance.
   let distance = LAYOUT_WORLD_SPACING * pixelScale / 52;
@@ -209,7 +219,8 @@ export function planCoreView(desired: ReadonlyMap<string, Point>, movable: Reado
       resolved = adjusted;
       if (unchanged) break;
     }
-    frameReading(resolved);
+    // Keep the camera used by the final clearance. Refitting after clearance
+    // can shrink four-pixel bodies back into one another in a narrow viewport.
   }
   const visible = new Set(plane.visible);
   const cohorts = new Map([...view.cohorts ?? [], ...[...spatial.groups].map(([id, group]) => [id, group.members] as const)]);

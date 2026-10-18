@@ -299,7 +299,8 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   if (!insertion) return boxes;
   const survivors = boxes.filter(box => !overlaps(insertion, box));
   if (survivors.length === MAX_VISIBLE_LABELS) {
-    const lastOrdinary = survivors.map(box => box.id !== selected).lastIndexOf(true);
+    const lastOrdinary = survivors.map(box => box.id !== selected && !byId.get(box.id)?.summary).lastIndexOf(true);
+    if (lastOrdinary < 0) return boxes;
     survivors.splice(lastOrdinary, 1);
   }
   return [...survivors, insertion];

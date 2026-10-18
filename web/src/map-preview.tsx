@@ -3,6 +3,8 @@ import { Group, Scene, Vector3 } from "three";
 import App from "./App";
 import type { GraphNode, Scope, Snapshot } from "./graph";
 import { Positions } from "./positions";
+import { COLLISION_GAP } from "./clearance";
+import { nodeScreenSize, nodeVisualRadius } from "./presentation";
 import "./style.css";
 
 // Development-only visual fixture. No request reaches a server or a user's store.
@@ -19,16 +21,21 @@ Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, ma
   if (performance.now() - lastSample < 80) return;
   lastSample = performance.now();
   const rect = renderer.domElement.getBoundingClientRect();
-  const stars: { id: string; x: number; y: number; z: number; px: number; py: number; opacity: number; retiring: boolean }[] = [];
+  const stars: { id: string; x: number; y: number; z: number; px: number; py: number; radius: number; opacity: number; retiring: boolean }[] = [];
   this.traverse(object => {
     if (!(object instanceof Group) || !object.userData.nodeId || !object.visible) return;
     object.getWorldPosition(world);
     const { x, y, z } = world;
+    const node = nodes.find(node => node.id === object.userData.nodeId);
+    const depth = -world.clone().applyMatrix4(camera.matrixWorldInverse).z;
+    // Disclosed source bodies have no selection rings or count-based summary glyph.
+    const radius = nodeVisualRadius(nodeScreenSize(node?.kind ?? "folder", depth, rect.height, camera.projectionMatrix.elements[5]), false, false);
     world.project(camera);
-    stars.push({ id: object.userData.nodeId, x, y, z, px: (world.x + 1) * rect.width / 2, py: (1 - world.y) * rect.height / 2,
+    stars.push({ id: object.userData.nodeId, x, y, z, px: (world.x + 1) * rect.width / 2, py: (1 - world.y) * rect.height / 2, radius,
       opacity: object.userData.opacity?.() ?? 1, retiring: object.userData.retiring?.() ?? false });
   });
   const notice = document.querySelector<HTMLElement>(".fixture-notice")!;
+  notice.dataset.frameSequence = String(Number(notice.dataset.frameSequence ?? 0) + 1);
   notice.dataset.frame = JSON.stringify({ stars, camera: camera.position, width: rect.width, height: rect.height });
   const groups = stars.filter(star => star.id.startsWith("preview-purpose-")).map(hub => {
     const members = stars.filter(star => star.id.startsWith(`preview-${hub.id.slice("preview-purpose-".length)}-`));
@@ -107,17 +114,20 @@ createRoot(document.getElementById("root")!).render(<App />);
 // placement tests cannot detect an animation interrupted by a changing status row.
 if (new URLSearchParams(window.location.search).has("check")) void (async () => {
   const notice = document.querySelector<HTMLElement>(".fixture-notice")!;
-  type Frame = { stars: { id: string; px: number; py: number; retiring: boolean; opacity: number }[]; camera: { x: number; y: number; z: number }; width: number; height: number };
+  type Frame = { stars: { id: string; px: number; py: number; radius: number; retiring: boolean; opacity: number }[]; camera: { x: number; y: number; z: number }; width: number; height: number };
   const frame = () => JSON.parse(notice.dataset.frame!) as Frame;
   const assert = (value: unknown, message: string) => { if (!value) throw new Error(message); };
   const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   const settled = async () => {
-    let stable = 0, previous = "";
-    for (let i = 0; i < 100; i++) {
+    let stable = 0, previous = "", sequence = "";
+    // Include cold loading of the lazy renderer, then observe distinct settled
+    // frames and the end of retiring bodies rather than a paused frame snapshot.
+    for (let i = 0; i < 375; i++) {
       await wait(80);
-      if (!notice.dataset.frame) continue;
+      if (!notice.dataset.frame || notice.dataset.frameSequence === sequence) continue;
+      sequence = notice.dataset.frameSequence!;
       const current = JSON.stringify(frame());
-      stable = !positions?.layoutMoving && current === previous ? stable + 1 : 0;
+      stable = !positions?.layoutMoving && !frame().stars.some(star => star.retiring) && current === previous ? stable + 1 : 0;
       if (stable >= 3) return;
       previous = current;
     }
@@ -130,10 +140,15 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
   const labels = () => [...document.querySelectorAll<HTMLElement>(".node-label:not([hidden])")];
   const names = () => labels().filter(node => node.dataset.nodeId!.startsWith("preview-purpose-")).map(node => [node.dataset.nodeId, node.style.left, node.style.top]);
   const members = (group: number) => frame().stars.filter(star => star.id.startsWith(`preview-${group}-`) && !star.retiring);
-  const inspect = (group: number) => {
+  const separated = (stars: Frame["stars"]) => {
+    for (const [index, star] of stars.entries()) for (const other of stars.slice(index + 1))
+      assert(Math.hypot(star.px - other.px, star.py - other.py) >= star.radius + other.radius + COLLISION_GAP - .01, `${star.id}/${other.id}: 최종 화면에서 별 간격 부족`);
+  };
+  const inspect = (group: number, expected = 12) => {
     const f = frame(), stars = members(group), origin = document.querySelector(".graph-canvas")!.getBoundingClientRect();
     const controls = [...document.querySelectorAll<HTMLElement>(".graph-core-actions, .graph-minimap")].map(element => element.getBoundingClientRect());
-    assert(stars.length === 12, "쪽 보기에는 구성원 12개가 남아야 합니다.");
+    assert(stars.length === expected, `보기에는 구성원 ${expected}개가 남아야 합니다.`);
+    separated(stars);
     for (const star of stars) {
       assert(star.px >= 8 && star.px <= f.width - 8 && star.py >= 8 && star.py <= f.height - 8, `${star.id}: 화면 밖`);
       assert(controls.every(box => star.px + origin.left < box.left - 6 || star.px + origin.left > box.right + 6 || star.py + origin.top < box.top - 6 || star.py + origin.top > box.bottom + 6), `${star.id}: 조작 영역 뒤`);
@@ -151,14 +166,17 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     await settled();
     const baseline = JSON.stringify(names());
     const canvas = document.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, rect = canvas.getBoundingClientRect();
-    for (const id of ["preview-single-3", "preview-single-11"]) {
-      const star = frame().stars.find(star => star.id === id)!;
+    const hoverTargets = frame().stars.filter(star => star.id.startsWith("preview-single-") && !star.retiring &&
+      star.px > 8 && star.px < rect.width - 8 && star.py > 80 && star.py < rect.height - 40).slice(0, 2);
+    assert(hoverTargets.length === 2, "가리키기를 검사할 실제 별 두 개가 필요합니다.");
+    for (const star of hoverTargets) {
       canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: rect.left + star.px, clientY: rect.top + star.py }));
       await wait(240);
       assert(document.querySelector(".graph-tooltip"), "실제 렌더러의 가리키기 반응이 없습니다.");
       assert(JSON.stringify(names()) === baseline, "가리키기로 묶음 이름이 이동했습니다.");
       canvas.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
       await wait(240);
+      assert(!document.querySelector(".graph-tooltip"), "지도 밖에 툴팁이 남았습니다.");
       assert(JSON.stringify(names()) === baseline, "가리키기 종료 뒤 이름이 복귀하지 않았습니다.");
     }
     results.push({ hoverRestoresNames: true });
@@ -168,9 +186,18 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
       const hovered = document.querySelector<HTMLElement>(".graph-tooltip")?.dataset.nodeId;
       assert(frame().stars.filter(star => !star.id.startsWith(`preview-${group}-`) && star.id !== `preview-purpose-${group}` && !star.retiring && star.id !== hovered).every(star => star.opacity <= .13), "주변 별이 펼친 구성원과 구분되지 않습니다.");
       button("다음").click(); await settled(); results.push({ group, page: 2, ...inspect(group) });
+      if (group === 1 && innerWidth <= 700) {
+        button("미니맵 펼치기").click(); await settled();
+        results.push({ group, page: 2, expandedMinimap: true, ...inspect(group) });
+        button("이전").click(); await settled();
+        results.push({ group, page: 1, expandedMinimap: true, ...inspect(group) });
+        button("다음").click(); await settled();
+        results.push({ group, page: 2, expandedMinimapBeforePaging: true, ...inspect(group) });
+        button("미니맵 접기").click(); await settled();
+      }
       if (group === 0) {
         button("전체 보기").click(); await settled();
-        assert(members(0).length === 225, "전체 보기에서 구성원이 누락됐습니다.");
+        inspect(0, 225);
         const lengths = labels().map(label => +label.style.getPropertyValue("--leader-length").replace("px", ""));
         assert(lengths.every(length => length <= 38), "전체 보기의 제목 지시선이 너무 깁니다.");
         results.push({ fullMembers: 225, titles: labels().length, longestGuide: Math.round(Math.max(0, ...lengths)) });

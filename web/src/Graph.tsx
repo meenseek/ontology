@@ -12,7 +12,7 @@ import type { Positions } from "./positions";
 import type { GraphLink, GraphView, Model, PositionedNode } from "./graph";
 import { LAYOUT_WORLD_SPACING, MAX_RESTING_STAR_LABELS, MAX_VISIBLE_LABELS, advanceStarClock, coreCameraDistance, focusedCameraDistance, labelLeader, nodePresentation, nodeScreenMetrics, nodeScreenSize, nodeVisualRadius, spriteScale, screenPickDistance, starColor, starMotion, starPhase, starPerspectiveSize, starShape, stellarDepth, summaryAppearance, summaryHaloScale, visibleLabels, type StarClock, type SummaryHaloMotion } from "./presentation";
 import { summaryGlyphTexture } from "./summary-glyph";
-import { planCoreView, screenPlane, overviewFrame, spatialCameraFrame } from "./view-layout";
+import { planCoreView, screenPlane, overviewFrame, spatialCameraFrame, coreReadingInsets } from "./view-layout";
 import { CameraMotion, zoomCameraPose } from "./camera-motion";
 import type { CameraPose } from "./camera-motion";
 import MiniMap from "./MiniMap";
@@ -399,7 +399,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   const hoverPointer = useRef(true);
   const rendererHover = useRef<{ id: string | null; content: typeof hover }>({ id: null, content: null });
   const showRendererHover = () => {
-    if (!hoverPointer.current || disabled) return;
+    if (!hoverPointer.current || !cursor.current || disabled) return;
     hoveredId.current = rendererHover.current.id;
     setHover(rendererHover.current.content);
   };
@@ -596,7 +596,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
             cohorts: new Map(cores.filter(core => collapsedCounts.has(core.hub)).map(core => [core.hub, [...core.members]])),
             spatial: spatialReveal, locks: new Map([...movedGroups].filter(([, value]) => value.epoch === positions.groupEpoch)),
             reading: purposeCore,
-            insets: { top: actions ? actions.bottom - bounds.top + 24 : 82, bottom: size.width <= 700 && minimap ? bounds.bottom - minimap.top + 24 : 70 },
+            insets: coreReadingInsets(size, actions ? { bottom: actions.bottom - bounds.top } : undefined,
+              minimap ? { left: minimap.left - bounds.left, top: minimap.top - bounds.top } : undefined),
           }, (desired, movable, held, plane) => positions.clearLayout(desired, movable, held, plane));
           if (automatic) plannedCamera.current = { key: cameraKey, camera: plan.camera, target: plan.target };
           // The committed view keeps the exact cohorts whose footprints were
@@ -1279,7 +1280,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       // The renderer emits hover only when its hit changes, including during touch.
       if (event.target === graph.current?.renderer().domElement) showRendererHover();
     }}
-    onPointerLeave={() => { cursor.current = null; }}
+    onPointerOutCapture={event => {
+      if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+      cursor.current = null; hoverPointer.current = false; hoveredId.current = null; setHover(null);
+    }}
     onWheelCapture={event => { if (event.target === graph.current?.renderer().domElement) { cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null; } }}
     onPointerDownCapture={event => {
       hoverPointer.current = event.pointerType === "mouse" || event.pointerType === "pen";

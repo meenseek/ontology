@@ -36,6 +36,8 @@ def http_fixture(health=None, mode=None):
 
         def do_GET(self):
             calls.append((self.path, self.headers.get("Cookie")))
+            if mode == "slow_projection":
+                time.sleep(2.1)
             raw = json.dumps(health).encode()
             if mode == "invalid_json":
                 raw = b"not-json"
@@ -73,6 +75,11 @@ def http_fixture(health=None, mode=None):
 
 
 class HttpTests(unittest.TestCase):
+    def test_successful_projection_can_outlast_the_old_two_second_socket_budget(self):
+        with http_fixture(dict(ok=True), mode="slow_projection") as (url, calls, _):
+            c.app_health(url)
+            self.assertEqual(calls, [("/api/health", None)])
+
     def test_health_transport_never_requests_or_reuses_a_session(self):
         with http_fixture(dict(ok=True)) as (url, calls, sizes):
             for _ in range(65):
@@ -97,8 +104,9 @@ class HttpTests(unittest.TestCase):
     def test_total_deadline_bounds_trickling_peer(self):
         with http_fixture(dict(ok=True), mode="trickle") as (url, calls, _), patch.object(c, "HTTP_TIMEOUT", 0.06):
             start = time.monotonic()
-            with self.assertRaises(c.Failure):
+            with self.assertRaises(c.Failure) as caught:
                 c.app_health(url)
+            self.assertEqual(caught.exception.code, "app_timeout")
             self.assertLess(time.monotonic() - start, 0.5)
             self.assertEqual(len(calls), 1)
 

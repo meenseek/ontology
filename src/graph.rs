@@ -192,6 +192,16 @@ const GRAPH_SQL: &str = concat!(
  SELECT n.id,n.kind,n.matched,n.value || CASE WHEN c.subject_id IS NOT NULL OR n.kind='subject'
  THEN jsonb_build_object('purpose_total',COALESCE(c.total,0)) ELSE '{}'::jsonb END AS value
  FROM classified_nodes n LEFT JOIN purpose_counts c ON c.subject_id=CASE WHEN n.kind='subject' THEN n.id ELSE n.value->>'subject_id' END
+), native_references AS MATERIALIZED (
+ -- Reject sources outside this graph before expanding JSON. The old target join
+ -- expanded the same projection once per target, even for a one-node health read.
+ SELECT COALESCE(b.id,'c_'||m.material_id::text) AS source,reference.target_path
+ FROM context_materials m JOIN context_projection_versions p USING(material_id,revision)
+ LEFT JOIN bound_materials b ON b.material_id=m.material_id
+ CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(p.payload->'source_references','[]'::jsonb)) reference(target_path)
+ WHERE NOT m.deleted AND NOT m.restricted
+ AND p.payload->>'status'='searchable' AND p.payload->>'source_digest'=m.content_digest
+ AND EXISTS(SELECT 1 FROM source_nodes visible WHERE visible.id=COALESCE(b.id,'c_'||m.material_id::text))
 ), links AS MATERIALIZED (
  SELECT left_id AS source,right_id AS target,'related' AS kind,true AS current
  FROM related_materials WHERE scope=$1
@@ -207,14 +217,11 @@ const GRAPH_SQL: &str = concat!(
  LEFT JOIN bound_materials source_bound ON source_bound.material_id=m.material_id
  LEFT JOIN bound_materials target_bound ON target_bound.material_id=target.material_id
  WHERE $1='personal' AND NOT m.deleted AND NOT m.restricted AND NOT target.deleted AND NOT target.restricted
- UNION ALL SELECT COALESCE(source_bound.id,'c_'||m.material_id::text),COALESCE(target_bound.id,'c_'||target.material_id::text),'reference',true
- FROM context_materials m JOIN context_projection_versions p USING(material_id,revision)
- CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(p.payload->'source_references','[]'::jsonb)) reference(target_path)
+ UNION ALL SELECT reference.source,COALESCE(target_bound.id,'c_'||target.material_id::text),'reference',true
+ FROM native_references reference
  JOIN context_materials target ON target.scope||'/'||target.path=reference.target_path
- LEFT JOIN bound_materials source_bound ON source_bound.material_id=m.material_id
  LEFT JOIN bound_materials target_bound ON target_bound.material_id=target.material_id
- WHERE NOT m.deleted AND NOT m.restricted AND NOT target.deleted AND NOT target.restricted
- AND p.payload->>'status'='searchable' AND p.payload->>'source_digest'=m.content_digest
+ WHERE NOT target.deleted AND NOT target.restricted
  UNION ALL SELECT reference.id,target.id,'reference',true
  FROM imported_references reference
  JOIN sources t ON t.scope=reference.scope AND t.repository=reference.repository AND t.path=reference.target_path AND t.kind='git'
@@ -272,6 +279,7 @@ impl Store {
         let result = async {
             query.validate()?;
             self.count(1);
+            let started = std::time::Instant::now();
             let value: Value = sqlx::query_scalar(GRAPH_SQL)
                 .bind(query.scope.as_str())
                 .bind(&query.q)
@@ -280,7 +288,21 @@ impl Store {
                 .bind(MAX_GRAPH_LINKS as i64)
                 .fetch_one(self.pool())
                 .await
-                .map_err(|_| Error::Storage)?;
+                .map_err(|error| {
+                    // Error messages can embed SQL, source text or credentials.
+                    // Keep only operational categories so a future failure can
+                    // distinguish pool exhaustion, a DB timeout and transport loss.
+                    let kind = match &error {
+                        sqlx::Error::Database(_) => "database",
+                        sqlx::Error::PoolTimedOut => "pool_timeout",
+                        sqlx::Error::PoolClosed => "pool_closed",
+                        sqlx::Error::Io(_) | sqlx::Error::Tls(_) => "transport",
+                        _ => "other",
+                    };
+                    let code = error.as_database_error().and_then(|db| db.code());
+                    eprintln!("{}", json!({"event":"consumer_graph_failed","kind":kind,"sqlstate":code,"elapsed_ms":started.elapsed().as_millis()}));
+                    Error::Storage
+                })?;
             bound_response(value, query.limit)
         }
         .await;
@@ -348,5 +370,112 @@ fn bound_response(mut value: Value, limit: usize) -> Result<Value, Error> {
         } else {
             return Err(Error::Limit);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{context::inventory, domain::ImportedRecord, domain::SourceKind, store::digest};
+    use sqlx::ConnectOptions;
+
+    #[tokio::test]
+    async fn graph_does_not_expand_references_outside_its_scope() {
+        let url = std::env::var("TEST_DATABASE_URL").expect("explicit isolated PostgreSQL");
+        assert!(
+            crate::config::database_options(&url)
+                .unwrap()
+                .get_database()
+                .is_some_and(|name| name.starts_with("ontology_test_"))
+        );
+        // Native Harness unit fixtures deliberately hold the shared context gate.
+        // Give this workload its own DB inside verify.sh's disposable server.
+        let admin = Store::connect(&url).await.unwrap();
+        let database = format!("ontology_test_graph_{}", Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
+            .execute(admin.pool())
+            .await
+            .unwrap();
+        let options = crate::config::database_options(&url)
+            .unwrap()
+            .database(&database);
+        let store = Store::connect(options.to_url_lossy().as_str())
+            .await
+            .unwrap();
+        store.initialize().await.unwrap();
+        let original = ImportedRecord {
+            source_id: format!("s_{}", digest(b"graph-reference-scope-source")),
+            entity_id: format!("e_{}", digest(b"graph-reference-scope-entity")),
+            scope: Scope::Meenseek,
+            repository: "/synthetic/references".into(),
+            path: "index.md".into(),
+            kind: SourceKind::Git,
+            source_revision: "a".repeat(40),
+            digest: Some(digest(b"# Index\n")),
+            content: Some("# Index\n".into()),
+        };
+        store.apply_import(&[original]).await.unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("profile/notes")).unwrap();
+        for i in 0..24 {
+            std::fs::write(
+                root.join(format!("profile/notes/{i}.md")),
+                format!("# Reference {i}\n[Next]({}.md)\n", (i + 1) % 24),
+            )
+            .unwrap();
+        }
+        let scopes = ["profile".parse().unwrap()];
+        let expected = inventory(&root, &scopes).unwrap();
+        store
+            .import_context(&root, &scopes, &expected.inventory_digest)
+            .await
+            .unwrap();
+        // Both SQL fragments are source constants; fixture values remain bound.
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, FORMAT JSON) {GRAPH_SQL}"
+        )))
+        .bind("meenseek")
+        .bind("")
+        .bind(None::<String>)
+        .bind(1_i64)
+        .bind(MAX_GRAPH_LINKS as i64)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        fn expansions(plan: &Value) -> u64 {
+            let own = if plan["Function Name"] == "jsonb_array_elements_text" {
+                plan["Actual Rows"].as_u64().unwrap() * plan["Actual Loops"].as_u64().unwrap()
+            } else {
+                0
+            };
+            own + plan["Plans"]
+                .as_array()
+                .map_or(0, |children| children.iter().map(expansions).sum())
+        }
+        assert_eq!(
+            expansions(&plan[0]["Plan"]),
+            0,
+            "unbound native references cannot consume the company graph/health budget"
+        );
+        let personal = store
+            .graph(GraphQuery {
+                scope: Scope::Personal,
+                q: String::new(),
+                focus: None,
+                limit: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            personal["totals"]["links"], 24,
+            "visible native reference semantics are retained"
+        );
+        store.pool().close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {database}")))
+            .execute(admin.pool())
+            .await
+            .unwrap();
+        admin.pool().close().await;
     }
 }
