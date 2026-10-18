@@ -76,7 +76,41 @@ type CoreView = {
   cohorts?: ReadonlyMap<string, readonly string[]>;
   spatial?: { level: number; members: ReadonlySet<string>; camera: Point; target: Point } | null;
   locks?: ReadonlyMap<string, { representative?: string; members: readonly string[]; level: number }>;
+  reading?: boolean;
+  insets?: { top: number; bottom: number };
 };
+
+/** Fit the final disclosed coordinates, with space for names and the actual map controls.
+ * The result depends on the page, viewport and viewing direction, never the previous zoom. */
+export function coreReadingFrame(camera: PerspectiveCamera, cameraTarget: Point, nodes: readonly Point[], size: { width: number; height: number }, insets?: { top: number; bottom: number }) {
+  camera.updateMatrixWorld();
+  const right = new Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+  const backward = camera.position.clone().sub(new Vector3(cameraTarget.x, cameraTarget.y, cameraTarget.z)).normalize();
+  if (!backward.lengthSq()) backward.set(0, 0, 1);
+  const coordinates = nodes.map(node => new Vector3(node.x, node.y, node.z));
+  const middle = (axis: Vector3) => (Math.min(...coordinates.map(at => at.dot(axis))) + Math.max(...coordinates.map(at => at.dot(axis)))) / 2;
+  const center = right.clone().multiplyScalar(middle(right)).addScaledVector(up, middle(up)).addScaledVector(backward, middle(backward));
+  const mobile = size.width <= 700;
+  const left = mobile ? 82 : 150, rightInset = mobile ? 82 : 210;
+  const top = insets?.top ?? (mobile ? 136 : 82), bottom = insets?.bottom ?? (mobile ? 100 : 70);
+  const availableWidth = Math.max(80, size.width - left - rightInset), availableHeight = Math.max(100, size.height - top - bottom);
+  const pixelScale = size.height * camera.projectionMatrix.elements[5] / 2;
+  // Avoid huge bodies in a small page. The bounds, including depth, can only increase this distance.
+  let distance = LAYOUT_WORLD_SPACING * pixelScale / 52;
+  for (const at of coordinates) {
+    const relative = at.clone().sub(center), depth = relative.dot(backward);
+    const x = relative.dot(right) * pixelScale, y = relative.dot(up) * pixelScale;
+    distance = Math.max(distance, depth + 1,
+      (x + (size.width / 2 - rightInset) * depth) / (availableWidth / 2),
+      (-x + (size.width / 2 - left) * depth) / (availableWidth / 2),
+      (y + (size.height / 2 - top) * depth) / (availableHeight / 2),
+      (-y + (size.height / 2 - bottom) * depth) / (availableHeight / 2));
+  }
+  // Shift the content into the safe rectangle without changing direction or depth.
+  const target = center.clone().addScaledVector(right, -(left - rightInset) * distance / (2 * pixelScale))
+    .addScaledVector(up, -(bottom - top) * distance / (2 * pixelScale));
+  return { position: target.clone().addScaledVector(backward, distance), target };
+}
 
 /** Plan coordinates and the exact camera used to clear them, without touching live render state. */
 export function planCoreView(desired: ReadonlyMap<string, Point>, movable: ReadonlySet<string>, hub: string,
@@ -110,6 +144,13 @@ export function planCoreView(desired: ReadonlyMap<string, Point>, movable: Reado
     }
     camera.lookAt(target);
   }
+  const reading = view.reading && view.automatic && !view.selected && !view.spatial;
+  const readingNodes = (values: ReadonlyMap<string, Point>) => nodes.filter(node => node.id === hub || view.members.has(node.id)).map(node => values.get(node.id)!);
+  const frameReading = (values: ReadonlyMap<string, Point>) => {
+    const frame = coreReadingFrame(camera, target, readingNodes(values), view.size, view.insets);
+    target.copy(frame.target); camera.position.copy(frame.position); camera.lookAt(target); camera.updateMatrixWorld();
+  };
+  if (reading) frameReading(desired);
   camera.updateMatrixWorld();
   const scale = view.size.height * camera.projectionMatrix.elements[5] / (2 * camera.position.distanceTo(target));
   const level = Math.max(nucleusLevel(LAYOUT_WORLD_SPACING * scale, view.lod), view.spatial?.members.size ? view.spatial.level : 0);
@@ -154,7 +195,22 @@ export function planCoreView(desired: ReadonlyMap<string, Point>, movable: Reado
     held = view.selected ?? hub;
     moving = new Set(plane.visible.filter(id => id !== held));
   }
-  const resolved = clear(next, moving, held, plane);
+  let resolved = clear(next, moving, held, plane);
+  if (reading) {
+    // Clearance and framing share the final projection. A camera chosen before
+    // clearance used to strand page-two stars outside the viewport.
+    for (let pass = 0; pass < 4; pass++) {
+      frameReading(resolved);
+      const adjusted = clear(resolved, moving, held, plane);
+      const unchanged = [...moving].every(id => {
+        const a = resolved.get(id)!, b = adjusted.get(id)!;
+        return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) < 1e-6;
+      });
+      resolved = adjusted;
+      if (unchanged) break;
+    }
+    frameReading(resolved);
+  }
   const visible = new Set(plane.visible);
   const cohorts = new Map([...view.cohorts ?? [], ...[...spatial.groups].map(([id, group]) => [id, group.members] as const)]);
   for (const [id, members] of cohorts) {

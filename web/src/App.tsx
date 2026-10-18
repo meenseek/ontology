@@ -348,7 +348,7 @@ function GraphApp() {
             {fallback && !route.q && <label className="list-sort">표시 항목 정렬<select aria-label="표시 항목 정렬" value={listSort} disabled={busy} onChange={event => setListSort(event.target.value as ListSort)}><option value="updated">최근 수정순</option><option value="created">최근 추가순</option><option value="name">이름순</option></select></label>}
             <button ref={filterButton} disabled={busy} aria-expanded={explore} onClick={() => explore ? closeExplorer() : setExplore(true)}>필터·묶음</button>
             <button disabled={busy} aria-pressed={fallback} onClick={() => { if (webglFailed) { setWebglFailed(false); setListMode(false); } else setListMode(v => !v); }}>{fallback ? "3D 보기" : "목록 보기"}</button>
-            <details className="view-options"><summary>보기 설정</summary><div>
+            <details className="view-options"><summary>보기 설정<svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg></summary><div>
               <label>묶음 기준<select aria-label="묶음 기준" value={view} disabled={busy} onChange={event => changeView(event.target.value as GraphView)}><option value="purpose">목적</option><option value="relationships">관계</option></select></label>
               {!fallback && <label><input type="checkbox" checked={allConnections} onChange={event => setAllConnections(event.target.checked)} /> 연결선 모두 보기</label>}
               <button disabled={busy || !data} onClick={() => { positions.reset(); setFit(v => v + 1); }}>배치 초기화</button>
@@ -364,8 +364,8 @@ function GraphApp() {
           {notice && <p className="notice">{notice}</p>}
           {loading && !data && <p className="loading" role="status">지식을 불러오는 중…</p>}
           {webglFailed && <p className="warning">3D 화면을 표시할 수 없어 같은 조회 결과를 목록으로 보여드립니다.</p>}
-          {(route.q || cluster || folder) && <div className="active-filters">{route.q && <button className="quiet" disabled={busy} onClick={() => search("")}>검색 해제</button>}{cluster && <button className="quiet" disabled={busy} onClick={() => fitView(null)}>묶음 해제</button>}{folder && <button className="quiet" disabled={busy} onClick={() => fitFolder(null)}>폴더 해제</button>}</div>}
-          {route.q && data && <p className="hint">일치 구절은 원문의 일부입니다. 적용 여부는 현재 내용과 근거에서 확인하세요.</p>}
+          {(route.q || cluster || folder) && !!displayed.length && <div className="active-filters">{route.q && <button className="quiet" disabled={busy} onClick={() => search("")}>검색 해제</button>}{cluster && <button className="quiet" disabled={busy} onClick={() => fitView(null)}>묶음 해제</button>}{folder && <button className="quiet" disabled={busy} onClick={() => fitFolder(null)}>폴더 해제</button>}</div>}
+          {route.q && !!displayed.length && <p className="hint">일치 구절은 원문의 일부입니다. 적용 여부는 현재 내용과 근거에서 확인하세요.</p>}
           {data?.snapshot.truncated && <p className="warning">자료가 많아 일부만 표시합니다. 검색으로 범위를 좁히면 다른 자료를 찾을 수 있습니다.</p>}
           {data && shown.nodes.length > 0 && !shown.links.length && <p className="hint no-relations">{data.snapshot.totals.links === 0 ? "아직 등록된 관계가 없습니다." : "현재 표시한 항목 사이에는 조회된 관계가 없습니다."}</p>}
           {selected && !shown.nodes.some(n => n.id === selected.id) && <p className="notice">선택한 자료가 현재 필터 밖에 있습니다. <button onClick={() => setFilters(initialFilters)}>필터 해제</button></p>}

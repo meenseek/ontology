@@ -71,7 +71,7 @@ export type LabelEnvironment = {
   restingSummaryGap?: number;
   /** Small star titles beyond the limit yield. Group names, the selection, the hovered star and exempt stars are not counted;
    * close stars are not counted unless an exempt set (an opened group) is given. */
-  starTitles?: { limit: number; exempt?: ReadonlySet<string> };
+  starTitles?: { limit: number; exempt?: ReadonlySet<string>; reach?: number };
 };
 /** Rank the current projection before bounding the visible set. No ID window excludes later nodes. */
 export function visibleLabels(candidates: ProjectedLabel[], width: number, height: number, selected: string | null, hovered: string | null, environment: LabelEnvironment = {}): LabelBox[] {
@@ -92,7 +92,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   }
   ordered.push(...ordinary.filter(n => n.kind !== "document" && n.kind !== "memory").sort(nearby));
   const fromStar = (node: ProjectedLabel, box: LabelBox) => Math.hypot(node.x - Math.max(box.left, Math.min(box.right, node.x)), node.y - Math.max(box.top, Math.min(box.bottom, node.y)));
-  const restingReach = (node: ProjectedLabel) => node.id === selected || node.id === hovered || environment.starTitles?.exempt?.has(node.id) ? Infinity :
+  const restingReach = (node: ProjectedLabel) => node.id === selected ? Infinity : environment.starTitles?.exempt?.has(node.id) ? environment.starTitles.reach ?? Infinity :
     node.summary ? environment.restingSummaryGap === undefined ? Infinity : node.radius + environment.restingSummaryGap : node.radius + 18;
   const positionsFor = (node: ProjectedLabel): LabelBox[] => {
     const clearance = node.radius + 5;
@@ -114,10 +114,15 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
       positions.push({ left: centered, top: node.y - clearance - gap - node.height }, { left: centered, top: node.y + clearance + gap });
     }
     const boxes = positions.map(({ left, top }) => ({ id: node.id, left, top, right: left + node.width, bottom: top + node.height }));
-    const previous = environment.previous?.get(node.id);
-    if (node.summary && environment.restingSummaryGap !== undefined && (!previous || fromStar(node, previous) > node.radius + environment.restingSummaryGap))
-      boxes.sort((a, b) => fromStar(node, a) - fromStar(node, b));
-    else if (previous) boxes.sort((a, b) => Math.hypot(a.left - previous.left, a.top - previous.top) - Math.hypot(b.left - previous.left, b.top - previous.top));
+    // A projection has one answer, including its first frame. History-dependent
+    // candidate order made a hover commit a different resting arrangement.
+    if (node.summary && environment.restingSummaryGap !== undefined)
+      boxes.sort((a, b) => {
+        const difference = fromStar(node, a) - fromStar(node, b);
+        // Equal sides can differ by floating-point roundoff after camera motion.
+        // Preserve their authored order below a thousandth of a CSS pixel.
+        return Math.abs(difference) < .001 ? 0 : difference;
+      });
     return boxes;
   };
   const inBounds = (box: LabelBox) => box.left >= 0 && box.top >= 0 && box.right <= width && box.bottom <= height;
@@ -148,8 +153,21 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     return leaderCache.get(box)!;
   };
   const guide = (box: LabelBox) => box.guide ?? (leader(box) ? [leader(box)!] : []);
+  const passesStar = (line: LabelLeader, id: string) => {
+    const reach = largestStar + 4;
+    for (let x = Math.floor((Math.min(line.x1, line.x2) - reach) / 64); x <= Math.floor((Math.max(line.x1, line.x2) + reach) / 64); x++)
+      for (let y = Math.floor((Math.min(line.y1, line.y2) - reach) / 64); y <= Math.floor((Math.max(line.y1, line.y2) + reach) / 64); y++)
+        for (const star of starCells.get(`${x},${y}`) ?? []) {
+          if (star.id === id) continue;
+          const dx = line.x2 - line.x1, dy = line.y2 - line.y1;
+          const t = Math.max(0, Math.min(1, ((star.x - line.x1) * dx + (star.y - line.y1) * dy) / Math.max(.001, dx * dx + dy * dy)));
+          if (Math.hypot(star.x - line.x1 - t * dx, star.y - line.y1 - t * dy) < star.radius + 3) return true;
+        }
+    return false;
+  };
   const fitsTogether = (box: LabelBox, placed: readonly LabelBox[]) => {
     const lines = guide(box), star = byId.get(box.id)!;
+    if (environment.starTitles?.reach !== undefined && lines.some(line => passesStar(line, box.id))) return false;
     // A covered source still needs an accessible name outside the covering control.
     if (lines.length && (environment.obstacles ?? []).some(other => {
       const coversSource = star.x >= other.left && star.x <= other.right && star.y >= other.top && star.y <= other.bottom;
@@ -187,7 +205,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
         const segments = points.slice(1).map((point, index) => ({ x1: points[index].x, y1: points[index].y, x2: point.x, y2: point.y, length: Math.hypot(point.x - points[index].x, point.y - points[index].y) }));
         const length = segments.reduce((sum, line) => sum + line.length, 0);
         const candidate = { ...box, guide: segments };
-        if (length > Math.min(240, Math.max(width, height)) || length >= shortest || segments.some(line => leaderHitsBox(line, box, 0)) || !fitsTogether(candidate, placed)) continue;
+        if (length > Math.min(240, Math.max(width, height), restingReach(node)) || length >= shortest || segments.some(line => leaderHitsBox(line, box, 0)) || !fitsTogether(candidate, placed)) continue;
         best = candidate; shortest = length;
       }
     }
@@ -205,14 +223,11 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
       (b.importance ?? 0) - (a.importance ?? 0) || optionsFor(a).length - optionsFor(b).length || nearby(a, b));
     ordered.splice(priority.length + disclosed.length, summaries.length, ...summaries);
   }
-  // The fallback keeps the label off its own body, reuses last frame's spot within reach, then takes the nearest grid spot within reach.
+  // The fallback keeps the label off its own body, then takes the nearest grid spot within reach.
   const nearestFree = (node: ProjectedLabel, placed: readonly LabelBox[], allowTurn = false): LabelBox | undefined => {
     const usable = (box: LabelBox) => fromStar(node, box) >= node.radius + 4 && clear(box) && !placed.some(other => overlaps(box, other));
     const arrange = (box: LabelBox) => usable(box) ? fitsTogether(box, placed) ? box : allowTurn ? routed(node, box, placed) : undefined : undefined;
-    const previous = environment.previous?.get(node.id);
     const reach = Math.min(240, Math.max(width, height), restingReach(node)), spots: LabelBox[] = [];
-    const kept = previous && { id: node.id, left: previous.left, top: previous.top, right: previous.left + node.width, bottom: previous.top + node.height };
-    if (kept && fromStar(node, kept) <= reach) { const retained = arrange(kept); if (retained) return retained; }
     for (let top = Math.max(0, Math.floor((node.y - reach - node.height) / 12) * 12); top <= Math.min(height - node.height, node.y + reach); top += 12)
       for (let left = Math.max(0, Math.floor((node.x - reach - node.width) / 12) * 12); left <= Math.min(width - node.width, node.x + reach); left += 12)
         spots.push({ id: node.id, left, top, right: left + node.width, bottom: top + node.height });
@@ -222,7 +237,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   };
   // Keep the base ranking stable; interaction can reveal a deferred name.
   const boxes: LabelBox[] = [];
-  const rationed = (node: ProjectedLabel) => !!environment.starTitles && !node.summary && node.id !== selected && node.id !== hovered &&
+  const rationed = (node: ProjectedLabel) => !!environment.starTitles && !node.summary && node.id !== selected &&
     !environment.starTitles.exempt?.has(node.id) && (!!environment.starTitles.exempt || (node.body ?? node.radius) < CLOSE_STAR_LABEL_RADIUS);
   let rationedTitles = 0;
   const important = !environment.stars ? [] : disclosed.length
@@ -234,7 +249,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     let states = [{ boxes: [...boxes], cost: 0 }];
     for (const node of important) {
       const next = states.flatMap(state => [
-        ...optionsFor(node).slice(0, 52).flatMap((box, index) => !fitsTogether(box, state.boxes) ? [] : [{ boxes: [...state.boxes, box], cost: state.cost + index + (environment.previous?.has(node.id) ? 0 : (leader(box)?.length ?? 0) / 12) }]),
+        ...optionsFor(node).slice(0, 52).flatMap((box, index) => !fitsTogether(box, state.boxes) ? [] : [{ boxes: [...state.boxes, box], cost: state.cost + index + (leader(box)?.length ?? 0) / 12 }]),
         { boxes: state.boxes, cost: state.cost + 10000 },
       ]);
       states = next.sort((a, b) => a.cost - b.cost).slice(0, 24);
@@ -274,7 +289,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   let insertion: LabelBox | undefined;
   let fewestCollisions = Infinity;
   for (const position of positionsFor(node)) {
-    if (!clear(position) || boxes.some(box => box.id === selected && overlaps(position, box)) || !fitsTogether(position, boxes.filter(box => !overlaps(position, box)))) continue;
+    if (!clear(position) || boxes.some(box => (box.id === selected || byId.get(box.id)?.summary) && overlaps(position, box)) || !fitsTogether(position, boxes.filter(box => !overlaps(position, box)))) continue;
     const collisions = boxes.filter(box => overlaps(position, box)).length;
     if (collisions < fewestCollisions) {
       insertion = position;

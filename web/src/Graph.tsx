@@ -462,6 +462,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   }, [nodes, collapsedCounts, cores, spatialGroups, snapshot.view]);
   const collapsibleCore = useMemo(() => !selected && expandedCore && constellationView(nodes, links, null, null, undefined, snapshot.view).counts.has(expandedCore), [nodes, links, selected, expandedCore, snapshot.view]);
   const activeExpandedCore = collapsibleCore ? expandedCore : null;
+  const purposeCore = snapshot.view === "purpose" && nodes.some(node => node.id === activeExpandedCore && node.kind !== "folder");
+  const readingMembers = useMemo(() => purposeCore && !spatialReveal?.members.size
+    ? cores.find(core => core.hub === activeExpandedCore)?.members : undefined, [purposeCore, activeExpandedCore, cores, spatialReveal]);
+  const readingMembersRef = useRef(readingMembers); readingMembersRef.current = readingMembers;
   const pinnedNames = useMemo(() => new Set(size.width <= 700 && !activeExpandedCore && !spatialReveal?.members.size && !selected ? navigationGroups.filter(node => collapsedCounts.has(node.id)).slice(0, 6).map(node => node.id) : []),
     [navigationGroups, collapsedCounts, size.width, activeExpandedCore, spatialReveal, selected]);
   // A filter can remove a hub and expose members hidden in the full overview.
@@ -568,7 +572,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     return members ? expandedCoreCameraFrame(nodes, links, activeExpandedCore, members)?.key ?? "" : "";
   }, [nodes, links, cores, selected, activeExpandedCore]);
   const spatialCameraKey = spatialReveal?.members.size ? `${positions.structureEpoch}:${[...spatialReveal.members].sort().join("|")}` : "";
-  const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${disclosure?.index ?? "all"}:${fit}:${size.width}:${size.height}:${expandedRelationKey}:${spatialCameraKey}`;
+  const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${disclosure?.index ?? "all"}:${fit}:${size.width}:${size.height}:${expandedRelationKey}:${spatialCameraKey}:${activeExpandedCore ? minimapRevision : ""}`;
   const appliedCamera = useRef("");
   const appliedFit = useRef(fit);
   const plannedCamera = useRef<{ key: string; camera: PerspectiveCamera; target: { x: number; y: number; z: number } } | null>(null);
@@ -582,12 +586,17 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         key: renderKey,
         resolve: (desired, movable, hub) => {
           const automatic = appliedCamera.current !== cameraKey;
+          const bounds = container.current!.getBoundingClientRect();
+          const actions = container.current!.querySelector(".graph-core-actions")?.getBoundingClientRect();
+          const minimap = container.current!.querySelector(".graph-minimap")?.getBoundingClientRect();
           const plan = planCoreView(desired, movable, hub, {
             camera: instance.camera() as PerspectiveCamera, cameraTarget: (instance.controls() as OrbitControls).target,
             size, automatic, nodes: semanticNodes, links: snapshotLinks, counts: collapsedCounts,
             members: disclosure?.hub === hub ? disclosure.visible : group.members, selected, lod: lodLevelRef.current,
             cohorts: new Map(cores.filter(core => collapsedCounts.has(core.hub)).map(core => [core.hub, [...core.members]])),
             spatial: spatialReveal, locks: new Map([...movedGroups].filter(([, value]) => value.epoch === positions.groupEpoch)),
+            reading: purposeCore,
+            insets: { top: actions ? actions.bottom - bounds.top + 24 : 82, bottom: size.width <= 700 && minimap ? bounds.bottom - minimap.top + 24 : 70 },
           }, (desired, movable, held, plane) => positions.clearLayout(desired, movable, held, plane));
           if (automatic) plannedCamera.current = { key: cameraKey, camera: plan.camera, target: plan.target };
           // The committed view keeps the exact cohorts whose footprints were
@@ -601,7 +610,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         },
       } : undefined);
   }, [positions, layoutCore, disclosure, nodes, links, snapshot.nodes.length, snapshotLinks, reduced, ready, semanticNodes,
-    cores, collapsedCounts, renderKey, cameraKey, size, selected, spatialReveal, movedGroups]);
+    cores, collapsedCounts, renderKey, cameraKey, size, selected, spatialReveal, movedGroups, purposeCore]);
   const positionCamera = useCallback(() => {
     const instance = graph.current;
     if (!ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
@@ -860,7 +869,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     let previousLabels = new Map<string, ReturnType<typeof visibleLabels>[number]>();
     const chrome = () => {
       const origin = layer.getBoundingClientRect();
-      return [...(container.current?.querySelectorAll<HTMLElement>(".graph-minimap, .graph-tooltip, .graph-core-actions, .graph-core-close, .graph-instructions, .graph-group-navigation.with-keys, .graph-group-target.core-name, .graph-group-target:focus") ?? [])]
+      return [...(container.current?.querySelectorAll<HTMLElement>(".graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions, .graph-group-navigation.with-keys, .graph-group-target.core-name, .graph-group-target:focus") ?? [])]
         .filter(element => element.offsetWidth && element.offsetHeight)
         .map(element => { const box = element.getBoundingClientRect(); return { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }; });
     };
@@ -1041,13 +1050,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
             marker.classList.toggle("active", star.id === hoveredId.current || star.id === focusedSummary);
           }
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
-          const labelCandidates = candidates.filter(node => (!spatialCounts.has(node.id) || (!activeExpandedCore && spatialLabels.has(node.id)) || node.id === hoveredId.current || node.id === focusedSummary) &&
+          const labelCandidates = candidates.filter(node => (!readingMembers || readingMembers.has(node.id) || node.id === activeExpandedCore || node.id === hoveredId.current || node.id === focusedSummary || node.id === selected) &&
+            (!spatialCounts.has(node.id) || (!activeExpandedCore && spatialLabels.has(node.id)) || node.id === hoveredId.current || node.id === focusedSummary) &&
             (!pinnedNames.has(node.id) || node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current));
           const priorityId = focusedSummary ?? dragged.current ?? selected;
           // An opened group or revealed nearby stars show their own titles; other star titles wait.
-          const opened = activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : spatialReveal?.members.size ? spatialReveal.members : undefined;
-          const starTitles = opened ? { limit: 0, exempt: opened } : { limit: MAX_RESTING_STAR_LABELS };
-          const environment = { stars: candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : 120 };
+          const opened = spatialReveal?.members.size ? spatialReveal.members : activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : undefined;
+          const starTitles = opened ? { limit: 0, exempt: opened, reach: readingMembers ? showAllCore ? 38 : 84 : undefined } : { limit: MAX_RESTING_STAR_LABELS };
+          const environment = { stars: readingMembers ? candidates.filter(node => readingMembers.has(node.id) || node.id === activeExpandedCore) : candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : 120 };
           let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
           // Expanded metadata must not make an already usable keyboard target disappear.
           const compactFallback = new Set(labelCandidates.filter(node => node.id === priorityId && !visible.some(box => box.id === node.id)).map(node => node.id));
@@ -1104,7 +1114,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       frame = requestAnimationFrame(draw);
     };
     draw(); return () => cancelAnimationFrame(frame);
-  }, [ready, labelFontRevision, minimapRevision, nodes, displayNodes, displayLinks, outlineLinks, allConnections, collapsedCounts, cores, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal, groupTitle, pinnedNames]);
+  }, [ready, labelFontRevision, minimapRevision, nodes, displayNodes, displayLinks, outlineLinks, allConnections, collapsedCounts, cores, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal, groupTitle, pinnedNames, readingMembers, showAllCore]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;
@@ -1124,7 +1134,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     const summaryPixels = summaryAppearance(summaryCounts.get(node.id) ?? 0).pixels;
     const haloScale = summary ? () => summaryHaloScale(summaryHalo.current, node.id, performance.now(), motionReduced.current) : undefined;
     const contactMotion = () => positions.collisionReaction(node.id, performance.now(), motionReduced.current);
-    const fade = () => revealOpacity(revealRef.current, node.id, performance.now());
+    const fade = () => revealOpacity(revealRef.current, node.id, performance.now()) *
+      (readingMembersRef.current && !readingMembersRef.current.has(node.id) && node.id !== hoveredId.current ? .12 : 1);
     group.userData.opacity = fade;
     group.userData.retiring = () => revealRef.current.retiring.has(node.id);
     const members = glyphMembers.get(node.id);
@@ -1412,7 +1423,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         }}>
         {pinnedNames.has(node.id) && <span className="group-key" aria-hidden="true">{[...pinnedNames].indexOf(node.id) + 1}</span>}
         <span className="group-name-copy"><span>{count ? title.slice(0, -count[0].length) : title}</span>
-        {count && <span className="group-count">{count[0]}</span>}</span>
+        {count && <span className="group-count">{pinnedNames.has(node.id) ? count[0].replace(/^ · /, "") : count[0]}</span>}</span>
       </button>; })}
     </div>
     <div className="graph-group-markers" ref={groupMarkerLayer} aria-hidden="true">
@@ -1441,6 +1452,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>근접 묶음 {spatialReveal.members.size}개 접기</button>}
     {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
       rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} onResize={resizeMinimap} />}
-    {hover && (!selected || hoveredId.current !== selected) && <div className="graph-tooltip" role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
+    <div className="graph-instructions graph-quick-help"><span className="pointer-instructions">빈 공간 끌기 · 스크롤 확대</span><span className="touch-instructions">빈 공간 끌기 · 두 손가락 확대</span></div>
+    {hover && (!selected || hoveredId.current !== selected) && <div className="graph-tooltip" data-node-id={hoveredId.current ?? undefined} role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
   </div>;
 }

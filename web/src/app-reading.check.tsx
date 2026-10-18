@@ -631,8 +631,8 @@ async function checkNativeConstellation() {
     eligible: { nodes: nodes.length, links: links.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
   let graphCalls = 0;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
-  const summary = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.textContent?.includes("관계 묶음 · 합성 상위 자료 · 121개"));
-  const folderSummary = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.textContent?.includes("폴더 묶음 · 40개"));
+  const summary = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.getAttribute("aria-label")?.includes("관계 묶음 · 합성 상위 자료 · 121개"));
+  const folderSummary = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.getAttribute("aria-label")?.includes("폴더 묶음 · 40개"));
   try {
     window.fetch = async input => {
       const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
@@ -700,7 +700,7 @@ async function checkPurposeDiagram() {
     eligible: { nodes: nodes.length, links: memberships.length + references.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
   let responseSnapshot = snapshot;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
-  const summary = (group: number) => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.textContent?.includes(`${names[group]} · ${group ? 23 : 120}개`));
+  const summary = (group: number) => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].find(node => !node.hidden && node.getAttribute("aria-label")?.includes(`${names[group]} · ${group ? 23 : 120}개`));
   try {
     Positions.prototype.packOverview = function (this: Positions, ...args: Parameters<Positions["packOverview"]>) {
       positions = this; return originalPack.apply(this, args);
@@ -855,7 +855,7 @@ async function checkSummaryOverview() {
   let graphCalls = 0;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
   const labels = () => [...host.querySelectorAll<HTMLElement>('.graph-group-target')].filter(node => !node.hidden);
-  const summary = (count: number) => labels().find(node => node.textContent?.includes(`관계 묶음 · 합성 ${count}개 묶음 자료 0 · ${count}개`));
+  const summary = (count: number) => labels().find(node => node.getAttribute("aria-label")?.includes(`관계 묶음 · 합성 ${count}개 묶음 자료 0 · ${count}개`));
   const overviewReady = () => counts.every(count => !!summary(count) && (glyphSamples.get(`group-${count}-0`)?.opacity ?? 0) > .99);
   const pointAt = (count: number | null) => {
     // Synthetic PointerEvent page coordinates do not include the fixture's scroll offset.

@@ -124,7 +124,11 @@ export function topologySlots(ids: readonly string[], links: readonly GraphLink[
     let center = { x: 0, y: 0 }, cursor = result.size ? cursors.get(component.radius) ?? 1 : 0;
     for (;; cursor++) {
       const distance = 1.1 * Math.sqrt(cursor), angle = cursor * 2.399963;
-      center = { x: Math.cos(angle) * distance, y: Math.sin(angle) * distance };
+      // A bounded asymmetric envelope avoids a uniform disc for many unrelated
+      // components. Actual edges still determine each component's interior.
+      center = components.length > 48
+        ? { x: (1.15 * Math.cos(angle) + .22 * Math.sin(2 * angle)) * distance, y: (.9 * Math.sin(angle) + .16 * Math.cos(3 * angle)) * distance }
+        : { x: Math.cos(angle) * distance, y: Math.sin(angle) * distance };
       const reach = component.radius + largest + .4;
       let free = true;
       for (let x = Math.floor((center.x - reach) / cellSize); x <= Math.floor((center.x + reach) / cellSize) && free; x++)

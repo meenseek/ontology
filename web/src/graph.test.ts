@@ -2815,6 +2815,37 @@ test("labels avoid unlabeled stars and measured chrome while preserving a safe p
   assert.deepEqual(visibleLabels([candidate], 300, 240, "a", "a", { stars, obstacles: covered }), []);
 });
 
+test("equidistant summary label sides keep their order across projection roundoff", () => {
+  const summary: ProjectedLabel = { id: "group", kind: "subject", active: true, summary: true, importance: 1,
+    x: 100.692, y: 100.876, depth: 0, radius: 5.052, width: 120, height: 31 };
+  const place = (delta: number) => {
+    const node = { ...summary, x: summary.x + delta, y: summary.y + delta };
+    return visibleLabels([node], 390, 500, null, null, { stars: [node], restingSummaryGap: 40 })[0];
+  };
+  const base = place(0);
+  for (const delta of [-1e-10, 1e-10]) {
+    const box = place(delta);
+    assert.ok(Math.hypot(box.left - base.left, box.top - base.top) < 1e-8,
+      "subpixel arithmetic must not choose another side of the star");
+  }
+});
+test("hover and label history never change the resting group arrangement", () => {
+  const groups: ProjectedLabel[] = Array.from({ length: 6 }, (_, i) => ({ id: `group-${i}`, kind: "subject", active: true, summary: true, importance: 2,
+    x: 280 + (i % 3) * 170, y: 180 + Math.floor(i / 3) * 180, depth: 0, radius: 28, width: 145, height: 25 }));
+  const stars: ProjectedLabel[] = Array.from({ length: 18 }, (_, i) => ({ id: `star-${i}`, kind: "document", active: true,
+    x: 250 + (i % 6) * 70, y: 150 + Math.floor(i / 6) * 90, depth: 0, radius: 6, width: 120, height: 21 }));
+  const candidates = [...groups, ...stars], environment = { stars: candidates, starTitles: { limit: 0 }, restingSummaryGap: 120 };
+  const base = visibleLabels(candidates, 1000, 700, null, null, environment);
+  assert.ok(base.filter(box => box.id.startsWith("group-")).length >= 4);
+  let previous = new Map(base.map(box => [box.id, box]));
+  for (const star of stars) {
+    const pointed = visibleLabels(candidates, 1000, 700, null, star.id, { ...environment, previous });
+    assert.deepEqual(pointed.filter(box => box.id.startsWith("group-")), base.filter(box => box.id.startsWith("group-")), "pointing cannot displace a summary name");
+    previous = new Map(pointed.map(box => [box.id, box]));
+    assert.deepEqual(visibleLabels(candidates, 1000, 700, null, null, { ...environment, previous }), base, "leaving restores the first projection, with no warm-up pass");
+  }
+});
+
 test("resting titles stay beside their stars and defer when only distant space is free", () => {
   const star: ProjectedLabel = { id: "star", kind: "document", active: true, x: 200, y: 120, depth: 0, radius: 10, width: 80, height: 20 };
   const environment = { stars: [star], obstacles: [{ left: 0, top: 0, right: 245, bottom: 240 }] };

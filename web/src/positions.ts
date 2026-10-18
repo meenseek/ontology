@@ -763,10 +763,13 @@ export class Positions {
     const changed = key !== this.activeCore || page !== this.activePage || visibleKey !== this.activeVisibleKey ||
       scopeKey !== this.activeScopeKey || this.layoutNeedsRefresh;
     if (!changed && (render?.key ?? "") === this.activeRenderKey) return;
+    // A resize or content render can arrive during disclosure. Re-plan its
+    // destination, not the partly unfolded frame that cancel() leaves behind.
+    const destination = this.layoutMotion?.to;
     this.cancel(false);
     const actual = new Map([...this.nodes].map(([id, node]) => [id, point(node)]));
     const from = new Map([...actual].map(([id, value]) => [id, this.canonical.get(id) ?? value]));
-    let target = changed ? this.coreLayout(key, page, visibleMembers, scope) : new Map(from);
+    let target = changed ? this.coreLayout(key, page, visibleMembers, scope) : new Map(destination ?? from);
     if (core && core !== "*") {
       const source = scope ?? this.source;
       const view = constellationView(source.nodes, source.links, null, core, page, source.view);

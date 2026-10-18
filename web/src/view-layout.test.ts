@@ -8,7 +8,7 @@ import { nucleusLevel, nucleusView } from "./nuclei.ts";
 import { Positions } from "./positions.ts";
 import type { LayoutView, Point } from "./positions.ts";
 import { coreCameraDistance, LAYOUT_WORLD_SPACING } from "./presentation.ts";
-import { planCoreView, screenPlane, overviewFrame } from "./view-layout.ts";
+import { planCoreView, screenPlane, overviewFrame, coreReadingFrame } from "./view-layout.ts";
 
 test("opening an already readable page retains its zoom while large content still fits", () => {
   assert.equal(coreCameraDistance(300, 700, 1.7, 500), 500);
@@ -127,6 +127,46 @@ function assertWholeShape(plane: ReturnType<typeof screenPlane>, before: Readonl
   for (const at of offsets) assert.ok(Math.hypot(at.bx - (at.ax * cosine - at.ay * sine), at.by - (at.ax * sine + at.ay * cosine)) < 1e-5,
     "every star follows one whole-shape scale and rotation instead of acquiring a new direction");
 }
+
+test("a render invalidation during disclosure preserves its intended destination", () => {
+  for (const elapsed of [16, 160, 400]) {
+    const f = fixture([40], 3, { width: 1440, height: 700 });
+    const view = constellationView(f.model.nodes, f.model.links, null, "g40-0", 0);
+    let destination: ReadonlyMap<string, Point> | undefined;
+    f.positions.showCore("g40-0", 0, false, 0, view.disclosure!.visible, undefined, { key: "initial", resolve: desired => { destination = new Map(desired); return new Map(desired); } });
+    f.positions.advance(elapsed, false);
+    f.positions.showCore("g40-0", elapsed, false, 0, view.disclosure!.visible, undefined, { key: "resized", resolve: desired => {
+      for (const [id, expected] of destination!) {
+        const at = desired.get(id)!;
+        assert.ok(Math.hypot(at.x - expected.x, at.y - expected.y, at.z - expected.z) < 1e-7, `${elapsed}ms: ${id} resumes toward the same final point`);
+      }
+      return new Map(desired);
+    } });
+    f.positions.advance(2000, true);
+    samePoints(f.model.nodes, destination!, "render invalidation cannot freeze a partly opened page");
+  }
+});
+
+test("purpose reading frames have the same scale on repeat entry and fit depth plus control insets", () => {
+  for (const size of [{ width: 1440, height: 680 }, { width: 390, height: 490 }]) {
+    const nodes = Array.from({ length: 13 }, (_, i) => ({ x: Math.cos(i) * 90, y: Math.sin(i) * 100, z: i * 3 }));
+    const before = structuredClone(nodes), camera = new PerspectiveCamera(60, size.width / size.height, .1, 20000);
+    const insets = { top: 130, bottom: 110 };
+    const frames = [500, 2000].map(distance => {
+      camera.position.set(0, 0, distance); camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
+      return coreReadingFrame(camera, { x: 0, y: 0, z: 0 }, nodes, size, insets);
+    });
+    assert.ok(frames[0].position.distanceTo(frames[1].position) < 1e-7);
+    assert.ok(frames[0].target.distanceTo(frames[1].target) < 1e-7);
+    camera.position.copy(frames[0].position); camera.lookAt(frames[0].target); camera.updateMatrixWorld();
+    const projected = nodes.map(at => new Vector3(at.x, at.y, at.z).project(camera));
+    for (const at of projected) {
+      const x = (at.x + 1) * size.width / 2, y = (1 - at.y) * size.height / 2;
+      assert.ok(x >= 70 && x <= size.width - 70 && y >= insets.top - 1 && y <= size.height - insets.bottom + 1, "every star stays inside the reading rectangle");
+    }
+    assert.deepEqual(nodes, before);
+  }
+});
 
 test("static pages use actual screen footprints and restore their overview across desktop and mobile", () => {
   for (const size of [{ width: 1280, height: 900 }, { width: 390, height: 800 }]) {

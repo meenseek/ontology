@@ -102,3 +102,113 @@ window.fetch = async (input, options) => {
   return json({ error: "합성 미리보기에서는 자료를 저장하지 않습니다." }, 403);
 };
 createRoot(document.getElementById("root")!).render(<App />);
+
+// Exercise the reported dense scene through the actual App and renderer. Pure
+// placement tests cannot detect an animation interrupted by a changing status row.
+if (new URLSearchParams(window.location.search).has("check")) void (async () => {
+  const notice = document.querySelector<HTMLElement>(".fixture-notice")!;
+  type Frame = { stars: { id: string; px: number; py: number; retiring: boolean; opacity: number }[]; camera: { x: number; y: number; z: number }; width: number; height: number };
+  const frame = () => JSON.parse(notice.dataset.frame!) as Frame;
+  const assert = (value: unknown, message: string) => { if (!value) throw new Error(message); };
+  const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const settled = async () => {
+    let stable = 0, previous = "";
+    for (let i = 0; i < 100; i++) {
+      await wait(80);
+      if (!notice.dataset.frame) continue;
+      const current = JSON.stringify(frame());
+      stable = !positions?.layoutMoving && current === previous ? stable + 1 : 0;
+      if (stable >= 3) return;
+      previous = current;
+    }
+    throw new Error("지도 전환이 정착하지 않았습니다.");
+  };
+  const button = (text: string) => {
+    const element = [...document.querySelectorAll<HTMLButtonElement>("button")].find(node => node.textContent?.trim() === text || node.getAttribute("aria-label") === text);
+    assert(element && !element.disabled, `조작 버튼: ${text}`); return element!;
+  };
+  const labels = () => [...document.querySelectorAll<HTMLElement>(".node-label:not([hidden])")];
+  const names = () => labels().filter(node => node.dataset.nodeId!.startsWith("preview-purpose-")).map(node => [node.dataset.nodeId, node.style.left, node.style.top]);
+  const members = (group: number) => frame().stars.filter(star => star.id.startsWith(`preview-${group}-`) && !star.retiring);
+  const inspect = (group: number) => {
+    const f = frame(), stars = members(group), origin = document.querySelector(".graph-canvas")!.getBoundingClientRect();
+    const controls = [...document.querySelectorAll<HTMLElement>(".graph-core-actions, .graph-minimap")].map(element => element.getBoundingClientRect());
+    assert(stars.length === 12, "쪽 보기에는 구성원 12개가 남아야 합니다.");
+    for (const star of stars) {
+      assert(star.px >= 8 && star.px <= f.width - 8 && star.py >= 8 && star.py <= f.height - 8, `${star.id}: 화면 밖`);
+      assert(controls.every(box => star.px + origin.left < box.left - 6 || star.px + origin.left > box.right + 6 || star.py + origin.top < box.top - 6 || star.py + origin.top > box.bottom + 6), `${star.id}: 조작 영역 뒤`);
+    }
+    for (const label of labels()) {
+      const box = label.getBoundingClientRect();
+      assert(box.left >= origin.left - 1 && box.right <= origin.right + 1 && box.top >= origin.top - 1 && box.bottom <= origin.bottom + 1, "제목이 화면 경계에서 잘렸습니다.");
+    }
+    return { members: stars.length, titles: labels().length,
+      width: Math.round(Math.max(...stars.map(star => star.px)) - Math.min(...stars.map(star => star.px))),
+      height: Math.round(Math.max(...stars.map(star => star.py)) - Math.min(...stars.map(star => star.py))) };
+  };
+  const results: unknown[] = [];
+  try {
+    await settled();
+    const baseline = JSON.stringify(names());
+    const canvas = document.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, rect = canvas.getBoundingClientRect();
+    for (const id of ["preview-single-3", "preview-single-11"]) {
+      const star = frame().stars.find(star => star.id === id)!;
+      canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: rect.left + star.px, clientY: rect.top + star.py }));
+      await wait(240);
+      assert(document.querySelector(".graph-tooltip"), "실제 렌더러의 가리키기 반응이 없습니다.");
+      assert(JSON.stringify(names()) === baseline, "가리키기로 묶음 이름이 이동했습니다.");
+      canvas.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+      await wait(240);
+      assert(JSON.stringify(names()) === baseline, "가리키기 종료 뒤 이름이 복귀하지 않았습니다.");
+    }
+    results.push({ hoverRestoresNames: true });
+    for (const group of [0, 1]) {
+      document.querySelector<HTMLButtonElement>(`.graph-group-target[data-node-id="preview-purpose-${group}"]`)!.click();
+      await settled(); results.push({ group, page: 1, ...inspect(group) });
+      const hovered = document.querySelector<HTMLElement>(".graph-tooltip")?.dataset.nodeId;
+      assert(frame().stars.filter(star => !star.id.startsWith(`preview-${group}-`) && star.id !== `preview-purpose-${group}` && !star.retiring && star.id !== hovered).every(star => star.opacity <= .13), "주변 별이 펼친 구성원과 구분되지 않습니다.");
+      button("다음").click(); await settled(); results.push({ group, page: 2, ...inspect(group) });
+      if (group === 0) {
+        button("전체 보기").click(); await settled();
+        assert(members(0).length === 225, "전체 보기에서 구성원이 누락됐습니다.");
+        const lengths = labels().map(label => +label.style.getPropertyValue("--leader-length").replace("px", ""));
+        assert(lengths.every(length => length <= 38), "전체 보기의 제목 지시선이 너무 깁니다.");
+        results.push({ fullMembers: 225, titles: labels().length, longestGuide: Math.round(Math.max(0, ...lengths)) });
+      }
+      button("묶음 접기").click(); await settled();
+    }
+    // Filter entry is the same non-hover state on each pass, including on a
+    // desktop browser resized to mobile. Touch clears the retained mouse hit.
+    const surface = document.querySelector<HTMLElement>(".graph-canvas")!;
+    surface.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", pointerId: 99, button: 0 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "touch", pointerId: 99, button: 0 }));
+    let reference = "", referenceLabels = "";
+    for (let repeat = 0; repeat < 4; repeat++) {
+      button("필터·묶음").click(); await wait(40);
+      [...document.querySelectorAll<HTMLButtonElement>(".cluster-list button")].find(node => node.querySelector("strong")?.textContent === "개발과 품질")!.click();
+      await settled();
+      const coordinates = members(2).map(star => [star.id, Math.round(star.px * 10), Math.round(star.py * 10)]);
+      const current = JSON.stringify(coordinates);
+      assert(!reference || current === reference, "같은 필터 재진입의 구도가 달라졌습니다."); reference = current;
+      const titlePositions = JSON.stringify(labels().map(label => [label.dataset.nodeId,
+        ...[label.style.left, label.style.top, ...["x", "y", "length", "angle"].map(key => label.style.getPropertyValue(`--leader-${key}`))].map(value => Math.round(Number.parseFloat(value) * 10)),
+        label.classList.contains("routed-label") ? label.querySelector("polyline")!.getAttribute("points")!.split(/[ ,]/).map(value => Math.round(Number(value) * 10)) : []]).sort());
+      assert(!referenceLabels || titlePositions === referenceLabels, "같은 필터 재진입의 제목·지시선이 달라졌습니다."); referenceLabels = titlePositions;
+      button("묶음 해제").click(); await settled();
+    }
+    results.push({ repeatedFilterEntries: 4, sameProjection: true, sameLabelsAndGuides: true });
+    const input = document.querySelector<HTMLInputElement>("#graph-search")!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "검색결과없음");
+    input.dispatchEvent(new Event("input", { bubbles: true })); await wait(40);
+    document.querySelector<HTMLButtonElement>(".map-search button")!.click(); await wait(160);
+    assert(document.querySelector(".map-empty") && !document.querySelector(".active-filters"), "빈 화면에 중복 초기화 동작이 남았습니다.");
+    assert(!document.querySelector(".map-status")!.textContent!.includes("일치 구절"), "검색 0건에 일치 구절 안내가 남았습니다.");
+    button("검색·조건 초기화").click(); await settled();
+    results.push({ emptySearch: true });
+    notice.textContent = `PASS · ${innerWidth}px · ${JSON.stringify(results)}`;
+    notice.dataset.result = JSON.stringify({ passed: true, results });
+  } catch (error) {
+    notice.textContent = `FAIL · ${error instanceof Error ? error.message : String(error)}`;
+    notice.dataset.result = JSON.stringify({ passed: false, results, error: notice.textContent });
+  }
+})();
