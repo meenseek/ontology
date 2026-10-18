@@ -2854,6 +2854,28 @@ test("equidistant summary label sides keep their order across projection roundof
       "subpixel arithmetic must not choose another side of the star");
   }
 });
+
+test("overview guides avoid other star bodies independently of title reach and history", () => {
+  const groups: ProjectedLabel[] = Array.from({ length: 6 }, (_, i) => ({ id: `group-${i}`, kind: "subject", active: true, summary: true, importance: 2,
+    x: 280 + (i % 3) * 170, y: 180 + Math.floor(i / 3) * 180, depth: 0, radius: 28, width: 145, height: 25 }));
+  const stars: ProjectedLabel[] = Array.from({ length: 18 }, (_, i) => ({ id: `star-${i}`, kind: "document", active: true,
+    x: 250 + (i % 6) * 70, y: 150 + Math.floor(i / 6) * 90, depth: 0, radius: 10, width: 120, height: 21 }));
+  const candidates = [...groups, ...stars], environment = { stars: candidates, starTitles: { limit: 0 }, restingSummaryGap: 120 };
+  const boxes = visibleLabels(candidates, 1000, 700, null, null, environment);
+  assert.ok(boxes.length >= 4, "removing every group name is not an acceptable collision fix");
+  let guides = 0;
+  for (const box of boxes) for (const line of box.guide ?? [labelLeader(candidates.find(node => node.id === box.id)!, box)].filter(line => line !== null)) {
+    guides++;
+    for (const star of candidates.filter(star => star.id !== box.id)) {
+      const dx = line.x2 - line.x1, dy = line.y2 - line.y1;
+      const t = Math.max(0, Math.min(1, ((star.x - line.x1) * dx + (star.y - line.y1) * dy) / Math.max(.001, dx * dx + dy * dy)));
+      assert.ok(Math.hypot(star.x - line.x1 - t * dx, star.y - line.y1 - t * dy) >= star.radius + 3 - 1e-8, `${box.id} crosses ${star.id}`);
+    }
+  }
+  assert.ok(guides > 0, "fixture exercises a visible guide");
+  assert.deepEqual(visibleLabels(candidates, 1000, 700, null, null, { ...environment, previous: new Map(boxes.map(box => [box.id, box])) }), boxes);
+});
+
 test("hover and label history never change the resting group arrangement", () => {
   const groups: ProjectedLabel[] = Array.from({ length: 6 }, (_, i) => ({ id: `group-${i}`, kind: "subject", active: true, summary: true, importance: 2,
     x: 280 + (i % 3) * 170, y: 180 + Math.floor(i / 3) * 180, depth: 0, radius: 28, width: 145, height: 25 }));
@@ -2957,7 +2979,10 @@ test("a crowded group name falls back to the nearest free spot off its own body"
   const field = Array.from({ length: 40 * 30 }, (_, index) => ({ id: `s-${index}`, x: (index % 40) * 20 + 10, y: Math.floor(index / 40) * 20 + 10, depth: 0, radius: 4 }))
     .filter(star => Math.hypot(star.x - 400, star.y - 300) > 82 && !(star.x > 540 && star.x < 700 && star.y > 120 && star.y < 180));
   const second = { ...group, id: "other", x: 60, y: 560, radius: 6 };
-  const [box] = visibleLabels([group, second], 800, 600, null, null, { stars: [group, second, ...field] }).filter(found => found.id === "group");
+  assert.ok(!visibleLabels([group, second], 800, 600, null, null, { stars: [group, second, ...field] }).some(found => found.id === "group"), "a pocket behind a solid field cannot get a guide through other stars");
+  // Open a real sightline to the pocket; a free label rectangle alone is insufficient.
+  const corridor = field.filter(star => Math.abs(star.y - (300 - (star.x - 400) * .85)) > 18);
+  const [box] = visibleLabels([group, second], 800, 600, null, null, { stars: [group, second, ...corridor] }).filter(found => found.id === "group");
   assert.ok(box && box.left >= 536 && box.right <= 704 && box.top >= 116 && box.bottom <= 184, "the group keeps its name in the nearby free pocket");
   const gap = Math.hypot(group.x - Math.max(box.left, Math.min(box.right, group.x)), group.y - Math.max(box.top, Math.min(box.bottom, group.y)));
   assert.ok(gap >= group.radius + 4, "the name does not cover its own body");

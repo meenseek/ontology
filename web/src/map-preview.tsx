@@ -22,7 +22,7 @@ Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, ma
   lastSample = performance.now();
   const rect = renderer.domElement.getBoundingClientRect();
   const stars: { id: string; x: number; y: number; z: number; px: number; py: number; radius: number; opacity: number; retiring: boolean }[] = [];
-  const relations: LabelLeader[] = [];
+  const relations: (LabelLeader & { opacity: number })[] = [];
   this.traverse(object => {
     if (object instanceof Line && object.visible && !Array.isArray(object.material) && object.material.opacity > 0) {
       const points = object.geometry.getAttribute("position");
@@ -32,7 +32,7 @@ Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, ma
         if (Math.abs(a.z) <= 1 && Math.abs(b.z) <= 1) {
           const x1 = (a.x + 1) * rect.width / 2, y1 = (1 - a.y) * rect.height / 2;
           const x2 = (b.x + 1) * rect.width / 2, y2 = (1 - b.y) * rect.height / 2;
-          relations.push({ x1, y1, x2, y2, length: Math.hypot(x2 - x1, y2 - y1) });
+          relations.push({ x1, y1, x2, y2, length: Math.hypot(x2 - x1, y2 - y1), opacity: +object.material.opacity.toFixed(4) });
         }
       }
     }
@@ -41,8 +41,10 @@ Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, ma
     const { x, y, z } = world;
     const node = nodes.find(node => node.id === object.userData.nodeId);
     const depth = -world.clone().applyMatrix4(camera.matrixWorldInverse).z;
-    // Disclosed source bodies have no selection rings or count-based summary glyph.
-    const radius = nodeVisualRadius(nodeScreenSize(node?.kind ?? "folder", depth, rect.height, camera.projectionMatrix.elements[5]), false, false);
+    // Read the count-sized sprite that was actually drawn, rather than treating a summary as a 10px marker.
+    const glyph = object.getObjectByName("summary-glyph");
+    const radius = glyph ? glyph.scale.x * camera.projectionMatrix.elements[5] * rect.height / 4 :
+      nodeVisualRadius(nodeScreenSize(node?.kind ?? "folder", depth, rect.height, camera.projectionMatrix.elements[5]), false, false);
     world.project(camera);
     stars.push({ id: object.userData.nodeId, x, y, z, px: (world.x + 1) * rect.width / 2, py: (1 - world.y) * rect.height / 2, radius,
       opacity: object.userData.opacity?.() ?? 1, retiring: object.userData.retiring?.() ?? false });
@@ -127,7 +129,7 @@ createRoot(document.getElementById("root")!).render(<App />);
 // placement tests cannot detect an animation interrupted by a changing status row.
 if (new URLSearchParams(window.location.search).has("check")) void (async () => {
   const notice = document.querySelector<HTMLElement>(".fixture-notice")!;
-  type Frame = { stars: { id: string; px: number; py: number; radius: number; retiring: boolean; opacity: number }[]; relations: LabelLeader[]; camera: { x: number; y: number; z: number }; width: number; height: number };
+  type Frame = { stars: { id: string; px: number; py: number; radius: number; retiring: boolean; opacity: number }[]; relations: (LabelLeader & { opacity: number })[]; camera: { x: number; y: number; z: number }; width: number; height: number };
   const frame = () => JSON.parse(notice.dataset.frame!) as Frame;
   const assert = (value: unknown, message: string) => { if (!value) throw new Error(message); };
   const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -183,16 +185,58 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
       width: Math.round(Math.max(...stars.map(star => star.px)) - Math.min(...stars.map(star => star.px))),
       height: Math.round(Math.max(...stars.map(star => star.py)) - Math.min(...stars.map(star => star.py))) };
   };
+  const guidePaths = (label: HTMLElement): LabelLeader[] => {
+    const origin = document.querySelector(".graph-canvas")!.getBoundingClientRect(), box = label.getBoundingClientRect();
+    const x = box.left - origin.left, y = box.top - origin.top;
+    const segment = (x1: number, y1: number, x2: number, y2: number) => ({ x1, y1, x2, y2, length: Math.hypot(x2 - x1, y2 - y1) });
+    if (label.classList.contains("routed-label")) {
+      const values = label.querySelector("polyline")!.getAttribute("points")!.split(/[ ,]/).map(Number);
+      return Array.from({ length: values.length / 2 - 1 }, (_, i) => segment(x + values[i * 2], y + values[i * 2 + 1], x + values[i * 2 + 2], y + values[i * 2 + 3]));
+    }
+    if (!label.classList.contains("offset-label")) return [];
+    const value = (key: string) => Number.parseFloat(label.style.getPropertyValue(`--leader-${key}`));
+    const x1 = x + value("x"), y1 = y + value("y"), length = value("length"), angle = value("angle");
+    return [segment(x1, y1, x1 + length * Math.cos(angle), y1 + length * Math.sin(angle))];
+  };
+  const starClearance = () => {
+    const crossings = labels().flatMap(label => guidePaths(label).flatMap(line => frame().stars.filter(star => {
+      if (star.id === label.dataset.nodeId || star.retiring || star.opacity < .2) return false;
+      const dx = line.x2 - line.x1, dy = line.y2 - line.y1;
+      const t = Math.max(0, Math.min(1, ((star.px - line.x1) * dx + (star.py - line.y1) * dy) / Math.max(.001, dx * dx + dy * dy)));
+      return Math.hypot(star.px - line.x1 - t * dx, star.py - line.y1 - t * dy) < star.radius - .1;
+    }).map(star => ({ title: label.dataset.nodeId, star: star.id }))));
+    assert(!crossings.length, `제목 지시선이 다른 별을 관통합니다: ${JSON.stringify(crossings)}`);
+    return crossings.length;
+  };
   const results: unknown[] = [];
   try {
     await settled(); backdrop(false);
+    const hoverRules: string[] = [];
+    const inspectRules = (rules: CSSRuleList, conditions: string[] = []) => {
+      for (const rule of rules) {
+        if (rule instanceof CSSMediaRule) inspectRules(rule.cssRules, [...conditions, rule.conditionText]);
+        else if (rule instanceof CSSStyleRule && rule.selectorText.includes(":hover")) {
+          assert(conditions.some(condition => condition.includes("hover: hover") && condition.includes("pointer: fine")), `터치에도 hover 장식이 적용됩니다: ${rule.selectorText}`);
+          hoverRules.push(rule.selectorText);
+        }
+      }
+    };
+    for (const sheet of document.styleSheets) inspectRules(sheet.cssRules);
+    assert(hoverRules.length > 0, "hover 조건 검사가 실제 스타일을 읽지 못했습니다.");
+    results.push({ pointerConditionalHoverRules: hoverRules.length, physicalTouch: "unverified" });
     const origin = document.querySelector(".graph-canvas")!.getBoundingClientRect();
     const overviewCrossings = labels().flatMap(label => {
       const box = label.getBoundingClientRect();
       return frame().relations.filter(line => leaderHitsBox(line, { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }, 0));
     }).length;
     assert(overviewCrossings === 0, "첫 화면의 관계선이 투명한 제목을 지나갑니다.");
-    results.push({ overviewRelationTitleCrossings: overviewCrossings });
+    const overviewLeaderStarCrossings = starClearance();
+    assert(names().length >= (innerWidth <= 700 ? 0 : 5), "별 회피 때문에 주요 묶음 이름이 사라졌습니다.");
+    results.push({ overviewRelationTitleCrossings: overviewCrossings, overviewLeaderStarCrossings, overviewNames: names().length });
+    if (new URLSearchParams(location.search).get("check") === "overview") {
+      notice.textContent = `PASS · ${innerWidth}px · 합성 자료 검사`;
+      notice.dataset.result = JSON.stringify({ passed: true, results }); return;
+    }
     const options = document.querySelector<HTMLDetailsElement>(".view-options")!;
     options.querySelector("summary")!.click();
     const connections = [...options.querySelectorAll<HTMLInputElement>("input[type=checkbox]")].find(input => input.closest("label")!.textContent!.includes("연결선 모두 보기"))!;
@@ -224,7 +268,15 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     results.push({ hoverRestoresNames: true });
     for (const group of [0, 1]) {
       document.querySelector<HTMLButtonElement>(`.graph-group-target[data-node-id="preview-purpose-${group}"]`)!.click();
-      await settled(); backdrop(true); results.push({ group, page: 1, ...inspect(group) });
+      await settled(); backdrop(true); starClearance(); results.push({ group, page: 1, ...inspect(group) });
+      const title = document.querySelector<HTMLElement>(".graph-core-title")!, count = title.querySelector<HTMLElement>(".graph-core-count")!;
+      assert(count.getClientRects().length === 1 && !count.textContent!.includes("·"), "묶음 개수가 나뉘거나 구분점이 고립됩니다.");
+      if (innerWidth <= 700) assert(getComputedStyle(title.querySelector(".graph-core-separator")!).display === "none", "모바일 개수 줄에 구분점이 남았습니다.");
+      const background = frame().stars.filter(star => star.opacity <= .13 && !star.retiring);
+      const endpoint = (x: number, y: number) => background.some(star => Math.hypot(star.px - x, star.py - y) < 1);
+      const backgroundEdges = frame().relations.filter(line => endpoint(line.x1, line.y1) && endpoint(line.x2, line.y2));
+      assert(backgroundEdges.length > 0 && backgroundEdges.every(line => line.opacity <= .061), "흐린 배경 별 사이의 선이 원래 밝기로 남았습니다.");
+      results.push({ group, backgroundEdges: backgroundEdges.length, maxBackgroundEdgeOpacity: Math.max(...backgroundEdges.map(line => line.opacity)) });
       const hovered = document.querySelector<HTMLElement>(".graph-tooltip")?.dataset.nodeId;
       assert(frame().stars.filter(star => !star.id.startsWith(`preview-${group}-`) && star.id !== `preview-purpose-${group}` && !star.retiring && star.id !== hovered).every(star => star.opacity <= .13), "주변 별이 펼친 구성원과 구분되지 않습니다.");
       button("다음").click(); await settled(); results.push({ group, page: 2, ...inspect(group) });
@@ -254,6 +306,8 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     let reference = "", referenceLabels = "";
     for (let repeat = 0; repeat < 4; repeat++) {
       button("필터·묶음").click(); await wait(40);
+      const fields = [...document.querySelectorAll<HTMLElement>(".filter-row select")].map(field => [field.getBoundingClientRect().height, getComputedStyle(field).fontSize, getComputedStyle(field.parentElement!).fontSize, getComputedStyle(field.parentElement!).color]);
+      assert(fields.length === 3 && fields.every(field => JSON.stringify(field) === JSON.stringify(fields[0])) && Number(fields[0][0]) >= 44, "지도 선택 필드의 높이·글자·라벨 규격이 다릅니다.");
       [...document.querySelectorAll<HTMLButtonElement>(".cluster-list button")].find(node => node.querySelector("strong")?.textContent === "개발과 품질")!.click();
       await settled();
       backdrop(true);
@@ -279,9 +333,24 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     document.querySelector<HTMLButtonElement>(".map-search button")!.click(); await wait(160);
     assert(document.querySelector(".map-empty") && !document.querySelector(".active-filters"), "빈 화면에 중복 초기화 동작이 남았습니다.");
     assert(!document.querySelector(".map-status")!.textContent!.includes("일치 구절"), "검색 0건에 일치 구절 안내가 남았습니다.");
+    assert(!document.querySelector(".map-legend > span"), "빈 검색 화면에 지도 도형 범례가 남았습니다.");
+    assert(document.querySelector(".map-legend details"), "빈 검색에서도 관계·상태 설명은 읽을 수 있어야 합니다.");
     button("검색·조건 초기화").click(); await settled();
-    results.push({ emptySearch: true });
-    notice.textContent = `PASS · ${innerWidth}px · ${JSON.stringify(results)}`;
+    results.push({ emptySearch: true, emptyVisualLegend: false });
+    // Source-only wrapping tests cannot observe the actual remaining width beside a detail panel.
+    button("목록 보기").click(); await wait(40);
+    [...document.querySelectorAll<HTMLButtonElement>(".graph-list button")].find(node => node.querySelector("strong")?.textContent === "개발과 품질")!.click(); await wait(160);
+    const units = [...document.querySelectorAll<HTMLElement>(".map-title .count-breakdown > span")];
+    assert(units.length >= 4 && units.every(unit => {
+      const rects = [...unit.getClientRects()];
+      return rects.length > 0 && rects.every(rect => Math.abs(rect.top - rects[0].top) < 1);
+    }), "종류 이름과 숫자가 다른 줄로 나뉩니다.");
+    const actions = [...document.querySelectorAll<HTMLElement>(".map-action-buttons > button, .map-action-buttons > details")].map(node => node.getBoundingClientRect());
+    assert(actions.length === 3 && actions.every(box => Math.abs(box.top - actions[0].top) < 1), "지도 동작 버튼 하나가 별도 줄로 밀립니다.");
+    const toolbar = document.querySelector(".map-toolbar")!.getBoundingClientRect();
+    assert(actions.every(box => box.left >= toolbar.left && box.right <= toolbar.right), "지도 동작이 화면 밖으로 나갑니다.");
+    results.push({ listAndDetail: true, atomicCounts: true, actionRow: true });
+    notice.textContent = `PASS · ${innerWidth}px · 합성 자료 검사`;
     notice.dataset.result = JSON.stringify({ passed: true, results });
   } catch (error) {
     notice.textContent = `FAIL · ${error instanceof Error ? error.message : String(error)}`;

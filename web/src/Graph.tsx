@@ -20,6 +20,7 @@ import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./r
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
 type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; filteredGroup?: string | null; hasDisplayFilters?: boolean; rotate: boolean; allConnections?: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onToggleRotation?: () => void; onFailure: () => void };
+const readingOpacity = (members: ReadonlySet<string> | undefined, id: string, hovered: string | null) => members && !members.has(id) && id !== hovered ? .12 : 1;
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
 const coreLabel = (node: PositionedNode | undefined, count: number, view?: GraphView) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : view === "purpose" ? `${node?.subject_name ?? node?.label ?? "목적 묶음"} · ${count}개` : `관계 묶음${node ? ` · ${nodePresentation(node, true).title}` : ""} · ${count}개`;
 function texture(kind: "ring" | "selection" | "change") {
@@ -907,7 +908,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         object.onBeforeRender = () => { if (object.material) {
           const focus = dragged.current ?? selectedId.current ?? hoveredId.current;
           const lineEmphasis = focus === from || focus === to ? .82 : focus ? (allConnections || outline ? .12 : .015) : resting;
-          const emphasis = relationship ? lineEmphasis * (key === "__arrowObj" ? 3 : 1) : opacity;
+          // Focused connections remain readable even when their other endpoint is outside the page.
+          const reading = focus === from || focus === to ? 1 : Math.min(readingOpacity(readingMembersRef.current, from, hoveredId.current), readingOpacity(readingMembersRef.current, to, hoveredId.current));
+          const emphasis = (relationship ? lineEmphasis * (key === "__arrowObj" ? 3 : 1) : opacity) * reading;
           const now = performance.now();
           const fade = object.userData.edgeEmphasis ??= { value: emphasis, at: now };
           fade.value = reduced ? emphasis : emphasis + (fade.value - emphasis) * Math.exp(-Math.min(50, Math.max(0, now - fade.at)) / 120);
@@ -1142,7 +1145,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     const haloScale = summary ? () => summaryHaloScale(summaryHalo.current, node.id, performance.now(), motionReduced.current) : undefined;
     const contactMotion = () => positions.collisionReaction(node.id, performance.now(), motionReduced.current);
     const fade = () => revealOpacity(revealRef.current, node.id, performance.now()) *
-      (readingMembersRef.current && !readingMembersRef.current.has(node.id) && node.id !== hoveredId.current ? .12 : 1);
+      readingOpacity(readingMembersRef.current, node.id, hoveredId.current);
     group.userData.opacity = fade;
     group.userData.retiring = () => revealRef.current.retiring.has(node.id);
     const members = glyphMembers.get(node.id);
@@ -1447,7 +1450,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     {activeExpandedCore && !selected && !spatialReveal?.members.size && <div className="graph-core-actions">
       <div className="graph-core-heading">
         <button type="button" ref={coreCloseButton} onClick={event => { if (event.detail === 0) container.current?.focus(); hoveredId.current = null; setHover(null); pendingReturn.current = coreReturn.current; restoringCoreReturn.current = coreReturn.current; coreReturn.current = null; setExpandedCore(null); }}>묶음 접기</button>
-        <span>{coreLabel(nodes.find(node => node.id === activeExpandedCore), cores.find(core => core.hub === activeExpandedCore)?.count ?? 0, snapshot.view)}</span>
+        <span className="graph-core-title">{(() => {
+          const title = coreLabel(nodes.find(node => node.id === activeExpandedCore), cores.find(core => core.hub === activeExpandedCore)?.count ?? 0, snapshot.view);
+          const count = title.match(/ · (\d+개)$/)!;
+          return <><span>{title.slice(0, -count[0].length)}</span><span className="graph-core-separator" aria-hidden="true"> · </span><span className="graph-core-count">{count[1]}</span></>;
+        })()}</span>
       </div>
       <div className="graph-core-navigation" role="group" aria-label="묶음 페이지">
         {disclosure?.hub === activeExpandedCore && <>
