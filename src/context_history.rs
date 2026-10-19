@@ -22,8 +22,34 @@ impl Store {
         conn: &mut sqlx::PgConnection,
         exclusive: bool,
     ) -> Result<(), Error> {
+        self.context_gate_mode(conn, exclusive, false).await
+    }
+
+    // The scheduler must resume after an uncommitted producer rolls back even
+    // when there is no committed change (and therefore no notification).
+    pub(crate) async fn wait_context_gate_in(
+        &self,
+        conn: &mut sqlx::PgConnection,
+    ) -> Result<(), Error> {
+        self.context_gate_mode(conn, false, true).await
+    }
+
+    pub(crate) async fn wait_context_ready(&self) -> Result<(), Error> {
+        let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
+        let result = self.wait_context_gate_in(&mut tx).await;
+        self.finish_context(tx, result).await
+    }
+
+    async fn context_gate_mode(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        exclusive: bool,
+        wait: bool,
+    ) -> Result<(), Error> {
         self.count(1);
-        let acquired: bool = sqlx::query_scalar(if exclusive {
+        let acquired: bool = sqlx::query_scalar(if wait {
+            "SELECT true FROM pg_advisory_xact_lock_shared(478310003)"
+        } else if exclusive {
             "SELECT pg_try_advisory_xact_lock(478310003)"
         } else {
             "SELECT pg_try_advisory_xact_lock_shared(478310003)"

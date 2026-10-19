@@ -350,6 +350,10 @@ impl Store {
                 "018-document-discovery-events.sql",
                 include_str!("../schema/migrations/018-document-discovery-events.sql"),
             ),
+            (
+                "019-classification-queue-events.sql",
+                include_str!("../schema/migrations/019-classification-queue-events.sql"),
+            ),
         ];
         if migrations.len() > expected.len() {
             return Err(Error::Baseline);

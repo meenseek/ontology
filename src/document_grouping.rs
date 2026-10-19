@@ -197,10 +197,12 @@ ORDER BY material_id
     }
 
     async fn claim_document_grouping(&self) -> Result<Option<Claim>, Error> {
+        self.count(1);
         sqlx::query("UPDATE document_grouping SET state='error',claim_token=NULL,lease_until=NULL,reason='분류 작업이 반복 중단됐습니다. 명시적으로 재검토할 수 있습니다.',updated_at=now() WHERE mode='auto' AND state='processing' AND lease_until<clock_timestamp() AND attempts>=3")
             .execute(self.pool()).await.map_err(|_|Error::Storage)?;
         let token = Uuid::new_v4().to_string();
-        let row=sqlx::query("WITH next AS (SELECT scope,source_id FROM document_grouping WHERE mode='auto' AND attempts<3 AND (state='pending' OR (state='processing' AND lease_until<clock_timestamp())) ORDER BY updated_at,scope,source_id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE document_grouping g SET state='processing',claim_token=$1::uuid,lease_until=clock_timestamp()+interval '2 minutes',attempts=attempts+1,updated_at=now() FROM next WHERE g.scope=next.scope AND g.source_id=next.source_id RETURNING g.scope,g.source_id,g.material_id::text,g.entity_id,g.source_revision,g.content_digest,g.membership_revision")
+        self.count(1);
+        let row=sqlx::query("WITH next AS (SELECT scope,source_id FROM document_grouping WHERE mode='auto' AND attempts<3 AND (state='pending' OR (state='processing' AND lease_until<clock_timestamp())) ORDER BY updated_at,scope,source_id FOR UPDATE LIMIT 1) UPDATE document_grouping g SET state='processing',claim_token=$1::uuid,lease_until=clock_timestamp()+interval '2 minutes',attempts=attempts+1,updated_at=now() FROM next WHERE g.scope=next.scope AND g.source_id=next.source_id RETURNING g.scope,g.source_id,g.material_id::text,g.entity_id,g.source_revision,g.content_digest,g.membership_revision")
             .bind(&token).fetch_optional(self.pool()).await.map_err(|_|Error::Storage)?;
         let Some(row) = row else {
             return Ok(None);
@@ -550,7 +552,15 @@ pub async fn run_discovery_loop(store: Store) {
                 .await
                 .map_err(|_| Error::Storage)?;
             loop {
-                store.discover_document_grouping().await?;
+                match store.wait_context_ready().await {
+                    Ok(()) => match store.discover_document_grouping().await {
+                        Ok(()) => {}
+                        Err(Error::ContextPending) => continue,
+                        Err(error) => return Err(error),
+                    },
+                    Err(Error::ContextPending) => {}
+                    Err(error) => return Err(error),
+                }
                 // Unlike recv(), try_recv exposes reconnection as None. The next
                 // iteration drains durable work whose notifications were lost.
                 listener.try_recv().await.map_err(|_| Error::Storage)?;
@@ -564,15 +574,6 @@ pub async fn run_discovery_loop(store: Store) {
             eprintln!("문서 변경 감지가 지연되어 다시 연결합니다.");
             // Only a failed connection/drain retries. Healthy idle does no SQL.
             tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    }
-}
-
-pub async fn run_loop(store: Store) {
-    loop {
-        match store.document_grouping_once().await {
-            Ok(true) => {}
-            Ok(false) | Err(_) => tokio::time::sleep(Duration::from_secs(3)).await,
         }
     }
 }

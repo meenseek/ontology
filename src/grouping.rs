@@ -8,7 +8,7 @@ use crate::{
 use context_core::redaction::redact_secrets;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{Postgres, Row, Transaction, postgres::PgListener};
 use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::PathBuf,
@@ -18,6 +18,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
+    sync::watch,
 };
 use uuid::Uuid;
 
@@ -266,10 +267,12 @@ impl Store {
     }
 
     async fn claim_grouping(&self) -> Result<Option<(String, i64, String)>, Error> {
+        self.count(1);
         sqlx::query("UPDATE memory_grouping SET state='error',lease_until=NULL,claim_token=NULL,reason='분류 작업이 반복 중단됐습니다.',updated_at=now() WHERE mode='auto' AND state='processing' AND lease_until<now() AND attempts>=3")
             .execute(self.pool()).await.map_err(|_| Error::Storage)?;
         let token = Uuid::new_v4().to_string();
-        let row = sqlx::query("WITH next AS (SELECT g.memory_id FROM memory_grouping g JOIN memories m ON m.id=g.memory_id WHERE m.scope='personal' AND m.status IN ('accepted','proposed') AND g.mode='auto' AND g.attempts<3 AND (g.state='pending' OR (g.state='processing' AND g.lease_until<now())) ORDER BY g.updated_at,g.memory_id FOR UPDATE OF g SKIP LOCKED LIMIT 1) UPDATE memory_grouping g SET state='processing',lease_until=now()+interval '2 minutes',claim_token=$1::uuid,attempts=attempts+1,updated_at=now() FROM next WHERE g.memory_id=next.memory_id RETURNING g.memory_id,g.source_revision,g.claim_token::text")
+        self.count(1);
+        let row = sqlx::query("WITH next AS (SELECT g.memory_id FROM memory_grouping g JOIN memories m ON m.id=g.memory_id WHERE m.scope='personal' AND m.status IN ('accepted','proposed') AND g.mode='auto' AND g.attempts<3 AND (g.state='pending' OR (g.state='processing' AND g.lease_until<now())) ORDER BY g.updated_at,g.memory_id FOR UPDATE OF g LIMIT 1) UPDATE memory_grouping g SET state='processing',lease_until=now()+interval '2 minutes',claim_token=$1::uuid,attempts=attempts+1,updated_at=now() FROM next WHERE g.memory_id=next.memory_id RETURNING g.memory_id,g.source_revision,g.claim_token::text")
             .bind(token).fetch_optional(self.pool()).await.map_err(|_| Error::Storage)?;
         Ok(row.map(|r| {
             (
@@ -606,13 +609,130 @@ pub(crate) async fn run_judgment(
     .await
 }
 
-pub async fn run_loop(store: Store) {
-    loop {
-        match store.grouping_once().await {
-            Ok(true) => {}
-            Ok(false) | Err(_) => tokio::time::sleep(Duration::from_secs(3)).await,
+#[derive(Clone, Copy)]
+enum Queue {
+    Memories,
+    Documents,
+}
+
+impl Store {
+    async fn grouping_queue_state(&self, queue: Queue) -> Result<(bool, Option<Duration>), Error> {
+        let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
+        let result = async {
+            self.wait_context_gate_in(&mut tx).await?;
+            self.count(1);
+            // One timestamp partitions expired and future leases without a gap:
+            // a lease expiring during this statement must still arm a deadline.
+            let row = sqlx::query(match queue {
+                Queue::Memories => r#"
+SELECT EXISTS(
+    SELECT 1 FROM memory_grouping g JOIN memories m ON m.id=g.memory_id
+    WHERE g.mode='auto' AND (
+        (g.state='processing' AND g.lease_until<=statement_timestamp() AND g.attempts>=3)
+        OR (m.scope='personal' AND m.status IN ('accepted','proposed') AND g.attempts<3
+            AND (g.state='pending' OR (g.state='processing' AND g.lease_until<=statement_timestamp()))))
+) AS ready,
+(SELECT ceil(extract(epoch FROM (min(lease_until)-statement_timestamp()))*1000)::bigint
+ FROM memory_grouping WHERE mode='auto' AND state='processing' AND lease_until>statement_timestamp()) AS delay_ms
+"#,
+                Queue::Documents => r#"
+SELECT EXISTS(
+    SELECT 1 FROM document_grouping WHERE mode='auto'
+    AND ((state='pending' AND attempts<3) OR (state='processing' AND lease_until<=statement_timestamp()))
+) AS ready,
+(SELECT ceil(extract(epoch FROM (min(lease_until)-statement_timestamp()))*1000)::bigint
+ FROM document_grouping WHERE mode='auto' AND state='processing' AND lease_until>statement_timestamp()) AS delay_ms
+"#,
+            })
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| Error::Storage)?;
+            Ok((row.get("ready"), row.get::<Option<i64>, _>("delay_ms")
+                .map(|ms| Duration::from_millis(ms.max(1) as u64))))
+        }.await;
+        self.finish_context(tx, result).await
+    }
+}
+
+async fn wait_for_work(wake: &mut watch::Receiver<bool>, delay: Option<Duration>) -> bool {
+    match delay {
+        Some(delay) => tokio::select! {
+            changed = wake.changed() => changed.is_ok(),
+            () = tokio::time::sleep(delay) => true,
+        },
+        None => wake.changed().await.is_ok(),
+    }
+}
+
+async fn run_queue(store: &Store, queue: Queue, mut wake: watch::Receiver<bool>) {
+    // LISTEN is registered before either worker's initial durable drain.
+    while !*wake.borrow_and_update() {
+        if wake.changed().await.is_err() {
+            return;
         }
     }
+    loop {
+        wake.borrow_and_update();
+        let delay = match store.grouping_queue_state(queue).await {
+            Ok((true, _)) => {
+                let result = match queue {
+                    Queue::Memories => store.grouping_once().await,
+                    Queue::Documents => store.document_grouping_once().await,
+                };
+                match result {
+                    Ok(_) | Err(Error::ContextPending) => continue,
+                    Err(_) => Some(Duration::from_secs(5)),
+                }
+            }
+            Ok((false, deadline)) => deadline,
+            // A committed native batch has its own state-change notification.
+            Err(Error::ContextPending) => None,
+            Err(_) => Some(Duration::from_secs(5)),
+        };
+        if !wait_for_work(&mut wake, delay).await {
+            return;
+        }
+    }
+}
+
+async fn queue_notifications(store: &Store, wake: watch::Sender<bool>) {
+    loop {
+        let result: Result<(), Error> = async {
+            let mut listener = PgListener::connect_with(store.pool())
+                .await
+                .map_err(|_| Error::Storage)?;
+            listener
+                .listen("ontology_grouping")
+                .await
+                .map_err(|_| Error::Storage)?;
+            wake.send(true).map_err(|_| Error::Storage)?;
+            loop {
+                // None means reconnected: redrain durable queues because notices
+                // emitted while disconnected cannot be delivered retroactively.
+                listener.try_recv().await.map_err(|_| Error::Storage)?;
+                wake.send(true).map_err(|_| Error::Storage)?;
+            }
+        }
+        .await;
+        if store.pool().is_closed() || wake.is_closed() {
+            return;
+        }
+        if result.is_err() {
+            eprintln!("분류 작업 알림 연결을 복구합니다.");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+}
+
+pub async fn run_loop(store: Store) {
+    let (send, receive) = watch::channel(false);
+    // No detached children: aborting this supervisor drops both workers and
+    // their model processes, together with the one shared listener connection.
+    tokio::join!(
+        queue_notifications(&store, send),
+        run_queue(&store, Queue::Memories, receive.clone()),
+        run_queue(&store, Queue::Documents, receive),
+    );
 }
 
 #[cfg(test)]

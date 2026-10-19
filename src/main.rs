@@ -279,7 +279,6 @@ async fn serve(store: Store) -> Result<(), Error> {
     let document_discovery_task = tokio::spawn(ontology::document_grouping::run_discovery_loop(
         store.clone(),
     ));
-    let document_grouping_task = tokio::spawn(ontology::document_grouping::run_loop(store.clone()));
     let sync_task = std::env::var_os("ONTOLOGY_SYNC_CONFIG").map(|path| {
         tokio::spawn(ontology::sync::run_loop(
             store,
@@ -301,8 +300,6 @@ async fn serve(store: Store) -> Result<(), Error> {
     let _ = grouping_task.await;
     document_discovery_task.abort();
     let _ = document_discovery_task.await;
-    document_grouping_task.abort();
-    let _ = document_grouping_task.await;
     result
 }
 
