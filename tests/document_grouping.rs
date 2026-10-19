@@ -177,7 +177,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::raw_sql("TRUNCATE document_grouping,document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
+    sqlx::raw_sql("TRUNCATE document_grouping_dirty,document_grouping,document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
     let temp = tempfile::tempdir().unwrap();
     let binary = temp.path().join("codex");
     let capture = temp.path().join("input");
@@ -207,7 +207,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     let preserved = preserved_sources(&store).await;
     // Exact pre-015 upgrade fixture: preserve originals and decisions, baseline
     // both app scopes even when a company binding has not been created yet.
-    sqlx::raw_sql("DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'").execute(store.pool()).await.unwrap();
+    sqlx::raw_sql("DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'").execute(store.pool()).await.unwrap();
     store.initialize().await.unwrap();
     assert_eq!(preserved_sources(&store).await, preserved);
     assert_eq!(
@@ -284,7 +284,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
         .fetch_one(store.pool())
         .await
         .unwrap();
-        sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER")
+        sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER; ALTER TABLE context_projection_versions ENABLE TRIGGER document_grouping_projection_changed")
             .execute(store.pool())
             .await
             .unwrap();
@@ -314,7 +314,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     // Losing eligibility is cancellation, never a fresh attempt budget.
     for attempts in [2, 3] {
         sqlx::query("UPDATE document_grouping SET state='pending',attempts=$2 WHERE scope='personal' AND source_id=$1").bind(native_id).bind(attempts).execute(store.pool()).await.unwrap();
-        sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER")
+        sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER; ALTER TABLE context_projection_versions ENABLE TRIGGER document_grouping_projection_changed")
             .execute(store.pool())
             .await
             .unwrap();
@@ -442,7 +442,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     import_native(&store, &root).await;
     let late = material(&store, "notes/late.md").await;
     let late_id = late["material_id"].as_str().unwrap();
-    sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER")
+    sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER; ALTER TABLE context_projection_versions ENABLE TRIGGER document_grouping_projection_changed")
         .execute(store.pool())
         .await
         .unwrap();
@@ -993,6 +993,283 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
         );
         assert!(store.document_grouping_once().await.unwrap());
     }
+
+    Box::pin(discovery_events(&store, &url)).await;
+}
+
+async fn wait_dirty_empty(store: &Store) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            if count == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("committed dirty identities were acknowledged");
+}
+
+async fn listener_pid(store: &Store) -> i32 {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE application_name='document_discovery_events_test' AND query LIKE 'LISTEN%' AND state='idle'")
+                .fetch_optional(store.pool()).await.unwrap();
+            if let Some(pid) = pid { break pid; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("real listener registered before work is delivered")
+}
+
+async fn discovery_events(store: &Store, url: &str) {
+    store.discover_document_grouping().await.unwrap();
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let worker_store = Store::connect(&format!(
+        "{url}{separator}application_name=document_discovery_events_test"
+    ))
+    .await
+    .unwrap();
+    let worker = tokio::spawn(ontology::document_grouping::run_discovery_loop(
+        worker_store.clone(),
+    ));
+    listener_pid(store).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        // Each scope acquires its memory gate, checks the context gate/pending
+        // state, then reads dirty IDs: both scopes must finish their four calls.
+        while worker_store.calls() < 8 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    wait_dirty_empty(store).await;
+    // Finish the initial backlog and any commit notifications already buffered
+    // during startup before measuring a separate full old-poll interval.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let before = worker_store.calls();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if before == worker_store.calls() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("startup discovery settled");
+    let idle_calls = worker_store.calls();
+    // Span the old30s poll: unchanged inventory must not cause even a dirty read.
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    assert_eq!(
+        worker_store.calls(),
+        idle_calls,
+        "healthy idle has no discovery SQL"
+    );
+
+    // More than one batch, with no native body or unrelated terminal rejudgment.
+    let items: Vec<_> = (0..160)
+        .map(|i| {
+            git_record(
+                &format!("event-batch-{i}"),
+                "합성 변경 알림 자료",
+                &"a".repeat(40),
+            )
+        })
+        .collect();
+    let mut blocked = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('personal',478312))")
+        .execute(&mut *blocked)
+        .await
+        .unwrap();
+    for batch in items.chunks(100) {
+        store.apply_import(batch).await.unwrap();
+    }
+    let backlog: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty WHERE scope='personal'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        backlog, 160,
+        "more than one discovery batch is durably waiting"
+    );
+    blocked.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM document_grouping WHERE source_id=ANY($1::text[])",
+            )
+            .bind(
+                items
+                    .iter()
+                    .map(|x| x.entity_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            if count == 160 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("notifications drain every bounded batch");
+    wait_dirty_empty(store).await;
+    let item = &items[0];
+    let before = queue(store, &item.entity_id).await;
+    let mut rollback = store.pool().begin().await.unwrap();
+    sqlx::query("UPDATE source_records SET present=false,absence_revision=source_revision WHERE entity_id=$1")
+        .bind(&item.entity_id)
+        .execute(&mut *rollback)
+        .await
+        .unwrap();
+    let inside: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty WHERE source_id=$1")
+            .bind(&item.entity_id)
+            .fetch_one(&mut *rollback)
+            .await
+            .unwrap();
+    assert_eq!(inside, 1);
+    rollback.rollback().await.unwrap();
+    wait_dirty_empty(store).await;
+    assert_eq!(
+        queue(store, &item.entity_id).await,
+        before,
+        "rolled-back source changes do not discover work"
+    );
+
+    // A missing record invalidates only that pending identity; restoration wakes it.
+    sqlx::query("DELETE FROM source_records WHERE entity_id=$1")
+        .bind(&item.entity_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    wait_dirty_empty(store).await;
+    assert_eq!(queue(store, &item.entity_id).await["state"], "ineligible");
+    assert_eq!(queue(store, &items[1].entity_id).await["state"], "pending");
+    store
+        .apply_import(std::slice::from_ref(item))
+        .await
+        .unwrap();
+    wait_dirty_empty(store).await;
+    assert_eq!(queue(store, &item.entity_id).await["state"], "pending");
+
+    // Simulate a committed invalidation whose notification was lost. Killing the
+    // listener must cause a reconnect drain without any subsequent notification.
+    sqlx::query(
+        "UPDATE document_grouping SET state='ineligible' WHERE scope='personal' AND source_id=$1",
+    )
+    .bind(&item.entity_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO document_grouping_dirty(scope,entity_id) VALUES('personal',$1)")
+        .bind(&item.entity_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let pid = listener_pid(store).await;
+    sqlx::query("SELECT pg_terminate_backend($1)")
+        .bind(pid)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    wait_dirty_empty(store).await;
+    assert_eq!(queue(store, &item.entity_id).await["state"], "pending");
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+
+    // Deduplication, acknowledgement rollback and a producer racing an ack.
+    let mut producer = store.pool().begin().await.unwrap();
+    for present in [false, true] {
+        sqlx::query("UPDATE source_records SET present=$2,absence_revision=CASE WHEN $2 THEN NULL ELSE source_revision END WHERE entity_id=$1")
+            .bind(&item.entity_id)
+            .bind(present)
+            .execute(&mut *producer)
+            .await
+            .unwrap();
+    }
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty WHERE source_id=$1")
+            .bind(&item.entity_id)
+            .fetch_one(&mut *producer)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "one durable identity for repeated changes");
+    producer.commit().await.unwrap();
+    let mut ack = store.pool().begin().await.unwrap();
+    sqlx::query("DELETE FROM document_grouping_dirty WHERE source_id=$1")
+        .bind(&item.entity_id)
+        .execute(&mut *ack)
+        .await
+        .unwrap();
+    ack.rollback().await.unwrap();
+    let mut ack = store.pool().begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar(
+        "SELECT pg_backend_pid() FROM document_grouping_dirty WHERE source_id=$1 FOR UPDATE",
+    )
+    .bind(&item.entity_id)
+    .fetch_one(&mut *ack)
+    .await
+    .unwrap();
+    let changed = git_record(
+        "event-batch-0",
+        "합성 동시 저장 뒤 새 내용",
+        &"b".repeat(40),
+    );
+    let writer = {
+        let store = store.clone();
+        let changed = changed.clone();
+        tokio::spawn(async move { store.apply_import(&[changed]).await })
+    };
+    wait_blocked(store, blocker, 1).await;
+    sqlx::query("DELETE FROM document_grouping_dirty WHERE source_id=$1")
+        .bind(&item.entity_id)
+        .execute(&mut *ack)
+        .await
+        .unwrap();
+    ack.commit().await.unwrap();
+    writer.await.unwrap().unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty WHERE source_id=$1")
+            .bind(&item.entity_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        count, 1,
+        "producer commit survives an in-flight acknowledgement"
+    );
+    // Startup must not skip an existing committed dirty row locked by a
+    // producer that later rolls back, since rollback emits no notification.
+    let mut producer = store.pool().begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *producer)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE source_records SET present=false,absence_revision=source_revision WHERE entity_id=$1")
+        .bind(&item.entity_id)
+        .execute(&mut *producer)
+        .await
+        .unwrap();
+    let worker = tokio::spawn(ontology::document_grouping::run_discovery_loop(
+        worker_store.clone(),
+    ));
+    wait_blocked(store, blocker, 1).await;
+    producer.rollback().await.unwrap();
+    wait_dirty_empty(store).await;
+    assert_eq!(
+        queue(store, &item.entity_id).await["content_digest"],
+        changed.digest.unwrap()
+    );
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+    worker_store.pool().close().await;
 }
 
 async fn once(store: &Store) -> Result<bool, Error> {

@@ -11,7 +11,7 @@ use crate::{
 use context_core::{document::parse_markdown_bytes, redaction::redact_secrets};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{Postgres, Row, Transaction, postgres::PgListener};
 use std::{path::Path, time::Duration};
 use uuid::Uuid;
 
@@ -92,19 +92,40 @@ impl Store {
     // binding aliases cannot be sent to the judge or applied as fallback copies.
     pub async fn discover_document_grouping(&self) -> Result<(), Error> {
         for scope in [Scope::Personal, Scope::Meenseek] {
-            let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
-            self.lock_memories(&mut tx, scope).await?;
-            self.context_gate_in(&mut tx, false).await?;
-            // Restrict current identities and scope before inspecting the large
-            // projection payloads. Otherwise each idle poll can decompress old
-            // revisions and documents outside the requested app scope.
-            let native = sqlx::query(
-                r#"
+            loop {
+                let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
+                self.lock_memories(&mut tx, scope).await?;
+                self.context_gate_in(&mut tx, false).await?;
+                // Use the same gate order as writers before locking invalidations.
+                // A producer conflict UPDATE waits for this transaction's ack, then
+                // leaves a fresh dirty row if its source changed during discovery.
+                self.count(1);
+                // Wait for a producer holding an existing dirty row: if it rolls
+                // back, no new notification can wake a consumer that skipped it.
+                let dirty = sqlx::query("SELECT source_id,material_id::text,entity_id FROM document_grouping_dirty WHERE scope=$1 ORDER BY source_id LIMIT 128 FOR UPDATE")
+                .bind(scope.as_str()).fetch_all(&mut *tx).await.map_err(|_| Error::Storage)?;
+                if dirty.is_empty() {
+                    tx.commit().await.map_err(|_| Error::Storage)?;
+                    break;
+                }
+                let changed: Vec<String> = dirty.iter().map(|row| row.get("source_id")).collect();
+                let native_ids: Vec<String> = dirty
+                    .iter()
+                    .filter_map(|row| row.get("material_id"))
+                    .collect();
+                let git_ids: Vec<String> = dirty
+                    .iter()
+                    .filter_map(|row| row.get("entity_id"))
+                    .collect();
+                // Fetch only changed current identities before reading payloads.
+                let native = sqlx::query(
+                    r#"
 WITH current_documents AS MATERIALIZED (
     SELECT m.material_id,m.scope,m.path,m.revision,m.content_digest,p.payload
     FROM context_materials m
     JOIN context_projection_versions p USING(material_id,revision)
     WHERE NOT m.deleted AND NOT m.restricted AND m.path LIKE '%.md'
+      AND m.material_id=ANY($2::text[]::uuid[])
       AND ($1='personal' OR EXISTS(
           SELECT 1 FROM context_source_bindings b
           JOIN sources s ON s.id=b.source_id
@@ -116,57 +137,61 @@ WHERE payload->>'status' IN ('searchable','unavailable')
   AND payload->>'source_digest'=content_digest
 ORDER BY material_id
 "#,
-            )
-            .bind(scope.as_str())
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|_| Error::Storage)?;
-            let mut sources = Vec::new();
-            for row in native {
-                let native_scope: ContextScope = row
-                    .get::<String, _>("scope")
-                    .parse()
-                    .map_err(|_| Error::Storage)?;
-                if eligible(&native_scope, &row.get::<String, _>("path"), false) {
+                )
+                .bind(scope.as_str())
+                .bind(native_ids)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|_| Error::Storage)?;
+                let mut sources = Vec::new();
+                for row in native {
+                    let native_scope: ContextScope = row
+                        .get::<String, _>("scope")
+                        .parse()
+                        .map_err(|_| Error::Storage)?;
+                    if eligible(&native_scope, &row.get::<String, _>("path"), false) {
+                        sources.push((
+                            DocumentIdentity {
+                                material_id: Some(row.get("material_id")),
+                                entity_id: None,
+                            },
+                            row.get::<String, _>("source_revision"),
+                            row.get::<String, _>("content_digest"),
+                        ));
+                    }
+                }
+                let git=sqlx::query("SELECT e.id,p.source_revision,p.content_digest FROM entities e JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id JOIN sources s ON s.scope=e.scope AND s.id=e.source_id WHERE e.scope=$1 AND e.id=ANY($2::text[]) AND s.kind='git' AND s.status='ok' AND p.present AND p.content_digest IS NOT NULL AND p.source_revision=s.verified_revision AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=s.id) ORDER BY e.id")
+                .bind(scope.as_str()).bind(git_ids).fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?;
+                for row in git {
                     sources.push((
                         DocumentIdentity {
-                            material_id: Some(row.get("material_id")),
-                            entity_id: None,
+                            material_id: None,
+                            entity_id: Some(row.get("id")),
                         },
-                        row.get::<String, _>("source_revision"),
-                        row.get::<String, _>("content_digest"),
+                        row.get("source_revision"),
+                        row.get("content_digest"),
                     ));
                 }
-            }
-            let git=sqlx::query("SELECT e.id,p.source_revision,p.content_digest FROM entities e JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id JOIN sources s ON s.scope=e.scope AND s.id=e.source_id WHERE e.scope=$1 AND s.kind='git' AND s.status='ok' AND p.present AND p.content_digest IS NOT NULL AND p.source_revision=s.verified_revision AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=s.id) ORDER BY e.id")
-                .bind(scope.as_str()).fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?;
-            for row in git {
-                sources.push((
-                    DocumentIdentity {
-                        material_id: None,
-                        entity_id: Some(row.get("id")),
-                    },
-                    row.get("source_revision"),
-                    row.get("content_digest"),
-                ));
-            }
-            let mut keys = Vec::with_capacity(sources.len());
-            let mut batch = Vec::with_capacity(sources.len());
-            for (identity, revision, hash) in sources {
-                let key = identity.key()?;
-                keys.push(key.clone());
-                batch.push(json!({"material_id":identity.material_id,"entity_id":identity.entity_id,"source_id":key,"source_revision":revision,"content_digest":hash}));
-            }
-            // One indexed upsert per scope, rather than N network round trips
-            // while holding the shared manual/memory mutation lock.
-            sqlx::query("INSERT INTO document_grouping(scope,material_id,entity_id,mode,state,source_revision,content_digest,membership_revision) SELECT $1,x.material_id::uuid,x.entity_id,'auto','pending',x.source_revision,x.content_digest,COALESCE(d.revision,0) FROM jsonb_to_recordset($2::jsonb) AS x(material_id text,entity_id text,source_id text,source_revision text,content_digest text) LEFT JOIN document_subjects d ON d.scope=$1 AND d.source_id=x.source_id ORDER BY x.source_id ON CONFLICT(scope,source_id) DO UPDATE SET source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,membership_revision=EXCLUDED.membership_revision,state=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state IN ('pending','processing') THEN 'pending' WHEN document_grouping.state='ineligible' THEN CASE WHEN document_grouping.attempts>=3 THEN 'error' ELSE 'pending' END ELSE document_grouping.state END,attempts=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state IN ('pending','processing') THEN 0 ELSE document_grouping.attempts END,claim_token=NULL,lease_until=NULL,suggestions=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest THEN '{}'::jsonb ELSE document_grouping.suggestions END,reason=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest THEN NULL ELSE document_grouping.reason END,updated_at=now() WHERE document_grouping.mode='auto' AND (document_grouping.source_revision IS DISTINCT FROM EXCLUDED.source_revision OR document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state='ineligible')")
+                let mut keys = Vec::with_capacity(sources.len());
+                let mut batch = Vec::with_capacity(sources.len());
+                for (identity, revision, hash) in sources {
+                    let key = identity.key()?;
+                    keys.push(key.clone());
+                    batch.push(json!({"material_id":identity.material_id,"entity_id":identity.entity_id,"source_id":key,"source_revision":revision,"content_digest":hash}));
+                }
+                // One indexed upsert per scope, rather than N network round trips
+                // while holding the shared manual/memory mutation lock.
+                sqlx::query("INSERT INTO document_grouping(scope,material_id,entity_id,mode,state,source_revision,content_digest,membership_revision) SELECT $1,x.material_id::uuid,x.entity_id,'auto','pending',x.source_revision,x.content_digest,COALESCE(d.revision,0) FROM jsonb_to_recordset($2::jsonb) AS x(material_id text,entity_id text,source_id text,source_revision text,content_digest text) LEFT JOIN document_subjects d ON d.scope=$1 AND d.source_id=x.source_id ORDER BY x.source_id ON CONFLICT(scope,source_id) DO UPDATE SET source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,membership_revision=EXCLUDED.membership_revision,state=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state IN ('pending','processing') THEN 'pending' WHEN document_grouping.state='ineligible' THEN CASE WHEN document_grouping.attempts>=3 THEN 'error' ELSE 'pending' END ELSE document_grouping.state END,attempts=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state IN ('pending','processing') THEN 0 ELSE document_grouping.attempts END,claim_token=NULL,lease_until=NULL,suggestions=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest THEN '{}'::jsonb ELSE document_grouping.suggestions END,reason=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest THEN NULL ELSE document_grouping.reason END,updated_at=now() WHERE document_grouping.mode='auto' AND (document_grouping.source_revision IS DISTINCT FROM EXCLUDED.source_revision OR document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state='ineligible')")
                 .bind(scope.as_str()).bind(json!(batch)).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
-            // Eligibility is not a new judgment. Preserve terminal decisions and
-            // attempt budgets across projection loss/restoration. Only an
-            // unfinished claim needs cancellation and later continuation.
-            sqlx::query("UPDATE document_grouping SET state='ineligible',claim_token=NULL,lease_until=NULL,updated_at=now() WHERE scope=$1 AND mode='auto' AND state IN ('pending','processing') AND NOT(source_id=ANY($2::text[]))")
-                .bind(scope.as_str()).bind(keys).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
-            tx.commit().await.map_err(|_| Error::Storage)?;
+                // Eligibility is not a new judgment. Preserve terminal decisions and
+                // attempt budgets across projection loss/restoration. Only an
+                // unfinished claim needs cancellation and later continuation.
+                sqlx::query("UPDATE document_grouping SET state='ineligible',claim_token=NULL,lease_until=NULL,updated_at=now() WHERE scope=$1 AND mode='auto' AND state IN ('pending','processing') AND source_id=ANY($2::text[]) AND NOT(source_id=ANY($3::text[]))")
+                .bind(scope.as_str()).bind(&changed).bind(keys).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+                sqlx::query("DELETE FROM document_grouping_dirty WHERE scope=$1 AND source_id=ANY($2::text[])")
+                .bind(scope.as_str()).bind(changed).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
+                tx.commit().await.map_err(|_| Error::Storage)?;
+            }
         }
         Ok(())
     }
@@ -515,10 +540,31 @@ ORDER BY material_id
 
 pub async fn run_discovery_loop(store: Store) {
     loop {
-        let _ = store.discover_document_grouping().await;
-        // Discovery inspects the full inventory even when nothing has changed.
-        // Allow up to 30 seconds for new documents to enter the claim queue.
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        let result: Result<(), Error> = async {
+            let mut listener = PgListener::connect_with(store.pool())
+                .await
+                .map_err(|_| Error::Storage)?;
+            // Listen first, then drain: commits during startup cannot fall in a gap.
+            listener
+                .listen("ontology_document_discovery")
+                .await
+                .map_err(|_| Error::Storage)?;
+            loop {
+                store.discover_document_grouping().await?;
+                // Unlike recv(), try_recv exposes reconnection as None. The next
+                // iteration drains durable work whose notifications were lost.
+                listener.try_recv().await.map_err(|_| Error::Storage)?;
+            }
+        }
+        .await;
+        if store.pool().is_closed() {
+            return;
+        }
+        if result.is_err() {
+            eprintln!("문서 변경 감지가 지연되어 다시 연결합니다.");
+            // Only a failed connection/drain retries. Healthy idle does no SQL.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
     }
 }
 

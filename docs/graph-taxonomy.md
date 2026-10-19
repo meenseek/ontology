@@ -141,7 +141,9 @@ Native `context`의 `ontology-audit`는 지정한 원문과 이번 호출에 제
 
 신규 문서의 자동 판정은 [문서 판단 정책](document-grouping.md)이 소유한다. 양 앱 범위에서 현재 사용할 수 있는 canonical 문서를 정의된 기존 목적과 비교한다. 문서는 정의 없는 그룹에 자동 배정하거나 새 그룹을 제안하지 않는다. 수동 소속은 `manual`, 명시적 미분류는 `off`로 우선하며, 같은 미분류를 다시 저장해도 진행 중 자동 판정을 취소한다. 자동 상태·후보·이유는 목적 관리 화면에서 확인하고, **목적 자동 재검토**는 현재 원문과 소속 revision을 확인한 명시적 요청이다. 이전 소속은 재검토 요청으로 지우지 않는다.
 
-서버는 3초마다 current metadata를 범위별 한 batch로 발견하고 분류 worker는 별도로 claim을 처리한다. 서버 중단 중 추가한 원문은 다음 시작에서 발견한다. `document-grouping-drain`은 발견과 처리 batch를 반복해 남은 작업을 소진한다. producer마다 별도 enqueue를 두지 않아 native import·Core 적용·수동 원문 편집·projection 준비·consumer binding·Git 갱신을 같은 identity와 currency 기준으로 검사한다. 복구 대기, 제외·삭제·restricted·미준비 원문은 모델에 전달하지 않는다.
+원문·조회 사본·출처 연결이 바뀌면 DB는 같은 트랜잭션에서 변경된 문서 ID를 대기열에 남기고 서버에 알린다. 서버는 알림을 받은 뒤 해당 ID의 현재 상태만 작은 묶음으로 확인하며, 변경이 없을 때 전체 문서 목록을 주기적으로 조회하지 않는다. 알림을 기다리기 전에 구독을 시작하고 저장된 대기열을 처리하므로, 서버 중단이나 알림 연결 끊김 중의 변경도 다시 시작하거나 연결한 뒤 이어서 처리한다. 분류 worker의 기존 claim 처리는 별도로 유지한다.
+
+`document-grouping-drain`은 발견과 처리 batch를 반복해 저장된 작업을 소진한다. 변경 대기열은 DB trigger가 한곳에서 관리하며 원문 본문을 복사하지 않는다. native import·Core 적용·수동 원문 편집·projection 준비·consumer binding·Git 갱신을 같은 identity와 currency 기준으로 검사한다. 복구 대기, 제외·삭제·restricted·미준비 원문은 모델에 전달하지 않는다.
 
 같은 원문의 재발견과 terminal 상태의 revision만 전진한 경우 모델·소속·이력을 바꾸지 않는다. 자동 문서의 실제 내용 digest가 바뀌면 이전 소속을 보존한 채 다시 판단한다. 처리 중 원문 또는 전체 목적 정의 집합이 바뀌면 오래된 성공·실패를 폐기하고 최신 기준과 새 시도 횟수로 대기한다. 이미 끝난 자동 판정은 다른 자료·관계·새 그룹·projection 재생성으로 다시 실행하지 않는다. 진행 중 eligibility가 사라졌다 복구되어도 같은 bytes의 실패 횟수를 보존한다. claim별 UUID와 실제 시각의 lease를 확인하며 3회 중단 후에는 명시적 재검토가 필요하다. 일시적 native 적용·복구 대기는 시도 횟수를 소비하지 않는다.
 

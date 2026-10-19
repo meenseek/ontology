@@ -346,6 +346,10 @@ impl Store {
                 "017-career-workflows.sql",
                 include_str!("../schema/migrations/017-career-workflows.sql"),
             ),
+            (
+                "018-document-discovery-events.sql",
+                include_str!("../schema/migrations/018-document-discovery-events.sql"),
+            ),
         ];
         if migrations.len() > expected.len() {
             return Err(Error::Baseline);
