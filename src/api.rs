@@ -1,5 +1,4 @@
 use crate::{
-    career_workflow::CareerCommand,
     config::Config,
     context::{ContextScope, MAX_FILE_BYTES},
     domain::{AREAS, Classification, Error, LinkChange, MAX_RESPONSE_BYTES, Scope},
@@ -27,7 +26,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -52,18 +51,11 @@ impl AppState {
     }
 }
 pub fn router(state: AppState) -> Router {
-    let files = ServeDir::new(&state.config.web_dist)
-        .not_found_service(ServeFile::new(state.config.web_dist.join("index.html")));
+    let files = ServeDir::new(&state.config.web_dist);
     Router::new()
-        .route_service(
-            "/career",
-            ServeFile::new(state.config.web_dist.join("index.html")),
-        )
         .route("/api/health", get(health))
         .route("/api/session", get(session))
         .route("/api/brain", post(brain))
-        .route("/api/career", get(career_list).post(career_command))
-        .route("/api/career/{id}", get(career_get))
         .route("/api/graph", get(graph))
         .route("/api/sync", get(sync_status))
         .route("/api/context/scopes", get(context_scopes))
@@ -116,43 +108,6 @@ fn json_response(value: Value) -> Result<Response, Error> {
         .headers_mut()
         .insert("content-type", HeaderValue::from_static("application/json"));
     Ok(response)
-}
-async fn career_list(State(state): State<AppState>) -> Result<Response, Error> {
-    json_response(state.store.list_career_workflows().await?)
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CareerSelection {
-    store_id: String,
-}
-async fn career_get(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    query: Result<Query<CareerSelection>, QueryRejection>,
-) -> Result<Response, Error> {
-    let Query(selection) = query.map_err(|_| Error::Invalid)?;
-    json_response(
-        state
-            .store
-            .career_workflow(CareerCommand::Get {
-                store_id: selection.store_id,
-                id,
-            })
-            .await?,
-    )
-}
-async fn career_command(
-    State(state): State<AppState>,
-    command: Result<Json<CareerCommand>, JsonRejection>,
-) -> Result<Response, Error> {
-    let Json(command) = command.map_err(|e| {
-        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            Error::Limit
-        } else {
-            Error::Invalid
-        }
-    })?;
-    json_response(state.store.career_workflow(command).await?)
 }
 fn one_header<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
     if headers.get_all(key).iter().count() != 1 {

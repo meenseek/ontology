@@ -1,7 +1,6 @@
 import { Component, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Documents from "./Documents";
-import CareerWorkflow from "./CareerWorkflow";
 import OriginalDetail from "./OriginalDetail";
 import Memory from "./Memory";
 import { DocumentPurpose, SubjectPurpose } from "./Purpose";
@@ -52,9 +51,6 @@ function SubjectDelete({ scope, id, label, csrf, disabled, onBusy, onDeleted }: 
 }
 const initialFilters: Filters = { kind: "all", state: "all", cluster: null, sourceScope: null };
 export default function App() {
-  return window.location.pathname === "/career" ? <CareerWorkflow /> : <GraphApp />;
-}
-function GraphApp() {
   const [route, setRoute] = useState(() => parseLocation(window.location.search));
   const positions = useMemo(() => new Positions(), [route.scope, route.q]);
   const routeRef = useRef(route); routeRef.current = route;
@@ -339,7 +335,6 @@ function GraphApp() {
         <button aria-pressed={route.scope === "personal"} disabled={busy} onClick={() => changeScope("personal")}>내 지식</button>
         <button aria-pressed={route.scope === "meenseek"} disabled={busy} onClick={() => changeScope("meenseek")}>meenseek 사업</button>
       </div>
-      <a className="career-nav" href="/career" aria-disabled={busy} onClick={event => { if (busy || dirtyRef.current && !confirm("수정 중인 내용을 닫고 지원 작업공간으로 이동할까요?")) event.preventDefault(); }}>지원 작업공간</a>
       </nav>
       <form className="map-search" role="search" onSubmit={e => { e.preventDefault(); search(input); }}>
         <label className="sr-only" htmlFor="graph-search">현재 범위의 지식 검색</label>

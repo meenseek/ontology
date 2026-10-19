@@ -38,10 +38,6 @@ A repository-only review or development task uses this repository and its synthe
 
 [상세 계약](docs/local-operations.md#로컬-연결).
 
-## 지원 결과 복기와 작성 기준 반영
-
-지원 결과·탈락 복기·그 결과의 작성 기준 반영에는 [지원 결과 흐름](docs/career-workflow.md)을 읽는다. 개인 원문과 문서별 정책은 현재 native personal 진입점이 소유한다. 이 경로는 기존 지원 상태 owner나 Native Harness 경계를 변경하지 않는다.
-
 ## 실행과 종료
 
 [상세 계약](docs/local-operations.md#실행과-종료).

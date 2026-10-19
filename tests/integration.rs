@@ -42,6 +42,159 @@ async fn store() -> Store {
 }
 
 #[tokio::test]
+async fn retired_workspace_preserves_legacy_data_without_entrypoints() {
+    let _guard = TEST_LOCK.lock().await;
+    use axum::{
+        body::Body,
+        http::{Method, Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use ontology::{
+        api::{AppState, router},
+        config::Config,
+    };
+    use std::process::{Command, Stdio};
+    use tower::ServiceExt;
+
+    let store = store().await;
+    let id = uuid::Uuid::new_v4().to_string();
+    let saved: Value = sqlx::query_scalar("INSERT INTO career_workflows(id,store_id,application_key,outcome_key,progress) SELECT $1::uuid,store_id,$2,'synthetic-outcome','{\"stage\":\"review\",\"synthetic\":true}'::jsonb FROM context_store RETURNING to_jsonb(career_workflows)")
+        .bind(&id).bind(&id).fetch_one(store.pool()).await.expect("isolated legacy row");
+    store
+        .initialize()
+        .await
+        .expect("retired migration stays registered");
+    let migration: String = sqlx::query_scalar(
+        "SELECT digest FROM ontology_migrations WHERE name='017-career-workflows.sql'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("applied migration");
+    assert_eq!(
+        migration,
+        digest(include_bytes!(
+            "../schema/migrations/017-career-workflows.sql"
+        ))
+    );
+
+    let web = tempfile::tempdir().expect("synthetic static assets");
+    std::fs::write(
+        web.path().join("index.html"),
+        "<main>synthetic knowledge map</main>",
+    )
+    .unwrap();
+    std::fs::write(web.path().join("asset.svg"), "<svg/>").unwrap();
+    let app = router(AppState::new(
+        store.clone(),
+        Config {
+            address: "127.0.0.1:47831".parse().unwrap(),
+            web_dist: web.path().into(),
+        },
+    ));
+    let session = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/session")
+                .header("host", "127.0.0.1:47831")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = session.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let session: Value =
+        serde_json::from_slice(&session.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let before = store.calls();
+    for (method, path, expected) in [
+        (Method::GET, "/", StatusCode::OK),
+        (Method::GET, "/asset.svg", StatusCode::OK),
+        (Method::GET, "/career", StatusCode::NOT_FOUND),
+        (Method::GET, "/career/old-bookmark", StatusCode::NOT_FOUND),
+        (Method::GET, "/api/career", StatusCode::NOT_FOUND),
+        (
+            Method::GET,
+            "/api/career/00000000-0000-4000-8000-000000000001",
+            StatusCode::NOT_FOUND,
+        ),
+        (Method::POST, "/api/career", StatusCode::METHOD_NOT_ALLOWED),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("host", "127.0.0.1:47831")
+                    .header("origin", "http://127.0.0.1:47831")
+                    .header("cookie", &cookie)
+                    .header("x-csrf-token", session["csrf"].as_str().unwrap())
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{path}");
+        if path == "/" {
+            assert_eq!(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .as_ref(),
+                b"<main>synthetic knowledge map</main>"
+            );
+        }
+    }
+    assert_eq!(
+        store.calls(),
+        before,
+        "retired routes perform no store operations"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ontology"))
+        .arg("career")
+        .env(
+            "DATABASE_URL",
+            "postgresql://ontology:synthetic@127.0.0.1:1/ontology_test_unavailable",
+        )
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        Error::Invalid.to_string(),
+        "unsupported CLI rejects before connecting to a database"
+    );
+    let retained: Value =
+        sqlx::query_scalar("SELECT to_jsonb(t) FROM career_workflows t WHERE id=$1::uuid")
+            .bind(&id)
+            .fetch_one(store.pool())
+            .await
+            .expect("legacy data remains");
+    assert_eq!(
+        retained, saved,
+        "startup and retired requests preserve the complete synthetic row"
+    );
+    sqlx::query("DELETE FROM career_workflows WHERE id=$1::uuid")
+        .bind(&id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn database_contract() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;

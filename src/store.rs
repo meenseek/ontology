@@ -341,6 +341,7 @@ impl Store {
                 "016-memory-grouping-history.sql",
                 include_str!("../schema/migrations/016-memory-grouping-history.sql"),
             ),
+            // Preserve the applied migration contract after retiring its consumer.
             (
                 "017-career-workflows.sql",
                 include_str!("../schema/migrations/017-career-workflows.sql"),

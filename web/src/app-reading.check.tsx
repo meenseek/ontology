@@ -1698,7 +1698,7 @@ async function checkHeaderLayout() {
     root.render(<App />);
     await until(() => !!host.querySelector(".app-navigation") && host.querySelector<HTMLButtonElement>(".map-search button")?.disabled === false, "header is ready");
     const header = host.querySelector<HTMLElement>(".app-header")!, nav = header.querySelector<HTMLElement>(".app-navigation")!;
-    const career = nav.querySelector<HTMLAnchorElement>(".career-nav")!;
+    assert(!nav.querySelector('a[href="/career"]'), "retired workspace is absent from primary navigation");
     assert(!header.querySelector(".scope-switch a"), "workflow navigation is separate from scope selection");
     const inspect = async (name: string) => {
       header.scrollIntoView({ block: "start" }); await settle();
@@ -1718,11 +1718,6 @@ async function checkHeaderLayout() {
       samples.push({ name, controls: controls.length, height: header.getBoundingClientRect().height });
     };
     await inspect("normal");
-    career.textContent = "지원 결과 복기·새 문서 반영을 확인하는 작업공간";
-    await inspect("long-menu");
-    const extra = career.cloneNode(true) as HTMLAnchorElement;
-    extra.textContent = "자료·작성 기준 관리"; nav.append(extra);
-    await inspect("additional-menu");
     if (innerWidth <= 700) { host.style.zoom = "2"; await inspect("mobile-css-zoom-200-percent"); }
     return { headerLayout: true, viewport: { width: innerWidth, height: innerHeight }, samples };
   } finally {

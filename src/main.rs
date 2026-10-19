@@ -27,10 +27,7 @@ async fn main() {
     if let Err(error) = run().await {
         if std::env::args().nth(1).as_deref() == Some("brain") {
             println!("{}", serde_json::json!({"error":error.to_string()}));
-        } else if matches!(
-            std::env::args().nth(1).as_deref(),
-            Some("context" | "career")
-        ) {
+        } else if std::env::args().nth(1).as_deref() == Some("context") {
             eprintln!("{}", serde_json::json!({"error":error.to_string()}));
         } else {
             eprintln!("{error}");
@@ -43,36 +40,28 @@ async fn run() -> Result<(), Error> {
     if args.first().map(String::as_str) == Some("context") {
         return context(&args).await;
     }
-    if args.first().map(String::as_str) == Some("career") {
-        if args.len() != 1 {
-            return Err(Error::Invalid);
-        }
-        let mut bytes = Vec::new();
-        std::io::stdin()
-            .take(16_385)
-            .read_to_end(&mut bytes)
-            .map_err(|_| Error::Invalid)?;
-        if bytes.len() > 16_384 {
-            return Err(Error::Limit);
-        }
-        let command = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
-        let store =
-            Store::connect(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?).await?;
-        let value = store.career_workflow(command).await?;
-        let bytes = serde_json::to_vec(&value).map_err(|_| Error::Storage)?;
-        std::io::stdout()
-            .lock()
-            .write_all(&bytes)
-            .map_err(|_| Error::Storage)?;
-        println!();
-        return Ok(());
-    }
     if args.first().map(String::as_str) == Some("import-vault")
         || args.iter().any(|v| v.starts_with("--vault-"))
     {
         eprintln!(
             "Use import-context --store-id UUID --context-scope SCOPE --scope SCOPE --file PATH; legacy Vault filesystem transport is retired"
         );
+        return Err(Error::Invalid);
+    }
+    // Unsupported commands must not initialize or connect to the app database.
+    if !matches!(
+        args.first().map(String::as_str),
+        None | Some(
+            "init"
+                | "serve"
+                | "import"
+                | "import-context"
+                | "brain"
+                | "sync-once"
+                | "grouping-drain"
+                | "document-grouping-drain"
+        )
+    ) {
         return Err(Error::Invalid);
     }
     let context_import = if args.first().map(String::as_str) == Some("import-context") {
