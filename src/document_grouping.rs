@@ -95,8 +95,32 @@ impl Store {
             let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
             self.lock_memories(&mut tx, scope).await?;
             self.context_gate_in(&mut tx, false).await?;
-            let native=sqlx::query("SELECT m.material_id::text,m.scope,m.path,m.revision::text AS source_revision,m.content_digest FROM context_materials m JOIN context_projection_versions p USING(material_id,revision) WHERE NOT m.deleted AND NOT m.restricted AND m.path LIKE '%.md' AND p.payload->>'status' IN ('searchable','unavailable') AND p.payload->>'source_digest'=m.content_digest AND ($1='personal' OR EXISTS(SELECT 1 FROM context_source_bindings b JOIN sources s ON s.id=b.source_id WHERE b.material_id=m.material_id AND s.scope=$1)) ORDER BY m.material_id")
-                .bind(scope.as_str()).fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?;
+            // Restrict current identities and scope before inspecting the large
+            // projection payloads. Otherwise each idle poll can decompress old
+            // revisions and documents outside the requested app scope.
+            let native = sqlx::query(
+                r#"
+WITH current_documents AS MATERIALIZED (
+    SELECT m.material_id,m.scope,m.path,m.revision,m.content_digest,p.payload
+    FROM context_materials m
+    JOIN context_projection_versions p USING(material_id,revision)
+    WHERE NOT m.deleted AND NOT m.restricted AND m.path LIKE '%.md'
+      AND ($1='personal' OR EXISTS(
+          SELECT 1 FROM context_source_bindings b
+          JOIN sources s ON s.id=b.source_id
+          WHERE b.material_id=m.material_id AND s.scope=$1))
+)
+SELECT material_id::text,scope,path,revision::text AS source_revision,content_digest
+FROM current_documents
+WHERE payload->>'status' IN ('searchable','unavailable')
+  AND payload->>'source_digest'=content_digest
+ORDER BY material_id
+"#,
+            )
+            .bind(scope.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|_| Error::Storage)?;
             let mut sources = Vec::new();
             for row in native {
                 let native_scope: ContextScope = row
@@ -492,7 +516,9 @@ impl Store {
 pub async fn run_discovery_loop(store: Store) {
     loop {
         let _ = store.discover_document_grouping().await;
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Discovery inspects the full inventory even when nothing has changed.
+        // Allow up to 30 seconds for new documents to enter the claim queue.
+        tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
 
