@@ -15,7 +15,7 @@ use axum::{
     },
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Sse, sse::Event},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/session", get(session))
         .route("/api/brain", post(brain))
+        .route("/api/grouping/events", get(grouping_events))
         .route("/api/graph", get(graph))
         .route("/api/sync", get(sync_status))
         .route("/api/context/scopes", get(context_scopes))
@@ -179,6 +180,42 @@ async fn health(State(state): State<AppState>) -> Result<Response, Error> {
         })
         .await?;
     json_response(json!({"ok": true}))
+}
+
+async fn grouping_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, Error> {
+    let expires = {
+        let sessions = state.sessions.lock().await;
+        cookie(&headers)
+            .and_then(|id| sessions.get(id))
+            .filter(|session| session.expires > Instant::now())
+            .ok_or(Error::Forbidden)?
+            .expires
+    };
+    let deadline = tokio::time::Instant::from_std(expires);
+    let stream = futures_util::stream::unfold(
+        (state.store.grouping_events(), true),
+        move |(mut changes, initial)| async move {
+            if !initial {
+                tokio::time::timeout_at(deadline, changes.changed())
+                    .await
+                    .ok()?
+                    .ok()?;
+            }
+            if *changes.borrow_and_update() || tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            // Initial/reconnected clients catch up once. No IDs, source bytes,
+            // DB connection per client, or periodic heartbeat are needed.
+            Some((
+                Ok::<_, std::convert::Infallible>(Event::default().data("changed")),
+                (changes, false),
+            ))
+        },
+    );
+    Ok(Sse::new(stream).into_response())
 }
 
 async fn session(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, Error> {
@@ -664,6 +701,64 @@ fn bounded_context_json<T: Serialize>(value: &T, limit: usize) -> Result<Respons
 #[cfg(test)]
 mod context_response_tests {
     use super::*;
+    #[tokio::test]
+    async fn grouping_stream_expires_and_shutdown_cannot_be_reopened_by_late_notices() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let store =
+            Store::for_native("postgresql://synthetic@127.0.0.1/ontology_test_no_connection")
+                .unwrap();
+        let state = AppState::new(
+            store.clone(),
+            Config {
+                address: "127.0.0.1:47831".parse().unwrap(),
+                web_dist: "/synthetic/static".into(),
+            },
+        );
+        state.sessions.lock().await.insert(
+            "synthetic".into(),
+            Session {
+                csrf: "synthetic".into(),
+                expires: Instant::now() + Duration::from_millis(150),
+            },
+        );
+        let app = router(state.clone());
+        let request = || {
+            axum::http::Request::builder()
+                .uri("/api/grouping/events")
+                .header("host", "127.0.0.1:47831")
+                .header("cookie", "ontology_session=synthetic")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let mut body = app.clone().oneshot(request()).await.unwrap().into_body();
+        assert!(body.frame().await.unwrap().unwrap().is_data());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), body.frame())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        state
+            .sessions
+            .lock()
+            .await
+            .get_mut("synthetic")
+            .unwrap()
+            .expires = Instant::now() + Duration::from_secs(60);
+        let mut active = app.oneshot(request()).await.unwrap().into_body();
+        assert!(active.frame().await.unwrap().unwrap().is_data());
+        store.close_grouping_events();
+        store.notify_grouping_change();
+        assert!(active.frame().await.is_none());
+        assert!(*store.grouping_events().borrow());
+        assert_eq!(store.pool().size(), 0);
+        assert_eq!(store.calls(), 0);
+    }
     #[test]
     fn playback_ranges_are_bounded_and_malformed_ranges_are_ignored() {
         for (value, expected) in [

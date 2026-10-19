@@ -59,6 +59,7 @@ pub struct Store {
     pub(crate) database_options: PgConnectOptions,
     calls: Arc<AtomicU64>,
     dependencies: Arc<std::sync::Mutex<DependencyObservations>>,
+    grouping_events: tokio::sync::watch::Sender<bool>,
 }
 impl Store {
     pub async fn connect(url: &str) -> Result<Self, Error> {
@@ -82,6 +83,7 @@ impl Store {
             pool,
             calls: Arc::new(AtomicU64::new(0)),
             dependencies: Arc::new(std::sync::Mutex::new(DependencyObservations::default())),
+            grouping_events: tokio::sync::watch::channel(false).0,
         }
     }
     fn pool_options() -> PgPoolOptions {
@@ -107,6 +109,17 @@ impl Store {
     }
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+    pub(crate) fn grouping_events(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.grouping_events.subscribe()
+    }
+    pub(crate) fn notify_grouping_change(&self) {
+        // A version change wakes clients; the value only records shutdown.
+        // Late queue notices must never reopen a closing stream.
+        self.grouping_events.send_if_modified(|closing| !*closing);
+    }
+    pub fn close_grouping_events(&self) {
+        self.grouping_events.send_replace(true);
     }
     pub fn calls(&self) -> u64 {
         self.calls.load(Ordering::Relaxed)

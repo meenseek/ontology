@@ -4,6 +4,7 @@ import { DefinitionFields, blankDefinition, completeDefinition } from "./Purpose
 import type { GraphNode, Request, Scope } from "./graph";
 import type { Subject } from "./Purpose";
 import { fileName, memoryKindName } from "./presentation";
+import { watchGroupingChanges } from "./grouping-events";
 type Evidence = { entity_id: string; source_id?: string; source_revision: string; content_digest: string; generation: number; kind?: "git" | "vault" | "context" | "record"; repository?: string; path?: string; current?: boolean; semantics?: { kind: string; title_from_body?: boolean; effective_from: number | null; effective_until: number | null; applicability?: string } };
 type Curation = { review_id: string; source_id: string; applicability: string; reason: string };
 type Input = { title_from_body?: boolean; kind: "record" | "fact" | "decision" | "preference" | "idea"; title: string; body: string; subject_id: string | null; grouping_preference?: "auto" | "manual" | "off"; effective_from: number | null; effective_until: number | null; evidence: Evidence[] };
@@ -104,22 +105,15 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
   }, [scope, csrf, visible, needsSubjects, subjectRetry]);
   useEffect(() => {
     if (!visible || !selected || editing || !["pending", "processing"].includes(selected.grouping?.state ?? "")) return;
-    const controller = new AbortController();
-    let timer: number;
-    const poll = async () => {
-      try {
-        const value = await command<Item>({ op: "read", id: selected.id }, controller.signal);
-        if (!controller.signal.aborted && active.current === value.id) {
-          const contentChanged = value.revision !== selected.revision;
-          if (contentChanged || value.grouping?.state !== selected.grouping?.state) {
-            setSelected(value); setDraft(draftFromItem(value)); onBackgroundChange?.(value, contentChanged);
-          }
+    return watchGroupingChanges(async signal => {
+      const value = await command<Item>({ op: "read", id: selected.id }, signal);
+      if (!signal.aborted && active.current === value.id) {
+        const contentChanged = value.revision !== selected.revision;
+        if (contentChanged || value.grouping?.state !== selected.grouping?.state) {
+          setSelected(value); setDraft(draftFromItem(value)); onBackgroundChange?.(value, contentChanged);
         }
-      } catch { /* A later poll can recover from a transient read failure. */ }
-      if (!controller.signal.aborted) timer = window.setTimeout(poll, 2500);
-    };
-    timer = window.setTimeout(poll, 2500);
-    return () => { window.clearTimeout(timer); controller.abort(); };
+      }
+    });
   }, [scope, csrf, visible, selected?.id, selected?.grouping?.state, selected?.revision, editing]);
   async function run(action: () => Promise<void>) {
     if (pending.current) return; pending.current = true; setBusy(true); onBusy(true); setError(""); setNotice("");

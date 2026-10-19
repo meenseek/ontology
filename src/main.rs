@@ -281,14 +281,15 @@ async fn serve(store: Store) -> Result<(), Error> {
     ));
     let sync_task = std::env::var_os("ONTOLOGY_SYNC_CONFIG").map(|path| {
         tokio::spawn(ontology::sync::run_loop(
-            store,
+            store.clone(),
             PathBuf::from(path),
             state.sync_status.clone(),
         ))
     });
     let result = axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            store.close_grouping_events();
         })
         .await
         .map_err(|_| Error::Storage);

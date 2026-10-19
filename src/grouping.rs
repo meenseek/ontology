@@ -706,11 +706,13 @@ async fn queue_notifications(store: &Store, wake: watch::Sender<bool>) {
                 .await
                 .map_err(|_| Error::Storage)?;
             wake.send(true).map_err(|_| Error::Storage)?;
+            store.notify_grouping_change();
             loop {
                 // None means reconnected: redrain durable queues because notices
                 // emitted while disconnected cannot be delivered retroactively.
                 listener.try_recv().await.map_err(|_| Error::Storage)?;
                 wake.send(true).map_err(|_| Error::Storage)?;
+                store.notify_grouping_change();
             }
         }
         .await;

@@ -18,6 +18,19 @@ const memoryId = "fixture-memory", documentId = "fixture-document";
 const quiet = () => undefined;
 let networkAttempts = 0;
 globalThis.fetch = async () => { networkAttempts++; throw new Error("실제 fetch는 이 합성 fixture에서 차단됩니다."); };
+class GroupingEvents {
+  static opened: GroupingEvents[] = [];
+  onmessage: (() => void) | null = null;
+  closed = false;
+  constructor(url: string) {
+    if (url !== "/api/grouping/events") throw new Error("예상하지 않은 합성 알림 주소");
+    GroupingEvents.opened.push(this);
+  }
+  close() { this.closed = true; }
+  notice() { this.onmessage?.(); }
+}
+// EventSource does not use fetch. Block that separate network path as well.
+Object.defineProperty(globalThis, "EventSource", { value: GroupingEvents, configurable: true });
 
 type Outcome = "pending" | "resolved" | "failed" | "aborted";
 type Call = { op: string; state: Outcome; requestBytes: number; responseBytes: number; signal: boolean };
@@ -137,7 +150,7 @@ function Scene({ stub, kind, seed, creating = false, scope = "personal" }: { stu
       <button id="fixture-seed" onClick={() => setInitialItem({ ...stub.item, title: "나중에 전달한 seed" })}>seed prop 변경</button>
     </div>
     <div id="fixture-surface" data-visible={visible} data-managing={managing}>
-      {kind === "memory" ? <Memory latestNode={sourceChanged ? { id: memoryId, scope: "personal", kind: "memory", label: "합성 기록", revision: String(initialItem?.revision ?? 1), supported: false } : null} visible={visible} managing={managing} initialItem={initialItem} scope={scope} csrf="synthetic-only" request={stub.request} selectedId={creating ? null : memoryId} onBusy={quiet} onChange={value => stub.changed.push(value)} onNavigate={quiet} onMetadataChange={quiet} /> : <Documents visible={visible} managing={managing} scope={scope} id={documentId} csrf="synthetic-only" allAreas={[]} request={stub.request} onBusy={quiet} onChange={() => { stub.documentChanges++; }} onNavigate={quiet} />}
+      {kind === "memory" ? <Memory latestNode={sourceChanged ? { id: memoryId, scope: "personal", kind: "memory", label: "합성 기록", revision: String(initialItem?.revision ?? 1), supported: false } : null} visible={visible} managing={managing} initialItem={initialItem} scope={scope} csrf="synthetic-only" request={stub.request} selectedId={creating ? null : memoryId} onBusy={quiet} onChange={value => stub.changed.push(value)} onBackgroundChange={value => stub.changed.push(value)} onNavigate={quiet} onMetadataChange={quiet} /> : <Documents visible={visible} managing={managing} scope={scope} id={documentId} csrf="synthetic-only" allAreas={[]} request={stub.request} onBusy={quiet} onChange={() => { stub.documentChanges++; }} onNavigate={quiet} />}
     </div>
   </>;
 }
@@ -175,6 +188,7 @@ function publish(done = false) {
 }
 async function scenario(name: string, size: number, kind: "memory" | "documents", run: (stub: Stub) => Promise<void>, setup: { seed?: Item | null; creating?: boolean; scope?: Scope; configure?: (stub: Stub) => void; modes?: [string, Mode[]] } = {}) {
   const stub = new Stub(size), startChecks = checks;
+  GroupingEvents.opened = [];
   if (setup.scope) stub.item.scope = setup.scope;
   setup.configure?.(stub);
   if (setup.modes) stub.next(setup.modes[0], ...setup.modes[1]);
@@ -187,7 +201,7 @@ async function scenario(name: string, size: number, kind: "memory" | "documents"
     assert(stub.calls.every(call => call.state !== "pending"), "완료 시 미결 요청 없음");
     assert(networkAttempts === 0, "실제 fetch 호출 금지");
   } catch (error) { reason = error instanceof Error ? error.message : String(error); }
-  finally { flushSync(() => root.unmount()); stub.release(); await settle(); }
+  finally { flushSync(() => root.unmount()); stub.release(); await settle(); if (GroupingEvents.opened.some(events => !events.closed)) reason ??= "종료 후 알림 연결이 남았습니다."; }
   results.push({ name, passed: reason === undefined, checks: checks - startChecks, reason, counts: Object.fromEntries([...new Set(stub.calls.map(call => call.op))].map(op => [op, stub.count(op)])), responseBytes: stub.calls.reduce((sum, call) => sum + call.responseBytes, 0), requestBytes: stub.calls.reduce((sum, call) => sum + call.requestBytes, 0), maxPending: stub.maxPending, calls: stub.calls });
   publish();
 }
@@ -676,6 +690,37 @@ async function main() {
     counts(stub, { subjects: 2 }, "abort 후 복귀 1회");
     assert(stub.calls[0].responseBytes === 0 && stub.calls[1].responseBytes > 0, "취소된 응답 미전달");
   }, { seed: memory(1), modes: ["subjects", ["hold"]] });
+  const pendingMemory: Item = { ...memory(0), grouping: { mode: "auto", state: "pending", suggestions: {}, reason: null } };
+  await scenario("Memory 분류 알림·유휴 무조회·완료 후 구독 종료", 0, "memory", async stub => {
+    counts(stub, {}, "저장 응답을 받은 상세");
+    await delay(2700); counts(stub, {}, "기존 2.5초를 지나도 주기 조회 없음");
+    GroupingEvents.opened.at(-1)!.notice(); await settle();
+    counts(stub, { read: 1 }, "연결 시 놓친 상태 확인");
+    stub.item = { ...stub.item, grouping: { ...stub.item.grouping!, state: "processing" } };
+    GroupingEvents.opened.at(-1)!.notice(); await settle();
+    assert(stub.changed.at(-1)?.grouping?.state === "processing", "분류 상태 변경을 상위에도 전달");
+    stub.item = { ...stub.item, revision: 2, subject_id: "fixture-assigned", subject_name: "완료한 묶음", grouping: { ...stub.item.grouping!, state: "assigned" } };
+    GroupingEvents.opened.at(-1)!.notice(); await settle();
+    counts(stub, { read: 3 }, "알림이 있는 경우만 조회");
+    assert(element(".detail-heading").textContent?.includes("완료한 묶음"), "완료된 소속을 자동 반영");
+    assert(GroupingEvents.opened.every(events => events.closed), "완료 후 알림 구독도 종료");
+  }, { seed: pendingMemory, configure: stub => { stub.item = pendingMemory; } });
+  await scenario("Memory 분류 구독 취소·복귀·편집 초안 보존", 0, "memory", async stub => {
+    const first = GroupingEvents.opened.at(-1)!;
+    stub.next("read", "hold"); first.notice(); await settle();
+    await click("#fixture-visible"); assert(first.closed && stub.calls[0].state === "aborted", "숨긴 상세의 구독과 읽기 취소");
+    await click("#fixture-visible");
+    const current = GroupingEvents.opened.at(-1)!;
+    assert(current !== first && !current.closed, "복귀 시 새 연결");
+    first.notice(); await settle(); counts(stub, { read: 1 }, "이전 연결의 늦은 알림 무시");
+    current.notice(); await settle(); counts(stub, { read: 2 }, "복귀 시 현재 상태 확인");
+    await click("#fixture-managing"); await button("기록 정정");
+    assert(current.closed, "편집 시작 시 구독 종료");
+    await type(".memory-editor form textarea[required]", "분류 알림 중에도 보존할 초안");
+    current.notice(); await click("#fixture-visible"); await click("#fixture-visible");
+    assert(element<HTMLTextAreaElement>(".memory-editor form textarea[required]").value === "분류 알림 중에도 보존할 초안", "숨김·늦은 알림이 초안을 덮어쓰지 않음");
+    counts(stub, { read: 2 }, "편집 중 자동 조회 없음"); stub.release();
+  }, { seed: pendingMemory, configure: stub => { stub.item = pendingMemory; } });
   for (const kind of ["memory", "documents"] as const) {
     const op = kind === "memory" ? "read" : "document-read";
     await scenario(`${kind} 초기 실패·로컬 재시도`, 1, kind, async stub => {
