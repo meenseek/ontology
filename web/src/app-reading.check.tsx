@@ -258,9 +258,19 @@ async function check(size: number) {
     await until(() => idleGraph() && !window.location.search.includes("q="), "clear search while writing");
     assert(host.querySelector<HTMLFormElement>(".memory-editor form") === form && form.querySelector("textarea")?.value === `새 본문 ${size}`, "Clearing search preserves the same draft DOM");
     phase("draft search and clear use only shared graph", start, { graph: 2 });
+    await openExplorer();
+    const displayFilter = (column: number) => host.querySelector<HTMLSelectElement>(`.filter-row label:nth-child(${column}) select`)!;
+    for (const [column, value] of [[1, "memory"], [2, "active"]] as const) {
+      displayFilter(column).value = value; displayFilter(column).dispatchEvent(new Event("change", { bubbles: true })); await settle();
+    }
+    button("닫기", host.querySelector(".map-sidebar")!).click(); await settle();
     start = calls.length; form.requestSubmit();
     await until(() => idleGraph() && bodyIs(`새 본문 ${size}`), "remember response reused");
     phase("remember response handoff", start, { remember: 1, graph: 1 });
+    await openExplorer();
+    assert(displayFilter(1).value === "memory" && displayFilter(2).value === "active", "Saving a record preserves its kind and state filters");
+    for (const column of [1, 2]) { displayFilter(column).value = "all"; displayFilter(column).dispatchEvent(new Event("change", { bubbles: true })); await settle(); }
+    button("닫기", host.querySelector(".map-sidebar")!).click(); await settle();
 
     start = calls.length;
     await navigate("personal", id(999));
@@ -630,13 +640,23 @@ async function checkSourceReferenceDirection() {
     host.querySelector<HTMLButtonElement>(".original-detail .document-internal-link")!.click();
     await until(() => host.querySelector(".original-detail h1")?.textContent === "원문 2", "authored outgoing link opens its exact target");
     assert(new URL(window.location.href).searchParams.get("focus") === originals[1].id && brainCalls === 0, "inline reference navigation preserves exact target and lazy purpose reads");
-    window.history.pushState(null, "", `${window.location.pathname}?scope=personal&focus=${originals[0].id}`);
-    window.dispatchEvent(new PopStateEvent("popstate"));
+    button("닫기 ×").click(); await until(() => !host.querySelector(".management-panel"), "return before filtering references");
+    const listToggle = [...host.querySelectorAll<HTMLButtonElement>("button")].find(node => node.textContent === "목록 보기");
+    if (listToggle) { listToggle.click(); await settle(); }
+    await openExplorer();
+    const sourceFilter = host.querySelector<HTMLSelectElement>(".topic-label select")!;
+    sourceFilter.value = "personal"; sourceFilter.dispatchEvent(new Event("change", { bubbles: true })); await settle();
+    button("닫기", host.querySelector(".map-sidebar")!).click(); await settle();
+    [...host.querySelectorAll<HTMLButtonElement>(".graph-list > button")].find(node => node.querySelector("strong")?.textContent === "원문 1")!.click();
     await until(() => host.querySelectorAll(".original-detail .document-internal-link").length === 2, "return to both authored outgoing references");
     button("다른 범위 원문 열기", host.querySelector(".original-detail")!).click();
     await until(() => host.querySelector(".original-detail h1")?.textContent === "원문 3", "cross-native-scope reference opens its exact current target");
     assert(new URL(window.location.href).searchParams.get("focus") === originals[2].id && brainCalls === 0, "cross-scope source reference does not promote incoming evidence or change app scope");
-    return { sourceReferenceDirection: true, outgoing: 2, incoming: 1, inlineNavigation: true, fragmentLookup: true, crossNativeScope: true, eagerBrainCalls: 0 };
+    assert(host.querySelector(".map-status .notice")?.textContent?.includes("필터 밖") && host.querySelectorAll(".graph-list > button").length === 2, "following a reference outside the filter shows its detail without changing the visible map set");
+    button("닫기 ×").click(); await until(() => !host.querySelector(".management-panel"), "close out-of-filter reference");
+    await openExplorer();
+    assert(host.querySelector<HTMLSelectElement>(".topic-label select")?.value === "personal", "out-of-filter navigation preserves the original source condition");
+    return { sourceReferenceDirection: true, outgoing: 2, incoming: 1, inlineNavigation: true, fragmentLookup: true, crossNativeScope: true, outsideFilterPreserved: true, eagerBrainCalls: 0 };
   } finally { root.unmount(); window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl); }
 }
 
@@ -702,7 +722,7 @@ async function checkOriginalFolders() {
   const originalUrl = window.location.href;
   const root = createRoot(host);
   const original = (id: string, context_scope: string, context_path: string): GraphNode => ({
-    id, scope: "personal", kind: "document", label: "지원 현황", title: "지원 현황",
+    id, scope: "personal", kind: "document", label: id === "folder-c" ? "지원 현황" : "다른 지원 자료", title: id === "folder-c" ? "지원 현황" : "다른 지원 자료",
     revision: "1", status: "ok", present: true, current: true, source_kind: "original", context_scope, context_path,
   });
   const nodes = [
@@ -790,6 +810,7 @@ async function checkOriginalFolders() {
     await until(() => host.querySelectorAll(".graph-list > button").length === 2, "structural overlay before document selection");
     [...host.querySelectorAll<HTMLButtonElement>(".graph-list > button")].find(node => node.querySelector(".node-symbol.document"))!.click();
     await until(() => !!host.querySelector(".original-detail .document-preview"), "original detail preview");
+    assert(host.querySelector<HTMLSelectElement>(".topic-label select")?.value === "personal" && host.querySelector<HTMLSelectElement>(".filter-row label:nth-child(2) select")?.value === "active", "Selecting an in-scope original preserves source and state filters");
     assert(!host.querySelector('.original-detail [aria-label="연결된 자료"]'), "Derived folder membership cannot appear as explicitly related material in document details");
     assert(host.querySelectorAll(".original-detail h1").length === 1, "Multiline authored H1 is displayed once in the actual detail path");
     assert(host.querySelector(".original-detail h1")?.textContent?.replace(/\s+/g, " ").trim() === "지원 현황", "The displayed H1 is the selected original's title");
@@ -832,7 +853,33 @@ async function checkOriginalFolders() {
     assert(promptCount() === 3 && !host.querySelector(".original-detail") && !new URL(window.location.href).searchParams.has("focus"), "Confirmed entry discards the original and clears its selection");
     button("검색·조건 초기화", host.querySelector(".map-empty")!).click();
     await until(() => !host.querySelector(".map-empty") && host.querySelector<HTMLSelectElement>(".filter-row label:first-child select")?.value === "all", "empty results provide a guarded return to the full scope");
-    return { originalFolders: true, listedFolders: 4, visibleOriginals: 1, titleCount: 1, draftGuard: true, localFolderStructure: true };
+    host.querySelector<HTMLButtonElement>('.management-panel button[aria-label="관리 패널 닫기"]')!.click();
+    await until(() => !host.querySelector(".management-panel"), "close blank record panel");
+    await openExplorer();
+    const sourceFilter = host.querySelector<HTMLSelectElement>(".topic-label select")!;
+    const stateFilter = host.querySelector<HTMLSelectElement>(".filter-row label:nth-child(2) select")!;
+    const kindFilter = host.querySelector<HTMLSelectElement>(".filter-row label:first-child select")!;
+    for (const [select, value] of [[sourceFilter, "personal"], [stateFilter, "active"], [kindFilter, "knowledge"]] as const) {
+      select.value = value; select.dispatchEvent(new Event("change", { bubbles: true })); await settle();
+    }
+    button("닫기", host.querySelector(".map-sidebar")!).click();
+    await until(() => host.querySelectorAll(".graph-list > button").length === 2, "three display filters applied");
+    const filteredOriginal = () => [...host.querySelectorAll<HTMLButtonElement>(".graph-list > button")].find(node => node.querySelector("strong")?.textContent === "지원 현황")!;
+    const filtersRetained = () => host.querySelector<HTMLSelectElement>(".topic-label select")?.value === "personal" &&
+      host.querySelector<HTMLSelectElement>(".filter-row label:nth-child(2) select")?.value === "active" &&
+      host.querySelector<HTMLSelectElement>(".filter-row label:first-child select")?.value === "knowledge";
+    for (const exit of ["close", "back"] as const) {
+      filteredOriginal().click();
+      await until(() => !!host.querySelector(".original-detail .document-preview"), "read filtered original");
+      assert(host.querySelectorAll(".graph-list > button").length === 2, "Opening detail retains the exact filtered visible set");
+      if (exit === "close") host.querySelector<HTMLButtonElement>('.management-panel button[aria-label="관리 패널 닫기"]')!.click();
+      else window.history.back();
+      await until(() => !host.querySelector(".management-panel"), "return from filtered detail");
+      await openExplorer();
+      assert(filtersRetained() && host.querySelectorAll(".graph-list > button").length === 2, "Close and browser Back preserve the filtered exploration context");
+      button("닫기", host.querySelector(".map-sidebar")!).click(); await settle();
+    }
+    return { originalFolders: true, listedFolders: 4, visibleOriginals: 1, titleCount: 1, draftGuard: true, localFolderStructure: true, selectionFiltersRetained: true, browserBackFiltersRetained: true };
   } finally {
     root.unmount();
     window.fetch = originalFetch;
@@ -1730,6 +1777,11 @@ async function run() {
   const results: unknown[] = [];
   try {
     assert(import.meta.env.DEV, "Run this fixture through the development server");
+    if (new URLSearchParams(window.location.search).get("scenario") === "filters") {
+      const filters = await checkOriginalFolders();
+      output.textContent = `PASS\n${JSON.stringify({ passed: true, filters }, null, 2)}`;
+      return;
+    }
     if (new URLSearchParams(window.location.search).get("scenario") === "header") {
       results.push(await checkHeaderLayout());
       output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;

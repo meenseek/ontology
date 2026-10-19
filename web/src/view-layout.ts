@@ -9,7 +9,8 @@ import { starCohort } from "./positions";
 import type { Point, Positions } from "./positions";
 
 /** Frame a settled overview of at most 60 visible bodies once, without moving stars or changing its viewing direction. */
-export function overviewFrame(camera: PerspectiveCamera, target: Point, nodes: readonly Point[], size: { width: number; height: number }) {
+export function overviewFrame<T extends Point>(camera: PerspectiveCamera, target: Point, nodes: readonly T[], size: { width: number; height: number },
+  display?: { radius: (node: T, depth: number) => number; obstacles: readonly { left: number; top: number; right: number; bottom: number }[] }) {
   if (nodes.length < 2 || nodes.length > 60 || size.width <= 0 || size.height <= 0) return null;
   camera.updateMatrixWorld();
   const right = new Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
@@ -25,8 +26,30 @@ export function overviewFrame(camera: PerspectiveCamera, target: Point, nodes: r
   }
   const vertical = Math.tan(camera.fov * Math.PI / 360), horizontal = vertical * size.width / size.height;
   // Leave room for titles and map controls; cap the gain so a tiny graph remains a constellation.
-  const fitted = nearest + Math.max(halfWidth / (horizontal * .64), halfHeight / (vertical * .64));
-  const nextDistance = Math.max(distance / 2.5, fitted);
+  const fitted = nearest + Math.max(halfWidth / (horizontal * .80), halfHeight / (vertical * .80));
+  const minimumDistance = Math.max(distance / 2.5, fitted);
+  if (minimumDistance >= distance * .96) return null;
+  let nextDistance = minimumDistance;
+  if (display) {
+    const candidate = camera.clone(), point = new Vector3(), center = new Vector3(target.x, target.y, target.z);
+    const safe = (reach: number) => {
+      candidate.position.copy(center).addScaledVector(forward, reach); candidate.lookAt(center); candidate.updateMatrixWorld();
+      return nodes.every(node => {
+        point.set(node.x, node.y, node.z).applyMatrix4(candidate.matrixWorldInverse);
+        const depth = -point.z, radius = display.radius(node, depth) + 8;
+        if (depth <= 0) return false;
+        point.applyMatrix4(candidate.projectionMatrix);
+        const x = (point.x + 1) * size.width / 2, y = (1 - point.y) * size.height / 2;
+        return x - radius >= 16 && x + radius <= size.width - 16 && y - radius >= 16 && y + radius <= size.height - 16 &&
+          display.obstacles.every(box => Math.hypot(x - Math.max(box.left, Math.min(x, box.right)), y - Math.max(box.top, Math.min(y, box.bottom))) >= radius);
+      });
+    };
+    // Fixed-size summary sprites and real DOM controls do not scale like world
+    // coordinates. Back off the one-time fit until their actual footprints clear.
+    let step = 0;
+    while (step < 32 && !safe(nextDistance)) { step++; nextDistance = minimumDistance + (distance - minimumDistance) * step / 32; }
+    if (!safe(nextDistance)) return null;
+  }
   if (nextDistance >= distance * .96) return null;
   offset.normalize().multiplyScalar(nextDistance);
   return { position: { x: target.x + offset.x, y: target.y + offset.y, z: target.z + offset.z }, target: { ...target } };
@@ -87,7 +110,7 @@ export function coreReadingInsets(size: { width: number; height: number }, actio
   if (size.width > 700 || !minimap) return { top, bottom: 70 };
   const bottom = size.height - minimap.top + 24;
   return size.height - top - bottom >= 100 ? { top, bottom }
-    : { top, bottom: 70, right: size.width - minimap.left + 24 };
+    : { top, bottom: 70, left: 24, right: size.width - minimap.left + 24 };
 }
 
 /** Fit the final disclosed coordinates, with space for names and the actual map controls.

@@ -1,4 +1,4 @@
-import { topologySlots } from "./constellation-layout.ts";
+import { constellationSlots, topologySlots } from "./constellation-layout.ts";
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -3085,6 +3085,18 @@ test("true hubs sit off center without changing edges or measured clearance", ()
   }
 });
 
+test("large hub clouds clear the anchor without magnifying every member", () => {
+  for (const count of [13, 39, 225, 800]) {
+    const slots = constellationSlots(count, 20, 16, "large-hub");
+    assert.deepEqual(slots, constellationSlots(count, 20, 16, "large-hub"));
+    assert.ok(Math.max(...slots.map(p => Math.hypot(p.x, p.y))) < 32 * Math.sqrt(count) + 20, "hub clearance cannot inflate the whole cloud");
+    for (const [index, p] of slots.entries()) {
+      assert.ok(Math.hypot(p.x, p.y) >= 20 - 1e-7);
+      for (const q of slots.slice(index + 1)) assert.ok(Math.hypot(p.x - q.x, p.y - q.y) >= 16 - 1e-7);
+    }
+  }
+});
+
 
 test("a hub with connected branches keeps real crosslinks beside its off-center anchor", () => {
   const ids = ["hub", ...Array.from({ length: 12 }, (_, i) => `leaf-${i}`)];
@@ -3120,4 +3132,17 @@ test("mobile titles keep an edge gutter through rest, hover and selection", () =
   }
   const desktop = visibleLabels([node], 1440, 900, null, null, environment);
   assert.equal(desktop[0].left, 0, "the mobile gutter does not move desktop titles");
+});
+
+
+test("small summary members retain resolved light and inactive state at actual display sizes", async () => {
+  const { summaryGlyphInk } = await import("./summary-glyph.ts");
+  for (const pixels of [28, 42, 64, 92, 136]) for (const depth of [-1, -.5, 0, .5, 1]) {
+    const active = summaryGlyphInk({ depth, opacity: 1 }, pixels);
+    const inactive = summaryGlyphInk({ depth, opacity: .4 }, pixels);
+    assert.ok(active.radius * pixels / 128 >= .72 - 1e-9, "downsampling must not erase a member into an unresolved subpixel point");
+    assert.ok(active.alpha >= .18 && active.alpha <= 1);
+    assert.ok(Math.abs(inactive.alpha / active.alpha - .4) < 1e-9, "state contrast remains independent of the display-size light floor");
+  }
+  assert.ok(summaryGlyphInk({ depth: -1, opacity: 1 }, 42).alpha > summaryGlyphInk({ depth: -1, opacity: 1 }, 136).alpha, "the smallest summary compensates for lost projected light");
 });

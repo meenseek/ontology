@@ -42,6 +42,14 @@ export function summaryGlyphPosition(star: GlyphStar, seconds: number, amount: n
   return { x: x / limit, y: y / limit };
 }
 
+/** Keep a small summary's real members resolved after its 128px texture is downsampled. */
+export function summaryGlyphInk(star: Pick<GlyphStar, "depth" | "opacity">, pixels: number) {
+  const near = (star.depth + 1) / 2;
+  const floor = .18 + .16 * Math.max(0, 1 - pixels / 92);
+  return { radius: Math.max(.72 * 128 / pixels, .65 + Math.pow(near, 4) * 5.8),
+    alpha: (floor + (1 - floor) * near * near) * star.opacity };
+}
+
 /** One retained canvas per summary; only a hovered/fading glyph uploads, at most 30fps. */
 export function summaryGlyphTexture(groupId: string, members: readonly Member[]) {
   const canvas = document.createElement("canvas");
@@ -55,7 +63,8 @@ export function summaryGlyphTexture(groupId: string, members: readonly Member[])
       const at = summaryGlyphPosition(star, seconds, amount);
       const x = 64 + at.x * 49, y = 64 + at.y * 49;
       const near = (star.depth + 1) / 2;
-      const radius = .65 + Math.pow(near, 4) * 5.8;
+      const ink = summaryGlyphInk(star, summaryAppearance(members.length).pixels);
+      const radius = ink.radius;
       const halo = 8 + near * 16;
       const glow = context.createRadialGradient(x, y, 0, x, y, halo);
       glow.addColorStop(0, "#f0f7ffe0");
@@ -64,12 +73,12 @@ export function summaryGlyphTexture(groupId: string, members: readonly Member[])
       glow.addColorStop(.65, star.color + "0b");
       glow.addColorStop(1, star.color + "00");
       context.fillStyle = glow;
-      context.globalAlpha = (.12 + near * near * .88) * star.opacity;
+      context.globalAlpha = ink.alpha;
       context.globalCompositeOperation = "lighter";
       context.beginPath(); context.arc(x, y, halo, 0, Math.PI * 2); context.fill();
       context.globalCompositeOperation = "source-over";
       context.fillStyle = star.color;
-      context.globalAlpha = (.12 + near * near * .88) * star.opacity;
+      context.globalAlpha = ink.alpha;
       context.beginPath();
       if (star.shape === 0) context.arc(x, y, radius, 0, Math.PI * 2);
       else {
@@ -84,7 +93,7 @@ export function summaryGlyphTexture(groupId: string, members: readonly Member[])
       }
       context.fill();
       context.fillStyle = "#ffffff";
-      context.globalAlpha = (.18 + near * near * .82) * star.opacity;
+      context.globalAlpha = Math.max(ink.alpha, (.18 + near * near * .82) * star.opacity);
       context.beginPath(); context.arc(x, y, Math.max(.7, radius * .36), 0, Math.PI * 2); context.fill();
       if (star.glint) {
         context.strokeStyle = "#edf5ff";

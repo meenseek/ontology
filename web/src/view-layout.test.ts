@@ -15,6 +15,23 @@ test("opening an already readable page retains its zoom while large content stil
   assert.equal(coreCameraDistance(900, 700, 1.7, 500), 900);
 });
 
+test("initial framing clears fixed-size summaries and actual map controls", () => {
+  for (const size of [{ width: 1440, height: 680 }, { width: 390, height: 560 }]) {
+    const camera = new PerspectiveCamera(60, size.width / size.height, .1, 20000), target = { x: 0, y: 0, z: 0 };
+    camera.position.set(0, 0, 1200); camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
+    const nodes = [{ x: -85, y: 40, z: 20 }, { x: 85, y: -40, z: -20 }];
+    const obstacles = [{ left: 12, right: size.width - 12, top: 10, bottom: 64 }, { left: size.width - 180, right: size.width - 14, top: size.height - 160, bottom: size.height - 14 }];
+    const frame = overviewFrame(camera, target, nodes, size, { radius: () => 68, obstacles })!;
+    assert.ok(frame, "there is room to enlarge this sparse graph safely");
+    camera.position.set(frame.position.x, frame.position.y, frame.position.z); camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
+    for (const node of nodes) {
+      const p = new Vector3(node.x, node.y, node.z).project(camera), x = (p.x + 1) * size.width / 2, y = (1 - p.y) * size.height / 2;
+      assert.ok(x >= 92 && x <= size.width - 92 && y >= 92 && y <= size.height - 92);
+      for (const box of obstacles) assert.ok(Math.hypot(x - Math.max(box.left, Math.min(x, box.right)), y - Math.max(box.top, Math.min(y, box.bottom))) >= 76);
+    }
+  }
+});
+
 test("sparse overview framing enlarges a small graph without changing coordinates or camera direction", () => {
   for (const size of [{ width: 1440, height: 680 }, { width: 390, height: 560 }]) {
     const camera = new PerspectiveCamera(60, size.width / size.height, .1, 20000);
@@ -438,34 +455,36 @@ test("purpose pages keep their real chain and preserve the held marker and backg
 });
 
 test("a short purpose view preserves final body clearance and actual control space after paging", () => {
-  const f = fixture([39], 23, { width: 390, height: 364.7578125 }), hub = "purpose";
-  f.source.nodes = f.source.nodes.map(node => node.id.startsWith("g39-") ? { ...node, subject_id: hub } : node);
-  f.source.nodes.push({ id: hub, scope: "personal", kind: "subject", label: "긴 이름의 목적 묶음" });
-  f.source.links = f.source.nodes.filter(node => node.subject_id).map(node => ({ source: node.id, target: hub, kind: "subject", current: true }));
-  for (let i = 0; i < 12; i++) f.source.links.push(edge(`g39-${i}`, `g39-${i + 1}`));
-  const model = reconcile(f.source, undefined, false, "purpose"), positions = new Positions(); positions.install(model, true);
-  const actions = { left: 14, top: 14, right: 376, bottom: 117 }, minimap = { left: 220, top: f.size.height - 228, right: 376, bottom: f.size.height - 52 };
-  const insets = coreReadingInsets(f.size, actions, minimap);
-  for (const page of [0, 1, 0, 1]) {
-    const semantic = constellationView(model.nodes, model.links, null, hub, page, "purpose");
-    let plan: ReturnType<typeof planCoreView> | undefined;
-    positions.showCore(hub, page * 1000, true, page, semantic.disclosure!.visible, undefined, { key: String(page), resolve: (desired, moving, anchor) => {
-      plan = planCoreView(desired, moving, anchor, { camera: f.camera, cameraTarget: f.center, size: f.size, automatic: true,
-        nodes: semantic.nodes, links: model.links, counts: semantic.counts, members: semantic.disclosure!.visible,
-        selected: null, lod: f.lod, reading: true, insets }, (desired, moving, held, plane) => positions.clearLayout(desired, moving, held, plane));
-      return plan.positions;
-    } });
-    const plane = screenPlane(plan!.camera, () => f.size, null, plan!.counts);
-    const members = semantic.nodes.filter(node => semantic.disclosure!.visible.has(node.id)).map(node => {
-      const at = plane.project(plan!.positions.get(node.id)!);
-      return { ...at, radius: plane.radius(node, at.depth) };
-    });
-    for (const [index, at] of members.entries()) {
-      const x = at.x + f.size.width / 2, y = f.size.height / 2 - at.y;
-      assert.ok(x >= 8 && x <= f.size.width - 8 && y >= 8 && y <= f.size.height - 8);
-      assert.ok([actions, minimap].every(box => x < box.left - 6 || x > box.right + 6 || y < box.top - 6 || y > box.bottom + 6));
-      for (const other of members.slice(index + 1)) assert.ok(Math.hypot(at.x - other.x, at.y - other.y) >= at.radius + other.radius + 1 - 1e-6,
-        "the final camera must preserve body clearance instead of shrinking a cleared layout");
+  for (const size of [{ width: 390, height: 364.7578125 }, { width: 360, height: 501 }]) {
+    const f = fixture([39], 23, size), hub = "purpose";
+    f.source.nodes = f.source.nodes.map(node => node.id.startsWith("g39-") ? { ...node, subject_id: hub } : node);
+    f.source.nodes.push({ id: hub, scope: "personal", kind: "subject", label: "긴 이름의 목적 묶음" });
+    f.source.links = f.source.nodes.filter(node => node.subject_id).map(node => ({ source: node.id, target: hub, kind: "subject", current: true }));
+    for (let i = 0; i < 12; i++) f.source.links.push(edge(`g39-${i}`, `g39-${i + 1}`));
+    const model = reconcile(f.source, undefined, false, "purpose"), positions = new Positions(); positions.install(model, true);
+    const actions = { left: 14, top: 14, right: size.width - 14, bottom: size.width === 360 ? 128.8 : 117 }, minimap = { left: size.width - 170, top: f.size.height - 228, right: size.width - 14, bottom: f.size.height - 52 };
+    const insets = coreReadingInsets(f.size, actions, minimap);
+    for (const page of [0, 1, 0, 1]) {
+      const semantic = constellationView(model.nodes, model.links, null, hub, page, "purpose");
+      let plan: ReturnType<typeof planCoreView> | undefined;
+      positions.showCore(hub, page * 1000, true, page, semantic.disclosure!.visible, undefined, { key: String(page), resolve: (desired, moving, anchor) => {
+        plan = planCoreView(desired, moving, anchor, { camera: f.camera, cameraTarget: f.center, size: f.size, automatic: true,
+          nodes: semantic.nodes, links: model.links, counts: semantic.counts, members: semantic.disclosure!.visible,
+          selected: null, lod: f.lod, reading: true, insets }, (desired, moving, held, plane) => positions.clearLayout(desired, moving, held, plane));
+        return plan.positions;
+      } });
+      const plane = screenPlane(plan!.camera, () => f.size, null, plan!.counts);
+      const members = semantic.nodes.filter(node => semantic.disclosure!.visible.has(node.id)).map(node => {
+        const at = plane.project(plan!.positions.get(node.id)!);
+        return { ...at, radius: plane.radius(node, at.depth) };
+      });
+      for (const [index, at] of members.entries()) {
+        const x = at.x + f.size.width / 2, y = f.size.height / 2 - at.y;
+        assert.ok(x >= 8 && x <= f.size.width - 8 && y >= 8 && y <= f.size.height - 8);
+        assert.ok([actions, minimap].every(box => x < box.left - 6 || x > box.right + 6 || y < box.top - 6 || y > box.bottom + 6));
+        for (const other of members.slice(index + 1)) assert.ok(Math.hypot(at.x - other.x, at.y - other.y) >= at.radius + other.radius + 1 - 1e-6,
+          "the final camera must preserve body clearance instead of shrinking a cleared layout");
+      }
     }
   }
 });

@@ -13,15 +13,20 @@ export function constellationSlots(count: number, minimumRadius: number, separat
     Array.from({ length: count }, (_, index) => {
       const radius = Math.sqrt(index + 1), angle = index * Math.PI * (3 - Math.sqrt(5));
       const x = radius * Math.cos(angle), y = radius * Math.sin(angle);
-      return { x: x * 1.12 + .13 * y, y };
+      // A smooth shear bends the cloud into one continuous asymmetric outline.
+      // It keeps nearby slots nearby without inventing separate semantic groups.
+      const bend = .12 + .18 * Math.min(1, Math.max(0, count - 48) / 100);
+      return { x: x * 1.12 + .13 * y + bend * y * y / Math.sqrt(count), y };
     });
-  if (count > outline.length) {
-    const left = Math.min(...slots.map(slot => slot.x));
-    for (const slot of slots) slot.x += .8 - left;
-  }
   let closest = Infinity;
   for (const [index, slot] of slots.entries()) for (const other of slots.slice(index + 1)) closest = Math.min(closest, Math.hypot(slot.x - other.x, slot.y - other.y));
-  const scale = Math.max(minimumRadius / Math.min(...slots.map(slot => Math.hypot(slot.x, slot.y))), separation / closest);
+  let scale = separation / closest;
+  if (count > outline.length) {
+    // Clear the hub by translating the already spaced cloud, rather than
+    // enlarging every leaf when one happens to lie close to the origin.
+    const shift = minimumRadius / scale - Math.min(...slots.map(slot => slot.x));
+    for (const slot of slots) slot.x += shift;
+  } else scale = Math.max(minimumRadius / Math.min(...slots.map(slot => Math.hypot(slot.x, slot.y))), scale);
   const phase = [...id].reduce((value, char) => Math.imul(value ^ char.charCodeAt(0), 16777619) >>> 0, 2166136261) / 0xffffffff * 2 * Math.PI;
   return slots.map(slot => ({ x: scale * (slot.x * Math.cos(phase) - slot.y * Math.sin(phase)), y: scale * (slot.x * Math.sin(phase) + slot.y * Math.cos(phase)) }));
 }

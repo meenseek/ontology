@@ -1006,7 +1006,10 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
               if (overviewChanged && overviewFrameKey.current !== frameKey) {
                 overviewFrameKey.current = frameKey;
                 const frame = overviewFrame(camera as PerspectiveCamera, (instance!.controls() as OrbitControls).target,
-                  displayNodes.map(node => positions.layoutTarget(node.id) ?? node), size);
+                  displayNodes.map(node => ({ ...node, ...(positions.layoutTarget(node.id) ?? node) })), size, {
+                    radius: (node, depth) => nodeVisualRadius(nodeScreenSize(node.kind, depth, size.height, camera.projectionMatrix.elements[5]), false, node.changed, summaryCounts.get(node.id)),
+                    obstacles: chrome(),
+                  });
                 if (frame) moveCamera(frame.position, frame.target, reduced ? 0 : REVEAL_DURATION);
               }
               setMovedGroups(previous => {
@@ -1469,7 +1472,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>근접 묶음 {spatialReveal.members.size}개 접기</button>}
     {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
       rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} onResize={resizeMinimap} />}
-    <div className="graph-instructions graph-quick-help"><span className="pointer-instructions">빈 공간 끌기 · 스크롤 확대</span><span className="touch-instructions">빈 공간 끌기 · 두 손가락 확대</span></div>
+    <div className="graph-instructions graph-quick-help"><span className="pointer-instructions"><span>빈 공간 끌기</span><span>스크롤 확대</span><span>묶음 눌러 펼치기</span></span><span className="touch-instructions"><span>빈 공간 끌기</span><span>두 손가락 확대</span><span>묶음 눌러 펼치기</span></span></div>
     {hover && (!selected || hoveredId.current !== selected) && <div className="graph-tooltip" data-node-id={hoveredId.current ?? undefined} role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
   </div>;
 }

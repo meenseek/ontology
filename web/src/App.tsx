@@ -128,7 +128,7 @@ export default function App() {
     const visibility = () => setVisible(document.visibilityState !== "hidden");
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
     const motion = () => setReduced(media.matches);
-    const pop = () => { if (busyRef.current || dirtyRef.current && !window.confirm("저장하지 않은 초안을 버리고 이동할까요?")) { window.history.pushState(null, "", graphUrl(routeRef.current.scope, routeRef.current.q, routeRef.current.focus)); return; } updatePurposeDirty(false); updateDirty(false); const next = parseLocation(window.location.search); routeRef.current = next; setRoute(next); setInput(next.q); setFilters(initialFilters); setPanel(next.focus ? "node" : null); setManaging(false); setMemoryItem(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); };
+    const pop = () => { if (busyRef.current || dirtyRef.current && !window.confirm("저장하지 않은 초안을 버리고 이동할까요?")) { window.history.pushState(null, "", graphUrl(routeRef.current.scope, routeRef.current.q, routeRef.current.focus)); return; } updatePurposeDirty(false); updateDirty(false); const next = parseLocation(window.location.search), current = routeRef.current; routeRef.current = next; setRoute(next); setInput(next.q); if (next.scope !== current.scope || next.q !== current.q) setFilters(initialFilters); setPanel(next.focus ? "node" : null); setManaging(false); setMemoryItem(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); };
     const beforeUnload = (event: BeforeUnloadEvent) => { if (dirtyRef.current || busyRef.current) event.preventDefault(); };
     document.addEventListener("visibilitychange", visibility); media.addEventListener("change", motion); window.addEventListener("popstate", pop); window.addEventListener("beforeunload", beforeUnload);
     return () => { document.removeEventListener("visibilitychange", visibility); media.removeEventListener("change", motion); window.removeEventListener("popstate", pop); window.removeEventListener("beforeunload", beforeUnload); };
@@ -209,14 +209,14 @@ export default function App() {
     const node = data?.model.nodes.find(n => n.id === id);
     if (node?.kind === "folder") { fitFolder(id); return; }
     if (discardCurrent) setPanelEpoch(v => v + 1);
-    setNotice(""); setManaging(false); setMemoryItem(null); setFilters(f => ({ ...initialFilters, cluster: f.cluster === node?.cluster ? f.cluster : null, folder: shown.nodes.some(value => value.id === id) ? f.folder : null }));
+    setNotice(""); setManaging(false); setMemoryItem(null);
     syncRoute({ ...route, focus: id }); openPanel("node");
     if (!node) setRefresh(v => v + 1);
   }
   function changed(item: MemoryItem | null) {
     const id = item?.id ?? null;
     syncRoute({ ...routeRef.current, focus: id }, true);
-    setMemoryItem(item); setManaging(false); setPanel(id ? "node" : "manage"); setFilters(initialFilters);
+    setMemoryItem(item); setManaging(false); setPanel(id ? "node" : "manage");
     setRefresh(v => v + 1); setPanelEpoch(v => v + 1); setNotice("");
   }
   function subjectDeleted(ungrouped: number, documents: number) {
@@ -354,7 +354,7 @@ export default function App() {
         <label className="topic-label"><input type="checkbox" checked={showFolders} disabled={busy} onChange={event => toggleFolders(event.target.checked)} /> 폴더 연결 표시</label>
         <section className="cluster-list"><h2>{view === "purpose" ? "목적 묶음" : "관계 군집"}</h2>
           <button className="cluster" aria-pressed={!filters.cluster && !filters.folder} disabled={busy} onClick={() => fitView(null)}>전체 보기</button>
-          <div className="compact-list">{listedClusters.map(c => <button className="cluster" key={c.id} disabled={busy} aria-pressed={filters.cluster === c.id} onClick={() => fitView(c.id)}><i style={{ background: c.color }} /><strong>{c.label}</strong><small>{c.purpose ? `전체 소속 ${c.totalKnowledge ?? c.knowledge} · 표시 ${c.knowledge}` : `문서·기록 ${c.knowledge}`} · 분류 표식 {c.members.length - c.knowledge}</small></button>)}</div>
+          <div className="compact-list">{listedClusters.map(c => <button className="cluster" key={c.id} disabled={busy} aria-pressed={filters.cluster === c.id} onClick={() => fitView(c.id)}><i style={{ background: c.color }} /><strong>{c.label}</strong><small className="cluster-counts"><span>{c.purpose && c.totalKnowledge !== undefined && c.totalKnowledge !== c.knowledge ? `표시 ${c.knowledge} / 전체 ${c.totalKnowledge}개` : `문서·기록 ${c.knowledge}개`}</span>{!c.purpose && c.members.length > c.knowledge && <span>분류 표식 {c.members.length - c.knowledge}개</span>}</small></button>)}</div>
           <p className="hint">{listedClusters.length}개 묶음 · 단독 항목 {clusterOptions.standalone}개</p>
           <p className="hint">{view === "purpose" ? "저장된 목적 소속을 표시합니다. 미분류는 개별 항목으로 남으며 검색·관계 변화로 소속이 바뀌지 않습니다." : "현재 관계로 계산한 군집입니다. 검색 범위와 관계 변화에 따라 달라질 수 있습니다."} 폴더 소속은 별도 구조입니다.</p>
         </section>
@@ -389,7 +389,7 @@ export default function App() {
           {selected && !shown.nodes.some(n => n.id === selected.id) && <p className="notice">선택한 자료가 현재 필터 밖에 있습니다. <button onClick={() => setFilters(initialFilters)}>필터 해제</button></p>}
         </div>
         {data && !loading && !displayed.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{hasDisplayFilters ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 저장한 기록이 이곳에 나타납니다."}</p><div className="action-row">{hasDisplayFilters && <button disabled={busy} onClick={() => search("")}>검색·조건 초기화</button>}<button disabled={!session || busy} onClick={startRecord}>기록 남기기</button></div></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{displayed.map(n => { const label = nodePresentation(n), at = listTimestamp(n, listSort), excerpt = route.q && n.excerpt ? searchExcerpt(n.excerpt, label.title) : null; return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} style={{ color: knowledge(n) ? starColor(n) : n.taxonomyColor ?? n.color }} aria-hidden="true">{knowledge(n) ? "·" : "○"}</span><span><strong>{label.title}</strong>{route.q && n.historical_match && <small className="warning">이전 내용에서 일치 · 현재 상태를 확인하세요</small>}{excerpt && <span className="search-excerpt">{excerpt}</span>}<small className="node-meta">{kindName[n.kind]} · {stateName(n)}</small>{label.subtitle && <span className="node-location" title={label.subtitle}>{label.subtitle}</span>}</span>{!route.q && knowledge(n) && listSort !== "name" && <small className="node-date">{at === null ? listSort === "created" ? "추가일 미확인" : "수정일 미확인" : <time dateTime={new Date(at).toISOString()} title={new Date(at).toLocaleString("ko-KR")}>{listSort === "created" ? "추가" : "수정"} · {new Date(at).toLocaleDateString("ko-KR")}</time>}</small>}{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph key={`${route.scope}:${route.q}`} positions={positions} snapshot={data.model} nodes={shown.nodes} links={shown.links} selected={route.focus} filteredGroup={filters.cluster} hasDisplayFilters={hasDisplayFilters} rotate={rotating} allConnections={allConnections} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onClearSelection={closePanel} onFit={() => fitView()} onToggleRotation={() => setRotate(value => !value)} onFailure={failed} /></Suspense></GraphBoundary>)}
-        <div className="map-legend">{!!displayed.length && <><span><i className="legend-star" aria-hidden="true" />문서·기록</span><span>색 · {view === "purpose" ? "목적 소속" : "분류 소속"}</span><span>○ 분류 표식{showFolders ? " · 폴더" : ""}</span>{!fallback && <span>{allConnections ? "연결선 모두 보기" : <>선 간략히<span className="map-legend-hint"> · 별을 가리키면 연결 보기</span></>}</span>}</>}<details onKeyDown={event => {
+        <div className="map-legend">{!!displayed.length && <><span><i className="legend-star" aria-hidden="true" />문서·기록</span><span>색: {view === "purpose" ? "목적 소속" : "분류 소속"}</span><span>○ 분류 표식{showFolders ? "·폴더" : ""}</span>{!fallback && <span>{allConnections ? "연결선 모두 보기" : <>선 간략히<span className="map-legend-hint">가리키면 연결 보기</span></>}</span>}</>}<details onKeyDown={event => {
           if (event.key !== "Escape" || !event.currentTarget.open) return;
           event.preventDefault(); event.stopPropagation();
           event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();
