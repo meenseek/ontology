@@ -92,7 +92,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     if (memories[i]) ordered.push(memories[i]);
   }
   ordered.push(...ordinary.filter(n => n.kind !== "document" && n.kind !== "memory").sort(nearby));
-  const fromStar = (node: ProjectedLabel, box: LabelBox) => Math.hypot(node.x - Math.max(box.left, Math.min(box.right, node.x)), node.y - Math.max(box.top, Math.min(box.bottom, node.y)));
+  const fromStar = (node: Pick<ProjectedLabel, "x" | "y">, box: LabelBox) => Math.hypot(node.x - Math.max(box.left, Math.min(box.right, node.x)), node.y - Math.max(box.top, Math.min(box.bottom, node.y)));
   const restingReach = (node: ProjectedLabel) => node.id === selected ? Infinity : environment.starTitles?.exempt?.has(node.id) ? environment.starTitles.reach ?? Infinity :
     node.summary ? environment.restingSummaryGap === undefined ? Infinity : node.radius + environment.restingSummaryGap : node.radius + 18;
   const positionsFor = (node: ProjectedLabel): LabelBox[] => {
@@ -174,6 +174,14 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   };
   const fitsTogether = (box: LabelBox, placed: readonly LabelBox[]) => {
     const lines = guide(box), star = byId.get(box.id)!;
+    // Without a guide, proximity is the only visible ownership cue. Clearance
+    // alone allowed another (even unlabeled) star to claim the title visually.
+    if (!lines.length) {
+      const ownGap = fromStar(star, box) - star.radius, reach = largestStar + ownGap;
+      for (let x = Math.floor((box.left - reach) / 64); x <= Math.floor((box.right + reach) / 64); x++)
+        for (let y = Math.floor((box.top - reach) / 64); y <= Math.floor((box.bottom + reach) / 64); y++)
+          if ((starCells.get(`${x},${y}`) ?? []).some(other => other.id !== box.id && fromStar(other, box) - other.radius <= ownGap)) return false;
+    }
     if (lines.some(line => passesStar(line, box.id))) return false;
     // A covered source still needs an accessible name outside the covering control.
     if (lines.length && (environment.obstacles ?? []).some(other => {

@@ -8,7 +8,7 @@ import { PerspectiveCamera, Vector3 } from "three";
 import { active, constellationView, denseConstellationCores, diagramLinks, expandedCoreCameraFrame, graphUrl, isNativeOriginal, knowledge, linkKey, listNodes, nativeFolders, overviewLinkKeys, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph, visualSatellites } from "./graph.ts";
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
-import { labelLeader, leaderHitsBox, leadersCross, visibleLabels, type ProjectedLabel } from "./presentation.ts";
+import { labelLeader, leaderHitsBox, leadersCross, visibleLabels, type LabelBox, type ProjectedLabel } from "./presentation.ts";
 import { CameraMotion, zoomCameraPose } from "./camera-motion.ts";
 import { miniMapTransform } from "./MiniMap.tsx";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition.ts";
@@ -2820,6 +2820,26 @@ test("labels avoid unlabeled stars and measured chrome while preserving a safe p
   assert.deepEqual(visibleLabels([candidate], 300, 240, "a", null, { stars, obstacles, previous }), boxes);
   const covered = [{ left: 0, top: 0, right: 300, bottom: 240 }];
   assert.deepEqual(visibleLabels([candidate], 300, 240, "a", "a", { stars, obstacles: covered }), []);
+});
+
+test("leaderless titles belong to the nearest star surface, including unlabeled neighbors", () => {
+  const owner: ProjectedLabel = { id: "owner", kind: "document", active: true, x: 100, y: 100, depth: 0, radius: 6, width: 70, height: 20 };
+  const obstacles = [{ left: 0, top: 92, right: 300, bottom: 108 }];
+  const gap = (star: Pick<ProjectedLabel, "x" | "y" | "radius">, box: LabelBox) =>
+    Math.hypot(star.x - Math.max(box.left, Math.min(box.right, star.x)), star.y - Math.max(box.top, Math.min(box.bottom, star.y))) - star.radius;
+  for (const neighbor of [{ id: "other", x: 147, y: 55, depth: 0, radius: 6 },
+    { id: "large-other", x: 147, y: 25, depth: 0, radius: 36 }]) {
+    for (const summary of [false, true]) for (const interaction of ["rest", "selected", "hovered"] as const) {
+      const node = { ...owner, summary }, stars = [node, neighbor];
+      const place = (previous?: Map<string, LabelBox>) => visibleLabels([node], 400, 300,
+        interaction === "selected" ? node.id : null, interaction === "hovered" ? node.id : null, { stars, obstacles, previous });
+      const boxes = place();
+      assert.equal(boxes.length, 1, "a safe local title remains available");
+      for (const box of boxes) if (!box.guide?.length && !labelLeader(node, box))
+        assert.ok(gap(node, box) < gap(neighbor, box), `${interaction}: the title must be closer to its own body than ${neighbor.id}`);
+      assert.deepEqual(place(new Map(boxes.map(box => [box.id, box]))), boxes, "history cannot reintroduce an ambiguous side");
+    }
+  }
 });
 
 test("hover at the label budget preserves group names and yields only an ordinary title", () => {

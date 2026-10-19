@@ -182,6 +182,7 @@ async function check(size: number) {
     button("목록 보기").click();
     releaseGraph();
     await until(() => idleGraph() && host.querySelectorAll(".graph-list > button").length === size, "initial list");
+    assert(!button("3D 보기").hasAttribute("aria-pressed"), "the next-view action does not announce a selected view");
     await until(() => host.querySelector(".load-timing")?.textContent?.includes("목록 표시") === true, "list timing");
     assert(/응답 \d+ms · 목록 표시 \d+ms/.test(host.querySelector(".load-timing")?.textContent ?? ""), "Timing names both measured phases");
     assert(host.querySelector<HTMLElement>(".load-timing")?.hidden === true, "development measurements never appear as a user-facing setting");
@@ -1406,8 +1407,9 @@ async function checkRenderedMotion() {
     for (let step = 0; step < 8; step++) button("축소").click();
     await until(() => [...sampled].every(([id, star]) => star.depth < lightBeforeZoom.get(id)!) && new Set([...sampled.values()].map(star => star.depth.toFixed(6))).size > 1,
       "shared material uploads distinct actual camera depths after zooming into the distant size floor");
-    button("전체 맞춤").click();
+    const fullFit = button("전체 맞춤"); fullFit.focus(); fullFit.click();
     await until(() => camera!.getWorldDirection(new Vector3()).distanceTo(new Vector3(0, 0, -1)) < .00001, "the existing full fit resets the camera orientation");
+    assert(document.activeElement === fullFit, "full fit preserves the initiating control's focus after panel close callbacks");
     assert([...sampled.values()].some(star => star.z !== 0), "minimap navigation preserves stellar depth");
     let fittedPosition = camera!.position.clone(), fittedLayout = "", fittedSince = performance.now();
     await until(() => {

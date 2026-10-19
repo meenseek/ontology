@@ -106,7 +106,7 @@ window.fetch = async (input, options) => {
   if (url.pathname === "/api/session") return json({ csrf: "synthetic-only", areas: [] });
   if (url.pathname === "/api/graph") {
     const scope: Scope = url.searchParams.get("scope") === "meenseek" ? "meenseek" : "personal", query = url.searchParams.get("q") ?? "", focus = url.searchParams.get("focus");
-    const included = nodes.filter(node => !query || `${node.label} ${node.title}`.includes(query) || node.id === focus).map(node => ({ ...node, scope }));
+    const included = nodes.filter(node => !query || `${node.label} ${node.title}`.includes(query) || node.id === focus).map(node => ({ ...node, scope, excerpt: query ? `합성 자료에서 ${query} 검색어와 일치하는 내용입니다.` : undefined }));
     const ids = new Set(included.map(node => node.id)), includedLinks = links.filter(link => ids.has(link.source) && ids.has(link.target));
     return json({ scope, query, focus: { id: focus, found: !!focus && ids.has(focus) }, nodes: included, links: includedLinks, matched: included.length,
       totals: { documents: included.filter(node => node.kind === "document").length, memories: included.filter(node => node.kind === "memory").length, markers: included.filter(node => node.kind === "subject" || node.kind === "topic").length, links: includedLinks.length },
@@ -199,6 +199,15 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     return [segment(x1, y1, x1 + length * Math.cos(angle), y1 + length * Math.sin(angle))];
   };
   const starClearance = () => {
+    const f = frame(), origin = document.querySelector(".graph-canvas")!.getBoundingClientRect();
+    for (const label of labels().filter(label => !guidePaths(label).length)) {
+      const box = label.getBoundingClientRect(), stars = f.stars.filter(star => !star.retiring && star.opacity >= .2);
+      const own = stars.find(star => star.id === label.dataset.nodeId);
+      assert(own, `무지시선 제목의 별이 없습니다: ${label.dataset.nodeId}`);
+      const gap = (star: Frame["stars"][number]) => Math.hypot(star.px - Math.max(box.left - origin.left, Math.min(box.right - origin.left, star.px)),
+        star.py - Math.max(box.top - origin.top, Math.min(box.bottom - origin.top, star.py))) - star.radius;
+      assert(stars.every(star => star.id === own!.id || gap(star) + .1 >= gap(own!)), `지시선 없는 제목이 다른 별에 더 가깝습니다: ${label.dataset.nodeId}`);
+    }
     const crossings = labels().flatMap(label => guidePaths(label).flatMap(line => frame().stars.filter(star => {
       if (star.id === label.dataset.nodeId || star.retiring || star.opacity < .2) return false;
       const dx = line.x2 - line.x1, dy = line.y2 - line.y1;
@@ -325,8 +334,16 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "사용자의 맥락");
     input.dispatchEvent(new Event("input", { bubbles: true })); await wait(40);
     document.querySelector<HTMLButtonElement>(".map-search button")!.click(); await settled(); backdrop(true);
+    assert(!document.querySelector(".map-status")!.textContent!.includes("일치 구절"), "발췌가 없는 3D 보기에 발췌 안내가 남았습니다.");
+    const listAction = button("목록 보기");
+    assert(!listAction.hasAttribute("aria-pressed"), "목록으로 바꾸는 동작이 현재 선택으로 표시됩니다.");
+    listAction.click(); await wait(80);
+    assert(document.querySelector(".search-excerpt") && document.querySelector(".map-status")!.textContent!.includes("일치 구절"), "목록의 실제 발췌와 안내가 일치하지 않습니다.");
+    assert(!button("3D 보기").hasAttribute("aria-pressed"), "3D로 바꾸는 동작이 현재 선택으로 표시됩니다.");
+    button("3D 보기").click(); await settled();
+    assert(!document.querySelector(".map-status")!.textContent!.includes("일치 구절"), "3D로 돌아온 뒤 발췌 안내가 남았습니다.");
     button("검색 해제").click(); await settled(); backdrop(false);
-    results.push({ searchBackdrop: "protected", clearedSearchBackdrop: "clear" });
+    results.push({ searchBackdrop: "protected", clearedSearchBackdrop: "clear", viewActionSemantics: true, excerptHintMatchesView: true });
     const emptyInput = document.querySelector<HTMLInputElement>("#graph-search")!;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(emptyInput, "검색결과없음");
     emptyInput.dispatchEvent(new Event("input", { bubbles: true })); await wait(40);
