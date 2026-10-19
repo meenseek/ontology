@@ -44,10 +44,14 @@ DATA_PATH = "/var/lib/postgresql"
 PORTS = {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "55432"}]}
 APP_URL = "http://127.0.0.1:47831"
 COMMAND_TIMEOUT = 4
+# psql needs its connection3s and statement3s budgets plus Docker delivery1s.
+PSQL_TIMEOUT = 7
 # Store allows 3s to acquire a connection and 5s for a statement. Leave 1s
 # for HTTP delivery; a 2s socket timeout falsely rejected successful projections
 # and left their queries running while installation retried the same work.
 HTTP_TIMEOUT = 9
+# Engine/container/volume/env commands, DB socket, two SQL calls, HTTP and startup.
+APP_CHECK_TIMEOUT = 4 * COMMAND_TIMEOUT + 1 + 2 * PSQL_TIMEOUT + HTTP_TIMEOUT + 1
 MAX_HTTP_BYTES = 1_048_576
 DOCKER_ATTEMPTS = 12
 START_ATTEMPTS = 8
@@ -160,7 +164,8 @@ def psql(docker, container_id, sql, env):
                     "psql", "-X", "-w", "-h", CONTAINER, "-p", "5432",
                     "-U", "ontology", "-d", "dbname=ontology require_auth=scram-sha-256",
                     "-At", "-v", "ON_ERROR_STOP=1", "-c", sql],
-                   "database", "database_unavailable", "기존 DB의 인증된 읽기 전용 조회가 실패했습니다.", env=child_env)
+                   "database", "database_unavailable", "기존 DB의 인증된 읽기 전용 조회가 실패했습니다.",
+                   timeout=PSQL_TIMEOUT, env=child_env)
 
 
 def database_health(docker, info, env):

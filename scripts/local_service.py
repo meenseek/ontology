@@ -16,6 +16,8 @@ import subprocess
 import sys
 import time
 
+import connection
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = Path.home() / "Library/Application Support/ontology"
@@ -44,7 +46,7 @@ def app_ready() -> bool:
     try:
         health = subprocess.run(
             [sys.executable, str(ROOT / "scripts/connection.py"), "check", "--target", "app"],
-            capture_output=True, timeout=15,
+            capture_output=True, timeout=connection.APP_CHECK_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
         return False

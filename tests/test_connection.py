@@ -572,6 +572,43 @@ class DockerDiagnosticsTests(unittest.TestCase):
         elif code == "docker_unavailable":
             self.assertEqual(error.message, "Docker 엔진에 연결할 수 없습니다.")
 
+    def test_psql_deadline_covers_both_bounded_phases(self):
+        self.process.return_value = self.response(b"1\n")
+        self.assertEqual(c.psql(self.DOCKER, INFO["id"], "SELECT 1;", ENV), b"1\n")
+        args = self.process.call_args.args[0]
+        connect = int(next(arg.split("=", 1)[1] for arg in args
+                           if arg.startswith("PGCONNECT_TIMEOUT=")))
+        options = next(arg.split("=", 1)[1] for arg in args if arg.startswith("PGOPTIONS="))
+        statement = int(options.split("statement_timeout=", 1)[1].split()[0]) / 1000
+        deadline = self.process.call_args.kwargs["timeout"]
+        self.assertGreater(deadline, connect + statement)
+        self.assertLessEqual(deadline, connect + statement + 1)
+
+        self.process.reset_mock()
+        self.process.return_value = self.response(b"28.0.0\n")
+        c.docker_ready()
+        self.assertEqual(self.process.call_args.kwargs["timeout"], 4)
+
+    def test_psql_timeout_and_sql_rejections_fail_once_without_private_output(self):
+        outcomes = (
+            subprocess.TimeoutExpired([self.DOCKER, self.PRIVATE_EXCEPTION], 7,
+                                      output=self.PRIVATE_STDOUT, stderr=self.PRIVATE_STDERR),
+            self.response(self.PRIVATE_STDOUT,
+                          b"FATAL: password authentication failed " + self.PRIVATE_STDERR, 2),
+            self.response(self.PRIVATE_STDOUT,
+                          b"ERROR: canceling statement due to statement timeout " + self.PRIVATE_STDERR, 1),
+            self.response(self.PRIVATE_STDOUT,
+                          b"ERROR: permission denied for table materials " + self.PRIVATE_STDERR, 1),
+        )
+        for outcome in outcomes:
+            with self.subTest(outcome=type(outcome).__name__):
+                self.process.reset_mock()
+                self.process.side_effect = [outcome]
+                with self.assertRaises(c.Failure) as caught:
+                    c.psql(self.DOCKER, INFO["id"], "SELECT 1;", ENV)
+                self.assert_private_failure(caught.exception, "database", "database_unavailable")
+                self.process.assert_called_once()
+
     def test_zero_exit_socket_denial_does_not_report_a_database_outage(self):
         for denial in self.DENIALS:
             with self.subTest(denial=denial), patch.object(c, "inspect_container") as inspect:
@@ -620,7 +657,8 @@ class DockerDiagnosticsTests(unittest.TestCase):
                     self.assert_private_failure(caught.exception, "docker", "docker_permission")
                     self.assertEqual(self.process.call_count, 2 if boundary == "volume" else 1)
                     self.assertEqual(self.process.call_args.args[0][0], self.DOCKER)
-                    self.assertEqual(self.process.call_args.kwargs["timeout"], c.COMMAND_TIMEOUT)
+                    self.assertEqual(self.process.call_args.kwargs["timeout"],
+                                     c.PSQL_TIMEOUT if boundary == "exec" else c.COMMAND_TIMEOUT)
                     if boundary == "exec":
                         self.assertEqual(self.process.call_args.kwargs["env"]["PGPASSWORD"], SECRET)
                         self.assertNotIn(SECRET, " ".join(self.process.call_args.args[0]))

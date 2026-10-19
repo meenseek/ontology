@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,7 +14,36 @@ SPEC = importlib.util.spec_from_file_location(
     "local_service", Path(__file__).resolve().parents[1] / "scripts/local_service.py"
 )
 service = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(service)
+with patch.object(sys, "path", [str(Path(SPEC.origin).parent), *sys.path]):
+    SPEC.loader.exec_module(service)
+
+
+class HealthDeadlineTests(unittest.TestCase):
+    def test_full_check_can_outlast_the_old_fifteen_second_deadline(self):
+        def check(args, *, capture_output, timeout):
+            # A valid full check can spend20s across its separately bounded stages.
+            if timeout < 20:
+                raise subprocess.TimeoutExpired(args, timeout)
+            limits = service.connection
+            stages = (4 * limits.COMMAND_TIMEOUT + 1 + 2 * limits.PSQL_TIMEOUT
+                      + limits.HTTP_TIMEOUT)
+            self.assertGreater(timeout, stages)
+            self.assertLessEqual(timeout, stages + 1)
+            return subprocess.CompletedProcess(args, 0)
+
+        with patch.object(service.subprocess, "run", side_effect=check) as process:
+            self.assertTrue(service.app_ready())
+            process.assert_called_once()
+            self.assertEqual(process.call_args.args[0][-3:], ["check", "--target", "app"])
+
+    def test_failed_or_timed_out_check_still_fails_once(self):
+        outcomes = (subprocess.CompletedProcess([], 1),
+                    subprocess.TimeoutExpired(["check"], 41))
+        for outcome in outcomes:
+            with self.subTest(outcome=type(outcome).__name__):
+                with patch.object(service.subprocess, "run", side_effect=[outcome]) as process:
+                    self.assertFalse(service.app_ready())
+                    process.assert_called_once()
 
 
 class InstallTests(unittest.TestCase):
