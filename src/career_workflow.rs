@@ -290,6 +290,22 @@ async fn current(conn: &mut PgConnection, v: &SourceVersion) -> Result<(), Error
 async fn record_body(conn: &mut PgConnection, v: &SourceVersion) -> Result<String, Error> {
     bound_source(conn, v, true).await
 }
+trait SourceReader: Send {
+    fn read<'a>(
+        &'a mut self,
+        version: &'a SourceVersion,
+        body: bool,
+    ) -> impl std::future::Future<Output = Result<String, Error>> + Send + 'a;
+}
+impl SourceReader for PgConnection {
+    fn read<'a>(
+        &'a mut self,
+        version: &'a SourceVersion,
+        body: bool,
+    ) -> impl std::future::Future<Output = Result<String, Error>> + Send + 'a {
+        bound_source(self, version, body)
+    }
+}
 fn sources(p: &Progress) -> Vec<&SourceVersion> {
     let mut refs = vec![&p.outcome];
     refs.extend(&p.criteria);
@@ -299,10 +315,88 @@ fn sources(p: &Progress) -> Vec<&SourceVersion> {
     refs
 }
 async fn fresh(conn: &mut PgConnection, p: &Progress) -> Result<(), Error> {
+    fresh_except(conn, p, &[]).await
+}
+async fn fresh_except(
+    conn: &mut PgConnection,
+    p: &Progress,
+    apply_targets: &[String],
+) -> Result<(), Error> {
+    fresh_with(p, apply_targets, conn).await
+}
+async fn fresh_with(
+    p: &Progress,
+    apply_targets: &[String],
+    source: &mut impl SourceReader,
+) -> Result<(), Error> {
     for v in sources(p) {
-        current(conn, v).await?;
+        if apply_targets.contains(&v.logical_path) {
+            continue;
+        }
+        let reflection = p.reflection.as_ref() == Some(v);
+        let verification = p.verification.as_ref() == Some(v);
+        let body = source.read(v, reflection || verification).await?;
+        if reflection {
+            let WorkflowRecord::Reflection { findings, .. } = parse_record(&body)? else {
+                return Err(Error::Invalid);
+            };
+            for evidence in findings.into_iter().flat_map(|f| f.evidence) {
+                // A confirmed criteria apply intentionally leaves its prior input in the reflection.
+                let replaced_criterion = p.apply.as_ref().is_some_and(|a| a.apply_id.is_some())
+                    && p.initial_criteria.contains(&evidence)
+                    && p.criteria
+                        .iter()
+                        .any(|v| v.logical_path == evidence.logical_path && v != &evidence);
+                if !replaced_criterion && !apply_targets.contains(&evidence.logical_path) {
+                    source.read(&evidence, false).await?;
+                }
+            }
+        }
+        if verification {
+            let WorkflowRecord::Verification { checks, .. } = parse_record(&body)? else {
+                return Err(Error::Invalid);
+            };
+            for check in checks {
+                source.read(&check.independent_review, false).await?;
+                if let Some(artifact) = check.artifact {
+                    source.read(&artifact, false).await?;
+                }
+            }
+        }
     }
     Ok(())
+}
+async fn start_with(
+    requested: &Progress,
+    existing: &Progress,
+    source: &mut impl SourceReader,
+) -> Result<(), Error> {
+    // Never silently replace the input bindings of an existing outcome.
+    if existing.outcome != requested.outcome
+        || existing.surfaces != requested.surfaces
+        || existing.initial_criteria != requested.initial_criteria
+    {
+        return Err(Error::Conflict);
+    }
+    fresh_with(existing, &[], source).await
+}
+async fn health_with(
+    p: &Progress,
+    gate: Result<(), Error>,
+    source: &mut impl SourceReader,
+) -> Result<&'static str, Error> {
+    match gate {
+        Err(Error::ContextPending) => Ok("native-apply-pending"),
+        Err(e) => Err(e),
+        Ok(()) if p.stage == Stage::CriteriaApply && p.apply.is_some() => {
+            Ok("apply-confirmation-needed")
+        }
+        Ok(()) => match fresh_with(p, &[], source).await {
+            Ok(()) => Ok("ready"),
+            Err(Error::Conflict | Error::NotFound) => Ok("source-drift"),
+            Err(e) => Err(e),
+        },
+    }
 }
 async fn review_targets(conn: &mut PgConnection, p: &Progress) -> Result<Vec<String>, Error> {
     let record = record_body(conn, p.review.as_ref().ok_or(Error::Conflict)?).await?;
@@ -459,6 +553,14 @@ async fn applied(
 }
 
 impl Store {
+    async fn career_health(
+        &self,
+        conn: &mut PgConnection,
+        p: &Progress,
+    ) -> Result<&'static str, Error> {
+        let gate = self.context_gate_in(conn, false).await;
+        health_with(p, gate, conn).await
+    }
     pub async fn list_career_workflows(&self) -> Result<Value, Error> {
         // The progress dashboard remains available while native source reads are recovery-gated.
         let store_id: String =
@@ -548,17 +650,10 @@ impl Store {
                 apply: None,
                 verification: None,
             };
-            fresh(conn, &p).await?;
             let row=sqlx::query("INSERT INTO career_workflows(store_id,application_key,outcome_key,progress) VALUES($1::uuid,$2,$3,$4) ON CONFLICT(store_id,application_key,outcome_key) DO UPDATE SET application_key=career_workflows.application_key RETURNING id::text,revision,progress").bind(&store_id).bind(application_key).bind(outcome_key).bind(serde_json::to_value(&p).map_err(|_|Error::Storage)?).fetch_one(&mut *conn).await.map_err(|_|Error::Storage)?;
             let existing: Progress =
                 serde_json::from_value(row.get("progress")).map_err(|_| Error::Storage)?;
-            // Never silently replace the input bindings of an existing outcome.
-            if existing.outcome != p.outcome
-                || existing.surfaces != p.surfaces
-                || existing.initial_criteria != p.initial_criteria
-            {
-                return Err(Error::Conflict);
-            }
+            start_with(&p, &existing, conn).await?;
             return Ok(
                 json!({"id":row.get::<String,_>("id"),"revision":row.get::<i64,_>("revision"),"application_key":application_key,"outcome_key":outcome_key,"progress":existing,"health":"ready"}),
             );
@@ -609,22 +704,12 @@ impl Store {
         let application_key: String = row.get("application_key");
         let outcome_key: String = row.get("outcome_key");
         if matches!(command, CareerCommand::Get { .. }) {
-            let health = match self.context_gate_in(conn, false).await {
-                Err(Error::ContextPending) => "native-apply-pending",
-                Err(e) => return Err(e),
-                Ok(()) if p.stage == Stage::CriteriaApply && p.apply.is_some() => {
-                    "apply-confirmation-needed"
-                }
-                Ok(()) => match fresh(conn, &p).await {
-                    Ok(()) => "ready",
-                    Err(Error::Conflict | Error::NotFound) => "source-drift",
-                    Err(e) => return Err(e),
-                },
-            };
+            let health = self.career_health(conn, &p).await?;
             return Ok(
                 json!({"id":id,"revision":actual,"application_key":application_key,"outcome_key":outcome_key,"progress":p,"health":health}),
             );
         }
+        let pausing = matches!(command, CareerCommand::Pause { .. });
         if !matches!(command, CareerCommand::Pause { .. }) {
             self.context_gate_in(conn, false).await?;
         }
@@ -641,12 +726,7 @@ impl Store {
             && p.apply.is_some()
         {
             let targets = review_targets(conn, &p).await?;
-            for v in sources(&p)
-                .into_iter()
-                .filter(|v| !targets.contains(&v.logical_path))
-            {
-                current(conn, v).await?;
-            }
+            fresh_except(conn, &p, &targets).await?;
         } else if !matches!(
             command,
             CareerCommand::ConfirmApply { .. }
@@ -714,12 +794,7 @@ impl Store {
                 }
                 let targets = review_targets(conn, &p).await?;
                 // Non-target originals must still be current; target revisions are checked against receipt history.
-                for v in sources(&p)
-                    .into_iter()
-                    .filter(|v| !targets.contains(&v.logical_path))
-                {
-                    current(conn, v).await?;
-                }
+                fresh_except(conn, &p, &targets).await?;
                 let binding = p.apply.as_ref().ok_or(Error::Conflict)?;
                 let (apply_id, resulting) = applied(
                     conn,
@@ -934,8 +1009,377 @@ impl Store {
             return Err(Error::Limit);
         }
         sqlx::query("UPDATE career_workflows SET progress=$2,revision=$3,updated_at=now() WHERE id=$1::uuid").bind(&id).bind(value).bind(next).execute(&mut *conn).await.map_err(|_|Error::Storage)?;
+        let health = if pausing {
+            self.career_health(conn, &p).await?
+        } else {
+            "ready"
+        };
         Ok(
-            json!({"id":id,"revision":next,"application_key":application_key,"outcome_key":outcome_key,"progress":p,"health":"ready"}),
+            json!({"id":id,"revision":next,"application_key":application_key,"outcome_key":outcome_key,"progress":p,"health":health}),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    // Already-recorded synthetic progress; Core acceptance remains an integration-test concern.
+    struct Originals(BTreeMap<String, (SourceVersion, String)>);
+    impl Originals {
+        fn put(&mut self, path: &str, body: String) -> SourceVersion {
+            let (material_id, revision) = match self.0.get(path).map(|(v, _)| &v.state) {
+                Some(StoredSourceState::Live {
+                    material_id,
+                    revision,
+                    ..
+                }) => (material_id.clone(), revision + 1),
+                _ => (uuid::Uuid::new_v4().to_string(), 1),
+            };
+            let version = SourceVersion {
+                logical_path: path.to_owned(),
+                state: StoredSourceState::Live {
+                    material_id,
+                    revision,
+                    content_digest: digest(body.as_bytes()),
+                },
+            };
+            self.0.insert(path.to_owned(), (version.clone(), body));
+            version
+        }
+        fn read(&self, version: &SourceVersion, body: bool) -> Result<String, Error> {
+            logical(version)?;
+            let (actual, content) = self.0.get(&version.logical_path).ok_or(Error::Conflict)?;
+            if actual != version {
+                return Err(Error::Conflict);
+            }
+            Ok(if body { content.clone() } else { String::new() })
+        }
+        fn drift(&mut self, version: &SourceVersion, deleted: bool) {
+            if deleted {
+                self.0.remove(&version.logical_path);
+            } else {
+                self.put(&version.logical_path, "changed original\n".into());
+            }
+        }
+    }
+    impl SourceReader for &Originals {
+        fn read<'a>(
+            &'a mut self,
+            version: &'a SourceVersion,
+            body: bool,
+        ) -> impl std::future::Future<Output = Result<String, Error>> + Send + 'a {
+            std::future::ready(Originals::read(self, version, body))
+        }
+    }
+    fn fenced(value: Value) -> String {
+        format!("```career-workflow\n{value}\n```\n")
+    }
+    struct Fixture {
+        originals: Originals,
+        progress: Progress,
+        evidence: SourceVersion,
+        outputs: Vec<(Option<SourceVersion>, SourceVersion)>,
+    }
+    impl Fixture {
+        fn complete(native: bool, applied: bool) -> Self {
+            let mut originals = Originals(BTreeMap::new());
+            let outcome = originals.put("vault/personal/outcome.md", "synthetic outcome\n".into());
+            let initial = originals.put("vault/personal/criteria.md", "initial criterion\n".into());
+            let evidence =
+                originals.put("vault/personal/evidence.md", "synthetic evidence\n".into());
+            let criteria = if applied {
+                originals.put(&initial.logical_path, "reviewed criterion\n".into())
+            } else {
+                initial.clone()
+            };
+            let reflection = originals.put("vault/personal/reflection.md", fenced(json!({
+                "kind":"reflection", "application_key":"synthetic", "outcome_key":"result-1",
+                "findings":[{"id":"fact", "kind":"confirmed-fact", "statement":"synthetic finding",
+                    "evidence":[evidence, initial]}]
+            })));
+            let review = originals.put("vault/personal/review.md", fenced(json!({
+                "kind":"review", "reflection":reflection,
+                "decisions":[{"finding_id":"fact", "disposition":if applied {"apply"} else {"already-covered"},
+                    "reason":"synthetic decision", "targets":[initial.logical_path], "revisit_when":null}]
+            })));
+            let surfaces = vec![
+                CareerOutputSurface::ApplicationEssay,
+                CareerOutputSurface::CareerDescription,
+                CareerOutputSurface::Portfolio,
+            ];
+            let mut outputs = Vec::new();
+            let mut checks = Vec::new();
+            for (index, surface) in surfaces.iter().enumerate() {
+                let artifact = native.then(|| {
+                    originals.put(
+                        &format!("vault/personal/output-{index}.md"),
+                        "synthetic output\n".into(),
+                    )
+                });
+                let independent_review = originals.put(
+                    &format!("vault/personal/output-review-{index}.md"),
+                    fenced(json!({
+                        "kind":"output-review", "review":review, "surface":surface,
+                        "criteria":[criteria], "artifact":artifact, "result":"passed",
+                        "observations":"synthetic independent observations"
+                    })),
+                );
+                checks.push(json!({"surface":surface, "artifact":artifact,
+                    "independent_review":independent_review, "result":"passed"}));
+                outputs.push((artifact, independent_review));
+            }
+            let verification = originals.put(
+                "vault/personal/verification.md",
+                fenced(json!({
+                    "kind":"verification", "review":review, "criteria":[criteria], "checks":checks
+                })),
+            );
+            Self {
+                originals,
+                evidence,
+                outputs,
+                progress: Progress {
+                    outcome,
+                    initial_criteria: vec![initial],
+                    criteria: vec![criteria],
+                    surfaces,
+                    stage: Stage::Complete,
+                    paused: false,
+                    reflection: Some(reflection),
+                    review: Some(review),
+                    apply: applied.then(|| ApplyBinding {
+                        run_id: "synthetic-apply".into(),
+                        prepared_run_digest: "a".repeat(64),
+                        apply_id: Some(uuid::Uuid::new_v4().to_string()),
+                    }),
+                    verification: Some(verification),
+                },
+            }
+        }
+        fn requested_start(&self) -> Progress {
+            Progress {
+                criteria: self.progress.initial_criteria.clone(),
+                stage: Stage::Reflection,
+                paused: false,
+                reflection: None,
+                review: None,
+                apply: None,
+                verification: None,
+                ..self.progress.clone()
+            }
+        }
+        async fn fresh(&self) -> Result<(), Error> {
+            fresh_with(&self.progress, &[], &mut &self.originals).await
+        }
+        async fn start(&self, requested: &Progress) -> Result<(), Error> {
+            start_with(requested, &self.progress, &mut &self.originals).await
+        }
+        async fn health(&self) -> Result<&'static str, Error> {
+            health_with(&self.progress, Ok(()), &mut &self.originals).await
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_native_and_external_outputs_and_start_stay_current() {
+        for native in [false, true] {
+            for applied in [false, true] {
+                let mut fixture = Fixture::complete(native, applied);
+                let before = fixture.progress.clone();
+                assert_eq!(fixture.fresh().await, Ok(()));
+                // The initial criterion may now be historical; only returned progress is current.
+                assert_eq!(fixture.start(&fixture.requested_start()).await, Ok(()));
+                assert_eq!(fixture.progress, before);
+                assert_eq!(fixture.health().await, Ok("ready"));
+                fixture.progress.paused = true;
+                assert_eq!(fixture.health().await, Ok("ready"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_or_deleted_outputs_invalidate_completed_progress_and_start() {
+        for native in [false, true] {
+            for index in 0..3 {
+                for artifact in [false, true] {
+                    if artifact && !native {
+                        continue;
+                    }
+                    for deleted in [false, true] {
+                        let mut fixture = Fixture::complete(native, false);
+                        let before = fixture.progress.clone();
+                        let output = &fixture.outputs[index];
+                        let version = if artifact {
+                            output.0.as_ref().unwrap()
+                        } else {
+                            &output.1
+                        };
+                        fixture.originals.drift(version, deleted);
+                        assert_eq!(fixture.fresh().await, Err(Error::Conflict));
+                        assert_eq!(
+                            fixture.start(&fixture.requested_start()).await,
+                            Err(Error::Conflict)
+                        );
+                        // Freshness does not rewrite the historical completion record.
+                        assert_eq!(fixture.progress, before);
+                        assert_eq!(fixture.health().await, Ok("source-drift"));
+                        fixture.progress.paused = true;
+                        assert_eq!(fixture.health().await, Ok("source-drift"));
+                        assert_eq!(fixture.progress.stage, Stage::Complete);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reflection_evidence_stays_bound_after_review_and_completion() {
+        for stage in [Stage::Review, Stage::OutputVerification, Stage::Complete] {
+            for deleted in [false, true] {
+                let mut fixture = Fixture::complete(true, false);
+                fixture.progress.stage = stage;
+                if stage != Stage::Complete {
+                    fixture.progress.verification = None;
+                }
+                if stage == Stage::Review {
+                    fixture.progress.review = None;
+                }
+                assert_eq!(fixture.fresh().await, Ok(()));
+                fixture.originals.drift(&fixture.evidence, deleted);
+                assert_eq!(fixture.fresh().await, Err(Error::Conflict));
+                fixture.progress.paused = true;
+                assert_eq!(fixture.health().await, Ok("source-drift"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn criteria_apply_preserves_only_its_exact_initial_evidence() {
+        let mut fixture = Fixture::complete(true, true);
+        assert_eq!(fixture.fresh().await, Ok(()));
+        let binding = fixture.progress.apply.clone();
+        fixture.progress.apply.as_mut().unwrap().apply_id = None;
+        assert_eq!(fixture.fresh().await, Err(Error::Conflict));
+        fixture.progress.apply = binding;
+        let initial = fixture.progress.initial_criteria.clone();
+        if let StoredSourceState::Live { revision, .. } =
+            &mut fixture.progress.initial_criteria[0].state
+        {
+            *revision += 10;
+        }
+        assert_eq!(fixture.fresh().await, Err(Error::Conflict));
+        fixture.progress.initial_criteria = initial;
+        fixture.originals.drift(&fixture.evidence, false);
+        assert_eq!(fixture.fresh().await, Err(Error::Conflict));
+
+        let mut fixture = Fixture::complete(true, true);
+        fixture
+            .originals
+            .drift(&fixture.progress.criteria[0], false);
+        assert_eq!(fixture.fresh().await, Err(Error::Conflict));
+    }
+
+    #[tokio::test]
+    async fn pending_apply_exempts_only_selected_targets() {
+        let mut fixture = Fixture::complete(true, true);
+        fixture.progress.stage = Stage::CriteriaApply;
+        fixture.progress.verification = None;
+        fixture.progress.criteria = fixture.progress.initial_criteria.clone();
+        fixture.progress.apply.as_mut().unwrap().apply_id = None;
+        let targets = vec![fixture.progress.criteria[0].logical_path.clone()];
+        assert_eq!(fixture.fresh().await, Err(Error::Conflict));
+        assert_eq!(
+            fresh_with(&fixture.progress, &targets, &mut &fixture.originals).await,
+            Ok(())
+        );
+        fixture.originals.drift(&fixture.evidence, true);
+        assert_eq!(
+            fresh_with(&fixture.progress, &targets, &mut &fixture.originals).await,
+            Err(Error::Conflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn start_keeps_input_bindings_and_validates_new_progress() {
+        let fixture = Fixture::complete(true, false);
+        let requested = fixture.requested_start();
+        assert_eq!(
+            start_with(&requested, &requested, &mut &fixture.originals).await,
+            Ok(())
+        );
+        for input in 0..3 {
+            let mut changed = requested.clone();
+            match input {
+                0 => changed.outcome.logical_path = "vault/personal/other-outcome.md".into(),
+                1 => {
+                    changed.initial_criteria[0].logical_path =
+                        "vault/personal/other-criterion.md".into()
+                }
+                _ => changed.surfaces.truncate(2),
+            }
+            assert_eq!(fixture.start(&changed).await, Err(Error::Conflict));
+        }
+        let mut fixture = fixture;
+        fixture.originals.drift(&requested.outcome, true);
+        assert_eq!(
+            start_with(&requested, &requested, &mut &fixture.originals).await,
+            Err(Error::Conflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn current_workflow_records_must_keep_their_kind() {
+        for reflection in [false, true] {
+            let mut fixture = Fixture::complete(true, false);
+            let record = if reflection {
+                &mut fixture.progress.reflection
+            } else {
+                &mut fixture.progress.verification
+            };
+            *record = Some(fixture.originals.put(
+                &record.as_ref().unwrap().logical_path,
+                fenced(json!({"kind":"review", "reflection":fixture.evidence, "decisions":[]})),
+            ));
+            assert_eq!(fixture.fresh().await, Err(Error::Invalid));
+        }
+    }
+
+    #[tokio::test]
+    async fn health_preserves_recovery_gates_and_does_not_hide_errors() {
+        struct Unreadable;
+        impl SourceReader for Unreadable {
+            fn read<'a>(
+                &'a mut self,
+                _: &'a SourceVersion,
+                _: bool,
+            ) -> impl std::future::Future<Output = Result<String, Error>> + Send + 'a {
+                std::future::ready(Err(Error::Storage))
+            }
+        }
+        let mut fixture = Fixture::complete(true, true);
+        fixture.progress.paused = true;
+        assert_eq!(
+            health_with(
+                &fixture.progress,
+                Err(Error::ContextPending),
+                &mut Unreadable
+            )
+            .await,
+            Ok("native-apply-pending")
+        );
+        assert_eq!(
+            health_with(&fixture.progress, Err(Error::Forbidden), &mut Unreadable).await,
+            Err(Error::Forbidden)
+        );
+        assert_eq!(
+            health_with(&fixture.progress, Ok(()), &mut Unreadable).await,
+            Err(Error::Storage)
+        );
+        fixture.progress.stage = Stage::CriteriaApply;
+        assert_eq!(
+            health_with(&fixture.progress, Ok(()), &mut Unreadable).await,
+            Ok("apply-confirmation-needed")
+        );
     }
 }
