@@ -721,6 +721,7 @@ async fn graph_snapshot_contract() {
     assert!(dense["omitted"]["links"].as_u64().expect("omissions") > 0);
     api_contract(&store).await;
     sorting_contract(&store).await;
+    large_document_search(&store).await;
     store.pool().close().await;
     let before = store.calls();
     assert_eq!(
@@ -728,6 +729,86 @@ async fn graph_snapshot_contract() {
         Err(Error::Storage)
     );
     assert_eq!(store.calls() - before, 1, "storage failure does not retry");
+}
+
+async fn large_document_search(store: &Store) {
+    let fixture = tempfile::tempdir().expect("synthetic large document fixture");
+    let root = fixture.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("personal")).unwrap();
+    let tokens = "GraphSlowSearch Amber BIRCH cedar DUNE Ember FIR grove HAZEL";
+    for index in 0..64 {
+        let body = format!(
+            "# Large native {index}\n\n{}\n{tokens}\n",
+            "한글 MixedCase 본문 ".repeat(20_000)
+        );
+        std::fs::write(root.join(format!("personal/large-{index}.md")), body).unwrap();
+    }
+    let scopes = ["personal".parse().unwrap()];
+    let expected = inventory(&root, &scopes).unwrap();
+    store
+        .import_context(&root, &scopes, &expected.inventory_digest)
+        .await
+        .unwrap();
+    let imported: Vec<_> = (0..32)
+        .map(|index| {
+            let mut value = record(10_000 + index, Scope::Personal);
+            let body = format!(
+                "# Large Git {index}\n\n{}\n{tokens}\n",
+                "MixedCase body ".repeat(3_000)
+            );
+            value.digest = Some(digest(body.as_bytes()));
+            value.content = Some(body);
+            value
+        })
+        .collect();
+    store.apply_import(&imported).await.unwrap();
+    let q = "graphslowsearch AMBER birch CEDAR dune EMBER fir GROVE hazel";
+    // Exercise real large bodies under the normal five-second Store budget,
+    // including a small returned window; no test-only timeout or retries.
+    for limit in [1, MAX_GRAPH_NODES, MAX_GRAPH_NODES] {
+        let value = fetch(store, query(Scope::Personal, q, None, limit)).await;
+        assert_eq!(value["matched"], 96);
+        assert_eq!(value["eligible"]["nodes"], 96);
+        for item in value["nodes"].as_array().unwrap() {
+            assert_eq!(item["kind"], "document");
+            let excerpt = item["excerpt"].as_str().unwrap();
+            assert!(
+                excerpt.contains("GraphSlowSearch Amber BIRCH"),
+                "search remains case-insensitive and excerpts retain original case"
+            );
+        }
+    }
+    let empty = fetch(store, query(Scope::Personal, "", None, 1)).await;
+    assert!(
+        empty["nodes"][0]["excerpt"].is_null(),
+        "empty reads need no body excerpt"
+    );
+    let missing = fetch(
+        store,
+        query(Scope::Personal, "graphslowsearch absentword", None, 800),
+    )
+    .await;
+    assert_eq!(missing["matched"], 0, "all query terms remain required");
+    let metadata_first = fetch(store, query(Scope::Personal, "large-0.md hazel", None, 800)).await;
+    assert_eq!(metadata_first["matched"], 1);
+    assert!(
+        metadata_first["nodes"][0]["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("HAZEL"),
+        "excerpt skips a metadata-only first term and finds the next body hit"
+    );
+    let metadata_only = fetch(store, query(Scope::Personal, "large-0.md", None, 800)).await;
+    assert_eq!(metadata_only["matched"], 1);
+    assert!(
+        metadata_only["nodes"][0]["excerpt"].is_null(),
+        "a path-only match must not invent an excerpt"
+    );
+    let company = fetch(store, query(Scope::Meenseek, q, None, 800)).await;
+    assert_eq!(
+        company["matched"], 0,
+        "native and Git originals remain scope-bound"
+    );
 }
 
 async fn api_contract(store: &Store) {

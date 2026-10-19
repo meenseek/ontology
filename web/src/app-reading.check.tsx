@@ -408,6 +408,142 @@ async function check(size: number) {
   }
 }
 
+async function checkDocumentEditing() {
+  const originalFetch = window.fetch, originalConfirm = window.confirm, originalUrl = window.location.href, root = createRoot(host);
+  const documentId = `e_${"1".repeat(64)}`, targetId = `e_${"2".repeat(64)}`;
+  let revision = 1, topics = ["처음 태그"], linked = false, confirmations = 0, permitDiscard = false;
+  let failSave = false, failRead = false, graphReads = 0, detailReads = 0, writes = 0;
+  const calls: Call[] = [], revisions: number[] = [], history: object[] = [];
+  active = { size: 2, calls, phases: [], forbidden: [] };
+  const definition = { purpose: "합성 목적", include: "합성 포함", exclude: "합성 제외" };
+  const body = "# 합성 문서\n\n현재 문서 본문";
+  const json = (call: Call, value: unknown, status = 200) => {
+    const text = JSON.stringify(value); call.status = status; call.responseBytes = encode(text);
+    return new Response(text, { status, headers: { "content-type": "application/json" } });
+  };
+  const tag = () => host.querySelector<HTMLTextAreaElement>("#topics")!;
+  const select = () => host.querySelector<HTMLSelectElement>('select[aria-label="연결할 자료"]')!;
+  const panel = () => host.querySelector<HTMLElement>(".management-panel")!;
+  async function open() {
+    window.history.pushState(null, "", `/?scope=personal&focus=${documentId}`); window.dispatchEvent(new PopStateEvent("popstate"));
+    await until(() => !!host.querySelector(".documents .document-preview"), "standalone document opens");
+    button("관리").click(); await settle(); details("분류 수정").summary.click(); await settle();
+  }
+  try {
+    window.confirm = () => { confirmations++; return permitDiscard; };
+    window.fetch = async (input, options) => {
+      const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+      const payload = typeof options?.body === "string" ? JSON.parse(options.body) : null;
+      const operation = payload?.op ?? (url.pathname === "/api/graph" ? "graph" : url.pathname === "/api/session" ? "session" : url.pathname === "/api/records" ? "candidates" : url.pathname.endsWith("/classification") ? "classification" : url.pathname.endsWith("/links") ? "links" : "detail");
+      const call: Call = { operation, scope: payload?.scope ?? url.searchParams.get("scope"), status: 0, requestBytes: typeof options?.body === "string" ? encode(options.body) : 0, responseBytes: 0 };
+      calls.push(call);
+      if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (url.pathname === "/api/session") return json(call, { csrf: "synthetic-only", areas: [] });
+      if (url.pathname === "/api/graph") {
+        graphReads++;
+        const scope = url.searchParams.get("scope") as Scope, focus = url.searchParams.get("focus");
+        const nodes: GraphNode[] = [documentId, targetId].map((id, index) => ({ id, scope, kind: "document", label: index ? "other.md" : "fixture.md", title: index ? "다른 문서" : "합성 문서", revision: String(index ? 1 : revision), current: true, present: true, status: "ok", source_kind: "git" }));
+        const links = linked ? [{ source: documentId, target: targetId, kind: "related" as const, current: true }] : [];
+        return json(call, { ...graph([], scope, url.searchParams.get("q") ?? "", focus, false), nodes, links, totals: { documents: 2, memories: 0, markers: 0, links: links.length }, returned: { knowledge: 2, markers: 0, links: links.length }, matched: 2 });
+      }
+      if (url.pathname === `/api/records/${documentId}`) {
+        detailReads++;
+        if (failRead) { failRead = false; return json(call, { error: "synthetic detail failure" }, 503); }
+        return json(call, { id: documentId, scope: "personal", revision, current: true, areas: [], topics,
+          source: { kind: "git", repository: "/synthetic/documents", path: "fixture.md", status: "ok", last_success_at: "2026-01-01T00:00:00Z" }, projection: { content: body, present: true },
+          related: linked ? [{ id: targetId, path: "other.md" }] : [], history });
+      }
+      if (url.pathname === `/api/records/${documentId}/classification` || url.pathname === `/api/records/${documentId}/links`) {
+        assert(options?.method === "POST" && options.headers && payload.revision === revision, "each mutation uses the latest confirmed document revision");
+        revisions.push(payload.revision); writes++;
+        if (failSave) { failSave = false; return json(call, { error: "synthetic conflict" }, 409); }
+        if (operation === "classification") topics = payload.topics;
+        else { assert(payload.target_id === targetId, "link target stays in the fixture scope"); linked = !payload.remove; }
+        revision++; history.unshift({ id: revision, revision, kind: operation === "classification" ? "classification" : payload.remove ? "link-remove" : "link-add", previous: {}, confirmed: { areas: [], topics }, confirmed_at: "2026-01-01T00:00:00Z" });
+        return json(call, { ok: true });
+      }
+      if (url.pathname === "/api/records") return json(call, { items: [{ id: targetId, path: "other.md" }], total: 1, limit: 100, areas: [] });
+      if (url.pathname === "/api/brain" && payload.op === "document-subject") return json(call, { revision: 1, subject_id: null, subject_revision: null, reason: null, review_needed: false, current_source: { source_revision: "a".repeat(40), content_digest: "b".repeat(64) } });
+      if (url.pathname === "/api/brain" && payload.op === "subjects") return json(call, { items: [{ id: subjectId, name: "합성 목적", revision: 1, definition }], next_after: null });
+      throw new Error(`Unexpected standalone document request: ${url.pathname}`);
+    };
+    window.history.replaceState(null, "", `${window.location.pathname}?scope=personal&focus=${documentId}`); root.render(<App />);
+    await until(() => !!host.querySelector(".documents .document-preview"), "initial standalone detail");
+    button("관리").click(); await settle(); details("분류 수정").summary.click(); await settle();
+    enter(tag(), "보호할 태그 초안"); await settle(); const draft = tag();
+    button("읽기로 돌아가기").click(); await settle(); button("관리").click(); await settle();
+    assert(tag() === draft && tag().value === "보호할 태그 초안", "reading/management keeps the actual draft element");
+    button("닫기 ×").click(); await settle();
+    assert(Number(confirmations) === 1 && panel() && tag().value === "보호할 태그 초안", "close cancellation preserves a tag draft");
+    button("다시 불러오기", host.querySelector(".provenance")!).click(); await settle();
+    assert(Number(confirmations) === 2 && Number(detailReads) === 1 && tag().value === "보호할 태그 초안", "local reload cancellation makes no read and preserves the draft");
+    button("meenseek 사업").click(); await settle();
+    assert(Number(confirmations) === 3 && new URLSearchParams(window.location.search).get("scope") === "personal", "scope cancellation protects the standalone draft");
+    const unload = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(unload);
+    assert(unload.defaultPrevented, "standalone draft participates in beforeunload protection");
+    window.history.pushState(null, "", "/?scope=meenseek"); window.dispatchEvent(new PopStateEvent("popstate")); await settle();
+    assert(Number(confirmations) === 4 && tag().value === "보호할 태그 초안" && new URLSearchParams(window.location.search).get("scope") === "personal", "back/forward cancellation restores the route and draft");
+    failSave = true; button("분류 확인 저장").click();
+    await until(() => !!host.querySelector(".documents .error"), "classification conflict");
+    assert(tag().value === "보호할 태그 초안" && Number(writes) === 1 && Number(detailReads) === 1, "failed save retains the original revision and draft without refetch");
+    button("분류 확인 저장").click();
+    await until(() => Number(detailReads) === 2 && host.querySelector(".classification-summary")?.textContent === "보호할 태그 초안" && !panel()?.querySelector<HTMLButtonElement>('button[aria-label="관리 패널 닫기"]')?.disabled, "first successful classification refresh");
+    assert(Number(graphReads) === 2 && tag() === draft && !host.querySelector(".documents .error"), "successful save refetches detail and graph once without remounting the editor");
+    enter(tag(), "두 번째 저장"); await settle(); button("분류 확인 저장").click();
+    await until(() => Number(revision) === 3 && Number(detailReads) === 3 && host.querySelector(".classification-summary")?.textContent === "두 번째 저장", "second classification uses the refreshed revision");
+    button("분류·연결").click(); await settle(); button("목적 소속 관리").click();
+    await until(() => !!host.querySelector(".document-purpose textarea"), "concurrent purpose draft");
+    enter(host.querySelector<HTMLTextAreaElement>(".document-purpose textarea")!, "보존할 소속 이유"); enter(tag(), "연결 저장 동안 유지할 태그"); await settle();
+    details("자료 연결 수정").summary.click(); await settle(); button("찾기", host.querySelector(".related-search")!).click();
+    await until(() => select().options.length === 2, "link candidates"); select().value = targetId; select().dispatchEvent(new Event("change", { bubbles: true })); await settle();
+    failRead = true; button("연결 추가").click();
+    await until(() => !!host.querySelector(".documents .warning")?.textContent?.includes("저장은 완료"), "saved link with failed follow-up read");
+    assert(linked && Number(writes) === 4 && tag().value === "연결 저장 동안 유지할 태그" && button("소속 저장").disabled === false, "committed link retains the other two drafts");
+    const classificationSave = [...host.querySelectorAll<HTMLButtonElement>("button")].find(node => node.textContent === "분류 확인 저장")!;
+    assert(classificationSave.disabled, "a stale document revision cannot be used for another mutation");
+    const beforeRetry = confirmations;
+    button("다시 불러오기", host.querySelector(".documents .error")!).click();
+    await until(() => !host.querySelector(".documents .warning") && !classificationSave.disabled, "follow-up detail retry");
+    assert(Number(confirmations) === beforeRetry && tag().value === "연결 저장 동안 유지할 태그" && host.querySelector<HTMLTextAreaElement>(".document-purpose textarea")?.value === "보존할 소속 이유", "read retry preserves both drafts without prompting to discard");
+    button("연결 해제").click(); await until(() => !linked && Number(detailReads) === 6 && !panel().querySelector(".documents .related"), "link removal refreshes related data");
+    assert(tag().value === "연결 저장 동안 유지할 태그", "link removal does not reset classification input");
+    button("분류 확인 저장").click(); await until(() => Number(revision) === 6 && Number(detailReads) === 7 && !classificationSave.disabled, "classification after link uses current revision");
+    button("닫기 ×").click(); await settle(); assert(Number(confirmations) === beforeRetry + 1 && panel(), "saving document metadata cannot clear the separate purpose draft guard");
+    button("취소", host.querySelector(".document-purpose")!).click(); await settle(); button("닫기 ×").click();
+    await until(() => !panel(), "all saved/cancelled drafts can close");
+    await open(); assert(tag().value === "연결 저장 동안 유지할 태그", "reopening reads the latest committed tags");
+    enter(tag(), "명시적으로 버릴 초안"); await settle(); permitDiscard = true;
+    button("다시 불러오기", host.querySelector(".provenance")!).click();
+    await until(() => !!tag() && tag().value === "연결 저장 동안 유지할 태그", "accepted local discard rereads the record");
+    permitDiscard = false;
+    details("자료 연결 수정").summary.click(); await settle(); button("찾기", host.querySelector(".related-search")!).click();
+    await until(() => select().options.length === 2, "link candidates after reload"); select().value = targetId; select().dispatchEvent(new Event("change", { bubbles: true })); await settle();
+    const beforeLinkGuard = confirmations; button("닫기 ×").click(); await settle();
+    assert(Number(confirmations) === beforeLinkGuard + 1 && select().value === targetId, "an unsaved link selection is also protected");
+    select().value = ""; select().dispatchEvent(new Event("change", { bubbles: true })); await settle();
+    enter(tag(), "재선택으로 버릴 태그"); await settle();
+    button("분류·연결").click(); await settle(); button("목적 소속 관리").click();
+    await until(() => !!host.querySelector(".document-purpose textarea"), "purpose draft before same-document selection");
+    enter(host.querySelector<HTMLTextAreaElement>(".document-purpose textarea")!, "재선택으로 버릴 소속"); await settle();
+    const listToggle = [...host.querySelectorAll<HTMLButtonElement>("button")].find(node => node.textContent === "목록 보기");
+    listToggle?.click(); await settle();
+    const oldTag = tag(), beforeReselect = confirmations;
+    permitDiscard = true; host.querySelector<HTMLButtonElement>('.graph-list > button[aria-pressed="true"]')!.click();
+    await until(() => !!tag() && tag() !== oldTag && tag().value === "연결 저장 동안 유지할 태그", "same-document selection actually discards its drafts");
+    assert(Number(confirmations) === beforeReselect + 1 && !host.querySelector(".document-purpose form"), "same-identity discard resets both document and purpose editors");
+    const cleanUnload = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(cleanUnload);
+    assert(!cleanUnload.defaultPrevented, "the discarded same-document editor has no remaining dirty owner");
+    button("관리").click(); await settle(); details("분류 수정").summary.click(); await settle();
+    enter(tag(), "다시 보호할 태그"); await settle(); permitDiscard = false;
+    button("닫기 ×").click(); await settle();
+    assert(Number(confirmations) === beforeReselect + 2 && tag().value === "다시 보호할 태그", "a fresh draft regains protection after same-document discard");
+    enter(tag(), "연결 저장 동안 유지할 태그"); await settle(); button("닫기 ×").click(); await until(() => !panel(), "restoring the draft clears its guard");
+    assert(revisions.join(",") === "1,1,2,3,4,5", "consecutive writes use refreshed CAS revisions including an initial conflict");
+    active = null;
+    return { documentEditing: true, confirmations, revisions, graphReads, detailReads, writes, requestBytes: calls.reduce((sum, call) => sum + call.requestBytes, 0), responseBytes: calls.reduce((sum, call) => sum + call.responseBytes, 0), calls };
+  } finally { root.unmount(); window.fetch = originalFetch; window.confirm = originalConfirm; window.history.replaceState(null, "", originalUrl); }
+}
+
 async function checkPurposeDefinitionRefresh() {
   const originalFetch = window.fetch, originalUrl = window.location.href, originalConfirm = window.confirm, root = createRoot(host);
   const node: GraphNode = { id: subjectId, scope: "personal", kind: "subject", label: "합성 목적", revision: "1",
@@ -1614,8 +1750,14 @@ async function run() {
       output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
       return;
     }
+    if (new URLSearchParams(window.location.search).get("scenario") === "documents") {
+      results.push(await checkDocumentEditing());
+      output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
+      return;
+    }
     results.push(checkSummaryGlyphMotion());
     for (const size of [1, 20]) results.push(await check(size));
+    results.push(await checkDocumentEditing());
     results.push(await checkOriginalFolders());
     results.push(await checkPurposeAndOriginalBusy());
     results.push(await checkPurposeDefinitionRefresh());

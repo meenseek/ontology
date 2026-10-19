@@ -25,10 +25,12 @@ const message = (error: unknown) => error instanceof Error ? error.message : "�
 function useCommand({ scope, csrf, request, onBusy }: Pick<Props, "scope" | "csrf" | "request" | "onBusy">) {
   const mounted = useRef(true), controllers = useRef(new Set<AbortController>());
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; for (const c of controllers.current) c.abort(); onBusy(false); }; }, []);
-  return { mounted, command: async <T,>(body: object): Promise<T> => {
+  return { mounted, command: async <T,>(body: object, signal?: AbortSignal): Promise<T> => {
     const controller = new AbortController(); controllers.current.add(controller);
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
     try { return await request<T>("/api/brain", { method: "POST", headers: { "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify({ scope, ...body }), signal: controller.signal }); }
-    finally { controllers.current.delete(controller); }
+    finally { signal?.removeEventListener("abort", abort); controllers.current.delete(controller); }
   } };
 }
 export function SubjectPurpose(props: Props) {
@@ -70,6 +72,8 @@ export function DocumentPurpose(props: Props) {
   const [value, setValue] = useState<Membership | null>(null), [editing, setEditing] = useState(false);
   const [subject, setSubject] = useState(""), [reason, setReason] = useState("");
   const [subjects, setSubjects] = useState<Subject[]>([]), [next, setNext] = useState<string | null>(null), [query, setQuery] = useState("");
+  const [choicesLoading, setChoicesLoading] = useState(false), [choicesLoaded, setChoicesLoaded] = useState(false);
+  const choiceRequest = useRef<AbortController | null>(null);
   const [history, setHistory] = useState<History[] | null>(null), [before, setBefore] = useState<number | null>(null), [error, setError] = useState("");
   const pending = useRef(false);
   const dirty = editing && !!value && (subject !== (value.subject_id ?? "") || reason !== (value.reason ?? ""));
@@ -81,14 +85,22 @@ export function DocumentPurpose(props: Props) {
     finally { pending.current = false; if (mounted.current) onBusy(false); }
   }
   async function read() {
+    cancelChoices();
     const current = await command<Membership>({ op: "document-subject", document: identity });
     if (!mounted.current) return;
-    setValue(current); setSubject(current.subject_id ?? ""); setReason(current.reason ?? ""); setSubjects([]); setNext(null); setEditing(true);
+    setValue(current); setSubject(current.subject_id ?? ""); setReason(current.reason ?? ""); setSubjects([]); setNext(null); setChoicesLoaded(false); setEditing(true);
   }
+  function cancelChoices() { choiceRequest.current?.abort(); choiceRequest.current = null; setChoicesLoading(false); }
   async function choices(after?: string) {
-    const page = await command<Page<Subject>>({ op: "subjects", query, ...(after ? { after } : {}), limit: 20 });
-    if (!mounted.current) return;
-    setSubjects(items => after ? [...items, ...page.items.filter(item => !items.some(old => old.id === item.id))] : page.items); setNext(page.next_after ?? null);
+    if (choiceRequest.current || pending.current || !visible || disabled) return;
+    const controller = new AbortController(); choiceRequest.current = controller;
+    setChoicesLoading(true); setChoicesLoaded(true); setError("");
+    try {
+      const page = await command<Page<Subject>>({ op: "subjects", query, ...(after ? { after } : {}), limit: 20 }, controller.signal);
+      if (!mounted.current || controller.signal.aborted) return;
+      setSubjects(items => after ? [...items, ...page.items.filter(item => !items.some(old => old.id === item.id))] : page.items); setNext(page.next_after ?? null);
+    } catch (error) { if (mounted.current && !controller.signal.aborted) setError(message(error)); }
+    finally { if (choiceRequest.current === controller) { choiceRequest.current = null; if (mounted.current) setChoicesLoading(false); } }
   }
   const chosen = subjects.find(item => item.id === subject);
   const subjectRevision = chosen?.revision ?? (value?.subject_id === subject ? value.current_subject_revision : undefined);
@@ -121,15 +133,16 @@ export function DocumentPurpose(props: Props) {
     {value && !editing && <><Definition value={value.definition} />{value.reason && <p className="hint">분류 이유: {value.reason}</p>}</>}
     {!editing ? <button disabled={disabled} onClick={() => void run(read)}>목적 소속 관리</button> : value && <form onSubmit={event => { event.preventDefault(); void run(save); }}><fieldset disabled={disabled}>
       <Definition value={chosen?.definition ?? (value.subject_id === subject ? value.definition : null)} />
-      <label className="topic-label">목적 묶음<select value={subject} onFocus={() => { if (!subjects.length) void run(() => choices()); }} onChange={event => setSubject(event.target.value)}>
+      <label className="topic-label">목적 묶음<select value={subject} aria-busy={choicesLoading} onFocus={() => { if (!choicesLoaded) void choices(); }} onChange={event => setSubject(event.target.value)}>
         <option value="">미분류</option>{value.subject_id && !subjects.some(item => item.id === value.subject_id) && <option value={value.subject_id}>{value.subject_name ?? "현재 묶음"}</option>}
         {subjects.map(item => <option key={item.id} value={item.id}>{item.name}{!item.definition ? " · 정의 없음" : ""}</option>)}
       </select></label>
-      <div className="related-search"><input aria-label="목적 묶음 검색" maxLength={120} value={query} onChange={event => setQuery(event.target.value)} /><button type="button" onClick={() => void run(() => choices())}>묶음 찾기</button></div>
-      {next && <button type="button" onClick={() => void run(() => choices(next))}>묶음 더 보기</button>}
+      <div className="related-search"><input aria-label="목적 묶음 검색" maxLength={120} value={query} onChange={event => setQuery(event.target.value)} /><button type="button" disabled={choicesLoading} onClick={() => void choices()}>묶음 찾기</button></div>
+      {choicesLoading && <p role="status">목적 묶음을 불러오는 중…</p>}
+      {next && <button type="button" disabled={choicesLoading} onClick={() => void choices(next)}>묶음 더 보기</button>}
       <label className="topic-label">분류 이유<textarea rows={3} value={reason} maxLength={2048} onChange={event => setReason(event.target.value)} /></label>
-      <div className="action-row"><button disabled={!reason.trim() || bytes(reason) > 2048 || (!!subject && subjectRevision === undefined)}>소속 저장</button>
-      <button type="button" onClick={() => { setEditing(false); setError(""); }}>취소</button><button type="button" onClick={() => void run(read)}>현재 소속 다시 읽기</button></div>
+      <div className="action-row"><button disabled={choicesLoading || !reason.trim() || bytes(reason) > 2048 || (!!subject && subjectRevision === undefined)}>소속 저장</button>
+      <button type="button" onClick={() => { cancelChoices(); setEditing(false); setError(""); }}>취소</button><button type="button" onClick={() => void run(read)}>현재 소속 다시 읽기</button></div>
     </fieldset></form>}
     <div className="action-row"><button disabled={disabled} onClick={() => void run(() => past())}>소속 이력</button>
     {value && <button disabled={disabled || dirty || ["pending", "processing"].includes(value.grouping?.state ?? "")} onClick={() => void run(retry)}>목적 자동 재검토</button>}</div>

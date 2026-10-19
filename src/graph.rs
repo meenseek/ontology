@@ -66,6 +66,10 @@ macro_rules! original_content_updated_at {
         concat!("(SELECT v.recorded_at FROM context_material_versions v LEFT JOIN context_material_versions previous ON previous.material_id=v.material_id AND previous.revision=v.revision-1 WHERE v.material_id=", $alias, ".material_id AND v.content_digest IS DISTINCT FROM previous.content_digest ORDER BY v.revision DESC LIMIT 1)")
     };
 }
+// OFFSET 0 keeps PostgreSQL from inlining the per-document text normalization
+// into each term predicate. Large original bodies are normalized once per row.
+// Order terms before testing excerpt hits so LIMIT stops at the first hit rather
+// than calculating every body position and sorting the entire set afterward.
 const GRAPH_SQL: &str = concat!(
     r#"WITH terms AS MATERIALIZED (
  SELECT lower(word) AS term,ordinality FROM regexp_split_to_table(btrim($2),'[[:space:]]+') WITH ORDINALITY AS words(word,ordinality)
@@ -114,10 +118,15 @@ const GRAPH_SQL: &str = concat!(
  LEFT JOIN context_source_bindings cb ON cb.source_id=s.id
  LEFT JOIN context_materials cm ON cm.material_id=cb.material_id AND NOT cm.deleted AND NOT cm.restricted
  LEFT JOIN context_projection_versions cp ON cp.material_id=cm.material_id AND cp.revision=cm.revision
- CROSS JOIN LATERAL (SELECT CASE WHEN cm.material_id IS NULL THEN p.content ELSE cp.payload->>'body' END AS body) current_body
- CROSS JOIN LATERAL (SELECT lower(concat(s.path,' ',cm.path,' ',cm.search_text,' ',CASE WHEN cm.material_id IS NULL THEN p.content ELSE concat(cp.payload->>'title',' ',cp.payload->>'body',' ',cp.payload->>'aliases') END,' ',
-   (SELECT string_agg(t.name,' ') FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id WHERE et.scope=e.scope AND et.entity_id=e.id))) AS text) search_text
- LEFT JOIN LATERAL (SELECT strpos(lower(current_body.body),term) AS at FROM terms WHERE strpos(lower(current_body.body),term)>0 ORDER BY ordinality LIMIT 1) excerpt_hit ON true
+ CROSS JOIN LATERAL (SELECT CASE WHEN $2<>'' THEN CASE WHEN cm.material_id IS NULL THEN p.content ELSE cp.payload->>'body' END END AS body,
+ CASE WHEN $2<>'' THEN lower(CASE WHEN cm.material_id IS NULL THEN p.content ELSE cp.payload->>'body' END) END AS lower_body OFFSET 0) current_body
+ CROSS JOIN LATERAL (SELECT CASE WHEN $2<>'' THEN lower(concat(s.path,' ',cm.path,' ',cm.search_text,' ',CASE WHEN cm.material_id IS NULL THEN p.content ELSE concat(cp.payload->>'title',' ',cp.payload->>'body',' ',cp.payload->>'aliases') END,' ',
+   (SELECT string_agg(t.name,' ') FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id WHERE et.scope=e.scope AND et.entity_id=e.id))) END AS text OFFSET 0) search_text
+ LEFT JOIN LATERAL (
+ SELECT hit.at FROM (SELECT term FROM terms ORDER BY ordinality OFFSET 0) ordered_terms
+ CROSS JOIN LATERAL (SELECT strpos(current_body.lower_body,term) AS at OFFSET 0) hit
+ WHERE hit.at>0 LIMIT 1
+ ) excerpt_hit ON true
  WHERE e.scope=$1 AND (cb.source_id IS NULL OR (cm.material_id IS NOT NULL AND cm.path LIKE '%.md'
  AND cp.payload->>'status' IN ('searchable','unavailable') AND cp.payload->>'source_digest'=cm.content_digest))
  UNION ALL
@@ -128,10 +137,17 @@ const GRAPH_SQL: &str = concat!(
  'created_at',m.created_at,'content_updated_at',"#,
     original_content_updated_at!("m"),
     r#",
- 'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(p.payload->>'body' FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END),
- NOT EXISTS(SELECT 1 FROM terms WHERE strpos(lower(concat(m.path,' ',m.search_text,' ',p.payload->>'title',' ',p.payload->>'body')),term)=0)
+ 'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(content.body FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END),
+ NOT EXISTS(SELECT 1 FROM terms WHERE strpos(content.search_text,term)=0)
  FROM context_materials m LEFT JOIN context_projection_versions p USING(material_id,revision)
- LEFT JOIN LATERAL (SELECT strpos(lower(p.payload->>'body'),term) AS at FROM terms WHERE strpos(lower(p.payload->>'body'),term)>0 ORDER BY ordinality LIMIT 1) excerpt_hit ON true
+ CROSS JOIN LATERAL (SELECT CASE WHEN $2<>'' THEN p.payload->>'body' END AS body,
+ CASE WHEN $2<>'' THEN lower(p.payload->>'body') END AS lower_body,
+ CASE WHEN $2<>'' THEN lower(concat(m.path,' ',m.search_text,' ',p.payload->>'title',' ',p.payload->>'body')) END AS search_text OFFSET 0) content
+ LEFT JOIN LATERAL (
+ SELECT hit.at FROM (SELECT term FROM terms ORDER BY ordinality OFFSET 0) ordered_terms
+ CROSS JOIN LATERAL (SELECT strpos(content.lower_body,term) AS at OFFSET 0) hit
+ WHERE hit.at>0 LIMIT 1
+ ) excerpt_hit ON true
  WHERE $1='personal' AND NOT m.deleted AND NOT m.restricted
  AND m.path LIKE '%.md' AND p.payload->>'status' IN ('searchable','unavailable')
  AND p.payload->>'source_digest'=m.content_digest

@@ -310,19 +310,23 @@ async function purposeManagement() {
   const stub = new Stub(0), root = createRoot(host), startChecks = checks;
   const material = "00000000-0000-4000-8000-000000000101";
   const node = { id: `c_${material}`, material_id: material, scope: "personal" as const, kind: "document" as const, label: "합성 원문" };
-  let groupRevision = 1, membershipRevision = 1, busy = false, dirty = false, changed = 0, failure: string | undefined, autoState = "suggested";
+  let groupRevision = 1, membershipRevision = 1, busy = false, dirty = false, changed = 0, failure: string | undefined, autoState = "suggested", emptyChoices = false;
   const definition = () => ({ purpose: `현재 목적 ${groupRevision}`, include: "합성 포함", exclude: "합성 제외" });
   const membership = () => ({ revision: membershipRevision, subject_id: "fixture-purpose", subject_revision: groupRevision,
     current_subject_revision: groupRevision, subject_name: "합성 목적", definition: definition(), reason: "확인한 목적", review_needed: autoState !== "assigned",
     grouping: { mode: "auto", state: autoState, suggestions: { candidate_ids: ["fixture-purpose"], candidate_names: { "fixture-purpose": "합성 후보" } }, reason: "분류 후보를 확인해 주세요." },
     current_source: { source_revision: "1", content_digest: "a".repeat(64) } });
-  const render = () => flushSync(() => root.render(<div id="fixture-surface"><DocumentPurpose node={node} scope="personal" csrf="synthetic-only" request={stub.request}
-    visible disabled={false} onBusy={value => { busy = value; }} onDirtyChange={value => { dirty = value; }} onChange={() => { changed++; }} /></div>));
+  function PurposeScene() {
+    const [disabled, setDisabled] = useState(false);
+    return <div id="fixture-surface"><DocumentPurpose node={node} scope="personal" csrf="synthetic-only" request={stub.request}
+      visible disabled={disabled} onBusy={value => { busy = value; setDisabled(value); }} onDirtyChange={value => { dirty = value; }} onChange={() => { changed++; }} /></div>;
+  }
+  const render = () => flushSync(() => root.render(<PurposeScene />));
   stub.reply = (op, body) => {
     assert(body.scope === "personal", "purpose stays in the requested app scope");
     if (op === "subjects") {
       assert(body.limit === 20, "selector request is bounded");
-      return { items: [{ id: "fixture-purpose", name: "합성 목적", revision: groupRevision, definition: definition() }], next_after: null };
+      return { items: emptyChoices ? [] : [{ id: "fixture-purpose", name: "합성 목적", revision: groupRevision, definition: definition() }], next_after: null };
     }
     const identity = ["document-subject-set", "document-grouping-retry"].includes(op) ? (body.document as { identity: object }).identity : body.document;
     assert(JSON.stringify(identity) === JSON.stringify({ material_id: material }), "native purpose APIs use canonical material, never a display alias");
@@ -349,7 +353,14 @@ async function purposeManagement() {
     render(); await settle(); counts(stub, {}, "purpose detail makes no eager API reads");
     await button("목적 소속 관리");
     assert(host.textContent?.includes("후보 검토 필요") && host.textContent?.includes("합성 후보"), "automatic candidate state and names are visible after explicit read");
-    element<HTMLSelectElement>(".document-purpose select").focus(); await settle();
+    stub.next("subjects", "hold");
+    const selector = element<HTMLSelectElement>(".document-purpose select");
+    selector.focus(); await settle();
+    assert(document.activeElement === selector && !selector.closest("fieldset")!.disabled && !busy, "candidate reads keep the focused selector enabled without global mutation busy");
+    selector.blur(); selector.focus(); await settle();
+    assert(stub.count("subjects") === 1, "repeated focus cannot duplicate an in-flight candidate read");
+    stub.release(); await settle();
+    assert(document.activeElement === selector, "candidate completion retains keyboard focus");
     counts(stub, { "document-subject": 1, subjects: 1 }, "explicit read and selector only");
     await type(".document-purpose textarea", "재확인 이유"); assert(dirty, "purpose draft reports dirty");
     assert([...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "목적 자동 재검토")?.disabled, "automatic retry cannot discard a manual draft");
@@ -366,6 +377,20 @@ async function purposeManagement() {
     counts(stub, { "document-subject": 2, subjects: 2, "document-subject-set": 2, "document-subject-history": 2 }, "bounded explicit purpose workflow");
     await button("목적 자동 재검토");
     assert(host.textContent?.includes("분류 대기") && [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "목적 자동 재검토")?.disabled, "one explicit automatic retry is visible and cannot be repeated while pending");
+    await button("목적 소속 관리");
+    stub.next("subjects", "fail");
+    const retrySelector = element<HTMLSelectElement>(".document-purpose select");
+    retrySelector.focus(); await settle();
+    assert(!!host.querySelector(".error") && document.activeElement === retrySelector && !busy, "failed candidate read retains focus and exposes its error");
+    const attempts = stub.count("subjects");
+    retrySelector.blur(); retrySelector.focus(); await settle();
+    assert(stub.count("subjects") === attempts, "failed candidate reads require explicit retry");
+    emptyChoices = true; await button("묶음 찾기");
+    retrySelector.focus(); await settle(); retrySelector.blur(); retrySelector.focus(); await settle();
+    assert(stub.count("subjects") === attempts + 1 && !busy, "a successful empty result is cached across focus changes");
+    stub.next("subjects", "hold"); await button("묶음 찾기"); await button("취소");
+    assert(stub.calls.at(-1)?.state === "aborted" && !busy, "cancel aborts the candidate lookup without holding navigation busy");
+    stub.release(); await settle();
     stub.next("document-subject", "hold"); await button("목적 소속 관리"); assert(busy, "held purpose request owns busy");
     flushSync(() => root.render(<div id="fixture-surface" />)); await settle();
     assert(!busy && stub.calls.at(-1)?.state === "aborted", "unmount aborts and releases its own busy");
@@ -525,7 +550,15 @@ async function main() {
       counts(stub, { "document-read": 1 }, "문서 관리·탭 복귀 추가 조회 없음");
       if (size > 0) await toggle("분류·연결 변경 이력");
       counts(stub, { "document-read": 1 }, "이미 받은 문서 이력 사용");
-      await button("다시 불러오기");
+      const originalConfirm = window.confirm;
+      let confirmations = 0;
+      try {
+        window.confirm = () => { confirmations++; return false; };
+        await button("다시 불러오기");
+        assert(confirmations === 1 && topics.value === "보존할 문서 태그" && stub.count("document-read") === 1, "local reload cancellation protects the tag draft without another read");
+        window.confirm = () => true;
+        await button("다시 불러오기");
+      } finally { window.confirm = originalConfirm; }
       await waitFor(() => stub.count("document-read") === 2 && !!host.querySelector(".document-preview"), "문서 로컬 reload");
       counts(stub, { "document-read": 2 }, "로컬 reload 1회");
       assert(stub.documentChanges === 0, "로컬 읽기 재시도는 상위 onChange를 호출하지 않음");

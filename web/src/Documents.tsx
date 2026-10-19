@@ -60,8 +60,11 @@ export default function Documents({ visible, managing, scope, id, csrf, allAreas
   const [relatedQuery, setRelatedQuery] = useState(""), [candidates, setCandidates] = useState<RecordItem[]>([]), [target, setTarget] = useState("");
   const [saving, setSaving] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true), [candidateTotal, setCandidateTotal] = useState<number | null>(null);
-  const [refresh, setRefresh] = useState(0);
+  const [refresh, setRefresh] = useState(0), [stale, setStale] = useState(false), [originalDirty, setOriginalDirty] = useState(false);
   const hasOriginal = !!contextScope && !!contextPath;
+  const classificationDirty = !!detail && (areas.length !== detail.areas.length || areas.some(area => !detail.areas.includes(area)) || topics !== detail.topics.join("\n"));
+  const dirty = classificationDirty || !!target || originalDirty;
+  useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false); }, [dirty, onDirtyChange]);
   const mounted = useRef(true), pending = useRef(false), requests = useRef(new Set<AbortController>());
   useEffect(() => {
     mounted.current = true;
@@ -77,7 +80,20 @@ export default function Documents({ visible, managing, scope, id, csrf, allAreas
     }).catch(e => { if (!controller.signal.aborted) setError(message(e)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [scope, id, request, visible, refresh]);
-  function reload() { setLoading(true); setDetail(null); setError(""); setRefresh(value => value + 1); }
+  async function reread(signal: AbortSignal) {
+    const current = await request<Detail>(`/api/records/${id}?scope=${scope}`, { signal });
+    if (mounted.current) { setDetail(current); setStale(false); }
+    return current;
+  }
+  function reload() {
+    if (pending.current) return;
+    // A committed mutation whose follow-up read failed needs a new revision,
+    // not another write or the destruction of the other form's draft.
+    if (stale) { void run(async signal => { await reread(signal); }); return; }
+    if (dirty && !window.confirm("저장하지 않은 초안을 버리고 다시 불러올까요?")) return;
+    setTarget(""); setCandidates([]); setCandidateTotal(null); setRelatedQuery("");
+    setLoading(true); setDetail(null); setError(""); setNotice(""); setRefresh(value => value + 1);
+  }
   const areaName = (id: string) => allAreas.find(area => area.id === id)?.label ?? id;
   function historyValue(value: unknown): string {
     if (!value || typeof value !== "object") return "기록 없음";
@@ -96,10 +112,19 @@ export default function Documents({ visible, managing, scope, id, csrf, allAreas
     finally { requests.current.delete(controller); pending.current = false; if (mounted.current) { setSaving(false); onBusy(false); } }
   }
   async function save(kind: "classification" | "links", body: object) {
-    if (!detail) return;
+    if (!detail || stale) return;
     await run(async signal => {
       await request(`/api/records/${id}/${kind}?scope=${scope}`, { method: "POST", headers: { "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify({ revision: detail.revision, ...body }), signal });
-      if (mounted.current) { setNotice(kind === "classification" ? "분류 확인을 저장했습니다." : "자료 연결을 변경했습니다."); onChange(); }
+      if (!mounted.current) return;
+      setStale(true);
+      if (kind === "classification") {
+        const saved = body as { areas: string[]; topics: string[] };
+        setDetail({ ...detail, ...saved }); setAreas(saved.areas); setTopics(saved.topics.join("\n"));
+      } else if (!(body as { remove: boolean }).remove) setTarget("");
+      setNotice(kind === "classification" ? "분류 확인을 저장했습니다." : "자료 연결을 변경했습니다.");
+      onChange();
+      const current = await reread(signal);
+      if (mounted.current && kind === "classification") { setAreas(current.areas); setTopics(current.topics.join("\n")); }
     });
   }
   async function findRelated(event: FormEvent) {
@@ -112,8 +137,9 @@ export default function Documents({ visible, managing, scope, id, csrf, allAreas
   return <section className="documents" aria-busy={loading}>
     {error && <p className="error" role="alert">{error}<button disabled={saving} onClick={reload}>다시 불러오기</button></p>}
     {notice && <p className="notice">{notice}</p>}
+    {stale && !saving && <p className="warning">저장은 완료했지만 최신 자료를 읽지 못했습니다. 다시 불러온 뒤 계속 저장할 수 있습니다. 다른 입력 중인 값은 유지됩니다.</p>}
     {loading ? <p role="status">자료를 불러오는 중…</p> : detail && <>
-      {hasOriginal ? <OriginalDetail scope={contextScope!} path={contextPath!} request={request} csrf={csrf} onBusy={onBusy} onChange={onChange} onDirtyChange={onDirtyChange} /> : <>
+      {hasOriginal ? <OriginalDetail scope={contextScope!} path={contextPath!} request={request} csrf={csrf} onBusy={onBusy} onChange={onChange} onDirtyChange={setOriginalDirty} /> : <>
         <p className="source-identity">{detail.source.kind === "vault" ? "Vault" : detail.source.kind === "context" ? "Context" : "Git"} 문서</p>
         {detail.source.status === "failed" && <p className="error">최근 출처 확인에 실패했습니다. 아래 내용은 마지막으로 성공한 기록입니다.</p>}
         {!detail.projection.present && <p className="warning">등록한 경로의 부재를 확인했습니다. 마지막 원문과 사용자의 확인 기록은 보존되어 있습니다.</p>}
@@ -144,17 +170,17 @@ export default function Documents({ visible, managing, scope, id, csrf, allAreas
             {scope === "meenseek" && <div className="area-options">{allAreas.map(area => <label key={area.id}><input type="checkbox" checked={areas.includes(area.id)} onChange={event => setAreas(current => event.target.checked ? [...current, area.id] : current.filter(id => id !== area.id))} />{area.label}</label>)}</div>}
             <label className="topic-label" htmlFor="topics">문서 태그 · 한 줄에 하나, 최대 10개</label>
             <textarea id="topics" value={topics} onChange={event => setTopics(event.target.value)} rows={3} maxLength={810} placeholder="태그가 없으면 비워두세요." />
-            <button className="primary" type="submit">{saving ? "저장 중…" : "분류 확인 저장"}</button>
+            <button className="primary" type="submit" disabled={stale}>{saving ? "저장 중…" : "분류 확인 저장"}</button>
           </fieldset>
         </form>
       </details>
       <details className="section">
         <summary>자료 연결 수정</summary>
         <p className="hint">같은 범위의 문서 사이에 관련 자료 관계를 추가하거나 해제합니다.</p>
-        {detail.related.length > 0 && <ul className="related">{detail.related.map(item => <li key={item.id}><span>{item.path}</span><button disabled={saving} aria-label={`${item.path} 연결 해제`} onClick={() => void save("links", { target_id: item.id, remove: true })}>연결 해제</button></li>)}</ul>}
+        {detail.related.length > 0 && <ul className="related">{detail.related.map(item => <li key={item.id}><span>{item.path}</span><button disabled={saving || stale} aria-label={`${item.path} 연결 해제`} onClick={() => void save("links", { target_id: item.id, remove: true })}>연결 해제</button></li>)}</ul>}
         <form className="related-search" onSubmit={findRelated}><input aria-label="관련 자료 검색" maxLength={120} value={relatedQuery} onChange={event => setRelatedQuery(event.target.value)} placeholder="연결할 자료 검색" /><button disabled={saving}>찾기</button></form>
         {candidateTotal !== null && <p className="hint">검색 결과 {candidateTotal}개 · 앞의 100개까지 연결 후보로 표시합니다. 경로나 검색어를 좁혀 찾을 수 있습니다.</p>}
-        <div className="link-controls"><select aria-label="연결할 자료" value={target} disabled={saving} onChange={event => setTarget(event.target.value)}><option value="">연결할 자료 선택</option>{candidates.map(item => <option key={item.id} value={item.id}>{item.path}</option>)}</select><button disabled={!target || saving} onClick={() => void save("links", { target_id: target, remove: false })}>연결 추가</button></div>
+        <div className="link-controls"><select aria-label="연결할 자료" value={target} disabled={saving} onChange={event => setTarget(event.target.value)}><option value="">연결할 자료 선택</option>{candidates.map(item => <option key={item.id} value={item.id}>{item.path}</option>)}</select><button disabled={!target || saving || stale} onClick={() => void save("links", { target_id: target, remove: false })}>연결 추가</button></div>
       </details>
       {detail.history.length > 0 && <details className="section">
         <summary>분류·연결 변경 이력</summary>
