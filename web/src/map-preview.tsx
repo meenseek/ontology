@@ -299,11 +299,15 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
         button("미니맵 접기").click(); await settled();
       }
       if (group === 0) {
-        button("전체 보기").click(); await settled();
+        const mode = button("전체 보기"); mode.focus(); mode.click(); await settled();
+        assert(document.activeElement === mode && mode === button("나눠 보기"), "전체 보기 전환에서 키보드 초점이 사라졌습니다.");
         inspect(0, 225);
         const lengths = labels().map(label => +label.style.getPropertyValue("--leader-length").replace("px", ""));
         assert(lengths.every(length => length <= 38), "전체 보기의 제목 지시선이 너무 깁니다.");
         results.push({ fullMembers: 225, titles: labels().length, longestGuide: Math.round(Math.max(0, ...lengths)) });
+        mode.click(); await settled();
+        assert(document.activeElement === mode && mode === button("전체 보기"), "나눠 보기 전환에서 키보드 초점이 사라졌습니다.");
+        results.push({ modeToggleFocusPreserved: true });
       }
       button("묶음 접기").click(); await settled();
     }

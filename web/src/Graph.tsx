@@ -1461,10 +1461,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
           <button type="button" disabled={disclosure.index === 0} onClick={() => setCorePage(disclosure.index - 1)}>이전</button>
           <span className="graph-core-page">{disclosure.index + 1}/{disclosure.pages}</span>
           <button type="button" disabled={disclosure.index + 1 === disclosure.pages} onClick={() => setCorePage(disclosure.index + 1)}>다음</button>
-          <button type="button" onClick={() => setShowAllCore(true)}>전체 보기</button>
         </>}
-        {showAllCore && cores.find(core => core.hub === activeExpandedCore && core.count > 36) &&
-          <button type="button" onClick={() => setShowAllCore(false)}>나눠 보기</button>}
+        {(disclosure?.hub === activeExpandedCore || showAllCore && cores.some(core => core.hub === activeExpandedCore && core.count > 36)) &&
+          <button type="button" onClick={() => setShowAllCore(value => !value)}>{showAllCore ? "나눠 보기" : "전체 보기"}</button>}
       </div>
     </div>}
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>근접 묶음 {spatialReveal.members.size}개 접기</button>}

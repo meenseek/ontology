@@ -12,7 +12,7 @@ export type Item = Input & { id: string; scope: Scope; revision: number; status:
 type Page<T> = { items: T[]; next_after?: string | null; next_before_revision?: number | null };
 type History = { revision: number; status: string; subject_id: string | null; document: Input & { curation?: Curation }; changed_at: string };
 type EvidenceSnapshot = { available: boolean; content: string | null; evidence: Evidence };
-type Props = { latestNode?: GraphNode | null; managing?: boolean; initialItem?: Item | null; visible: boolean; scope: Scope; csrf: string; request: Request; selectedId: string | null; onBusy: (busy: boolean) => void; onChange: (item: Item | null) => void; onBackgroundChange?: (item: Item, contentChanged: boolean) => void; onNavigate: (id: string) => void; onMetadataChange: () => void };
+type Props = { latestNode?: GraphNode | null; managing?: boolean; initialItem?: Item | null; visible: boolean; scope: Scope; csrf: string; request: Request; selectedId: string | null; onBusy: (busy: boolean) => void; onChange: (item: Item | null) => void; onBackgroundChange?: (item: Item, contentChanged: boolean) => void; onNavigate: (id: string) => void; onMetadataChange: () => void; onDirtyChange?: (dirty: boolean, item: Item | null) => void };
 const blank = (): Input => ({ kind: "record", title: "", body: "", subject_id: null, effective_from: null, effective_until: null, evidence: [] });
 const message = (e: unknown) => e instanceof Error ? e.message : "요청에 실패했습니다.";
 const epoch = (value: string) => value ? Math.floor(new Date(value).getTime() / 1000) : null;
@@ -41,7 +41,7 @@ function EvidenceLocation({ evidence }: { evidence: Evidence }) {
 function Validity({ value }: { value: Pick<Input, "effective_from" | "effective_until"> }) {
   return <dl><dt>유효 시작</dt><dd>{date(value.effective_from)}</dd><dt>유효 종료</dt><dd>{date(value.effective_until)}</dd></dl>;
 }
-export default function Memory({ latestNode, managing = false, initialItem, visible, scope, csrf, request, selectedId, onBusy, onChange, onBackgroundChange, onNavigate, onMetadataChange }: Props) {
+export default function Memory({ latestNode, managing = false, initialItem, visible, scope, csrf, request, selectedId, onBusy, onChange, onBackgroundChange, onNavigate, onMetadataChange, onDirtyChange }: Props) {
   const seed = initialItem?.scope === scope && initialItem.id === selectedId ? initialItem : null;
   const [subjects, setSubjects] = useState<Subject[]>([]), [subjectNext, setSubjectNext] = useState<string | null>(null);
   const subjectsLoaded = useRef(false), subjectsFailed = useRef(false), readFailed = useRef(false);
@@ -59,6 +59,10 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
   const [subjectName, setSubjectName] = useState("");
   const [subjectDefinition, setSubjectDefinition] = useState(blankDefinition);
   const definingSubject = Object.values(subjectDefinition).some(value => !!value.trim());
+  const dirty = editing && JSON.stringify(cleanInput(draft)) !== JSON.stringify(cleanInput(selected ? draftFromItem(selected) : blank()))
+    || !!subjectName || definingSubject || !selected && proposal;
+  useEffect(() => { onDirtyChange?.(dirty, selected); }, [dirty, selected, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false, null), [onDirtyChange]);
   const [evidenceView, setEvidenceView] = useState<string | null>(null);
   const [evidenceSnapshots, setEvidenceSnapshots] = useState<Record<string, EvidenceSnapshot>>({});
   const [busy, setBusy] = useState(false), [loading, setLoading] = useState(!!selectedId && !seed), [error, setError] = useState(""), [notice, setNotice] = useState("");
@@ -123,6 +127,7 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
     finally { pending.current = false; if (mounted.current) { setBusy(false); onBusy(false); } }
   }
   async function choose(id: string) {
+    if (dirty && !window.confirm("저장하지 않은 초안을 버리고 다시 읽을까요?")) return;
     await run(async () => { const value = await command<Item>({ op: "read", id }); if (!mounted.current) return; active.current = id; setSelected(value); setDraft(draftFromItem(value)); setEditing(false); setHistory(null); setHistoryNext(null); setChoices([]); setForgetting(false); });
   }
   function change(patch: Partial<Input>) { setDraft((v) => ({ ...v, ...patch, ...(patch.title !== undefined ? { title_from_body: false } : {}) })); if (!selected) setKey(crypto.randomUUID()); }

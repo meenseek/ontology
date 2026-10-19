@@ -86,6 +86,8 @@ function graph(items: Item[], scope: Scope, query: string, focus: string | null,
 }
 
 async function check(size: number) {
+  const originalConfirm = window.confirm;
+  let confirmations = 0, permitDiscard = false, failCorrection = false;
   const originalMatchMedia = window.matchMedia;
   const narrowMedia = Object.assign(new EventTarget(), { matches: false, media: "(max-width: 900px)", onchange: null, addListener() {}, removeListener() {} });
   window.matchMedia = query => query === narrowMedia.media ? narrowMedia as MediaQueryList : originalMatchMedia.call(window, query);
@@ -101,7 +103,7 @@ async function check(size: number) {
   };
   let releaseGraph!: () => void;
   const initialGraph = new Promise<void>(resolve => { releaseGraph = resolve; });
-  let firstGraph = true, failSync = false, subjectExists = true;
+  let firstGraph = true, failSync = false, subjectExists = true, screenVisible = true;
   function phase(name: string, start: number, expected: Record<string, number>) {
     const current = calls.slice(start), counts: Record<string, number> = {};
     for (const call of current) counts[call.operation] = (counts[call.operation] ?? 0) + 1;
@@ -119,7 +121,8 @@ async function check(size: number) {
     await until(() => idleGraph() && bodyIs(records[scope].get(focus)!.body), `route ${scope}`);
   }
   try {
-    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    window.confirm = () => { confirmations++; return permitDiscard; };
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => screenVisible ? "visible" : "hidden" });
     window.fetch = async (input, options) => {
       const raw = input instanceof Request ? input.url : String(input);
       const url = new URL(raw, window.location.href);
@@ -143,7 +146,8 @@ async function check(size: number) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const scope = url.searchParams.get("scope") as Scope;
         assert(scope === "meenseek" || scope === "personal", "Graph scope");
-        return response(graph([...records[scope].values()], scope, url.searchParams.get("q") ?? "", url.searchParams.get("focus"), subjectExists));
+        const query = url.searchParams.get("q") ?? "";
+        return response(graph(query === "결과 없는 합성 검색" ? [] : [...records[scope].values()], scope, query, url.searchParams.get("focus"), query === "결과 없는 합성 검색" ? false : subjectExists));
       }
       if (url.pathname === "/api/sync" && method === "GET") {
         if (failSync) { failSync = false; return response({ error: "synthetic failure" }, 503); }
@@ -164,6 +168,7 @@ async function check(size: number) {
           return response({ id: subjectId, deleted: true, ungrouped: 0 });
         }
         if (body.op === "remember" || body.op === "correct") {
+          if (body.op === "correct" && failCorrection) { failCorrection = false; return response({ error: "synthetic conflict" }, 409); }
           const prior = body.op === "correct" ? records[scope].get(body.id) : item(999, scope);
           assert(prior, "Corrected record exists");
           if (body.op === "correct") assert(body.revision === prior.revision, "Correction revision");
@@ -270,16 +275,102 @@ async function check(size: number) {
     await settle();
     const correction = host.querySelector<HTMLFormElement>(".memory-editor form")!;
     enter(correction.querySelector<HTMLTextAreaElement>("textarea")!, `정정 본문 ${size}`);
-    await settle(); start = calls.length; correction.requestSubmit();
+    enter(correction.querySelector<HTMLInputElement>("input")!, `정정 제목 ${size}`);
+    await settle(); start = calls.length;
+    const correctionPreserved = () => host.querySelector(".memory-editor form") === correction
+      && correction.querySelector("textarea")?.value === `정정 본문 ${size}` && correction.querySelector("input")?.value === `정정 제목 ${size}`;
+    for (const query of ["찾을 자료", "결과 없는 합성 검색"]) {
+      enter(host.querySelector<HTMLInputElement>("#graph-search")!, query);
+      host.querySelector<HTMLFormElement>(".map-search")!.requestSubmit();
+      await until(() => idleGraph() && window.location.search.includes("q="), "search while correcting");
+      assert(correctionPreserved() && !window.location.search.includes("focus="), "Correction survives search without adding its record to the results");
+      if (query === "결과 없는 합성 검색") assert(!!host.querySelector(".map-empty"), "A dirty record does not turn an empty search into a match");
+      button(query === "결과 없는 합성 검색" ? "검색·조건 초기화" : "검색 해제").click();
+      await until(() => idleGraph() && !window.location.search.includes("q="), "clear search while correcting");
+      assert(correctionPreserved(), "Clearing search preserves the same correction editor and fields");
+    }
+    assert(confirmations === 0, "Search and clear never ask to discard a preserved draft");
+    phase("correction search and empty results preserve draft without rereading", start, { graph: 4 });
+    start = calls.length;
+    const unload = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(unload);
+    assert(unload.defaultPrevented, "A correction participates in the shared page-exit guard");
+    button("닫기 ×").click(); await settle();
+    button("내 지식").click(); await settle();
+    host.querySelector<HTMLButtonElement>(".graph-list > button")!.click(); await settle();
+    details("보기 설정").summary.click(); await settle(); button("새로고침").click(); await settle();
+    assert(Number(confirmations) === 4 && correctionPreserved(), "Declining close, scope, selection and refresh retains the correction");
+    phase("declined correction exits perform no reads or writes", start, {});
+    failCorrection = true; start = calls.length; correction.requestSubmit();
+    await until(() => !!host.querySelector(".memory-editor .error,.brain .error"), "correction conflict");
+    assert(correctionPreserved(), "A failed save retains the same correction editor");
+    button("현재 기록 다시 읽기").click(); await settle();
+    assert(Number(confirmations) === 5 && correctionPreserved(), "Declining conflict recovery retains the dirty draft");
+    phase("failed correction and declined reread", start, { correct: 1 });
+    start = calls.length; correction.requestSubmit();
     await until(() => idleGraph() && bodyIs(`정정 본문 ${size}`), "correct response reused");
     phase("correct response handoff", start, { correct: 1, graph: 1 });
-    details("보기 설정").summary.click(); await settle();
+    if (!details("보기 설정").element.open) details("보기 설정").summary.click(); await settle();
     start = calls.length; button("새로고침").click();
     await until(() => idleGraph() && calls.slice(start).some(call => call.operation === "read") && bodyIs(`정정 본문 ${size}`), "explicit fresh read");
     phase("explicit refresh clears write seed", start, { graph: 1, read: 1 });
+    assert(Number(confirmations) === 5, "Successful save clears the dirty guard before explicit refresh");
+    button("관리", host.querySelector(".panel-actions")!).click(); await settle(); button("기록 정정").click(); await settle();
+    enter(host.querySelector<HTMLTextAreaElement>(".memory-editor form textarea")!, "버릴 정정 초안"); await settle();
+    permitDiscard = true; button("닫기 ×").click(); await settle(); permitDiscard = false;
+    assert(Number(confirmations) === 6 && !host.querySelector(".management-panel"), "Confirmed close discards the draft");
+    const cleanUnload = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(cleanUnload);
+    assert(!cleanUnload.defaultPrevented, "Unmounting a discarded editor clears the page-exit guard");
+    const originalBody = records.meenseek.get(id(999))!.body;
+    await navigate("meenseek", id(999));
+    button("관리", host.querySelector(".panel-actions")!).click(); await settle(); button("기록 정정").click(); await settle();
+    enter(host.querySelector<HTMLTextAreaElement>(".memory-editor form textarea")!, "다시 선택할 정정 초안"); await settle();
+    permitDiscard = true;
+    host.querySelector<HTMLButtonElement>('.graph-list > button[aria-pressed="true"]')!.click();
+    await until(() => !host.querySelector<HTMLFormElement>(".memory-editor form")?.checkVisibility() && bodyIs(originalBody), "same-record selection discards the correction");
+    button("관리", host.querySelector(".panel-actions")!).click(); await settle();
+    assert(!host.querySelector<HTMLFormElement>(".memory-editor form")?.checkVisibility(), "Confirmed same-record selection ends editing rather than hiding a dirty draft");
+    button("기록 정정").click(); await settle();
+    enter(host.querySelector<HTMLTextAreaElement>(".memory-editor form textarea")!, "검색 뒤 새로고침할 초안"); await settle();
+    enter(host.querySelector<HTMLInputElement>("#graph-search")!, "찾을 자료"); host.querySelector<HTMLFormElement>(".map-search")!.requestSubmit();
+    await until(() => idleGraph() && window.location.search.includes("q="), "retained editor before refresh");
+    if (!details("보기 설정").element.open) details("보기 설정").summary.click(); await settle(); button("새로고침").click();
+    await until(() => idleGraph() && !host.querySelector(".management-panel"), "confirmed refresh closes the retained unselected editor");
+    assert(document.activeElement !== document.body && host.contains(document.activeElement), "Confirmed refresh returns focus from the closed panel to the app");
+    button("검색 해제").click(); await until(() => idleGraph() && !window.location.search.includes("q="), "clear query after discarded refresh");
+    assert(records.meenseek.get(id(999))!.body === originalBody, "Confirmed exits never write a discarded draft");
+    permitDiscard = false;
+    await navigate("meenseek", id(999));
+    button("관리", host.querySelector(".panel-actions")!).click(); await settle(); button("기록 정정").click(); await settle();
+    const orphanedDraft = host.querySelector<HTMLFormElement>(".memory-editor form")!;
+    enter(orphanedDraft.querySelector<HTMLTextAreaElement>("textarea")!, "복귀 때 원본이 사라져도 남을 초안"); await settle();
+    const priorRecord = records.meenseek.get(id(999))!;
+    records.meenseek.delete(id(999)); // A separate client removes the synthetic record while this editor is open.
+    start = calls.length;
+    narrowMedia.matches = true; narrowMedia.dispatchEvent(new Event("change")); await settle();
+    screenVisible = false; document.dispatchEvent(new Event("visibilitychange")); await settle();
+    screenVisible = true; document.dispatchEvent(new Event("visibilitychange"));
+    await until(() => idleGraph() && !window.location.search.includes("focus="), "resume after external record deletion");
+    assert(host.querySelector(".memory-editor form") === orphanedDraft && orphanedDraft.querySelector("textarea")?.value === "복귀 때 원본이 사라져도 남을 초안", "A missing focus response preserves the same unsaved correction");
+    const resumeNotice = host.querySelector<HTMLElement>('.management-panel [aria-live="polite"] .notice');
+    assert(resumeNotice && resumeNotice.textContent?.includes("초안은 유지") && resumeNotice.checkVisibility() && !resumeNotice.closest("[inert]"), "Missing-record recovery is readable inside the active panel live region");
+    if (innerWidth <= 700) {
+      const box = resumeNotice.getBoundingClientRect();
+      assert(box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight, "The retained-draft notice fits the mobile panel viewport");
+    }
+    const orphanedUnload = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(orphanedUnload);
+    assert(orphanedUnload.defaultPrevented, "The retained orphaned draft still blocks accidental page exit");
+    phase("visibility resume with missing record retains draft without rereading", start, { graph: 2 });
+    records.meenseek.set(priorRecord.id, priorRecord);
+    permitDiscard = true; button("닫기 ×").click(); await settle(); permitDiscard = false;
+    narrowMedia.matches = false; narrowMedia.dispatchEvent(new Event("change")); await settle();
 
-    button("닫기 ×").click(); await settle();
     start = calls.length; button("기록 남기기").click(); await settle();
+    const blankForm = host.querySelector<HTMLFormElement>(".memory-editor form")!;
+    enter(blankForm.querySelector<HTMLTextAreaElement>("textarea")!, "다시 시작할 새 기록"); await settle();
+    button("기록 남기기").click(); await settle();
+    assert(host.querySelector(".memory-editor form") === blankForm, "Declining a new-record restart retains its draft");
+    permitDiscard = true; button("기록 남기기").click(); await settle(); permitDiscard = false;
+    assert(host.querySelector(".memory-editor form") !== blankForm && host.querySelector<HTMLTextAreaElement>(".memory-editor form textarea")?.value === "", "Confirmed new-record restart creates a clean editor");
     phase("SyncPanel closed", start, {});
     const sync = details("출처 갱신");
     start = calls.length; sync.summary.click();
@@ -309,6 +400,7 @@ async function check(size: number) {
     return { size, passed: true, phases, calls, totalResponseBytes: calls.reduce((sum, call) => sum + call.responseBytes, 0), forbidden };
   } finally {
     root.unmount(); releaseGraph();
+    window.confirm = originalConfirm;
     window.fetch = originalFetch; window.matchMedia = originalMatchMedia;
     window.history.replaceState(null, "", originalUrl);
     if (visibility) Object.defineProperty(document, "visibilityState", visibility);
@@ -1514,6 +1606,11 @@ async function run() {
     }
     if (new URLSearchParams(window.location.search).get("scenario") === "motion") {
       results.push(await checkRenderedMotion());
+      output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
+      return;
+    }
+    if (new URLSearchParams(window.location.search).get("scenario") === "records") {
+      for (const size of [1, 20]) results.push(await check(size));
       output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
       return;
     }

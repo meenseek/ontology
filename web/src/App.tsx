@@ -72,8 +72,9 @@ function GraphApp() {
   const viewRef = useRef<GraphView>("purpose");
   const [panel, setPanel] = useState<"node" | "manage" | null>(route.focus ? "node" : null);
   const [managing, setManaging] = useState(false);
-  // One write response is handed to its new detail view; this is not a cross-document cache.
-  const [savedMemory, setSavedMemory] = useState<MemoryItem | null>(null);
+  // Keep only the current record snapshot so its editor survives graph searches.
+  // Navigation and explicit refresh still discard the snapshot and read afresh.
+  const [memoryItem, setMemoryItem] = useState<MemoryItem | null>(null);
   const [busy, setBusy] = useState(false), [loading, setLoading] = useState(true), [error, setError] = useState("");
   const busyRef = useRef(false);
   const originalBusy = useRef(false), purposeBusy = useRef(false);
@@ -82,6 +83,11 @@ function GraphApp() {
   const dirtyRef = useRef(false);
   const originalDirty = useRef(false), purposeDirty = useRef(false);
   const updateDirty = useCallback((value: boolean) => { originalDirty.current = value; dirtyRef.current = value || purposeDirty.current; }, []);
+  const memoryDirty = useRef(false);
+  const updateMemoryDirty = useCallback((value: boolean, item: MemoryItem | null) => {
+    memoryDirty.current = value; updateDirty(value);
+    if (item) setMemoryItem(item);
+  }, [updateDirty]);
   const updatePurposeDirty = useCallback((value: boolean) => { purposeDirty.current = value; dirtyRef.current = value || originalDirty.current; }, []);
   const [notice, setNotice] = useState(""), [listMode, setListMode] = useState(false), [webglFailed, setWebglFailed] = useState(false);
   const [listSort, setListSort] = useState<ListSort>("updated");
@@ -110,7 +116,8 @@ function GraphApp() {
     const node = data.model.nodes.find(candidate => candidate.id === id);
     return node ? [{ node, outgoing }] : [];
   }) ?? [] : [];
-  const memorySeed = savedMemory?.scope === route.scope && savedMemory.id === route.focus ? savedMemory : null;
+  const memorySeed = panel === "node" && memoryItem?.scope === route.scope && (!route.focus || memoryItem.id === route.focus) ? memoryItem : null;
+  const memoryId = route.focus ?? memorySeed?.id ?? null;
   const shown = useMemo(() => data ? visibleGraph(data.model, filters) : { nodes: [], links: [] }, [data, filters]);
   const fallback = listMode || webglFailed;
   const displayed = fallback ? route.q ? searchResults(shown.nodes, route.q) : listNodes(shown.nodes, listSort) : shown.nodes;
@@ -125,7 +132,7 @@ function GraphApp() {
     const visibility = () => setVisible(document.visibilityState !== "hidden");
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
     const motion = () => setReduced(media.matches);
-    const pop = () => { if (busyRef.current || dirtyRef.current && !window.confirm("저장하지 않은 초안을 버리고 이동할까요?")) { window.history.pushState(null, "", graphUrl(routeRef.current.scope, routeRef.current.q, routeRef.current.focus)); return; } updatePurposeDirty(false); updateDirty(false); const next = parseLocation(window.location.search); routeRef.current = next; setRoute(next); setInput(next.q); setFilters(initialFilters); setPanel(next.focus ? "node" : null); setManaging(false); setSavedMemory(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); };
+    const pop = () => { if (busyRef.current || dirtyRef.current && !window.confirm("저장하지 않은 초안을 버리고 이동할까요?")) { window.history.pushState(null, "", graphUrl(routeRef.current.scope, routeRef.current.q, routeRef.current.focus)); return; } updatePurposeDirty(false); updateDirty(false); const next = parseLocation(window.location.search); routeRef.current = next; setRoute(next); setInput(next.q); setFilters(initialFilters); setPanel(next.focus ? "node" : null); setManaging(false); setMemoryItem(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); };
     const beforeUnload = (event: BeforeUnloadEvent) => { if (dirtyRef.current || busyRef.current) event.preventDefault(); };
     document.addEventListener("visibilitychange", visibility); media.addEventListener("change", motion); window.addEventListener("popstate", pop); window.addEventListener("beforeunload", beforeUnload);
     return () => { document.removeEventListener("visibilitychange", visibility); media.removeEventListener("change", motion); window.removeEventListener("popstate", pop); window.removeEventListener("beforeunload", beforeUnload); };
@@ -155,8 +162,10 @@ function GraphApp() {
       setFilters(f => f.cluster && !model.clusters.some(c => c.id === f.cluster) ? { ...f, cluster: null } : f);
       const focus = routeRef.current.focus;
       if (focus && !model.nodes.some(n => n.id === focus)) {
-        setNotice("초점을 지정한 자료가 없거나 이 범위에서 찾을 수 없습니다.");
-        syncRoute({ ...routeRef.current, focus: null }, true); setPanel(null);
+        const preserveMemory = memoryDirty.current;
+        setNotice(preserveMemory ? "기록을 다시 찾지 못했습니다. 입력 중인 초안은 유지했습니다." : "초점을 지정한 자료가 없거나 이 범위에서 찾을 수 없습니다.");
+        syncRoute({ ...routeRef.current, focus: null }, true);
+        if (!preserveMemory) setPanel(null);
       }
     }).catch(e => { if (!controller.signal.aborted && sameGraphLocation(current, routeRef.current)) setError(message(e)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
@@ -180,31 +189,37 @@ function GraphApp() {
     if (!window.confirm("저장하지 않은 초안을 버리고 이동할까요?")) return false;
     updatePurposeDirty(false); updateDirty(false); return true;
   }
-  const reload = () => { if (busy || !confirmDiscard()) return; setSavedMemory(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); setNotice(""); };
-  function search(query: string) {
+  const reload = () => {
     if (busy || !confirmDiscard()) return;
+    if (panel === "node" && !route.focus) closePanel();
+    setMemoryItem(null); setRefresh(v => v + 1); setPanelEpoch(v => v + 1); setNotice("");
+  };
+  function search(query: string) {
+    const preserveMemory = panel === "manage" || panel === "node" && memoryDirty.current && !!memorySeed;
+    if (busy || !preserveMemory && !confirmDiscard()) return;
     const next = query.trim(), same = route.q === next;
     setInput(next); syncRoute({ scope: route.scope, q: next, focus: null });
-    if (panel !== "manage") setPanel(null);
+    if (!preserveMemory) setPanel(null);
     setFilters(initialFilters); setNotice(""); if (same) setRefresh(v => v + 1);
   }
   function changeScope(scope: Scope) {
     if (busy || scope === route.scope || !confirmDiscard()) return;
-    previous.current = undefined; setStored(null); setInput(""); setFilters(initialFilters); setPanel(null); setManaging(false); setSavedMemory(null); setNotice(""); setError("");
+    previous.current = undefined; setStored(null); setInput(""); setFilters(initialFilters); setPanel(null); setManaging(false); setMemoryItem(null); setNotice(""); setError("");
     syncRoute({ scope, q: "", focus: null });
   }
   function choose(id: string) {
     if (busy || !confirmDiscard()) return;
     const node = data?.model.nodes.find(n => n.id === id);
     if (node?.kind === "folder") { fitFolder(id); return; }
-    setNotice(""); setManaging(false); setSavedMemory(null); setFilters(f => ({ ...initialFilters, cluster: f.cluster === node?.cluster ? f.cluster : null, folder: shown.nodes.some(value => value.id === id) ? f.folder : null }));
+    if (memoryDirty.current && memoryId === id) setPanelEpoch(v => v + 1);
+    setNotice(""); setManaging(false); setMemoryItem(null); setFilters(f => ({ ...initialFilters, cluster: f.cluster === node?.cluster ? f.cluster : null, folder: shown.nodes.some(value => value.id === id) ? f.folder : null }));
     syncRoute({ ...route, focus: id }); openPanel("node");
     if (!node) setRefresh(v => v + 1);
   }
   function changed(item: MemoryItem | null) {
     const id = item?.id ?? null;
     syncRoute({ ...routeRef.current, focus: id }, true);
-    setSavedMemory(item); setManaging(false); setPanel(id ? "node" : "manage"); setFilters(initialFilters);
+    setMemoryItem(item); setManaging(false); setPanel(id ? "node" : "manage"); setFilters(initialFilters);
     setRefresh(v => v + 1); setPanelEpoch(v => v + 1); setNotice("");
   }
   function subjectDeleted(ungrouped: number, documents: number) {
@@ -213,7 +228,7 @@ function GraphApp() {
     syncRoute({ scope: route.scope, q: "", focus: null });
   }
   function groupingChanged(item: MemoryItem, contentChanged: boolean) {
-    setSavedMemory(item);
+    setMemoryItem(item);
     if (contentChanged) setRefresh(v => v + 1);
   }
   function openPanel(next: "node" | "manage") {
@@ -222,6 +237,7 @@ function GraphApp() {
   }
   function startRecord() {
     if (busy || !confirmDiscard()) return;
+    setPanelEpoch(v => v + 1);
     syncRoute({ ...route, focus: null }); openPanel("manage");
   }
   function fitView(cluster = filters.cluster) {
@@ -258,7 +274,7 @@ function GraphApp() {
   function closePanel(): boolean {
     if (busy || !confirmDiscard()) return false;
     const restoreFocus = !!panel && !!panelElement.current?.contains(document.activeElement);
-    setPanel(null); setManaging(false); setSavedMemory(null); syncRoute({ ...routeRef.current, focus: null });
+    setPanel(null); setManaging(false); setMemoryItem(null); syncRoute({ ...routeRef.current, focus: null });
     if (restoreFocus) requestAnimationFrame(() => (opener.current?.isConnected ? opener.current : manageButton.current)?.focus());
     return true;
   }
@@ -310,6 +326,10 @@ function GraphApp() {
   const folders = useMemo(() => data ? nativeFolders(visibleGraph(data.model, { ...filters, cluster: null, folder: null }).nodes) : [], [data, filters]);
   const folder = data && filters.folder ? nativeFolders(data.model.nodes).find(value => value.id === filters.folder) : null;
   const hasDisplayFilters = !!(route.q || filters.kind !== "all" || filters.state !== "all" || filters.cluster || filters.folder || filters.sourceScope);
+  const statusMessages = <>
+    {error && <p className="error" role="alert">{error} <button onClick={reload}>다시 불러오기</button></p>}
+    {notice && <p className="notice">{notice}</p>}
+  </>;
   return <div className="app">
     <header className="app-header" inert={(!!panel || explore) && narrow}>
       <a className="wordmark" href="/">개인 온톨로지</a>
@@ -363,8 +383,7 @@ function GraphApp() {
           </div>
         </div>
         <div className="map-status" aria-live="polite">
-          {error && <p className="error" role="alert">{error} <button onClick={reload}>다시 불러오기</button></p>}
-          {notice && <p className="notice">{notice}</p>}
+          {!(panel && session) && statusMessages}
           {loading && !data && <p className="loading" role="status">지식을 불러오는 중…</p>}
           {webglFailed && <p className="warning">3D 화면을 표시할 수 없어 같은 조회 결과를 목록으로 보여드립니다.</p>}
           {(route.q || cluster || folder) && !!displayed.length && <div className="active-filters">{route.q && <button className="quiet" disabled={busy} onClick={() => search("")}>검색 해제</button>}{cluster && <button className="quiet" disabled={busy} onClick={() => fitView(null)}>묶음 해제</button>}{folder && <button className="quiet" disabled={busy} onClick={() => fitFolder(null)}>폴더 해제</button>}</div>}
@@ -389,9 +408,10 @@ function GraphApp() {
       </section>
       {panel && session && <aside ref={panelElement} className="management-panel" role="dialog" aria-modal={narrow || undefined} aria-label={panel === "manage" ? "기록 남기기" : "선택한 자료 상세"}>
         <div className="panel-heading"><span>{panel === "manage" ? "기록 남기기" : selected ? kindName[selected.kind] : memorySeed ? "기록" : "자료 상세"}</span><div className="panel-actions">{panel === "node" && selected?.kind === "document" && <button disabled={busy} onClick={() => { const section = documentContext.current; if (section) { section.open = true; section.scrollIntoView({ block: "start" }); section.querySelector("summary")?.focus(); } }}>분류·연결</button>}{panel === "node" && (memorySeed || selected && knowledge(selected) && !isNativeOriginal(selected)) && <button disabled={busy} aria-expanded={managing} onClick={toggleManagement}>{managing ? "읽기로 돌아가기" : "관리"}</button>}<button ref={closeButton} disabled={busy} aria-label="관리 패널 닫기" onClick={closePanel}>닫기 ×</button></div></div>
-        {panel === "manage" ? <><Memory visible={visible} managing key={`${route.scope}:manage:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={null} onBusy={updateBusy} onChange={changed} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /><SyncPanel key={panelEpoch} visible={visible} /></> : !selected && !memorySeed ? <p className="empty">선택한 자료를 불러오는 중…</p> : <>
+        <div aria-live="polite">{statusMessages}</div>
+        {panel === "manage" ? <><Memory visible={visible} managing key={`${route.scope}:manage:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={null} onDirtyChange={updateMemoryDirty} onBusy={updateBusy} onChange={changed} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /><SyncPanel key={panelEpoch} visible={visible} /></> : !selected && !memorySeed ? <p className="empty">선택한 자료를 불러오는 중…</p> : <>
           {selected?.changed && <p className="notice">이전 조회 이후 기록이나 관계가 변경되었습니다.</p>}
-          {selected?.kind === "document" ? isNativeOriginal(selected) ? <OriginalDetail key={selected.id} scope={selected.context_scope!} path={selected.context_path!} request={request} related={listNodes(relatedOriginals)} references={listNodes(references.filter(item => item.outgoing).map(item => item.node))} onNavigate={choose} csrf={session.csrf} onBusy={updateBusy} onChange={() => setRefresh(v => v + 1)} onDirtyChange={updateDirty} /> : <Documents visible={visible} managing={managing} key={`${route.scope}:${selected.id}:${panelEpoch}`} scope={route.scope} id={selected.id} csrf={session.csrf} allAreas={session.areas} request={request} onBusy={updateBusy} onChange={reload} onNavigate={choose} contextScope={selected.context_scope} contextPath={selected.context_path} onDirtyChange={updateDirty} /> : selected?.kind === "memory" || memorySeed ? <Memory latestNode={selected} visible={visible} managing={managing} initialItem={memorySeed} key={`${route.scope}:${route.focus}:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={route.focus} onBusy={updateBusy} onChange={changed} onBackgroundChange={groupingChanged} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /> : selected && <><h2>{selected.label}</h2><p className="hint">{kindName[selected.kind]} 표식입니다.</p><button onClick={() => fitView(selected.cluster)}>이 묶음 보기</button>{selected.kind === "subject" && <SubjectPurpose key={`${route.scope}:${selected.id}:${panelEpoch}:definition`} node={selected} scope={route.scope} csrf={session.csrf} request={request} visible={visible} disabled={busy} onBusy={updatePurposeBusy} onDirtyChange={updatePurposeDirty} onChange={() => setRefresh(v => v + 1)} />}{selected.kind === "subject" && <SubjectDelete key={selected.id} scope={route.scope} id={selected.id} label={selected.label} csrf={session.csrf} disabled={busy} onBusy={updateBusy} onDeleted={subjectDeleted} />}<div className="compact-list">{data?.model.links.filter(l => l.source === selected.id || l.target === selected.id).map(l => { const other = data.model.nodes.find(n => n.id === (l.source === selected.id ? l.target : l.source)); return other && <button key={`${l.kind}:${other.id}`} disabled={busy} onClick={() => choose(other.id)}><span>{linkName[l.kind]}</span><strong>{nodePresentation(other).title}</strong>{nodePresentation(other).subtitle && <small>{nodePresentation(other).subtitle}</small>}</button>; })}</div></>}
+          {selected?.kind === "document" ? isNativeOriginal(selected) ? <OriginalDetail key={selected.id} scope={selected.context_scope!} path={selected.context_path!} request={request} related={listNodes(relatedOriginals)} references={listNodes(references.filter(item => item.outgoing).map(item => item.node))} onNavigate={choose} csrf={session.csrf} onBusy={updateBusy} onChange={() => setRefresh(v => v + 1)} onDirtyChange={updateDirty} /> : <Documents visible={visible} managing={managing} key={`${route.scope}:${selected.id}:${panelEpoch}`} scope={route.scope} id={selected.id} csrf={session.csrf} allAreas={session.areas} request={request} onBusy={updateBusy} onChange={reload} onNavigate={choose} contextScope={selected.context_scope} contextPath={selected.context_path} onDirtyChange={updateDirty} /> : selected?.kind === "memory" || memorySeed ? <Memory latestNode={selected} visible={visible} managing={managing} initialItem={memorySeed} key={`${route.scope}:${memoryId}:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={memoryId} onDirtyChange={updateMemoryDirty} onBusy={updateBusy} onChange={changed} onBackgroundChange={groupingChanged} onNavigate={choose} onMetadataChange={() => setRefresh(v => v + 1)} /> : selected && <><h2>{selected.label}</h2><p className="hint">{kindName[selected.kind]} 표식입니다.</p><button onClick={() => fitView(selected.cluster)}>이 묶음 보기</button>{selected.kind === "subject" && <SubjectPurpose key={`${route.scope}:${selected.id}:${panelEpoch}:definition`} node={selected} scope={route.scope} csrf={session.csrf} request={request} visible={visible} disabled={busy} onBusy={updatePurposeBusy} onDirtyChange={updatePurposeDirty} onChange={() => setRefresh(v => v + 1)} />}{selected.kind === "subject" && <SubjectDelete key={selected.id} scope={route.scope} id={selected.id} label={selected.label} csrf={session.csrf} disabled={busy} onBusy={updateBusy} onDeleted={subjectDeleted} />}<div className="compact-list">{data?.model.links.filter(l => l.source === selected.id || l.target === selected.id).map(l => { const other = data.model.nodes.find(n => n.id === (l.source === selected.id ? l.target : l.source)); return other && <button key={`${l.kind}:${other.id}`} disabled={busy} onClick={() => choose(other.id)}><span>{linkName[l.kind]}</span><strong>{nodePresentation(other).title}</strong>{nodePresentation(other).subtitle && <small>{nodePresentation(other).subtitle}</small>}</button>; })}</div></>}
           {selected?.kind === "document" && <details key={`${selected.id}:${panelEpoch}:context`} ref={documentContext} className="section document-context"><summary>목적 소속 · {selected.subject_name ?? "미분류"}{references.length > 0 && <> · 원문 링크 {references.length}개</>}</summary>
             <DocumentPurpose key={`${route.scope}:${selected.id}:${panelEpoch}:purpose`} node={selected} scope={route.scope} csrf={session.csrf} request={request} visible={visible} disabled={busy} onBusy={updatePurposeBusy} onDirtyChange={updatePurposeDirty} onChange={() => setRefresh(v => v + 1)} />
             {references.length > 0 && <details className="section source-references"><summary>원문 링크 · {references.length}개</summary><p className="hint">현재 조회된 자료 사이의 본문 링크입니다. 같은 목적이나 주장의 근거를 뜻하지 않습니다.</p><div className="compact-list">{references.map(({ node, outgoing }) => <button key={`${outgoing}:${node.id}`} disabled={busy} onClick={() => choose(node.id)}><span>{outgoing ? "원문 링크 →" : "← 이 원문을 참조한 자료"}</span><strong>{nodePresentation(node).title}</strong>{nodePresentation(node).subtitle && <small>{nodePresentation(node).subtitle}</small>}</button>)}</div></details>}
