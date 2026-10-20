@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
+    "test:e2e": "playwright test",
     "test": "node --import tsx --test src/pointer-gesture.test.ts src/graph.test.ts src/view-layout.test.ts src/document-preview.test.tsx src/context.test.tsx src/grouping-events.test.ts src/memory-lifecycle.test.mjs"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
     "three": "0.185"
   },
   "devDependencies": {
+    "playwright": "1.62.1",
     "@types/node": "26",
     "@types/react": "19",
     "@types/react-dom": "19",

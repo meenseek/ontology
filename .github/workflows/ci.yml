@@ -46,6 +46,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  web-e2e:
+    name: Synthetic browser checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '26'
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+      - name: Install web dependencies
+        run: pnpm --dir web install --frozen-lockfile
+      - name: Install Chromium and system dependencies
+        run: pnpm --dir web exec playwright install --with-deps chromium
+      - name: Run synthetic browser checks
+        run: pnpm --dir web test:e2e
+      - name: Keep failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: synthetic-browser-failure
+          path: web/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   verify:
     name: Verify
     runs-on: ubuntu-latest

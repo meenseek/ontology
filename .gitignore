@@ -4,6 +4,7 @@
 /.llm-context-vault-harness/
 /web/node_modules/
 /web/dist/
+/web/test-results/
 .env
 *.dump
 /sync.local.json
