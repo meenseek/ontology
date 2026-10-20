@@ -80,7 +80,9 @@ for (const viewport of viewports) {
       }
       await expect(page.locator(".map-sidebar")).toHaveCount(0);
       await page.getByRole("button", { name: "목록 보기", exact: true }).click();
-      await page.locator(".graph-list > button").filter({ hasText: "제품 전략과 의사결정" }).click();
+      await page.locator(".graph-list > button").filter({
+        has: page.getByText("제품 전략과 의사결정", { exact: true }),
+      }).click();
       await expect(page.locator(".management-panel h2")).toHaveText("제품 전략과 의사결정");
       await page.getByRole("button", { name: "관리 패널 닫기", exact: true }).click();
       await expect(page.locator(".management-panel")).toHaveCount(0);
