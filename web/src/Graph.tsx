@@ -502,6 +502,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     const tooltipFloor = () => {
       element.style.setProperty("--graph-help-floor", `${(help?.offsetHeight ?? 14) + 28}px`);
       element.style.setProperty("--graph-chrome-floor", `${(chrome?.offsetHeight ?? 14) + 28}px`);
+      const minimap = element.querySelector(".graph-minimap")?.getBoundingClientRect(), guidance = help?.getBoundingClientRect();
+      element.dataset.chromeStacked = String(!!minimap && !!guidance && guidance.top >= minimap.bottom - 1);
     };
     const observer = new ResizeObserver(entries => {
       const rect = entries.find(entry => entry.target === element)?.contentRect;
@@ -903,7 +905,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     const chrome = () => {
       const origin = layer.getBoundingClientRect();
       return [...(container.current?.closest(".map-workspace")?.querySelectorAll<HTMLElement>(".map-sidebar, .graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions, .graph-group-navigation.with-keys, .graph-group-target.core-name, .graph-group-target:focus") ?? [])]
-        .filter(element => element.offsetWidth && element.offsetHeight)
+        // Closed details can retain descendant layout boxes. Only painted chrome can obstruct a label.
+        .filter(element => element.offsetWidth && element.offsetHeight && !element.closest("details:not([open])"))
         .map(element => { const box = element.getBoundingClientRect(); return { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }; });
     };
     const degrees = new Map<string, number>();

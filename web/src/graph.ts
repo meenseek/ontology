@@ -62,6 +62,18 @@ export function listNodes<T extends GraphNode>(nodes: readonly T[], sort: ListSo
   });
 }
 export const knowledge = (n: GraphNode) => n.kind === "document" || n.kind === "memory";
+/** Material links and classification membership have different reading roles. */
+export function relatedKnowledge(model: { nodes: readonly GraphNode[]; links: readonly GraphLink[] }, selected: string): GraphNode[] {
+  const nodes = new Map(model.nodes.map(node => [node.id, node]));
+  const related = new Map<string, GraphNode>();
+  for (const link of model.links) {
+    if (link.kind !== "related" && link.kind !== "evidence") continue;
+    const id = link.source === selected ? link.target : link.target === selected ? link.source : null;
+    const node = id && nodes.get(id);
+    if (node && node.id !== selected && knowledge(node)) related.set(node.id, node);
+  }
+  return [...related.values()];
+}
 export const isNativeOriginal = (n: GraphNode) => n.kind === "document" && !!n.context_scope && !!n.context_path;
 export function active(n: GraphNode): boolean {
   if (n.kind === "document") return n.status === "ok" && n.present === true && n.current === true;

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { Positions, compactSlots, fixPosition } from "./positions.ts";
 import { separateDiscs } from "./clearance.ts";
 import { PerspectiveCamera, Vector3 } from "three";
-import { active, constellationView, denseConstellationCores, diagramLinks, expandedCoreCameraFrame, graphUrl, isNativeOriginal, knowledge, linkKey, listNodes, nativeFolders, overviewLinkKeys, parseLocation, reconcile, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph, visualSatellites } from "./graph.ts";
+import { active, constellationView, denseConstellationCores, diagramLinks, expandedCoreCameraFrame, graphUrl, isNativeOriginal, knowledge, linkKey, listNodes, nativeFolders, overviewLinkKeys, parseLocation, reconcile, relatedKnowledge, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph, visualSatellites } from "./graph.ts";
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei.ts";
 import type { GraphLink, GraphNode, Snapshot } from "./graph.ts";
 import { labelLeader, leaderHitsBox, leadersCross, visibleLabels, type LabelBox, type ProjectedLabel } from "./presentation.ts";
@@ -3145,4 +3145,19 @@ test("small summary members retain resolved light and inactive state at actual d
     assert.ok(Math.abs(inactive.alpha / active.alpha - .4) < 1e-9, "state contrast remains independent of the display-size light floor");
   }
   assert.ok(summaryGlyphInk({ depth: -1, opacity: 1 }, 42).alpha > summaryGlyphInk({ depth: -1, opacity: 1 }, 136).alpha, "the smallest summary compensates for lost projected light");
+});
+
+
+test("original detail keeps material relations separate from every classification and path edge", () => {
+  const selected = doc("selected"), linked = doc("linked"), cited = memory("cited");
+  const markers: GraphNode[] = ["subject", "topic", "area", "folder"].map(kind => ({ ...doc(kind), kind: kind as GraphNode["kind"] }));
+  const links: GraphLink[] = [edge(selected.id, linked.id), edge(linked.id, selected.id),
+    { source: cited.id, target: selected.id, kind: "evidence", current: false },
+    ...markers.map(node => ({ source: selected.id, target: node.id, kind: (node.kind === "folder" ? "parent" : node.kind) as "subject" | "topic" | "area" | "parent", current: true })),
+    { source: selected.id, target: "reference-only", kind: "reference", current: true },
+    edge(selected.id, "subject"), edge("unrelated", linked.id), edge(selected.id, selected.id)];
+  const model = { nodes: [selected, linked, cited, ...markers, doc("reference-only")], links };
+  const before = JSON.stringify(model);
+  assert.deepEqual(relatedKnowledge(model, selected.id).map(node => node.id).sort(), ["cited", "linked"]);
+  assert.equal(JSON.stringify(model), before, "classification, direction, history and source data stay unchanged");
 });

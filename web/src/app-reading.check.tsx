@@ -1790,6 +1790,46 @@ async function checkHeaderLayout() {
 
 
 // Only the newly affected map/list/marker transitions; existing editing suites are separate.
+async function checkRelatedMaterialKinds() {
+  const originalFetch = window.fetch, originalUrl = window.location.href, root = createRoot(host);
+  const original: GraphNode = { id: "e_1111111111111111111111111111111111111111111111111111111111111111", scope: "personal", kind: "document", label: "synthetic/original.md", title: "작은 결정을 오래 기억하기", source_kind: "original", context_scope: "personal", context_path: "synthetic/original.md", status: "ok", current: true, present: true, subject_id: subjectId, subject_name: "합성 목적" };
+  const related: GraphNode = { ...original, id: "e_2222222222222222222222222222222222222222222222222222222222222222", label: "synthetic/related.md", title: "합성 관련 문서", context_path: "synthetic/related.md" };
+  const evidence: GraphNode = { id: "related-memory", scope: "personal", kind: "memory", label: "합성 근거 기록", status: "accepted", current: true, temporal: "current", supported: true };
+  const markers: GraphNode[] = ["subject", "topic", "area"].map(kind => ({ id: kind === "subject" ? subjectId : `related-${kind}`, scope: "personal", kind: kind as GraphNode["kind"], label: kind === "subject" ? "합성 목적" : `합성 ${kind} 분류` }));
+  const links: Snapshot["links"] = [{ source: original.id, target: related.id, kind: "related", current: true },
+    { source: evidence.id, target: original.id, kind: "evidence", current: true },
+    ...markers.map(node => ({ source: original.id, target: node.id, kind: node.kind as "subject" | "topic" | "area", current: true }))];
+  const nodes = [original, related, evidence, ...markers];
+  const snapshot: Snapshot = { ...graph([], "personal", "", original.id, false), nodes, links, totals: { documents: 2, memories: 1, markers: 3, links: links.length }, returned: { knowledge: 3, markers: 3, links: links.length }, matched: nodes.length };
+  const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+  let reads = 0;
+  try {
+    window.fetch = async (input, options) => {
+      const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+      assert(!options?.method || options.method === "GET", "related-material reading never writes or forwards requests");
+      reads++;
+      if (url.pathname === "/api/session") return json({ csrf: "synthetic-only", areas: [] });
+      if (url.pathname === "/api/graph") return json(snapshot);
+      if (url.pathname === "/api/context/history") return json({ items: [], next_before: null });
+      if (url.pathname === "/api/context/read") return json({ metadata: { scope: "personal", path: original.context_path, revision: 1, content_digest: "synthetic", byte_len: 40 }, title: original.title, content: "# 작은 결정을 오래 기억하기\n\n분류 소속과 실제 자료 연결을 따로 읽습니다." });
+      throw new Error(`Unexpected related-material request: ${url.pathname}`);
+    };
+    window.history.replaceState(null, "", `${window.location.pathname}?scope=personal&focus=${original.id}`); root.render(<App />);
+    await until(() => !!host.querySelector(".related-materials button"), "actual native detail renders its material connections");
+    const titles = [...host.querySelectorAll(".related-materials strong")].map(node => node.textContent).sort();
+    assert(JSON.stringify(titles) === JSON.stringify(["합성 관련 문서", "합성 근거 기록"]), "only material relations appear; subject, topic and area stay out of the list");
+    const context = host.querySelector<HTMLDetailsElement>(".document-context")!;
+    assert(!context.open && context.textContent?.includes("합성 목적"), "purpose membership stays in the collapsed classification area");
+    if (innerWidth > 900) {
+      await until(() => !!host.querySelector('.node-label[data-node-id="e_1111111111111111111111111111111111111111111111111111111111111111"]:not([hidden])'), "selected native title remains visible beside a closed view-settings panel");
+      const selectedLabel = host.querySelector<HTMLElement>('.node-label[data-node-id="e_1111111111111111111111111111111111111111111111111111111111111111"]:not([hidden])')!;
+      assert(selectedLabel.textContent?.includes("작은 결정을 오래 기억하기") && selectedLabel.textContent?.includes("synthetic/original.md") && selectedLabel.textContent?.includes("문서"), "selected native label includes title, path and kind");
+    }
+    assert(!!(host.querySelector(".original-detail")!.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING), "original title/body and material links precede collapsed classification");
+    return { relatedMaterialKinds: true, titles, reads, writes: 0 };
+  } finally { root.unmount(); window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl); }
+}
+
 async function checkResidualMap(mouseOnly = false) {
   const originalUrl = window.location.href;
   const originalRender = Scene.prototype.onBeforeRender, originalPack = Positions.prototype.packOverview;
@@ -1812,6 +1852,8 @@ async function checkResidualMap(mouseOnly = false) {
     const help = host.querySelector(".graph-quick-help")!.getBoundingClientRect(), mini = host.querySelector(".graph-minimap")!.getBoundingClientRect();
     assert(separate(help, mini), "the actual canvas keeps minimap and sentence guidance separate");
     assert(help.left >= 0 && help.right <= innerWidth && mini.right <= innerWidth, "map controls remain inside the screen");
+    const available = host.querySelector(".graph-chrome")!.getBoundingClientRect();
+    if (available.width <= 520) assert(mini.bottom <= help.top, "narrow usable map space stacks the minimap above the complete guidance sentence");
   };
   const frameIsReadable = (group: number) => {
     if (!positions || positions.layoutMoving) return false;
@@ -1885,6 +1927,10 @@ async function checkResidualMap(mouseOnly = false) {
   for (const group of [1, 0]) {
     const row = [...host.querySelectorAll<HTMLButtonElement>(".graph-list > button")].find(row => row.querySelector("strong")?.textContent === names[group])!;
     row.click(); await until(() => host.querySelector(".management-panel h2")?.textContent === names[group], "purpose detail selection");
+    const overview = host.querySelector(".marker-overview")!.getBoundingClientRect();
+    const action = button("이 묶음 보기").getBoundingClientRect();
+    const definition = host.querySelector(".marker-overview + .section")!.getBoundingClientRect();
+    assert(definition.top - action.bottom >= 16 && overview.bottom <= definition.top, "marker overview separates its action from the definition divider");
     button("3D 보기").click();
     await until(() => host.querySelector(".graph-core-page")?.textContent === `1/${group ? 4 : 19}` && frameIsReadable(group), "selected purpose opens a readable 12-member page");
     if (innerWidth <= 900) {
@@ -1902,8 +1948,10 @@ async function checkResidualMap(mouseOnly = false) {
       await until(() => frameIsReadable(group), "selected purpose refits after filter obstruction");
       const sidebar = host.querySelector(".map-sidebar")!.getBoundingClientRect();
       assert(host.querySelector(".graph-core-actions")!.getBoundingClientRect().left >= sidebar.right, "the open filter leaves every page control readable");
+      const mapBounds = host.querySelector(".graph-canvas")!.getBoundingClientRect();
+      assert([...host.querySelectorAll(".graph-core-actions button")].every(button => button.getBoundingClientRect().right <= mapBounds.right - 10), "every wrapped page button stays inside the usable map");
       const canvas = host.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, box = canvas.getBoundingClientRect();
-      const sample = [...samples].find(([id]) => id.startsWith(`residual-${group}-`))![1];
+      const sample = [...samples].filter(([id]) => id.startsWith(`residual-${group}-`)).sort((a, b) => a[1].z - b[1].z)[0][1];
       canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: box.left + (sample.x + 1) * box.width / 2, clientY: box.top + (1 - sample.y) * box.height / 2 }));
       await until(() => !!host.querySelector(".graph-tooltip"), "pointed member guidance is rendered");
       const tooltip = host.querySelector(".graph-tooltip")!.getBoundingClientRect();
@@ -1923,6 +1971,11 @@ async function run() {
   const results: unknown[] = [];
   try {
     assert(import.meta.env.DEV, "Run this fixture through the development server");
+    if (new URLSearchParams(window.location.search).get("scenario") === "related-materials") {
+      results.push(await checkRelatedMaterialKinds());
+      output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
+      return;
+    }
     if (["residual", "residual-mouse"].includes(new URLSearchParams(window.location.search).get("scenario") ?? "")) {
       results.push(await checkResidualMap(new URLSearchParams(window.location.search).get("scenario") === "residual-mouse"));
       output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
