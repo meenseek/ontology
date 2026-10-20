@@ -7,7 +7,7 @@ import type { GraphLink, GraphNode, PositionedNode, Snapshot } from "./graph.ts"
 import { nucleusLevel, nucleusView } from "./nuclei.ts";
 import { Positions } from "./positions.ts";
 import type { LayoutView, Point } from "./positions.ts";
-import { coreCameraDistance, LAYOUT_WORLD_SPACING } from "./presentation.ts";
+import { coreCameraDistance, LAYOUT_WORLD_SPACING, nodeScreenSize, nodeVisualRadius } from "./presentation.ts";
 import { planCoreView, screenPlane, overviewFrame, coreReadingFrame, coreReadingInsets } from "./view-layout.ts";
 
 test("opening an already readable page retains its zoom while large content still fits", () => {
@@ -509,4 +509,94 @@ test("a selected purpose marker frames its disclosed page rather than an individ
         `selected collection member stays in its reading rectangle at ${size.width}px`);
     }
   }
+});
+
+// Settled 360×740 synthetic input; the old minimum-distance early exit kept a covered body.
+test("initial framing recovers an unsafe narrow pose even when approaching is impossible", () => {
+  const size = {"height": 449, "width": 360}, target = {"x": 1.6887970896347184, "y": -2.9177088023344595, "z": 4.115896008043606};
+  const camera = new PerspectiveCamera(50, size.width / size.height, .1, 20000);
+  camera.position.set(1.6887970896347184,-2.9177088023344244,579.8694213466977); camera.lookAt(target.x, target.y, target.z); camera.updateMatrixWorld();
+  const bodies = [
+    {"id":"preview-5-0","kind":"document","x":73.02620324142721,"y":79.93619628877536,"z":-49.57289030812409,"count":0},
+    {"id":"preview-5-1","kind":"document","x":94.8809696730771,"y":54.75006494397529,"z":-37.13133348825912,"count":0},
+    {"id":"preview-5-10","kind":"document","x":-94.27868831440809,"y":-8.782435722807094,"z":-39.01488606951422,"count":0},
+    {"id":"preview-5-11","kind":"document","x":-107.63742282410033,"y":21.628817883202288,"z":-56.00892854098871,"count":0},
+    {"id":"preview-5-2","kind":"document","x":81.80274532804388,"y":22.419213082463877,"z":-6.1993694492517575,"count":0},
+    {"id":"preview-5-3","kind":"document","x":80.12807091187304,"y":-7.619027736279957,"z":48.150776185997294,"count":0},
+    {"id":"preview-5-4","kind":"document","x":62.86523678069581,"y":-29.464953615750396,"z":29.63428042540696,"count":0},
+    {"id":"preview-5-5","kind":"document","x":38.127338514692205,"y":-41.224243119306195,"z":-6.205793698187592,"count":0},
+    {"id":"preview-5-6","kind":"document","x":13.138962903101204,"y":-58.27939493934115,"z":-23.924742114028476,"count":0},
+    {"id":"preview-5-7","kind":"document","x":-16.8749228794234,"y":-55.89633358206402,"z":-10.068080931826948,"count":0},
+    {"id":"preview-5-8","kind":"document","x":-43.20340224424955,"y":-48.65525316403416,"z":40.12487974284586,"count":0},
+    {"id":"preview-5-9","kind":"document","x":-65.81664599036804,"y":-29.451920476386853,"z":19.096931009315945,"count":0},
+    {"id":"preview-purpose-0","kind":"subject","x":7.067506389382384,"y":-150.41114897085427,"z":7.412551706524292,"count":225},
+    {"id":"preview-purpose-1","kind":"subject","x":4.180440381926884,"y":25.473281377985376,"z":10.81861469587091,"count":39},
+    {"id":"preview-purpose-2","kind":"subject","x":-55.3615689304372,"y":65.44769657542156,"z":17.65506854653333,"count":22},
+    {"id":"preview-purpose-3","kind":"subject","x":100.38221751039173,"y":-54.788204579094085,"z":-4.748861123386145,"count":21},
+    {"id":"preview-purpose-4","kind":"subject","x":2.3170071735403397,"y":125.85779694918824,"z":-26.177983043038317,"count":20},
+    {"id":"preview-purpose-5","kind":"subject","x":-89.34236205777967,"y":67.5808334585056,"z":71.02486718487293,"count":0},
+    {"id":"preview-single-0","kind":"document","x":46.37323800198223,"y":117.6108981404485,"z":32.66622749028515,"count":0},
+    {"id":"preview-single-1","kind":"document","x":-63.83683163475274,"y":101.20906951145513,"z":37.32792741119864,"count":0},
+    {"id":"preview-single-10","kind":"document","x":68.48749590272323,"y":100.96961562661328,"z":-46.51302988249113,"count":0},
+    {"id":"preview-single-11","kind":"memory","x":100.6409211386668,"y":113.33530673463596,"z":-17.928337423206187,"count":0},
+    {"id":"preview-single-12","kind":"document","x":-111.061435049007,"y":-60.779266386314106,"z":34.15462777417312,"count":0},
+    {"id":"preview-single-13","kind":"document","x":97.17609781940668,"y":69.55374807578026,"z":37.85038773760772,"count":0},
+    {"id":"preview-single-14","kind":"document","x":159.65022264117755,"y":-10.994382686902185,"z":-22.351821688424224,"count":0},
+    {"id":"preview-single-15","kind":"memory","x":-73.87144473050627,"y":-84.59611616780388,"z":48.791546093321145,"count":0},
+    {"id":"preview-single-16","kind":"document","x":-120.10161585259648,"y":54.8010407262671,"z":18.756159405909813,"count":0},
+    {"id":"preview-single-17","kind":"document","x":-162.36672312365488,"y":34.83108304207886,"z":-38.98298845622202,"count":0},
+    {"id":"preview-single-18","kind":"document","x":-96.73947824068448,"y":-28.86308629694804,"z":55.103457112987435,"count":0},
+    {"id":"preview-single-19","kind":"memory","x":151.30114471525698,"y":81.84666637928284,"z":-46.97683186449831,"count":0},
+    {"id":"preview-single-2","kind":"document","x":110.59342839087606,"y":6.10481728911703,"z":50.67937780264811,"count":0},
+    {"id":"preview-single-20","kind":"document","x":-145.1877241963875,"y":-21.22264678139166,"z":-5.369961792147389,"count":0},
+    {"id":"preview-single-21","kind":"document","x":-170.49118999241492,"y":-63.90032698356913,"z":-64.85462751794923,"count":0},
+    {"id":"preview-single-22","kind":"document","x":-107.8448415451862,"y":108.23078799247185,"z":-19.764704906846937,"count":0},
+    {"id":"preview-single-3","kind":"memory","x":-115.2617045235391,"y":7.9212374007721,"z":41.86364970342013,"count":0},
+    {"id":"preview-single-4","kind":"document","x":79.33860238277215,"y":-88.51528594053718,"z":43.376656095281945,"count":0},
+    {"id":"preview-single-5","kind":"document","x":167.80958994450435,"y":-73.39462793854305,"z":-62.096691605117066,"count":0},
+    {"id":"preview-single-6","kind":"document","x":-67.4118603483995,"y":-50.99614642641765,"z":73.08641953403645,"count":0},
+    {"id":"preview-single-7","kind":"memory","x":-123.61788607238476,"y":-106.45233049377538,"z":-33.47091632975556,"count":0},
+    {"id":"preview-single-8","kind":"document","x":-71.93783527897621,"y":158.5020880260288,"z":-56.37184738998015,"count":0},
+    {"id":"preview-single-9","kind":"document","x":134.5845034474588,"y":38.05545783715301,"z":7.074054514306549,"count":0},
+    {"id":"preview-topic-shared","kind":"topic","x":-30.925651661247016,"y":87.75876719118246,"z":65.6446455609903,"count":0},
+  ];
+  const obstacles = [{"bottom":70,"left":12,"right":348,"top":10},{"bottom":60,"left":12,"right":184,"top":10},{"bottom":60,"left":192,"right":364,"top":10},{"bottom":60,"left":372,"right":544,"top":10},{"bottom":60,"left":552,"right":724,"top":10},{"bottom":60,"left":732,"right":904,"top":10},{"bottom":386.1171875,"left":190,"right":346,"top":332.1171875},{"bottom":435.7109375,"left":14,"right":346,"top":396.1171875}];
+  const radius = (body: typeof bodies[number], depth: number) => nodeVisualRadius(nodeScreenSize(body.kind, depth, size.height, camera.projectionMatrix.elements[5]), false, false, body.count);
+  const projected = () => bodies.map(body => { const world=new Vector3(body.x,body.y,body.z), depth=-world.clone().applyMatrix4(camera.matrixWorldInverse).z, p=world.project(camera); return { x:(p.x+1)*size.width/2, y:(1-p.y)*size.height/2, radius:radius(body,depth) }; });
+  const blocked = () => projected().filter(body => obstacles.some(box => Math.hypot(body.x-Math.max(box.left,Math.min(box.right,body.x)),body.y-Math.max(box.top,Math.min(box.bottom,body.y))) < body.radius));
+  assert.ok(blocked().length > 0, "the regression input actually covers a rendered body");
+  const frame = overviewFrame(camera, target, bodies, size, { radius, obstacles });
+  assert.ok(frame, "an unsafe original pose requires a safe replacement, not a no-op");
+  camera.position.set(frame.position.x, frame.position.y, frame.position.z); camera.lookAt(frame.target.x, frame.target.y, frame.target.z); camera.updateMatrixWorld();
+  assert.equal(blocked().length, 0);
+  for (const body of projected()) assert.ok(body.x-body.radius>=16 && body.x+body.radius<=size.width-16 && body.y-body.radius>=16 && body.y+body.radius<=size.height-16);
+});
+
+test("initial framing translates when every distance at the original target is obstructed", () => {
+  const size = { width: 360, height: 449 }, target = { x: 0, y: 0, z: 0 };
+  const camera = new PerspectiveCamera(60, size.width / size.height, .1, 20000);
+  camera.position.set(0, 0, 1200); camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
+  const bodies = [{ x: -60, y: 0, z: 0 }, { x: 60, y: 0, z: 0 }];
+  // One body's center stays inside the right-half obstacle at every old distance.
+  const obstacles = [{ left: 180, top: 0, right: 360, bottom: 449 }];
+  const frame = overviewFrame(camera, target, bodies, size, { radius: () => 21, obstacles });
+  assert.ok(frame, "a safe left-hand pocket is reachable by camera translation");
+  camera.position.set(frame.position.x, frame.position.y, frame.position.z); camera.lookAt(frame.target.x, frame.target.y, frame.target.z); camera.updateMatrixWorld();
+  for (const body of bodies) {
+    const p = new Vector3(body.x, body.y, body.z).project(camera), x = (p.x + 1) * size.width / 2;
+    assert.ok(x - 21 >= 16 && x + 21 <= obstacles[0].left);
+  }
+});
+
+test("impossible framing exhausts bounded candidates without mutating the live camera or stars", () => {
+  const size = { width: 360, height: 449 }, target = { x: 0, y: 0, z: 0 };
+  const camera = new PerspectiveCamera(60, size.width / size.height, .1, 20000);
+  camera.position.set(0, 0, 500); camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
+  const bodies = [{ x: -60, y: 0, z: 0 }, { x: 60, y: 0, z: 0 }], before = JSON.stringify(bodies);
+  const pose = camera.position.clone(), rotation = camera.quaternion.clone();
+  let calls = 0;
+  assert.equal(overviewFrame(camera, target, bodies, size, { radius: () => { calls++; return 21; }, obstacles: [{ left: 0, top: 0, right: 360, bottom: 449 }] }), null);
+  assert.ok(calls > 2 && calls < 1000, "the exhaustive failure search remains bounded");
+  assert.ok(camera.position.equals(pose) && camera.quaternion.equals(rotation));
+  assert.equal(JSON.stringify(bodies), before);
 });

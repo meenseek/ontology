@@ -44,7 +44,7 @@ Scene.prototype.onBeforeRender = function (renderer, scene, camera, geometry, ma
     // Read the count-sized sprite that was actually drawn, rather than treating a summary as a 10px marker.
     const glyph = object.getObjectByName("summary-glyph");
     const radius = glyph ? glyph.scale.x * camera.projectionMatrix.elements[5] * rect.height / 4 :
-      nodeVisualRadius(nodeScreenSize(node?.kind ?? "folder", depth, rect.height, camera.projectionMatrix.elements[5]), false, false);
+      nodeVisualRadius(nodeScreenSize(node?.kind ?? "folder", depth, rect.height, camera.projectionMatrix.elements[5]), object.userData.nodeId === new URLSearchParams(location.search).get("focus"), false);
     world.project(camera);
     stars.push({ id: object.userData.nodeId, x, y, z, px: (world.x + 1) * rect.width / 2, py: (1 - world.y) * rect.height / 2, radius,
       opacity: object.userData.opacity?.() ?? 1, retiring: object.userData.retiring?.() ?? false });
@@ -270,6 +270,57 @@ if (check !== null) void (async () => {
   };
   try {
     await settled();
+    if (check === "readable-bounds") {
+      const coverage = () => {
+        const shown = new Set(labels().map(label => label.dataset.nodeId));
+        for (let group = 0; group < 5; group++) {
+          const id = `preview-purpose-${group}`;
+          const pinned = document.querySelector<HTMLElement>(`.graph-group-target.core-name[data-node-id="${id}"]`);
+          assert(shown.has(id) || !!pinned, `필수 묶음 이름 누락: ${id}`);
+        }
+      };
+      const bodiesClear = () => {
+        const origin = document.querySelector(".graph-canvas")!.getBoundingClientRect();
+        const obstacles = [...document.querySelectorAll<HTMLElement>(".graph-minimap,.graph-quick-help,.graph-group-navigation.with-keys,.graph-core-actions")]
+          .filter(element => element.offsetWidth && element.offsetHeight).map(element => element.getBoundingClientRect());
+        for (const star of frame().stars.filter(star => !star.retiring && star.opacity > .99)) {
+          const x = star.px + origin.left, y = star.py + origin.top;
+          assert(x-star.radius >= origin.left && x+star.radius <= origin.right && y-star.radius >= origin.top && y+star.radius <= origin.bottom, `${star.id}: 별 표시 영역이 화면 밖`);
+          assert(obstacles.every(box => Math.hypot(x-Math.max(box.left,Math.min(box.right,x)), y-Math.max(box.top,Math.min(box.bottom,y))) >= star.radius-.1), `${star.id}: 실제 별 반지름이 조작 영역에 가림`);
+        }
+      };
+      coverage(); bodiesClear(); starClearance();
+      results.push({ phase: "overview", requiredGroupIds: [0,1,2,3,4], actualRadiusClearance: true });
+      for (const group of [0,1]) {
+        button("목록 보기").click(); await wait(0);
+        [...document.querySelectorAll<HTMLButtonElement>(".graph-list>button")].find(row => row.querySelector("strong")?.textContent === nodes.find(node => node.id === `preview-purpose-${group}`)!.label)!.click();
+        button("3D 보기").click(); await settled();
+        if (innerWidth <= 900) { button("관리 패널 닫기").click(); await settled(); document.querySelector<HTMLButtonElement>(`.graph-group-target[data-node-id="preview-purpose-${group}"]`)!.click(); await settled(); }
+        const readable = () => {
+          inspect(group); bodiesClear(); starClearance();
+          const titles = labels().filter(label => label.dataset.nodeId?.startsWith(`preview-${group}-`));
+          assert(titles.length >= 2, "읽기 프레임의 제목이 모두 보류되거나 한 개만 남음");
+          const separator = document.querySelector<HTMLElement>(".graph-core-separator")!;
+          const chrome = document.querySelector(".graph-chrome")!.getBoundingClientRect();
+          if (chrome.width <= 520) assert(getComputedStyle(separator).display === "none", "좁은 실제 너비에 가운뎃점이 고립됨");
+          return titles.length;
+        };
+        let titleCount = readable();
+        button("다음").click(); await settled(); titleCount = Math.min(titleCount, readable());
+        button("필터·묶음").click(); await wait(100); await settled();
+        const filter = document.querySelector(".map-sidebar")!;
+        if (filter.getAttribute("aria-modal") === "true") {
+          assert(document.querySelector(".galaxy")!.hasAttribute("inert"), "필터 모달 뒤 지도 입력이 열림");
+          assert(filter.contains(document.activeElement), "필터 모달로 초점이 옮겨지지 않음");
+          if (innerWidth > 900) assert(document.querySelector(".management-panel")!.hasAttribute("inert"), "필터 모달 뒤 상세 입력이 열림");
+        } else titleCount = Math.min(titleCount, readable());
+        button("탐색 조건 닫기").click(); await settled(); titleCount = Math.min(titleCount, readable());
+        button("묶음 접기").click(); await settled(); coverage();
+        results.push({ group, longTitle: group === 1, pages: [1,2], minimumVisibleTitles: titleCount, foldedNameCoverage: true });
+      }
+      notice.textContent = `PASS · ${innerWidth}px · 이름·긴 제목·실제 별 가림 검사`;
+      notice.dataset.result = JSON.stringify({ passed: true, results }); return;
+    }
     if (check === "activation" || check === "activation-extra" || check === "interface") {
       const canvas = document.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!;
       const capture = canvas.setPointerCapture, releaseCapture = canvas.releasePointerCapture;
@@ -367,7 +418,10 @@ if (check !== null) void (async () => {
     }).length;
     assert(overviewCrossings === 0, "첫 화면의 관계선이 투명한 제목을 지나갑니다.");
     const overviewLeaderStarCrossings = starClearance();
-    assert(names().length >= (innerWidth <= 700 ? 0 : 5), "별 회피 때문에 주요 묶음 이름이 사라졌습니다.");
+    for (let group = 0; group < 5; group++) {
+      const id = `preview-purpose-${group}`;
+      assert(names().some(([named]) => named === id) || !!document.querySelector(`.graph-group-target.core-name[data-node-id="${id}"]`), `주요 묶음 이름 누락: ${id}`);
+    }
     results.push({ overviewRelationTitleCrossings: overviewCrossings, overviewLeaderStarCrossings, overviewNames: names().length });
     if (new URLSearchParams(location.search).get("check") === "overview") {
       notice.textContent = `PASS · ${innerWidth}px · 합성 자료 검사`;

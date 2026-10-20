@@ -28,31 +28,60 @@ export function overviewFrame<T extends Point>(camera: PerspectiveCamera, target
   // Leave room for titles and map controls; cap the gain so a tiny graph remains a constellation.
   const fitted = nearest + Math.max(halfWidth / (horizontal * .80), halfHeight / (vertical * .80));
   const minimumDistance = Math.max(distance / 2.5, fitted);
-  if (minimumDistance >= distance * .96) return null;
-  let nextDistance = minimumDistance;
-  if (display) {
-    const candidate = camera.clone(), point = new Vector3(), center = new Vector3(target.x, target.y, target.z);
-    const safe = (reach: number) => {
-      candidate.position.copy(center).addScaledVector(forward, reach); candidate.lookAt(center); candidate.updateMatrixWorld();
-      return nodes.every(node => {
-        point.set(node.x, node.y, node.z).applyMatrix4(candidate.matrixWorldInverse);
-        const depth = -point.z, radius = display.radius(node, depth) + 8;
-        if (depth <= 0) return false;
-        point.applyMatrix4(candidate.projectionMatrix);
-        const x = (point.x + 1) * size.width / 2, y = (1 - point.y) * size.height / 2;
-        return x - radius >= 16 && x + radius <= size.width - 16 && y - radius >= 16 && y + radius <= size.height - 16 &&
-          display.obstacles.every(box => Math.hypot(x - Math.max(box.left, Math.min(x, box.right)), y - Math.max(box.top, Math.min(y, box.bottom))) >= radius);
-      });
-    };
-    // Fixed-size summary sprites and real DOM controls do not scale like world
-    // coordinates. Back off the one-time fit until their actual footprints clear.
-    let step = 0;
-    while (step < 32 && !safe(nextDistance)) { step++; nextDistance = minimumDistance + (distance - minimumDistance) * step / 32; }
-    if (!safe(nextDistance)) return null;
+  if (!display) {
+    if (minimumDistance >= distance * .96) return null;
+    offset.normalize().multiplyScalar(minimumDistance);
+    return { position: { x: target.x + offset.x, y: target.y + offset.y, z: target.z + offset.z }, target: { ...target } };
   }
-  if (nextDistance >= distance * .96) return null;
-  offset.normalize().multiplyScalar(nextDistance);
-  return { position: { x: target.x + offset.x, y: target.y + offset.y, z: target.z + offset.z }, target: { ...target } };
+  const candidate = camera.clone(), point = new Vector3(), original = new Vector3(target.x, target.y, target.z);
+  const project = (reach: number, center: Vector3) => {
+    candidate.position.copy(center).addScaledVector(forward, reach); candidate.lookAt(center); candidate.updateMatrixWorld();
+    return nodes.map(node => {
+      point.set(node.x, node.y, node.z).applyMatrix4(candidate.matrixWorldInverse);
+      const depth = -point.z, radius = display.radius(node, depth) + 8;
+      point.applyMatrix4(candidate.projectionMatrix);
+      return { x: (point.x + 1) * size.width / 2, y: (1 - point.y) * size.height / 2, depth, radius };
+    });
+  };
+  const safe = (bodies: ReturnType<typeof project>) => bodies.every(({ x, y, depth, radius }) => depth > 0 &&
+    x - radius >= 16 && x + radius <= size.width - 16 && y - radius >= 16 && y + radius <= size.height - 16 &&
+    display.obstacles.every(box => Math.hypot(x - Math.max(box.left, Math.min(x, box.right)), y - Math.max(box.top, Math.min(y, box.bottom))) >= radius));
+  const originalSafe = safe(project(distance, original));
+  // Search empty screen rectangles as well as distance. A fixed-size summary
+  // can overlap bottom controls at every zoom about the old target.
+  const xs = [...new Set([16, size.width - 16, ...display.obstacles.flatMap(box => [box.left, box.right]).filter(x => x > 16 && x < size.width - 16)])].sort((a, b) => a - b);
+  const ys = [...new Set([16, size.height - 16, ...display.obstacles.flatMap(box => [box.top, box.bottom]).filter(y => y > 16 && y < size.height - 16)])].sort((a, b) => a - b);
+  const pockets: { left: number; top: number; right: number; bottom: number }[] = [];
+  for (let l = 0; l < xs.length - 1; l++) for (let r = l + 1; r < xs.length; r++)
+    for (let t = 0; t < ys.length - 1; t++) for (let b = t + 1; b < ys.length; b++) {
+      const box = { left: xs[l], right: xs[r], top: ys[t], bottom: ys[b] };
+      if (display.obstacles.every(other => box.right <= other.left || box.left >= other.right || box.bottom <= other.top || box.top >= other.bottom)) pockets.push(box);
+    }
+  pockets.sort((a, b) => (b.right - b.left) * (b.bottom - b.top) - (a.right - a.left) * (a.bottom - a.top));
+  const end = Math.max(distance, minimumDistance), reaches = end === minimumDistance ? [minimumDistance] : Array.from({ length: 33 }, (_, i) => minimumDistance + (end - minimumDistance) * i / 32);
+  // The 2.5x cap limits approaching a tiny graph; it must not prevent backing
+  // away from an already unsafe initial pose on a short/narrow canvas.
+  for (let i = 1; i <= 12; i++) reaches.push(end * 1.15 ** i);
+  for (const reach of reaches) {
+    const bodies = project(reach, original);
+    const center = original.clone();
+    if (!safe(bodies)) {
+      const left = Math.min(...bodies.map(body => body.x - body.radius)), rightEdge = Math.max(...bodies.map(body => body.x + body.radius));
+      const top = Math.min(...bodies.map(body => body.y - body.radius)), bottom = Math.max(...bodies.map(body => body.y + body.radius));
+      let found = false;
+      for (const pocket of pockets.slice(0, 24)) {
+        if (rightEdge - left > pocket.right - pocket.left || bottom - top > pocket.bottom - pocket.top) continue;
+        const dx = (pocket.left + pocket.right - left - rightEdge) / 2, dy = (pocket.top + pocket.bottom - top - bottom) / 2;
+        const worldPerPixel = 2 * reach / (size.height * camera.projectionMatrix.elements[5]);
+        center.copy(original).addScaledVector(right, -dx * worldPerPixel).addScaledVector(up, dy * worldPerPixel);
+        if (safe(project(reach, center))) { found = true; break; }
+      }
+      if (!found) continue;
+    }
+    if (originalSafe && reach >= distance * .96) return null;
+    return { position: center.clone().addScaledVector(forward, reach), target: { x: center.x, y: center.y, z: center.z } };
+  }
+  return null;
 }
 
 /** Shared projection and footprints; a drag uses its live camera, a layout freezes a clone. */

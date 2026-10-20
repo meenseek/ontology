@@ -396,6 +396,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   const cursor = useRef<{ x: number; y: number } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const selectedId = useRef(selected); selectedId.current = selected;
+  const [compactChrome, setCompactChrome] = useState(false);
   const [minimapRevision, setMinimapRevision] = useState(0);
   const resizeMinimap = useCallback(() => setMinimapRevision(value => value + 1), []);
   const [labelFontRevision, setLabelFontRevision] = useState(0);
@@ -500,6 +501,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     if (!element) return;
     const chrome = element.querySelector<HTMLElement>(".graph-chrome"), help = element.querySelector<HTMLElement>(".graph-quick-help");
     const tooltipFloor = () => {
+      setCompactChrome((chrome?.clientWidth ?? element.clientWidth) <= 520);
       element.style.setProperty("--graph-help-floor", `${(help?.offsetHeight ?? 14) + 28}px`);
       element.style.setProperty("--graph-chrome-floor", `${(chrome?.offsetHeight ?? 14) + 28}px`);
       const minimap = element.querySelector(".graph-minimap")?.getBoundingClientRect(), guidance = help?.getBoundingClientRect();
@@ -1098,7 +1100,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
           // An opened group or revealed nearby stars show their own titles; other star titles wait.
           const opened = spatialReveal?.members.size ? spatialReveal.members : activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : undefined;
           const starTitles = opened ? { limit: 0, exempt: opened, reach: readingMembers ? showAllCore ? 38 : 84 : undefined } : { limit: MAX_RESTING_STAR_LABELS };
-          const environment = { stars: readingMembers ? candidates.filter(node => readingMembers.has(node.id) || node.id === activeExpandedCore) : candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : 120 };
+          const environment = { stars: readingMembers ? candidates.filter(node => readingMembers.has(node.id) || node.id === activeExpandedCore) : candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : undefined };
           let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
           // Expanded metadata must not make an already usable keyboard target disappear.
           const compactFallback = new Set(labelCandidates.filter(node => node.id === priorityId && !visible.some(box => box.id === node.id)).map(node => node.id));
@@ -1304,7 +1306,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       spatialCloseTimer.current = null;
     }, reduced ? 0 : REVEAL_DURATION + 16);
   };
-  return <div className="graph-canvas" ref={container} tabIndex={-1}
+  return <div className="graph-canvas" data-compact-chrome={compactChrome} ref={container} tabIndex={-1}
     data-label-backdrop={hasDisplayFilters || selected || activeExpandedCore || spatialReveal?.members.size || allConnections ? "protected" : "clear"}
     onKeyDownCapture={event => {
       if (disabled || !(event.target as HTMLElement).closest(".graph-minimap") ||
@@ -1496,7 +1498,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     </div>}
     {spatialReveal && spatialReveal.members.size > 0 && !selected && <button type="button" ref={spatialCloseButton} className="graph-core-close" onClick={event => { if (event.detail === 0) container.current?.focus(); closeSpatialReveal(); }}>근접 묶음 {spatialReveal.members.size}개 접기</button>}
     <div className="graph-chrome">
-    {ready && <MiniMap nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
+    {ready && <MiniMap compact={compactChrome} nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
       rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} onResize={resizeMinimap} />}
     <GraphInstructions quick />
     </div>

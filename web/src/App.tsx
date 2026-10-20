@@ -124,6 +124,19 @@ export default function App() {
   const explorerElement = useRef<HTMLElement>(null), explorerClose = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null), filterButton = useRef<HTMLButtonElement>(null);
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 900px)").matches);
+  const workspaceElement = useRef<HTMLElement>(null);
+  const [mapWidth, setMapWidth] = useState(Infinity);
+  // Keep a readable map after both panels: a filter uses the existing modal
+  // interaction when its overlay would leave less than a mobile reading width.
+  const overlayExplorer = !narrow && !!panel && mapWidth < 360;
+  useEffect(() => {
+    const workspace = workspaceElement.current;
+    if (!workspace) return;
+    const measure = () => setMapWidth(workspace.clientWidth - (panelElement.current?.getBoundingClientRect().width ?? 0) - (parseFloat(getComputedStyle(workspace).getPropertyValue("--explorer-width")) || 0));
+    const observer = new ResizeObserver(measure); observer.observe(workspace);
+    if (panelElement.current) observer.observe(panelElement.current);
+    measure(); return () => observer.disconnect();
+  }, [!!panel, !!session]);
   const selected = data?.model.nodes.find(n => n.id === route.focus) ?? null;
   const relatedOriginals = selected && data ? relatedKnowledge(data.model, selected.id) : [];
   const references = selected ? data?.model.links.flatMap(link => {
@@ -313,14 +326,14 @@ export default function App() {
     setExplore(false);
     if (restoreFocus) requestAnimationFrame(() => filterButton.current?.focus());
   }
-  useEffect(() => { if (explore && narrow && !panel) explorerClose.current?.focus(); }, [explore, narrow, panel]);
-  useEffect(() => { if (panel) closeButton.current?.focus(); }, [!!panel, !!session]);
+  useEffect(() => { if (explore && (narrow && !panel || overlayExplorer)) explorerClose.current?.focus(); }, [explore, narrow, panel, overlayExplorer]);
+  useEffect(() => { if (panel) closeButton.current?.focus(); }, [!!panel, !!session, narrow]);
   useEffect(() => {
     if (!panel && !(explore && narrow)) return;
-    const modal = panel ? panelElement.current : explorerElement.current;
+    const modal = explore && overlayExplorer ? explorerElement.current : panel ? panelElement.current : explorerElement.current;
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) { event.preventDefault(); if (panel) closePanel(); else closeExplorer(); }
-      if (event.key !== "Tab" || !narrow) return;
+      if (event.key === "Escape" && !busy) { event.preventDefault(); if (explore && overlayExplorer) closeExplorer(); else if (panel) closePanel(); else closeExplorer(); }
+      if (event.key !== "Tab" || !(narrow || explore && overlayExplorer)) return;
       const controls = [...(modal?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, [tabindex="0"]') ?? [])].filter(el => {
         if (!el.getClientRects().length || getComputedStyle(el).visibility !== "visible") return false;
         for (let ancestor: HTMLElement | null = el; ancestor; ancestor = ancestor.parentElement) {
@@ -337,7 +350,7 @@ export default function App() {
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     };
     document.addEventListener("keydown", keydown); return () => document.removeEventListener("keydown", keydown);
-  }, [panel, explore, narrow, busy]);
+  }, [panel, explore, narrow, overlayExplorer, busy]);
   const cluster = data?.model.clusters.find(c => c.id === filters.cluster);
   const clusterOptions = useMemo(() => data ? visibleClusterOptions(data.model, filters) : { listed: [], standalone: 0 }, [data, filters]);
   const listedClusters = clusterOptions.listed;
@@ -350,7 +363,7 @@ export default function App() {
     {selected && !shown.nodes.some(n => n.id === selected.id) && <p className="notice">선택한 자료가 현재 필터 밖에 있습니다. <button disabled={busy} onClick={event => { setFilters(initialFilters); if (event.detail === 0) (panel ? closeButton.current : filterButton.current)?.focus(); }}>필터 해제</button></p>}
   </>;
   return <div className="app">
-    <header className="app-header" inert={(!!panel || explore) && narrow}>
+    <header className="app-header" inert={(!!panel || explore) && narrow || explore && overlayExplorer}>
       <a className="wordmark" href="/">개인 온톨로지</a>
       <nav className="app-navigation" aria-label="주요 탐색">
       <div className="scope-switch" role="group" aria-label="탐색 범위">
@@ -365,8 +378,8 @@ export default function App() {
       </form>
       <button ref={manageButton} className="manage-button" disabled={!session || busy} onClick={startRecord}>기록 남기기</button>
     </header>
-    <main className={`map-workspace ${panel ? "panel-open" : ""} ${explore ? "explorer-open" : ""}`}>
-      {explore && <aside ref={explorerElement} className="map-sidebar" role={narrow ? "dialog" : undefined} aria-modal={narrow || undefined} aria-label="지식 탐색" inert={!!panel && narrow}>
+    <main ref={workspaceElement} className={`map-workspace ${panel ? "panel-open" : ""} ${explore && !overlayExplorer ? "explorer-open" : ""} ${explore && overlayExplorer ? "explorer-modal" : ""}`}>
+      {explore && <aside ref={explorerElement} className="map-sidebar" role={narrow || overlayExplorer ? "dialog" : undefined} aria-modal={narrow || overlayExplorer || undefined} aria-label="지식 탐색" inert={!!panel && narrow}>
         <div className="sidebar-heading"><h2>탐색 조건</h2><button ref={explorerClose} className="quiet" aria-label="탐색 조건 닫기" onClick={closeExplorer}>닫기</button></div>
         <div className="filter-row">
           <label>표시 종류<select value={filters.kind} disabled={busy} onChange={e => setFilters(f => ({ ...f, kind: e.target.value as Filters["kind"] }))}><option value="all">모두</option><option value="knowledge">문서와 기록</option>{Object.entries(kindName).filter(([id]) => id !== "folder" || showFolders).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
@@ -383,7 +396,7 @@ export default function App() {
         <details className="folder-list"><summary>상위 폴더 · {folders.length}개</summary><div className="compact-list">{folders.map(value => <button className="cluster" key={value.id} disabled={busy} aria-pressed={filters.folder === value.id} onClick={() => fitFolder(value.id)}><strong>{value.label}</strong><small>하위 원문 {value.members.length}개</small></button>)}</div><p className="hint">조회된 원문 경로에서 계산한 부모·소속 구조입니다. 폴더를 누르면 하위 자료를 봅니다.</p></details>
         <details className="section"><summary>검색 방법</summary><p className="hint">단어를 띄어 쓰면 순서와 관계없이 모든 단어가 포함된 항목을 찾습니다. 경로와 검색 가능한 원문 내용도 함께 찾습니다. 첨부 파일은 연결된 원문 안에서 내려받습니다. 폴더 연결은 경로에서 계산하며 내용의 유사성을 뜻하지 않습니다.</p></details>
       </aside>}
-      <section className="galaxy" aria-label="지식 지도" aria-busy={loading} inert={(!!panel || explore) && narrow}>
+      <section className="galaxy" aria-label="지식 지도" aria-busy={loading} inert={(!!panel || explore) && narrow || explore && overlayExplorer}>
         <div className="map-toolbar"><div className="map-title"><h1>{folder ? folder.label : cluster ? cluster.label : route.q ? `“${route.q}” 검색` : "지식 지도"}</h1><p className="count-breakdown"><span>표시 중</span>{" · "}<span>문서 {data ? displayed.filter(n => n.kind === "document").length : "—"}</span>{" · "}<span>기록 {data ? displayed.filter(n => n.kind === "memory").length : "—"}</span>{" · "}<span>관계 {data ? shown.links.filter(link => link.kind !== "parent").length : "—"}</span>{showFolders && data && <>{" · "}<span>부모·소속 {shown.links.filter(link => link.kind === "parent").length}</span></>}</p></div>
           <div className="map-actions">
             {fallback && !route.q && <label className="list-sort">표시 항목 정렬<select aria-label="표시 항목 정렬" value={listSort} disabled={busy} onChange={event => setListSort(event.target.value as ListSort)}><option value="updated">최근 수정순</option><option value="created">최근 추가순</option><option value="name">이름순</option></select></label>}
@@ -409,7 +422,7 @@ export default function App() {
           {data?.snapshot.truncated && <p className="warning">자료가 많아 일부만 표시합니다. 검색으로 범위를 좁히면 다른 자료를 찾을 수 있습니다.</p>}
           {data && shown.nodes.length > 0 && !shown.links.length && <p className="hint no-relations">{data.snapshot.totals.links === 0 ? "아직 등록된 관계가 없습니다." : "현재 표시한 항목 사이에는 조회된 관계가 없습니다."}</p>}
         </div>
-        {data && !loading && !displayed.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{hasDisplayFilters ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 저장한 기록이 이곳에 나타납니다."}</p><div className="action-row">{hasDisplayFilters && <button disabled={busy} onClick={() => search("")}>검색·조건 초기화</button>}<button disabled={!session || busy} onClick={startRecord}>기록 남기기</button></div></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{displayed.map(n => { const label = nodePresentation(n), at = listTimestamp(n, listSort), excerpt = route.q && n.excerpt ? searchExcerpt(n.excerpt, label.title) : null; return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} style={{ color: knowledge(n) ? starColor(n) : n.taxonomyColor ?? n.color }} aria-hidden="true">{knowledge(n) ? <i /> : "○"}</span><span><strong>{label.title}</strong>{route.q && n.historical_match && <small className="warning">이전 내용에서 일치 · 현재 상태를 확인하세요</small>}{excerpt && <span className="search-excerpt">{excerpt}</span>}<small className="node-meta">{kindName[n.kind]} · {stateName(n)}</small>{label.subtitle && <span className="node-location" title={label.subtitle}>{label.subtitle}</span>}</span>{!route.q && knowledge(n) && listSort !== "name" && <small className="node-date">{at === null ? listSort === "created" ? "추가일 미확인" : "수정일 미확인" : <time dateTime={new Date(at).toISOString()} title={new Date(at).toLocaleString("ko-KR")}>{listSort === "created" ? "추가" : "수정"} · {new Date(at).toLocaleDateString("ko-KR")}</time>}</small>}{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph key={`${route.scope}:${route.q}`} positions={positions} snapshot={data.model} nodes={shown.nodes} links={shown.links} selected={route.focus} filteredGroup={filters.cluster} hasDisplayFilters={hasDisplayFilters} explorerOpen={explore} rotate={rotating} allConnections={allConnections} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onClearSelection={closePanel} onFit={() => fitView()} onToggleRotation={() => setRotate(value => !value)} onFailure={failed} /></Suspense></GraphBoundary>)}
+        {data && !loading && !displayed.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{hasDisplayFilters ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 저장한 기록이 이곳에 나타납니다."}</p><div className="action-row">{hasDisplayFilters && <button disabled={busy} onClick={() => search("")}>검색·조건 초기화</button>}<button disabled={!session || busy} onClick={startRecord}>기록 남기기</button></div></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{displayed.map(n => { const label = nodePresentation(n), at = listTimestamp(n, listSort), excerpt = route.q && n.excerpt ? searchExcerpt(n.excerpt, label.title) : null; return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} style={{ color: knowledge(n) ? starColor(n) : n.taxonomyColor ?? n.color }} aria-hidden="true">{knowledge(n) ? <i /> : "○"}</span><span><strong>{label.title}</strong>{route.q && n.historical_match && <small className="warning">이전 내용에서 일치 · 현재 상태를 확인하세요</small>}{excerpt && <span className="search-excerpt">{excerpt}</span>}<small className="node-meta">{kindName[n.kind]} · {stateName(n)}</small>{label.subtitle && <span className="node-location" title={label.subtitle}>{label.subtitle}</span>}</span>{!route.q && knowledge(n) && listSort !== "name" && <small className="node-date">{at === null ? listSort === "created" ? "추가일 미확인" : "수정일 미확인" : <time dateTime={new Date(at).toISOString()} title={new Date(at).toLocaleString("ko-KR")}>{listSort === "created" ? "추가" : "수정"} · {new Date(at).toLocaleDateString("ko-KR")}</time>}</small>}{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph key={`${route.scope}:${route.q}`} positions={positions} snapshot={data.model} nodes={shown.nodes} links={shown.links} selected={route.focus} filteredGroup={filters.cluster} hasDisplayFilters={hasDisplayFilters} explorerOpen={explore && !overlayExplorer} rotate={rotating} allConnections={allConnections} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onClearSelection={closePanel} onFit={() => fitView()} onToggleRotation={() => setRotate(value => !value)} onFailure={failed} /></Suspense></GraphBoundary>)}
         <div className="map-legend">{!!displayed.length && <><span><i className="legend-star" aria-hidden="true" />문서·기록</span><span>색: {view === "purpose" ? "목적 소속" : "분류 소속"}</span><span>○ 분류 표식{showFolders ? "·폴더" : ""}</span>{!fallback && <><span>{allConnections ? "연결선 모두 보기" : "선 간략히"}</span>{!allConnections && <span className="map-legend-hint">가리키면 연결 보기</span>}</>}</>}<details onKeyDown={event => {
           if (event.key !== "Escape" || !event.currentTarget.open) return;
           event.preventDefault(); event.stopPropagation();
@@ -423,7 +436,7 @@ export default function App() {
           <section><h3>해석할 때 주의할 점</h3><p>과거 출처 근거는 갈색의 가는 선이며 군집에서 제외합니다. 단독 항목은 연결된 자료 곁에 배치될 수 있습니다. ‘저장’은 사실 검증을 뜻하지 않습니다. 출처 확인 시각만 바뀌면 변경으로 표시하지 않습니다.</p></section>
         </div></details></div>
       </section>
-      {panel && session && <aside ref={panelElement} className="management-panel" role="dialog" aria-modal={narrow || undefined} aria-label={panel === "manage" ? "기록 남기기" : "선택한 자료 상세"}>
+      {panel && session && <aside ref={panelElement} className="management-panel" inert={explore && overlayExplorer} role="dialog" aria-modal={narrow || undefined} aria-label={panel === "manage" ? "기록 남기기" : "선택한 자료 상세"}>
         <div className="panel-heading"><span>{panel === "manage" ? "기록 남기기" : selected ? kindName[selected.kind] : memorySeed ? "기록" : "자료 상세"}</span><div className="panel-actions">{panel === "node" && selected?.kind === "document" && <button disabled={busy} onClick={() => { const section = documentContext.current; if (section) { section.open = true; section.scrollIntoView({ block: "start" }); section.querySelector("summary")?.focus(); } }}>분류·연결</button>}{panel === "node" && (memorySeed || selected && knowledge(selected) && !isNativeOriginal(selected)) && <button disabled={busy} aria-expanded={managing} onClick={toggleManagement}>{managing ? "읽기로 돌아가기" : "관리"}</button>}<button ref={closeButton} disabled={busy} aria-label="관리 패널 닫기" onClick={closePanel}>닫기 ×</button></div></div>
         <div aria-live="polite">{statusMessages}</div>
         {panel === "manage" ? <><Memory visible={visible} managing key={`${route.scope}:manage:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={null} onDirtyChange={updateMemoryDirty} onBusy={updateBusy} onCommit={changed} onNavigate={choose} onSubjectsChange={() => setRefresh(v => v + 1)} /><SyncPanel key={panelEpoch} visible={visible} /></> : !selected && !memorySeed ? <p className="empty">선택한 자료를 불러오는 중…</p> : <>

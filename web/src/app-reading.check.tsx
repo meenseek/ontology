@@ -1833,11 +1833,11 @@ async function checkRelatedMaterialKinds() {
 async function checkResidualMap(mouseOnly = false) {
   const originalUrl = window.location.href;
   const originalRender = Scene.prototype.onBeforeRender, originalPack = Positions.prototype.packOverview;
-  const root = createRoot(host), samples = new Map<string, { x: number; y: number; z: number }>();
+  const root = createRoot(host), samples = new Map<string, { x: number; y: number; z: number; radius: number }>();
   let positions: Positions | undefined, apiCalls = 0;
-  const names = ["합성 연구와 실행 목적", "합성 개발과 품질 목적"], subjects = [subjectId, "p_00000000-0000-4000-8000-000000000002"];
+  const names = ["제품 전략과 의사결정", "보안 플랫폼 개발·검증과 사용자 경험을 함께 개선하기"], subjects = [subjectId, "p_00000000-0000-4000-8000-000000000002"];
   const members: GraphNode[] = [225, 39].flatMap((count, group) => Array.from({ length: count }, (_, i) => ({
-    id: `residual-${group}-${String(i).padStart(3, "0")}`, scope: "personal", kind: "document", label: `합성 자료 ${group}-${i}`,
+    id: `residual-${group}-${String(i).padStart(3, "0")}`, scope: "personal", kind: "document", label: `합성 자료 ${group}-${i}`, title: ["사용자의 맥락을 이해하는 방법", "변화하는 지식을 연결하는 방식", "자연스럽게 이어지는 인터랙션"][i % 3],
     subject_id: subjects[group], subject_name: names[group], status: "ok", present: true, current: true,
   })));
   const nodes: GraphNode[] = [...subjects.map((id, i): GraphNode => ({ id, scope: "personal", kind: "subject", label: names[i], purpose_total: i ? 39 : 225 })), ...members];
@@ -1862,10 +1862,10 @@ async function checkResidualMap(mouseOnly = false) {
     const actual = [...samples].filter(([id]) => id.startsWith(`residual-${group}-`));
     const obstacles = [...host.querySelectorAll<HTMLElement>(".graph-minimap, .graph-quick-help, .graph-core-actions, .map-sidebar")]
       .filter(element => element.offsetWidth && element.offsetHeight).map(element => element.getBoundingClientRect());
-    return actual.length === 12 && actual.every(([, at]) => {
+    return actual.length === 12 && [...host.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].filter(label => label.dataset.nodeId?.startsWith(`residual-${group}-`)).length >= 2 && actual.every(([, at]) => {
       const x = box.left + (at.x + 1) * box.width / 2, y = box.top + (1 - at.y) * box.height / 2;
-      return at.z > -1 && at.z < 1 && x >= box.left + 10 && x <= box.right - 10 && y >= box.top + 10 && y <= box.bottom - 10 &&
-        obstacles.every(other => x + 10 <= other.left || x - 10 >= other.right || y + 10 <= other.top || y - 10 >= other.bottom);
+      return at.z > -1 && at.z < 1 && x >= box.left + at.radius && x <= box.right - at.radius && y >= box.top + at.radius && y <= box.bottom - at.radius &&
+        obstacles.every(other => Math.hypot(x - Math.max(other.left, Math.min(other.right, x)), y - Math.max(other.top, Math.min(other.bottom, y))) >= at.radius);
     });
   };
   // Match the application viewport; fixture prose/results stay available in the DOM.
@@ -1879,7 +1879,11 @@ async function checkResidualMap(mouseOnly = false) {
     this.traverse(object => {
       const id = object.userData.nodeId;
       if (typeof id !== "string" || typeof object.userData.opacity !== "function" || object.userData.opacity() < .99 || object.userData.retiring?.()) return;
-      const p = object.getWorldPosition(new Vector3()).project(args[2]); samples.set(id, { x: p.x, y: p.y, z: p.z });
+      const at = object.getWorldPosition(new Vector3()), camera = args[2], bounds = host.querySelector(".graph-canvas")!.getBoundingClientRect();
+      const depth = -at.clone().applyMatrix4(camera.matrixWorldInverse).z;
+      const glyph = object.getObjectByName("summary-glyph");
+      const radius = glyph ? glyph.scale.x * camera.projectionMatrix.elements[5] * bounds.height / 4 : nodeVisualRadius(nodeScreenSize(nodes.find(node => node.id === id)?.kind ?? "document", depth, bounds.height, camera.projectionMatrix.elements[5]), false, false);
+      const p = at.project(camera); samples.set(id, { x: p.x, y: p.y, z: p.z, radius });
     });
     originalRender.apply(this, args);
   };
@@ -1946,17 +1950,24 @@ async function checkResidualMap(mouseOnly = false) {
     if (innerWidth > 900) {
       assert(host.querySelector(".management-panel h2")?.textContent === names[group], "paging preserves the selected purpose detail");
       await openExplorer();
-      await until(() => frameIsReadable(group), "selected purpose refits after filter obstruction");
-      const sidebar = host.querySelector(".map-sidebar")!.getBoundingClientRect();
-      assert(host.querySelector(".graph-core-actions")!.getBoundingClientRect().left >= sidebar.right, "the open filter leaves every page control readable");
-      const mapBounds = host.querySelector(".graph-canvas")!.getBoundingClientRect();
-      assert([...host.querySelectorAll(".graph-core-actions button")].every(button => button.getBoundingClientRect().right <= mapBounds.right - 10), "every wrapped page button stays inside the usable map");
-      const canvas = host.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, box = canvas.getBoundingClientRect();
-      const sample = [...samples].filter(([id]) => id.startsWith(`residual-${group}-`)).sort((a, b) => a[1].z - b[1].z)[0][1];
-      canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: box.left + (sample.x + 1) * box.width / 2, clientY: box.top + (1 - sample.y) * box.height / 2 }));
-      await until(() => !!host.querySelector(".graph-tooltip"), "pointed member guidance is rendered");
-      const tooltip = host.querySelector(".graph-tooltip")!.getBoundingClientRect();
-      assert(tooltip.left >= sidebar.right && [...host.querySelectorAll(".graph-minimap, .graph-quick-help")].every(element => separate(tooltip, element.getBoundingClientRect())), "hover guidance clears the filter, minimap and quick instructions");
+      if (host.querySelector(".map-sidebar")?.getAttribute("aria-modal") === "true") {
+        assert(host.querySelector(".galaxy")!.hasAttribute("inert") && host.querySelector(".management-panel")!.hasAttribute("inert"), "a filter that leaves no readable map owns the modal screen");
+        host.querySelector<HTMLButtonElement>(".map-sidebar .sidebar-heading button")!.click(); await settle();
+        await until(() => frameIsReadable(group), "closing the modal restores the readable purpose map");
+        await openExplorer();
+      } else await until(() => frameIsReadable(group), "selected purpose refits after filter obstruction");
+      if (host.querySelector(".map-sidebar")?.getAttribute("aria-modal") !== "true") {
+        const sidebar = host.querySelector(".map-sidebar")!.getBoundingClientRect();
+        assert(host.querySelector(".graph-core-actions")!.getBoundingClientRect().left >= sidebar.right, "the open filter leaves every page control readable");
+        const mapBounds = host.querySelector(".graph-canvas")!.getBoundingClientRect();
+        assert([...host.querySelectorAll(".graph-core-actions button")].every(button => button.getBoundingClientRect().right <= mapBounds.right - 10), "every wrapped page button stays inside the usable map");
+        const canvas = host.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, box = canvas.getBoundingClientRect();
+        const sample = [...samples].filter(([id]) => id.startsWith(`residual-${group}-`)).sort((a, b) => a[1].z - b[1].z)[0][1];
+        canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: box.left + (sample.x + 1) * box.width / 2, clientY: box.top + (1 - sample.y) * box.height / 2 }));
+        await until(() => !!host.querySelector(".graph-tooltip"), "pointed member guidance is rendered");
+        const tooltip = host.querySelector(".graph-tooltip")!.getBoundingClientRect();
+        assert(tooltip.left >= sidebar.right && [...host.querySelectorAll(".graph-minimap, .graph-quick-help")].every(element => separate(tooltip, element.getBoundingClientRect())), "hover guidance clears the filter, minimap and quick instructions");
+      }
       host.querySelector<HTMLButtonElement>(".map-sidebar .sidebar-heading button")!.click(); await settle();
     }
     phases.push({ group: names[group], page: host.querySelector(".graph-core-page")!.textContent, visibleMembers: [...samples.keys()].filter(id => id.startsWith(`residual-${group}-`)).length, labels: checkLabelAssociations() });

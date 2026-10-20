@@ -17,9 +17,10 @@ export function miniMapTransform(points: readonly XY[], width: number, height: n
     toWorld: (p: XY): XY => ({ x: center.x + (p.x - width / 2) / scale, y: center.y - (p.y - height / 2) / scale }),
   };
 }
-type Props = { nodes: PositionedNode[]; getCamera: () => { camera: PerspectiveCamera; pose: CameraPose } | null; onMove: (pose: CameraPose) => void; onZoom: (factor: number) => void; onFit?: () => void; rotating?: boolean; rotationUnavailable?: string; onToggleRotation?: () => void; disabled: boolean; visible: boolean; onResize: () => void };
-export default function MiniMap({ nodes, getCamera, onMove, onZoom, onFit, rotating, rotationUnavailable, onToggleRotation, disabled, visible, onResize }: Props) {
-  const [collapsed, setCollapsed] = useState(() => window.matchMedia("(max-width: 600px)").matches);
+type Props = { nodes: PositionedNode[]; getCamera: () => { camera: PerspectiveCamera; pose: CameraPose } | null; onMove: (pose: CameraPose) => void; onZoom: (factor: number) => void; onFit?: () => void; rotating?: boolean; rotationUnavailable?: string; onToggleRotation?: () => void; disabled: boolean; visible: boolean; onResize: () => void; compact?: boolean };
+export default function MiniMap({ nodes, getCamera, onMove, onZoom, onFit, rotating, rotationUnavailable, onToggleRotation, disabled, visible, onResize, compact }: Props) {
+  const [preference, setPreference] = useState<boolean | null>(null);
+  const collapsed = preference ?? compact ?? window.matchMedia("(max-width: 600px)").matches;
   const bodyId = useId();
   useEffect(onResize, [collapsed, onResize]);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -85,7 +86,7 @@ export default function MiniMap({ nodes, getCamera, onMove, onZoom, onFit, rotat
   const center = () => { const element = canvas.current; if (element) navigate.current?.(element.clientWidth / 2, element.clientHeight / 2); };
   return <div className={`graph-minimap${collapsed ? " collapsed" : ""}`}>
     <div className="minimap-heading"><button type="button" className="minimap-disclosure" aria-label={collapsed ? "미니맵 펼치기" : "미니맵 접기"} aria-expanded={!collapsed} aria-controls={bodyId}
-        onClick={() => setCollapsed(value => !value)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 5 6-2 6 2 6-2v16l-6 2-6-2-6 2zM9 3v16m6-14v16" /></svg><span>전체 지도</span><svg className="minimap-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d={collapsed ? "m8 14 4-4 4 4" : "m8 10 4 4 4-4"} /></svg></button>
+        onClick={() => setPreference(!collapsed)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 5 6-2 6 2 6-2v16l-6 2-6-2-6 2zM9 3v16m6-14v16" /></svg><span>전체 지도</span><svg className="minimap-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d={collapsed ? "m8 14 4-4 4 4" : "m8 10 4 4 4-4"} /></svg></button>
       {onToggleRotation && <button type="button" className="minimap-rotation" disabled={disabled || !!rotationUnavailable} aria-pressed={!!rotating}
         aria-label={rotating ? "3D 회전 멈춤" : "3D 회전 시작"} title={rotationUnavailable ?? (rotating ? "느린 3D 회전 멈춤" : "느린 3D 회전 · 지도를 끌면 이동")}
         onClick={onToggleRotation}><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="9" ry="4" transform="rotate(-30 12 12)" /><circle cx="12" cy="12" r="2" /><path d="m17 3 3 2-1 4" /></svg></button>}

@@ -250,7 +250,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     if (allowTurn && remainingRoutePaths <= 0) return;
     const usable = (box: LabelBox) => fromStar(node, box) >= node.radius + 4 && clear(box) && !placed.some(other => overlaps(box, other));
     const arrange = (box: LabelBox) => usable(box) ? fitsTogether(box, placed) ? box : allowTurn ? routed(node, box, placed) : undefined : undefined;
-    const reach = Math.min(240, Math.max(width, height), restingReach(node)), spots: LabelBox[] = [];
+    const reach = Math.min(node.summary && environment.restingSummaryGap === undefined ? Math.hypot(width, height) : 240, Math.max(width, height), restingReach(node)), spots: LabelBox[] = [];
     for (let top = Math.max(edgeGap, Math.floor((node.y - reach - node.height) / 12) * 12); top <= Math.min(height - edgeGap - node.height, node.y + reach); top += 12)
       for (let left = Math.max(edgeGap, Math.floor((node.x - reach - node.width) / 12) * 12); left <= Math.min(width - edgeGap - node.width, node.x + reach); left += 12)
         spots.push({ id: node.id, left, top, right: left + node.width, bottom: top + node.height });
@@ -303,11 +303,11 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     }
     // Fill a close diagonal pocket before deferring a title or a prominent group name.
     if (!box && environment.stars && (!node.summary || (node.importance ?? 0) > 0)) box = nearestFree(node, boxes);
-    if (!box && environment.starTitles?.exempt?.has(node.id)) {
+    if (!box && (environment.starTitles?.exempt?.has(node.id) || node.summary && environment.restingSummaryGap === undefined)) {
       box = nearestFree(node, boxes, true);
       // A newly constrained guide may need a pocket already taken by another
       // disclosed title. Reconsider one such title before deferring either name.
-      if (!box && environment.starTitles.reach === undefined && remainingRoutePaths > 0) for (const other of boxes.filter(other => other.id !== selected && environment.starTitles?.exempt?.has(other.id))) {
+      if (!box && environment.starTitles?.reach === undefined && remainingRoutePaths > 0) for (const other of boxes.filter(other => other.id !== selected && environment.starTitles?.exempt?.has(other.id))) {
         if (remainingRoutePaths <= 0) break;
         const rest = boxes.filter(existing => existing !== other);
         const candidate = nearestFree(node, rest, true);

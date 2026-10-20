@@ -3161,3 +3161,54 @@ test("original detail keeps material relations separate from every classificatio
   assert.deepEqual(relatedKnowledge(model, selected.id).map(node => node.id).sort(), ["cited", "linked"]);
   assert.equal(JSON.stringify(model), before, "classification, direction, history and source data stay unchanged");
 });
+
+// Settled 920×760 synthetic overview that previously omitted the 39-member purpose.
+test("resting summary coverage survives a crowded short tablet overview", () => {
+  const candidates = [{"active":true,"body":5,"depth":0.9996167863065336,"height":24,"id":"preview-purpose-0","importance":2,"kind":"subject","radius":68,"summary":true,"width":161,"x":423.3405576117553,"y":190.57741124051591},{"active":true,"body":5,"depth":0.9996142477965032,"height":43,"id":"preview-purpose-1","importance":2,"kind":"subject","radius":32,"summary":true,"width":240,"x":509.91232196603585,"y":379.6036570356172},{"active":true,"body":5,"depth":0.999609050214847,"height":24,"id":"preview-purpose-2","importance":2,"kind":"subject","radius":21,"summary":true,"width":103,"x":418.7994125324562,"y":390.9466974810473},{"active":true,"body":5,"depth":0.9996255848256204,"height":24,"id":"preview-purpose-3","importance":2,"kind":"subject","radius":21,"summary":true,"width":113,"x":587.451790720957,"y":327.4292518490473},{"active":true,"body":5,"depth":0.9996401471615978,"height":24,"id":"preview-purpose-4","importance":2,"kind":"subject","radius":21,"summary":true,"width":143,"x":341.79016204957475,"y":353.16333714640126},{"active":true,"body":5,"depth":0.999563118667448,"height":21,"id":"preview-purpose-5","importance":1,"kind":"subject","radius":5,"summary":true,"width":62,"x":485.16869429308286,"y":438.9429802287127}];
+  const stars = [
+    {"id":"preview-5-0","x":521.021420967894,"y":188.94330918461375,"depth":0.9996548097131652,"radius":7.613563003475165},
+    {"id":"preview-5-1","x":545.600429162285,"y":213.1148764244736,"depth":0.999647163439714,"radius":7.781432135503145},
+    {"id":"preview-5-10","x":348.6186920208652,"y":279.37994055634283,"depth":0.9996483426117608,"radius":7.75554415368966},
+    {"id":"preview-5-11","x":338.4004199078174,"y":248.58906465058064,"depth":0.9996586370998648,"radius":7.529535131947644},
+    {"id":"preview-5-2","x":537.0355287619396,"y":245.0489631902411,"depth":0.9996266074541208,"radius":8.23272589076236},
+    {"id":"preview-5-3","x":545.7543363156752,"y":278.583442824579,"depth":0.9995840580893336,"radius":9.166870475168231},
+    {"id":"preview-5-4","x":521.1321753557148,"y":304.3560653235716,"depth":0.9995995982835202,"radius":8.82569527049456},
+    {"id":"preview-5-5","x":488.8459687333874,"y":315.95794108682185,"depth":0.9996266119709332,"radius":8.232626726980994},
+    {"id":"preview-5-6","x":460.5347303842016,"y":332.41617657499376,"depth":0.9996386692355128,"radius":7.96791705467554},
+    {"id":"preview-5-7","x":427.818775360747,"y":331.4985455078334,"depth":0.99962930794309,"radius":8.17343835125864},
+    {"id":"preview-5-8","x":393.2037793806079,"y":328.7004255747068,"depth":0.9995909390128782,"radius":9.01580411972073},
+    {"id":"preview-5-9","x":369.350485765449,"y":303.941296135267,"depth":0.9996079361415,"radius":8.642642834426015},
+    {"id":"preview-purpose-0","x":423.3405576117553,"y":190.57741124051591,"depth":0.9996167863065336,"radius":68},
+    {"id":"preview-purpose-1","x":509.91232196603585,"y":379.6036570356172,"depth":0.9996142477965032,"radius":32},
+    {"id":"preview-purpose-2","x":418.7994125324562,"y":390.9466974810473,"depth":0.999609050214847,"radius":21},
+    {"id":"preview-purpose-3","x":587.451790720957,"y":327.4292518490473,"depth":0.9996255848256204,"radius":21},
+    {"id":"preview-purpose-4","x":341.79016204957475,"y":353.16333714640126,"depth":0.9996401471615978,"radius":21},
+    {"id":"preview-purpose-5","x":485.16869429308286,"y":438.9429802287127,"depth":0.999563118667448,"radius":5},
+    {"id":"preview-single-0","x":549.1637845618254,"y":421.9934047205923,"depth":0.9995971333689077,"radius":8.879810922934846},
+    {"id":"preview-single-1","x":313.45996675086195,"y":310.7630021230611,"depth":0.9995932839683646,"radius":8.964322094569935},
+    {"id":"preview-single-10","x":584.0592729739795,"y":408.394772285142,"depth":0.999652959952783,"radius":7.654173331074707},
+    {"id":"preview-single-11","x":536.8874860909448,"y":147.9240581925293,"depth":0.9996346765988614,"radius":8.055572885124127},
+    {"id":"preview-single-12","x":556.5422661499043,"y":179.07818440422906,"depth":0.9995959122329664,"radius":8.90662019569442},
+    {"id":"preview-single-13","x":579.2267325827964,"y":377.19308610153234,"depth":0.9995928479755564,"radius":8.97389404288575},
+    {"id":"preview-single-14","x":320.7834147354899,"y":202.02192537834475,"depth":0.9996376303555738,"radius":7.990725011354964},
+    {"id":"preview-single-15","x":580.6686790495115,"y":282.50284659948346,"depth":0.9995834987784402,"radius":9.17914979460274},
+    {"id":"preview-single-16","x":306.20280721918743,"y":257.11162532665753,"depth":0.9996082000132782,"radius":8.636849695243962},
+    {"id":"preview-single-17","x":356.6678802240049,"y":424.5892626857405,"depth":0.9996483227080146,"radius":7.755981127938486},
+    {"id":"preview-single-18","x":499.2717061288347,"y":267.5185551623362,"depth":0.9995779081311562,"radius":9.301888944991576},
+    {"id":"preview-single-19","x":289.0666598150999,"y":290.83222004590834,"depth":0.9996532416002302,"radius":7.647989938240436},
+    {"id":"preview-single-2","x":554.3760836664724,"y":305.19816857613654,"depth":0.9995818421956242,"radius":9.215519030052253},
+    {"id":"preview-single-20","x":410.86449306754554,"y":443.9609033007327,"depth":0.9996260233922296,"radius":8.2455486028101},
+    {"id":"preview-single-21","x":631.8331730852146,"y":324.62687481886934,"depth":0.9996637616751084,"radius":7.417028300521426},
+    {"id":"preview-single-22","x":501.25686922657735,"y":452.1713381276387,"depth":0.9996359086234734,"radius":8.0285245584329},
+    {"id":"preview-single-3","x":595.6939813206408,"y":250.66409528193316,"depth":0.9995894676087034,"radius":9.048107874388872},
+    {"id":"preview-single-4","x":376.7423083229452,"y":382.49912511257287,"depth":0.999588178646818,"radius":9.076406223161207},
+    {"id":"preview-single-5","x":443.2319621622146,"y":464.29972577983864,"depth":0.99966218042843,"radius":7.45174357838173},
+    {"id":"preview-single-6","x":444.54164818455854,"y":306.66111654159295,"depth":0.9995611278400928,"radius":9.67028969786372},
+    {"id":"preview-single-7","x":624.4669046461456,"y":265.0601651797995,"depth":0.9996448492248368,"radius":7.832239269882197},
+    {"id":"preview-single-8","x":587.7307565633903,"y":177.75998070692506,"depth":0.9996588504059654,"radius":7.524852130452714},
+    {"id":"preview-single-9","x":597.9392907848863,"y":214.3491121759932,"depth":0.9996170367692035,"radius":8.442844268065814},
+    {"id":"preview-topic-shared","x":418.8368353812559,"y":285.2188157733203,"depth":0.999568230530918,"radius":5},
+  ];
+  const boxes = visibleLabels(candidates, 920, 585, null, null, { stars, obstacles: [{"bottom":571.5703125,"left":738,"right":906,"top":385.5703125},{"bottom":571.5703125,"left":14,"right":724,"top":551.7734375}], starTitles: { limit: 0 } });
+  assert.deepEqual(new Set(boxes.map(box => box.id)), new Set(candidates.map(node => node.id)));
+});
