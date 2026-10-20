@@ -1426,7 +1426,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         return <button key={node.id} type="button" data-node-id={node.id}
         className={`graph-group-target${pinnedNames.has(node.id) ? " core-name" : ""}`} disabled={disabled}
         aria-label={`${title}, ${collapsedCounts.has(node.id) || spatialCounts.has(node.id) ? "눌러 펼치기" : "선택"}`}
-        onFocus={event => { hoveredId.current = node.id; if (pinnedNames.has(node.id)) event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" }); }}
+        onFocus={event => { hoveredId.current = node.id; if (event.currentTarget.parentElement?.classList.contains("with-keys")) event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" }); }}
         onBlur={() => { if (hoveredId.current === node.id) hoveredId.current = null; }}
         onPointerEnter={event => { if (event.pointerType !== "touch" && pinnedNames.has(node.id)) hoveredId.current = node.id; }}
         onPointerLeave={event => { if (event.currentTarget !== document.activeElement && hoveredId.current === node.id) hoveredId.current = null; }}
