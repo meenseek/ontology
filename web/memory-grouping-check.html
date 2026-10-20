@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>설치된 기록 편집기 · 묶음 갱신 회귀 검증</title>
+<div id="root"></div>
+<aside id="fixture" style="position:fixed;bottom:8px;left:8px;right:8px;z-index:10000;padding:8px;background:#e6edf5;color:#14202e;font:12px sans-serif;max-height:96px;overflow:auto">
+  <strong>설치된 JS 번들 · 합성 API 전용 · 실제 기록 저장 없음</strong>
+  <pre id="result" role="status" style="margin:4px 0">RUNNING</pre>
+  <button id="finish" type="button">검증 종료</button>
+</aside>
+<script type="module">
+// Run in a dedicated tab. Copy this dev-only file beside an installed index.html
+// temporarily; it is excluded from Vite's production inputs. For strict CSP,
+// extract this module to memory-grouping-check.js and replace this inline script
+// with an external module script referencing /memory-grouping-check.js.
+// Remove both temporary installed files afterward.
+const output = document.querySelector('#result');
+Object.assign(document.querySelector('#fixture').style, { position: 'fixed', bottom: '8px', left: '8px', right: '8px', zIndex: '10000', padding: '8px', background: '#e6edf5', color: '#14202e', font: '12px sans-serif', maxHeight: '96px', overflow: 'auto' });
+const assert = (value, message) => { if (!value) throw new Error(message); };
+const settle = () => new Promise(resolve => setTimeout(resolve, 30));
+async function until(test, message) {
+  const end = performance.now() + 5000;
+  while (!test()) { assert(performance.now() < end, `Timeout: ${message}`); await new Promise(resolve => setTimeout(resolve, 10)); }
+  await settle();
+}
+const root = document.querySelector('#root');
+const idle = () => [...root.querySelectorAll('.panel-heading button')].some(node => ['관리', '읽기로 돌아가기'].includes(node.textContent) && !node.disabled);
+function button(text, parent = root) {
+  const found = [...parent.querySelectorAll('button')].find(node => node.textContent.trim() === text || node.getAttribute('aria-label') === text);
+  assert(found && !found.disabled, `Enabled action: ${text}`); return found;
+}
+function details(prefix, parent = root) {
+  const summary = [...parent.querySelectorAll('summary')].find(node => node.textContent.startsWith(prefix));
+  assert(summary, `Details: ${prefix}`);
+  summary.parentElement.open = true;
+  summary.parentElement.dispatchEvent(new Event('toggle'));
+  return summary.parentElement;
+}
+function enter(node, value) {
+  const prototype = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(prototype, 'value').set.call(node, value);
+  node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function select(node, value) { node.value = value; node.dispatchEvent(new Event('change', { bubbles: true })); }
+const calls = [], passed = [], streams = new Set();
+let permitDiscard = false, confirmations = 0, failGrouping = false, current, nextSubject = 3, releaseGraph;
+let draftArea, draftForm, holdReads = false, fixtureHidden = false, graphReads = 0;
+const heldReads = [];
+const visibilityDescriptors = ['hidden', 'visibilityState'].map(key => [key, Object.getOwnPropertyDescriptor(document, key)]);
+function restoreVisibility() {
+  for (const [key, descriptor] of visibilityDescriptors) {
+    if (descriptor) Object.defineProperty(document, key, descriptor); else delete document[key];
+  }
+}
+const recordId = 'm_00000000-0000-4000-8000-000000000001';
+const subjectId = number => `p_00000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
+const subjects = [{ id: subjectId(1), name: '합성 묶음 A' }, { id: subjectId(2), name: '합성 묶음 B' }];
+const grouping = (state = 'unmatched', mode = 'auto', suggestions = {}) => ({ state, mode, suggestions, reason: null });
+const base = { id: recordId, scope: 'personal', revision: 1, kind: 'fact', title: '합성 검증 기록', body: '저장된 합성 본문', subject_id: null, subject_name: null, grouping: grouping(), effective_from: null, effective_until: null, evidence: [{ entity_id: 'e_00000000-0000-4000-8000-000000000001', source_revision: '1', content_digest: '0'.repeat(64), generation: 1, path: 'synthetic.md', current: true }], status: 'accepted', origin: 'user', support: 'user-recorded', updated_at: '2026-10-01T00:00:00Z' };
+current = structuredClone(base);
+const initialGraph = new Promise(resolve => { releaseGraph = resolve; });
+let firstGraph = true;
+const summary = () => ({ passed, calls: calls.map(value => ({ op: value.op, revision: value.revision, mode: value.mode })), viewport: [innerWidth, innerHeight], entry: moduleEntry });
+let moduleEntry;
+function snapshot(focus) {
+  const nodes = [{ id: current.id, scope: 'personal', kind: 'memory', label: current.title, revision: String(current.revision), status: current.status, temporal: 'current', supported: true, subject_id: current.subject_id }, ...subjects.map(value => ({ id: value.id, scope: 'personal', kind: 'subject', label: value.name }))];
+  const links = current.subject_id ? [{ source: recordId, target: current.subject_id, kind: 'subject', current: true }] : [];
+  return { scope: 'personal', query: '', focus: { id: focus, found: nodes.some(node => node.id === focus) }, nodes, links, matched: nodes.length, totals: { documents: 0, memories: 1, markers: subjects.length, links: links.length }, returned: { knowledge: 1, markers: subjects.length, links: links.length }, omitted: { nodes: 0, links: 0 }, eligible: { nodes: nodes.length, links: links.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
+}
+async function reading() { button('읽기로 돌아가기').click(); await settle(); }
+async function editing() {
+  button('관리').click(); await settle();
+  const action = [...root.querySelectorAll('button')].find(node => node.textContent === '기록 정정');
+  if (draftForm?.hidden !== false && action) { action.click(); await settle(); }
+  await until(() => !!root.querySelector('form:not([hidden]) textarea'), 'correction editor');
+}
+const content = '묶음을 바꿔도 남아야 하는 미저장 본문';
+const title = '미저장 제목';
+function draftIsIntact(name, expectedSubject = current.subject_id) {
+  assert(draftArea.isConnected && draftArea === root.querySelector('form textarea'), `${name}: editor was recreated`);
+  assert(draftArea.value === content && draftForm.querySelector('input[maxlength="160"]').value === title, `${name}: body/title preserved`);
+  assert(draftForm.querySelector('select').value === 'idea', `${name}: kind preserved`);
+  assert(draftForm.querySelector('input[type="datetime-local"]').value === '2026-10-01T09:00', `${name}: period preserved`);
+  assert(draftForm.querySelector('[aria-label="기록 묶음"]').value === (expectedSubject ?? ''), `${name}: expected grouping choice retained`);
+  passed.push(name);
+}
+async function beginCase(state = 'unmatched', suggestions = {}, status = 'accepted') {
+  if (root.querySelector('.management-panel')) { permitDiscard = true; button('관리 패널 닫기').click(); await until(() => !root.querySelector('.management-panel'), 'close preceding fixture record'); }
+  permitDiscard = false;
+  current = { ...structuredClone(base), revision: current.revision + 1, grouping: grouping(state, 'auto', suggestions), status };
+  root.querySelector('.graph-list > button').click();
+  await until(() => root.querySelector('.memory-body'), 'read fixture record');
+  button('관리').click(); await settle(); button('기록 정정').click();
+  await until(() => !!root.querySelector('form:not([hidden]) textarea'), 'edit fixture record');
+  draftArea = root.querySelector('form textarea'); draftForm = draftArea.form;
+  details('추가 설정', draftForm);
+  enter(draftArea, content); enter(draftForm.querySelector('input[maxlength="160"]'), title);
+  select(draftForm.querySelector('select'), 'idea');
+  enter(draftForm.querySelector('input[type="datetime-local"]'), '2026-10-01T09:00');
+  await reading();
+}
+async function groupAction(text) {
+  const section = details('기록 묶음 ·');
+  await until(() => [...section.querySelectorAll('button')].some(node => node.textContent === text && !node.disabled), text);
+  const before = current.revision;
+  button(text, section).click();
+  await until(() => current.revision > before && idle(), text);
+  await settle();
+}
+function notify() { for (const stream of streams) stream.onmessage?.(new MessageEvent('message', { data: 'classification changed' })); }
+document.querySelector('#finish').onclick = async () => {
+  permitDiscard = true; restoreVisibility();
+  if (root.querySelector('.management-panel')) { button('관리 패널 닫기').click(); await until(() => !root.querySelector('.management-panel'), 'fixture panel cleanup'); }
+  output.textContent += '\nCLEAN: no draft panel or real API writes';
+};
+try {
+  const shellResponse = await fetch('/index.html'); assert(shellResponse.ok, 'installed entrypoint');
+  const shell = new DOMParser().parseFromString(await shellResponse.text(), 'text/html');
+  moduleEntry = shell.querySelector('script[type="module"][src]')?.getAttribute('src');
+  assert(moduleEntry?.startsWith('/assets/') && moduleEntry.endsWith('.js'), 'use the installed production JS, not a source substitute');
+  await Promise.all([...shell.querySelectorAll('link[rel="stylesheet"]')].map(link => new Promise((resolve, reject) => {
+    const style = document.createElement('link'); style.rel = 'stylesheet'; style.href = link.getAttribute('href');
+    style.onload = resolve; style.onerror = reject; document.head.append(style);
+  })));
+  window.confirm = () => { confirmations++; return permitDiscard; };
+  window.EventSource = class {
+    constructor(url) { assert(url === '/api/grouping/events', `Unexpected EventSource: ${url}`); streams.add(this); queueMicrotask(() => this.onmessage?.(new MessageEvent('message'))); }
+    close() { streams.delete(this); }
+  };
+  window.fetch = async (input, options = {}) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+    assert(url.origin === location.origin, `No external requests: ${url}`);
+    const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+    if (url.pathname === '/api/session') return json({ csrf: 'synthetic-only', areas: [] });
+    if (url.pathname === '/api/graph') {
+      graphReads++;
+      assert(url.searchParams.get('scope') === 'personal', 'single fixture scope');
+      if (firstGraph) { firstGraph = false; await initialGraph; }
+      return json(snapshot(url.searchParams.get('focus')));
+    }
+    assert(url.pathname === '/api/brain' && options.method === 'POST', `No real or unexpected API: ${url}`);
+    const value = JSON.parse(options.body); assert(value.scope === 'personal', 'fixture command scope'); calls.push(value);
+    if (value.op === 'subjects') return json({ items: subjects, next_after: null });
+    if (value.op === 'read') { assert(value.id === recordId, 'fixture record only'); if (holdReads) await new Promise(resolve => heldReads.push(resolve)); return json(current); }
+    if (value.op === 'subject-create') { const subject = { id: subjectId(nextSubject++), name: value.name }; subjects.push(subject); return json(subject); }
+    assert(value.id === recordId, 'writes only target the synthetic record');
+    if (value.op === 'grouping-set') {
+      if (failGrouping) { failGrouping = false; return json({ error: '합성 묶음 변경 실패' }, 409); }
+      assert(value.revision === current.revision, 'grouping uses current baseline revision');
+      current = { ...current, revision: current.revision + 1, subject_id: value.subject_id, subject_name: subjects.find(subject => subject.id === value.subject_id)?.name ?? null, grouping: grouping(value.mode === 'manual' ? 'manual' : value.mode === 'off' ? 'off' : 'unmatched', value.mode) };
+      return json(current);
+    }
+    if (value.op === 'grouping-retry') { current = { ...current, grouping: grouping('processing') }; return json(current); }
+    if (value.op === 'correct') {
+      if (value.revision !== current.revision) return json({ error: '합성 정정 충돌' }, 409);
+      assert(value.memory.evidence[0].entity_id === base.evidence[0].entity_id, 'evidence preserved');
+      current = { ...current, ...value.memory, revision: current.revision + 1 }; return json(current);
+    }
+    throw new Error(`Forbidden fixture operation: ${value.op}`);
+  };
+  history.replaceState(null, '', `${location.pathname}?scope=personal`);
+  await import(moduleEntry);
+  await until(() => [...root.querySelectorAll('button')].some(node => node.textContent === '목록 보기'), 'installed App controls');
+  button('목록 보기').click(); releaseGraph();
+  await until(() => !!root.querySelector('.graph-list > button'), 'fixture list');
+  await beginCase();
+  await groupAction('합성 묶음 A에 묶기'); draftIsIntact('manual membership');
+  assert(current.body === base.body, 'grouping never saves the correction');
+  const beforeCloseConfirm = confirmations; button('관리 패널 닫기').click(); await settle();
+  assert(confirmations === beforeCloseConfirm + 1 && root.querySelector('.management-panel'), 'grouping keeps the unsaved navigation guard');
+  draftIsIntact('cancelled close after grouping');
+  const revisionBeforeFailure = current.revision; failGrouping = true;
+  button('합성 묶음 B에 묶기', details('기록 묶음 ·')).click();
+  await until(() => root.textContent.includes('다른 변경이 먼저 저장되었습니다.'), 'grouping failure');
+  assert(current.revision === revisionBeforeFailure, 'failed grouping leaves revision unchanged'); draftIsIntact('failed membership');
+  await groupAction('합성 묶음 B에 묶기'); draftIsIntact('retried membership');
+  await groupAction('묶음 없음'); draftIsIntact('explicit ungrouping');
+  await groupAction('Codex가 다시 분류'); draftIsIntact('automatic grouping request');
+  button('다시 분류').click(); await until(() => streams.size > 0, 'classification events while a correction is retained');
+  current = { ...current, revision: current.revision + 1, subject_id: subjectId(1), subject_name: subjects[0].name, grouping: grouping('assigned') };
+  notify(); await until(() => draftForm.querySelector('[aria-label="기록 묶음"]').value === subjectId(1), 'classification event merges grouping'); draftIsIntact('classification completion');
+  const correctionRevision = current.revision;
+  await editing(); button('정정 저장').click();
+  await until(() => current.body === content && !root.querySelector('form:not([hidden]) textarea'), 'correct after grouping');
+  assert(calls.findLast(value => value.op === 'correct').revision === correctionRevision, 'correction uses advanced grouping revision');
+  assert(current.title === title && current.kind === 'idea' && current.effective_from !== null, 'whole correction saved'); passed.push('subsequent correction');
+  await beginCase('processing');
+  await editing(); const localGroupSelect = draftForm.querySelector('[aria-label="기록 묶음"]'); localGroupSelect.focus();
+  await until(() => [...localGroupSelect.options].some(option => option.value === subjectId(2)), 'local group options loaded');
+  select(localGroupSelect, subjectId(2)); await reading();
+  current = { ...current, revision: current.revision + 1, subject_id: subjectId(1), subject_name: subjects[0].name, grouping: grouping('assigned') };
+  notify(); await until(() => root.querySelector('.detail-heading .hint')?.textContent === subjects[0].name, 'automatic assignment received with a local group choice');
+  draftIsIntact('uncommitted local group survives automatic assignment', subjectId(2));
+  const localChoiceRevision = current.revision;
+  await editing(); button('정정 저장').click();
+  await until(() => current.body === content && !root.querySelector('form:not([hidden]) textarea'), 'save retained local group choice');
+  assert(current.subject_id === subjectId(2) && calls.findLast(value => value.op === 'correct').revision === localChoiceRevision, 'local group and latest baseline submitted together'); passed.push('local group correction saved');
+  await beginCase('processing');
+  await editing(); select(draftForm.querySelector('[aria-label="기록 묶음"]'), ''); await reading();
+  current = { ...current, revision: current.revision + 1, subject_id: subjectId(1), subject_name: subjects[0].name, grouping: grouping('assigned') };
+  notify(); await until(() => root.querySelector('.detail-heading .hint')?.textContent === subjects[0].name, 'automatic assignment received with local off choice');
+  draftIsIntact('uncommitted off choice survives automatic assignment', null);
+  assert(!draftForm.querySelector('.proposal-toggle input').checked, 'local off preference retained');
+  await groupAction('합성 묶음 B에 묶기'); draftIsIntact('explicit assignment supersedes earlier local choice');
+  await beginCase('processing');
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => fixtureHidden });
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => fixtureHidden ? 'hidden' : 'visible' });
+  fixtureHidden = true; document.dispatchEvent(new Event('visibilitychange'));
+  await until(() => streams.size === 0, 'hidden tab releases classification watch');
+  current = { ...current, revision: current.revision + 1, subject_id: subjectId(1), subject_name: subjects[0].name, grouping: grouping('assigned') };
+  holdReads = true; const previousGraphs = graphReads;
+  fixtureHidden = false; document.dispatchEvent(new Event('visibilitychange'));
+  await until(() => graphReads > previousGraphs && heldReads.length > 0 && root.textContent.includes('열어 둔 기록이나 근거의 변경을 확인했습니다.'), 'graph response arrives before classification detail');
+  holdReads = false; for (const resolve of heldReads.splice(0)) resolve();
+  await until(() => root.querySelector('.detail-heading .hint')?.textContent === subjects[0].name, 'detail catches up after graph-first response');
+  assert(!root.textContent.includes('열어 둔 기록이나 근거의 변경을 확인했습니다.'), 'group-only revision mismatch clears after verified detail');
+  draftIsIntact('graph-first visibility return preserves correction'); restoreVisibility();
+  await beginCase();
+  const section = details('새 묶음 만들고 연결', details('기록 묶음 ·'));
+  enter(section.querySelector('input'), '합성 새 묶음'); await settle(); button('만들고 연결', section).click();
+  await until(() => current.subject_name === '합성 새 묶음' && idle(), 'new group assigned');
+  assert(section.querySelector('input').value === '', 'committed subject-name input cleared'); draftIsIntact('create and assign group');
+  await beginCase('suggested', { candidate_ids: [subjectId(1)], candidate_names: { [subjectId(1)]: subjects[0].name } });
+  button('합성 묶음 A에 묶기').click(); await until(() => current.subject_id === subjectId(1), 'accept suggested group'); draftIsIntact('suggested existing group');
+  await beginCase('suggested', { new_subject: '합성 제안 새 묶음' });
+  button('새 묶음 ‘합성 제안 새 묶음’ 만들고 연결').click();
+  await until(() => current.subject_name === '합성 제안 새 묶음' && idle(), 'accept suggested new group'); draftIsIntact('suggested new group');
+  await beginCase('error');
+  button('다시 시도').click(); await until(() => streams.size > 0, 'error retry watches classification'); draftIsIntact('classification retry after error');
+  await editing(); await until(() => streams.size === 0, 'classification watch pauses in the editor');
+  draftIsIntact('classification watch paused while editing');
+  await reading(); await until(() => streams.size > 0, 'classification watch resumes in reading mode');
+  const oldRevision = current.revision;
+  current = { ...current, revision: oldRevision + 1, body: '다른 곳에서 바뀐 합성 본문', grouping: grouping('assigned') };
+  notify(); await until(() => root.textContent.includes('열어 둔 기록이나 근거의 변경을 확인했습니다.'), 'external content change warning');
+  assert(draftArea.value === content && draftArea.isConnected, 'external body change keeps correction');
+  await editing(); button('정정 저장').click(); await until(() => root.textContent.includes('다른 변경이 먼저 저장되었습니다.'), 'old baseline still conflicts');
+  assert(calls.findLast(value => value.op === 'correct').revision === oldRevision, 'external content cannot silently advance correction revision'); passed.push('external content conflict');
+  const beforeConfirm = confirmations; button('현재 기록 다시 읽기').click(); await settle();
+  assert(confirmations === beforeConfirm + 1 && draftArea.value === content, 'cancelled reread preserves draft');
+  permitDiscard = true; button('현재 기록 다시 읽기').click();
+  await until(() => root.querySelector('.memory-body')?.textContent.includes(current.body), 'explicit current-record reread');
+  assert(!root.textContent.includes('열어 둔 기록이나 근거의 변경을 확인했습니다.'), 'explicit reread clears stale baseline'); passed.push('explicit reread boundary');
+  await beginCase('unmatched', {}, 'proposed');
+  const beforeAccept = calls.length, beforeAcceptConfirm = confirmations; button('제안 보관').click(); await settle();
+  assert(confirmations === beforeAcceptConfirm + 1 && calls.length === beforeAccept, 'status action respects a retained correction'); draftIsIntact('explicit discard guard');
+  await editing();
+  assert(document.documentElement.scrollWidth <= innerWidth, 'no horizontal overflow');
+  draftArea.scrollIntoView({ block: 'center' });
+  output.textContent = `PASS ${passed.length} checks\n${JSON.stringify(summary())}`;
+} catch (error) {
+  restoreVisibility();
+  output.textContent = `FAIL\n${error instanceof Error ? error.message : String(error)}\n${JSON.stringify(summary())}`;
+}
+</script>
+</html>
