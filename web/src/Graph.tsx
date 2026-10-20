@@ -16,6 +16,7 @@ import { planCoreView, screenPlane, overviewFrame, spatialCameraFrame, coreReadi
 import { CameraMotion, zoomCameraPose } from "./camera-motion";
 import type { CameraPose } from "./camera-motion";
 import MiniMap from "./MiniMap";
+import { PointerGesture } from "./pointer-gesture";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
@@ -76,7 +77,7 @@ export function starMaterial() {
         vec2 p = vUv * 2.0 - 1.0 - uWobble;
         float distance = length(p);
         float spokes = uShape < 1.5 ? 4.0 : uShape < 2.5 ? 5.0 : 6.0;
-        float silhouette = uShape < 0.5 ? 1.0 : 1.0 + 0.03 * cos(spokes * atan(p.y, p.x) + uPhase);
+        float silhouette = uShape < 0.5 ? 1.0 : 1.0 + 0.03 * (1.0 - 0.60 * uDetail) * cos(spokes * atan(p.y, p.x) + uPhase);
         float depth = clamp(uDepth, 0.0, 1.0);
         float radius = mix(mix(0.26, 0.38, depth), 0.50, uDetail) * silhouette;
         float r = distance / radius;
@@ -99,7 +100,7 @@ export function starMaterial() {
         float pulse = clamp((uShimmer - 0.7) / 0.3, 0.0, 1.0);
         float coreShimmer = mix(0.86, 1.0, pulse);
         float heat = exp(-r * r * 4.5);
-        vec3 surface = mix(uColor, vec3(1.0), 0.35 + 0.55 * heat)
+        vec3 surface = mix(uColor, vec3(1.0), mix(0.35 + 0.55 * heat, 0.16 + 0.60 * heat, uDetail))
           * (0.90 + 0.10 * normal.z + grain) * coreShimmer * (1.0 + 0.12 * uNear)
           * mix(0.55 + 0.45 * depth, 1.0, uDetail);
         float fade = 1.0 - smoothstep(0.72, 1.0, distance);
@@ -117,7 +118,7 @@ export function starMaterial() {
         // A brighter crest stays inside the same footprint and settles at close range.
         halo *= 1.0 + 0.70 * pulse * (1.0 - uDetail) + 1.1 * uNear;
         // A resolved surface retains the same glint family as a distant star.
-        halo = (halo + (primary + secondary) * mix(1.0, 0.35, uDetail)) * fade * uShimmer;
+        halo = (halo + (primary + secondary) * mix(1.0, 0.55, uDetail)) * fade * uShimmer;
         float alpha = clamp(disc + halo * (1.0 - disc), 0.0, 1.0);
         // A hot white core, a colored inner corona, then a soft tinted falloff.
         // Everything stays inside the existing quad; depth never changes picking or layout.
@@ -385,12 +386,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   const [settledRevision, setSettledRevision] = useState(0);
   const lodLevelRef = useRef(0), movingRef = useRef(false), settleMovingRef = useRef(false);
   const spatialCloseTimer = useRef<number | null>(null);
-  const allowDrag = useRef(true), suppressClickUntil = useRef(0);
+  const allowDrag = useRef(true);
   const pointer = useRef<{ pointerId: number; pointerType: string } | null>(null);
   const navigationKeys = useRef(new Set<string>());
   const controlPointer = useRef<{ pointerId: number; pointerType: string } | null>(null);
   const activePointers = useRef(new Map<number, string>());
-  const pressedNode = useRef<{ id: string; pointerId: number; x: number; y: number } | null>(null);
+  const gesture = useRef(new PointerGesture());
   const cursor = useRef<{ x: number; y: number } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const selectedId = useRef(selected); selectedId.current = selected;
@@ -756,7 +757,6 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     const cancel = () => {
       navigationKeys.current.clear();
       allowDrag.current = false;
-      if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
       const moved = positions.dragMoved, individual = draggedSummary.current ? null : dragged.current;
       positions.cancel();
       if (draggedSummary.current && moved && draggedSummary.current.epoch === positions.groupEpoch) {
@@ -765,7 +765,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       }
       if (individual && moved) setMovedGroups(current => new Map([...current].filter(([, group]) => !group.members.includes(individual))));
       dragged.current = null; draggedSummary.current = null; summaryHalo.current = null; frozenSpatial.current = null; setDraggingId(null);
-      pressedNode.current = null;
+      gesture.current.cancel();
       // DragControls handles pointerup/leave but has no pointercancel listener.
       const input = controlPointer.current ?? pointer.current;
       const inputs = new Map(activePointers.current);
@@ -818,7 +818,6 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     const current = new Map(nodes.map(value => [value.id, value]));
     for (const rendered of data.nodes) fixPosition(rendered, current.get(rendered.id)!);
     instance.d3ReheatSimulation();
-    suppressClickUntil.current = performance.now() + 350;
   };
   useEffect(() => {
     const layer = labelLayer.current;
@@ -878,7 +877,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     let previousLabels = new Map<string, ReturnType<typeof visibleLabels>[number]>();
     const chrome = () => {
       const origin = layer.getBoundingClientRect();
-      return [...(container.current?.querySelectorAll<HTMLElement>(".graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions, .graph-group-navigation.with-keys, .graph-group-target.core-name, .graph-group-target:focus") ?? [])]
+      return [...(container.current?.closest(".map-workspace")?.querySelectorAll<HTMLElement>(".map-sidebar, .graph-minimap, .graph-core-actions, .graph-core-close, .graph-instructions, .graph-group-navigation.with-keys, .graph-group-target.core-name, .graph-group-target:focus") ?? [])]
         .filter(element => element.offsetWidth && element.offsetHeight)
         .map(element => { const box = element.getBoundingClientRect(); return { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }; });
     };
@@ -1064,7 +1063,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
             marker.classList.toggle("active", star.id === hoveredId.current || star.id === focusedSummary);
           }
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
-          const labelCandidates = candidates.filter(node => (!readingMembers || readingMembers.has(node.id) || node.id === activeExpandedCore || node.id === hoveredId.current || node.id === focusedSummary || node.id === selected) &&
+          const labelCandidates = candidates.filter(node => !obstacles.some(box => node.x + node.radius > box.left && node.x - node.radius < box.right && node.y + node.radius > box.top && node.y - node.radius < box.bottom) && (!readingMembers || readingMembers.has(node.id) || node.id === activeExpandedCore || node.id === hoveredId.current || node.id === focusedSummary || node.id === selected) &&
             (!spatialCounts.has(node.id) || (!activeExpandedCore && spatialLabels.has(node.id)) || node.id === hoveredId.current || node.id === focusedSummary) &&
             (!pinnedNames.has(node.id) || node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current));
           const priorityId = focusedSummary ?? dragged.current ?? selected;
@@ -1235,7 +1234,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal, glyphMembers, summaryCounts, positions, activeExpandedCore, reveal]);
   const chooseNode = (id: string) => {
     hoveredId.current = null; setHover(null);
-    if (disabled || !revealRef.current.current.has(id) || performance.now() < suppressClickUntil.current) return;
+    if (disabled || !revealRef.current.current.has(id)) return;
     if (collapsedCounts.has(id)) {
       if (selected && !onClearSelection()) return;
       // A rapid reopen keeps the overview destination instead of capturing a halfway return pose.
@@ -1288,6 +1287,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     onBlurCapture={() => { navigationKeys.current.clear(); }}
     onLostPointerCapture={event => { if (pointer.current?.pointerId === event.pointerId) pointer.current = null; }}
     onPointerMoveCapture={event => {
+      gesture.current.move(event.pointerId, event.clientX, event.clientY);
       hoverPointer.current = event.pointerType === "mouse" || event.pointerType === "pen";
       if (disabled || positions.dragging || (event.pointerType !== "mouse" && event.pointerType !== "pen")) { cursor.current = null; return; }
       const rect = event.currentTarget.getBoundingClientRect();
@@ -1295,6 +1295,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       // The renderer emits hover only when its hit changes, including during touch.
       if (event.target === graph.current?.renderer().domElement) showRendererHover();
     }}
+    onPointerLeave={() => gesture.current.cancel()}
     onPointerOutCapture={event => {
       if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
       cursor.current = null; hoverPointer.current = false; hoveredId.current = null; setHover(null);
@@ -1305,16 +1306,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       if (!hoverPointer.current) { hoveredId.current = null; setHover(null); }
       cursor.current = null;
       if (graph.current) (graph.current.controls() as OrbitControls).autoRotate = false;
-      // A new press is a new action; the guard only belongs to the prior drag's click.
-      if (!positions.dragging) suppressClickUntil.current = 0;
       allowDrag.current = !positions.layoutMoving && (event.button === 0 || event.pointerType === "touch");
-      if (!allowDrag.current) suppressClickUntil.current = performance.now() + 350;
       pointer.current ??= { pointerId: event.pointerId, pointerType: event.pointerType };
-      pressedNode.current = null;
+      gesture.current.cancel();
       const instance = graph.current, canvas = instance?.renderer().domElement;
       if (canvas && event.target === canvas) {
         cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null;
         if (activePointers.current.size === 0) controlPointer.current = null;
+        if (activePointers.current.size > 0) allowDrag.current = false;
         activePointers.current.set(event.pointerId, event.pointerType);
         const rect = canvas.getBoundingClientRect(), camera = instance!.camera();
         camera.updateMatrixWorld();
@@ -1324,19 +1323,19 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         const id = ray.intersectObjects(objects, true)[0]?.object.parent?.userData.nodeId as string | undefined;
         if (id) {
           if (!controlPointer.current) controlPointer.current = { pointerId: event.pointerId, pointerType: event.pointerType };
-          if (event.button === 0 && allowDrag.current) pressedNode.current = { id, pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+          if (event.button === 0 && allowDrag.current) gesture.current.begin(id, event.pointerId, event.clientX, event.clientY);
         }
       }
     }}
     onPointerUpCapture={event => {
-      const press = pressedNode.current;
-      pressedNode.current = null;
+      gesture.current.release(event.pointerId, event.clientX, event.clientY);
       if (pointer.current?.pointerId === event.pointerId) pointer.current = null;
-      if (!press || event.button !== 0 || press.pointerId !== event.pointerId || positions.dragging || Math.hypot(event.clientX - press.x, event.clientY - press.y) >= 6) return;
-      // The renderer clicks its previous hover frame, which can miss a first tap.
-      suppressClickUntil.current = 0;
-      chooseNode(press.id);
-      suppressClickUntil.current = performance.now() + 350;
+      if (event.button !== 0) { gesture.current.cancel(); return; }
+      // DragControls releases later on the canvas; that path consumes this same press.
+      if (!positions.dragging) {
+        const id = gesture.current.consume();
+        if (id) chooseNode(id);
+      }
     }}
     aria-label="3D 지식 지도. 빈 공간을 끌면 지도가 이동합니다. 묶음 별을 끌면 함께 이동하고 누르면 펼쳐 개별 별을 끌 수 있습니다. 스크롤로 확대·축소하고 미니맵 회전 버튼이나 보기 설정에서 느린 3D 회전을 켤 수 있습니다. 두 손가락으로 확대·이동할 수 있습니다. Tab과 Enter로 묶음을 펼칠 수 있으며 전체 항목은 목록 보기에서 탐색할 수 있습니다.">
     {ready && <ForceGraph3D<PositionedNode, RenderLink>
@@ -1368,8 +1367,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         const summary = draggedSummary.current;
         const individual = summary ? null : dragged.current;
         draggedSummary.current = null;
-        if (positions.dragging) suppressClickUntil.current = performance.now() + 350;
-        const moved = allowDrag.current && positions.release(performance.now(), reduced);
+        // An additional pointer may disable activation after a drag has already begun.
+        const moved = positions.dragging ? positions.release(performance.now(), reduced) : false;
         const halo = summaryHalo.current;
         if (halo) {
           if (moved) {
@@ -1406,15 +1405,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
           }
           return next;
         });
-        const clicked = allowDrag.current && !moved ? individual ?? (summary?.epoch === positions.groupEpoch ? summary.id : null) : null;
-        if (clicked) {
-          suppressClickUntil.current = 0;
-          chooseNode(clicked);
-          suppressClickUntil.current = performance.now() + 350;
-        }
+        if (moved || !allowDrag.current) gesture.current.cancel();
+        const clicked = gesture.current.consume();
+        if (clicked) chooseNode(clicked);
       }} enablePointerInteraction={!disabled}
       cooldownTicks={0} warmupTicks={0}
-      onNodeClick={node => chooseNode(node.id)}
+      // Canvas activation is owned by the press/release gesture, not delayed renderer hover.
       onNodeHover={node => {
         rendererHover.current = { id: node?.id ?? null, content: node ? collapsedCounts.has(node.id) ? { title: coreLabel(node, collapsedCounts.get(node.id)!, snapshot.view), detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `근접 묶음 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null };
         showRendererHover();
@@ -1434,8 +1430,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         onBlur={() => { if (hoveredId.current === node.id) hoveredId.current = null; }}
         onPointerEnter={event => { if (event.pointerType !== "touch" && pinnedNames.has(node.id)) hoveredId.current = node.id; }}
         onPointerLeave={event => { if (event.currentTarget !== document.activeElement && hoveredId.current === node.id) hoveredId.current = null; }}
-        onClick={event => {
-          if (event.detail === 0) suppressClickUntil.current = 0;
+        onClick={() => {
           const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id);
           chooseNode(node.id);
           if (summary) requestAnimationFrame(() => (spatialCounts.has(node.id) ? spatialCloseButton : coreCloseButton).current?.focus());
@@ -1449,7 +1444,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       {[...pinnedNames].map((id, index) => <span className="graph-group-marker group-key" key={id} data-node-id={id} hidden>{index + 1}</span>)}
     </div>
     <div className="node-labels" ref={labelLayer}
-      onClick={event => { const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { if (event.detail === 0) suppressClickUntil.current = 0; chooseNode(label.dataset.nodeId); } }}>
+      onClick={event => { const label = (event.target as HTMLElement).closest<HTMLElement>(".node-label.interactive"); if (label?.dataset.nodeId) { chooseNode(label.dataset.nodeId); } }}>
       {Array.from({ length: MAX_VISIBLE_LABELS }, (_, index) => <div className="node-label" hidden key={index}><strong /><span /><small /><svg className="label-leader" aria-hidden="true" style={{ display: "none" }}><polyline /><circle r="1.5" /></svg></div>)}
     </div>
     {activeExpandedCore && !selected && !spatialReveal?.members.size && <div className="graph-core-actions">

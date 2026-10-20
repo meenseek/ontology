@@ -270,6 +270,77 @@ if (check !== null) void (async () => {
   };
   try {
     await settled();
+    if (check === "activation" || check === "activation-extra" || check === "interface") {
+      const canvas = document.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!;
+      const capture = canvas.setPointerCapture, releaseCapture = canvas.releasePointerCapture;
+      // Synthetic pointers are not registered with the browser capture service.
+      // Only this test ID bypasses that service; production handlers and ray picking run unchanged.
+      if (check?.startsWith("activation")) {
+      canvas.setPointerCapture = function (id) { if (id < 9100) capture.call(this, id); };
+      canvas.releasePointerCapture = function (id) { if (id < 9100) releaseCapture.call(this, id); };
+      }
+      const point = () => {
+        const star = frame().stars.find(star => star.id === "preview-purpose-0")!;
+        const box = canvas.getBoundingClientRect();
+        return { x: box.left + star.px, y: box.top + star.py };
+      };
+      const pointer = (type: string, x: number, y: number, id = 9101, pointerType = "mouse") => canvas.dispatchEvent(new PointerEvent(type,
+        { bubbles: true, pointerId: id, pointerType, button: 0, buttons: type === "pointerup" || type === "pointercancel" ? 0 : 1, clientX: x, clientY: y }));
+      const unchanged = () => assert(!document.querySelector(".graph-core-actions, .management-panel"), "취소하거나 끈 입력이 자료를 활성화했습니다.");
+      if (check?.startsWith("activation")) try {
+        for (const hoverMs of check === "activation-extra" ? [] : [0, 500]) {
+          const p = point(); pointer("pointermove", p.x, p.y); await wait(hoverMs);
+          pointer("pointerdown", p.x, p.y); pointer("pointerup", p.x, p.y);
+          await settled(); await wait(450);
+          assert(document.querySelector(".graph-core-actions") && !document.querySelector(".management-panel"), `hover ${hoverMs}ms 뒤 묶음 클릭이 한 번의 펼침으로 끝나지 않았습니다.`);
+          inspect(0);
+          button("묶음 접기").click(); await settled();
+          results.push({ canvasClickAfterHoverMs: hoverMs, expandsOnce: true });
+        }
+        for (const ending of check === "activation-extra" ? ["multitouch-jitter", "multitouch-drag"] : ["pointercancel", "blur", "roundtrip", "multitouch"]) {
+          const p = point(); pointer("pointermove", p.x, p.y); await wait(160);
+          pointer("pointerdown", p.x, p.y);
+          if (ending.startsWith("multitouch-")) pointer("pointermove", p.x + (ending === "multitouch-jitter" ? 3 : 9), p.y);
+          if (ending === "roundtrip") { pointer("pointermove", p.x + 9, p.y); pointer("pointermove", p.x, p.y); }
+          else if (ending.startsWith("multitouch")) { pointer("pointerdown", p.x + 20, p.y, 9102, "touch"); pointer("pointerup", p.x + 20, p.y, 9102, "touch"); }
+          else if (ending === "blur") window.dispatchEvent(new Event("blur"));
+          else pointer("pointercancel", p.x, p.y);
+          pointer("pointerup", p.x, p.y); await settled(); await wait(450); unchanged();
+          assert(!(positions as Positions | null)?.dragging, "다중 포인터 해제 뒤 끌기 상태가 남았습니다.");
+          results.push({ ending, accidentalActivation: false });
+        }
+        if (check === "activation-extra") {
+          const p = point(); pointer("pointerdown", p.x, p.y); pointer("pointermove", p.x + 2, p.y); pointer("pointerup", p.x + 2, p.y);
+          await settled();
+          assert(document.querySelector(".graph-core-actions") && !document.querySelector(".management-panel"), "다중 포인터 종료 뒤 작은 흔들림을 동반한 클릭이 작동하지 않습니다.");
+          button("묶음 접기").click(); await settled();
+          results.push({ clickAfterMultitouch: true, smallJitterTap: true });
+        }
+      } finally { canvas.setPointerCapture = capture; canvas.releasePointerCapture = releaseCapture; }
+      const before = canvas.getBoundingClientRect();
+      button("필터·묶음").click(); await wait(40);
+      const sidebar = document.querySelector(".map-sidebar")!.getBoundingClientRect(), after = canvas.getBoundingClientRect();
+      assert(before.width === after.width && before.height === after.height, "필터 열기로 캔버스 크기가 바뀌었습니다.");
+      if (innerWidth > 900) for (const selector of [".map-toolbar", ".map-status", ".map-legend"]) {
+        const box = document.querySelector(selector)!.getBoundingClientRect();
+        assert(box.height === 0 || sidebar.bottom <= box.top + .1 || sidebar.top >= box.bottom - .1, `${selector}: 필터가 결과 문맥을 덮었습니다.`);
+      }
+      button("탐색 조건 닫기").click(); await wait(40);
+      button("목록 보기").click(); await wait(40);
+      const rows = [...document.querySelectorAll<HTMLButtonElement>(".graph-list > button")];
+      const sampleRow = rows.find(row => row.querySelector(".node-symbol i"))!;
+      assert(sampleRow && sampleRow.getBoundingClientRect().height < 95 && sampleRow.getBoundingClientRect().height >= 44, "목록 행 밀도나 조작 높이가 맞지 않습니다.");
+      const dot = sampleRow.querySelector(".node-symbol i")!.getBoundingClientRect();
+      assert(dot.width >= 8 && dot.height >= 8, "목적 색 점이 작습니다.");
+      rows.find(row => row.querySelector("strong")?.textContent === "제품 전략과 의사결정")!.click(); await wait(80);
+      const connectionSection = [...document.querySelectorAll<HTMLElement>(".marker-connections section")].find(section => section.querySelector("h3")?.textContent?.startsWith("구성원"));
+      assert(connectionSection?.querySelectorAll("li").length === 225, "목적의 전체 구성원을 읽을 수 없습니다.");
+      assert(connectionSection && !connectionSection.querySelector(".compact-list") && getComputedStyle(connectionSection.querySelector("ul")!).overflowY === "visible", "구성원 안에 별도 스크롤 목록이 남습니다.");
+      assert([...connectionSection!.querySelectorAll("button")].every(row => !row.querySelector("span")), "구성원 행마다 같은 관계 라벨이 반복됩니다.");
+      results.push({ filterContextUncovered: true, canvasSizePreserved: true, memberRows: 225, nestedMemberScroll: false, listRowHeight: sampleRow.getBoundingClientRect().height });
+      notice.textContent = `PASS · ${innerWidth}px · 입력과 화면 구조 검사`;
+      notice.dataset.result = JSON.stringify({ passed: true, results }); return;
+    }
     if (check?.startsWith("transitions")) {
       await checkTransitions();
       notice.textContent = `PASS · ${innerWidth}px · 합성 자료 검사`;
