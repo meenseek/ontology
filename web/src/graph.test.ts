@@ -2999,9 +2999,19 @@ test("a crowded group name falls back to the nearest free spot off its own body"
   const field = Array.from({ length: 40 * 30 }, (_, index) => ({ id: `s-${index}`, x: (index % 40) * 20 + 10, y: Math.floor(index / 40) * 20 + 10, depth: 0, radius: 4 }))
     .filter(star => Math.hypot(star.x - 400, star.y - 300) > 82 && !(star.x > 540 && star.x < 700 && star.y > 120 && star.y < 180));
   const second = { ...group, id: "other", x: 60, y: 560, radius: 6 };
-  assert.ok(!visibleLabels([group, second], 800, 600, null, null, { stars: [group, second, ...field] }).some(found => found.id === "group"), "a pocket behind a solid field cannot get a guide through other stars");
-  // Open a real sightline to the pocket; a free label rectangle alone is insufficient.
-  const corridor = field.filter(star => Math.abs(star.y - (300 - (star.x - 400) * .85)) > 18);
+  const sparse = visibleLabels([group, second], 800, 600, null, null, { stars: [group, second, ...field] }).find(box => box.id === "group");
+  assert.ok(sparse?.guide?.length, "a summary can use a bent guide through actual gaps");
+  for (const line of sparse.guide) for (const star of field) {
+    const dx = line.x2 - line.x1, dy = line.y2 - line.y1;
+    const t = Math.max(0, Math.min(1, ((star.x - line.x1) * dx + (star.y - line.y1) * dy) / (dx * dx + dy * dy)));
+    assert.ok(Math.hypot(star.x - line.x1 - t * dx, star.y - line.y1 - t * dy) >= star.radius + 3, "every bent segment clears the real star footprint");
+  }
+  // A 20px lattice of radius4 leaves safe channels. Radius12 closes those
+  // channels, so this assertion now represents an actually solid field.
+  const solid = field.map(star => ({ ...star, radius: 12 }));
+  assert.ok(!visibleLabels([group, second], 800, 600, null, null, { stars: [group, second, ...solid] }).some(found => found.id === "group"), "a pocket behind a solid field cannot get a guide through other stars");
+  // Open a corridor wider than the solid field's radius plus guide clearance.
+  const corridor = solid.filter(star => Math.abs(star.y - (300 - (star.x - 400) * .85)) > 32);
   const [box] = visibleLabels([group, second], 800, 600, null, null, { stars: [group, second, ...corridor] }).filter(found => found.id === "group");
   assert.ok(box && box.left >= 536 && box.right <= 704 && box.top >= 116 && box.bottom <= 184, "the group keeps its name in the nearby free pocket");
   const gap = Math.hypot(group.x - Math.max(box.left, Math.min(box.right, group.x)), group.y - Math.max(box.top, Math.min(box.bottom, group.y)));

@@ -132,10 +132,16 @@ export default function App() {
   useEffect(() => {
     const workspace = workspaceElement.current;
     if (!workspace) return;
-    const measure = () => setMapWidth(workspace.clientWidth - (panelElement.current?.getBoundingClientRect().width ?? 0) - (parseFloat(getComputedStyle(workspace).getPropertyValue("--explorer-width")) || 0));
-    const observer = new ResizeObserver(measure); observer.observe(workspace);
-    if (panelElement.current) observer.observe(panelElement.current);
-    measure(); return () => observer.disconnect();
+    const measure = () => {
+      // A hidden/non-layout document has no measured width; retain the last
+      // real reading width rather than treating zero as an obstructed map.
+      if (workspace.clientWidth <= 0) return;
+      setMapWidth(workspace.clientWidth - (panelElement.current?.getBoundingClientRect().width ?? 0) - (parseFloat(getComputedStyle(workspace).getPropertyValue("--explorer-width")) || 0));
+    };
+    // Columns depend on viewport and panel presence, both covered here. This
+    // does not introduce a ResizeObserver requirement to the App/list reader.
+    window.addEventListener("resize", measure);
+    measure(); return () => window.removeEventListener("resize", measure);
   }, [!!panel, !!session]);
   const selected = data?.model.nodes.find(n => n.id === route.focus) ?? null;
   const relatedOriginals = selected && data ? relatedKnowledge(data.model, selected.id) : [];
