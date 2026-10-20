@@ -600,3 +600,23 @@ test("impossible framing exhausts bounded candidates without mutating the live c
   assert.ok(camera.position.equals(pose) && camera.quaternion.equals(rotation));
   assert.equal(JSON.stringify(bodies), before);
 });
+
+
+test("dense initial views clear minimap footprints without enabling automatic approach", () => {
+  const size = { width: 360, height: 449 }, target = { x: 0, y: 0, z: 0 };
+  const camera = new PerspectiveCamera(60, size.width / size.height, .1, 20000);
+  camera.position.set(0, 0, 500); camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
+  const bodies = [...Array.from({ length: 61 }, (_, i) => ({ x: -80 + (i % 10) * 16, y: 10 + Math.floor(i / 10) * 12, z: 0, radius: 4 })), { x: 70, y: -80, z: 0, radius: 68 }];
+  const obstacle = { left: 190, right: 346, top: 332, bottom: 386 };
+  const covered = () => bodies.some(body => {
+    const p = new Vector3(body.x, body.y, body.z).project(camera), x = (p.x + 1) * size.width / 2, y = (1 - p.y) * size.height / 2;
+    return Math.hypot(x - Math.max(obstacle.left, Math.min(obstacle.right, x)), y - Math.max(obstacle.top, Math.min(obstacle.bottom, y))) < body.radius;
+  });
+  assert.ok(covered());
+  const frame = overviewFrame(camera, target, bodies, size, { radius: body => body.radius, obstacles: [obstacle] });
+  assert.ok(frame, "more than 60 bodies must not bypass initial clearance");
+  assert.ok(new Vector3(frame.position.x, frame.position.y, frame.position.z).distanceTo(new Vector3(frame.target.x, frame.target.y, frame.target.z)) >= 500);
+  camera.position.set(frame.position.x, frame.position.y, frame.position.z); camera.lookAt(frame.target.x, frame.target.y, frame.target.z); camera.updateMatrixWorld();
+  assert.equal(covered(), false);
+  assert.equal(overviewFrame(camera, frame.target, bodies, size, { radius: body => body.radius, obstacles: [obstacle] }), null, "an already safe dense view keeps its pose");
+});

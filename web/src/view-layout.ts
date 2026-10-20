@@ -8,10 +8,10 @@ import { DEFAULT_LINK_PIXELS, LAYOUT_WORLD_SPACING, coreCameraDistance, focusedC
 import { starCohort } from "./positions";
 import type { Point, Positions } from "./positions";
 
-/** Frame a settled overview of at most 60 visible bodies once, without moving stars or changing its viewing direction. */
+/** Frame a settled overview once. Only small views approach; every size checks chrome clearance. */
 export function overviewFrame<T extends Point>(camera: PerspectiveCamera, target: Point, nodes: readonly T[], size: { width: number; height: number },
   display?: { radius: (node: T, depth: number) => number; obstacles: readonly { left: number; top: number; right: number; bottom: number }[] }) {
-  if (nodes.length < 2 || nodes.length > 60 || size.width <= 0 || size.height <= 0) return null;
+  if (nodes.length < 2 || size.width <= 0 || size.height <= 0) return null;
   camera.updateMatrixWorld();
   const right = new Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
   const offset = camera.position.clone().sub(new Vector3(target.x, target.y, target.z)), distance = offset.length();
@@ -27,9 +27,9 @@ export function overviewFrame<T extends Point>(camera: PerspectiveCamera, target
   const vertical = Math.tan(camera.fov * Math.PI / 360), horizontal = vertical * size.width / size.height;
   // Leave room for titles and map controls; cap the gain so a tiny graph remains a constellation.
   const fitted = nearest + Math.max(halfWidth / (horizontal * .80), halfHeight / (vertical * .80));
-  const minimumDistance = Math.max(distance / 2.5, fitted);
+  const minimumDistance = Math.max(distance / (nodes.length <= 60 ? 2.5 : 1), fitted);
   if (!display) {
-    if (minimumDistance >= distance * .96) return null;
+    if (nodes.length > 60 || minimumDistance >= distance * .96) return null;
     offset.normalize().multiplyScalar(minimumDistance);
     return { position: { x: target.x + offset.x, y: target.y + offset.y, z: target.z + offset.z }, target: { ...target } };
   }
@@ -47,6 +47,7 @@ export function overviewFrame<T extends Point>(camera: PerspectiveCamera, target
     x - radius >= 16 && x + radius <= size.width - 16 && y - radius >= 16 && y + radius <= size.height - 16 &&
     display.obstacles.every(box => Math.hypot(x - Math.max(box.left, Math.min(x, box.right)), y - Math.max(box.top, Math.min(y, box.bottom))) >= radius));
   const originalSafe = safe(project(distance, original));
+  if (nodes.length > 60 && originalSafe) return null;
   // Search empty screen rectangles as well as distance. A fixed-size summary
   // can overlap bottom controls at every zoom about the old target.
   const xs = [...new Set([16, size.width - 16, ...display.obstacles.flatMap(box => [box.left, box.right]).filter(x => x > 16 && x < size.width - 16)])].sort((a, b) => a - b);
