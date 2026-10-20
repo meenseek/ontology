@@ -1854,6 +1854,7 @@ async function checkResidualMap(mouseOnly = false) {
     assert(help.left >= 0 && help.right <= innerWidth && mini.right <= innerWidth, "map controls remain inside the screen");
     const available = host.querySelector(".graph-chrome")!.getBoundingClientRect();
     if (available.width <= 520) assert(mini.bottom <= help.top, "narrow usable map space stacks the minimap above the complete guidance sentence");
+    if (innerWidth <= 700) assert([...host.querySelectorAll(".graph-core-actions button")].every(button => button.getBoundingClientRect().width >= 44), "mobile page controls retain their touch width after desktop compaction");
   };
   const frameIsReadable = (group: number) => {
     if (!positions || positions.layoutMoving) return false;

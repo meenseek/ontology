@@ -179,7 +179,8 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .graph-core-title .graph-core-count { display: inline-block; white-space: nowrap; }
 .graph-core-actions .graph-core-separator { padding: 0; white-space: pre; }
 .graph-core-navigation { flex-shrink: 1; flex-wrap: wrap; }
-.graph-core-navigation button { padding-inline: 6px; white-space: nowrap; }
+.graph-core-navigation button { white-space: nowrap; }
+@media (min-width: 701px) { .graph-core-navigation button { padding-inline: 6px; } }
 .graph-core-page { white-space: nowrap; }
 .graph-core-navigation:empty { display: none; }
 .graph-instructions { font-size: 11px; line-height: 1.6; color: var(--text-muted); word-break: keep-all; }
