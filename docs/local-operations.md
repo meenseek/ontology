@@ -1070,6 +1070,20 @@ consumer와 갱신, Git 커밋 가져오기와 실패·부재 처리, 사용자 
 
 `pnpm --dir web test`에는 `memory-lifecycle.test.mjs`가 포함된다. 이 검사는 jsdom에서 실제 App·Memory를 실행하고 `memory-grouping-check.html`의 합성 API 시나리오를 공유한다. 패널을 유지한 새 묶음 생성→다른 묶음→재선택, 생성 성공·연결 실패 뒤 같은 키 재시도, 폼·제안 생성, 초안·기준 리비전·이탈 보호를 검사한다. 기본 웹 테스트를 호출하는 `verify.sh`와 CI에서도 실행되지만, jsdom은 배치·WebGL·물리 입력을 검증하지 않는다.
 
+합성 화면의 자동 브라우저 검사는 체크아웃 루트에서 `pnpm --dir web test:e2e`로 실행합니다.
+잠금 파일 기준 웹 의존성과 `pnpm --dir web exec playwright install chromium`으로 준비한
+Chromium이 필요합니다. Mac의 무거운 로컬 검증 시작 제한을 통과한 실행에서 사용합니다.
+Playwright가 전용 `127.0.0.1:47839` 개발 서버를 시작하고 종료하며, 기존 서버를 빌리지 않습니다.
+실제 API·외부 요청은 차단하고 기존 `reading-check`, App의 기록·문서·원문 연결·지도 경계,
+`map-preview`의 활성화·취소·화면 구조 시나리오를 재사용합니다. 지도 경계는
+1440·1180·920·390px, 편집·입력·패널 흐름은 1440·390px에서 검사합니다.
+실제 브라우저 마우스 입력과 모바일 필터의 Esc·초점 복귀도 포함합니다.
+CI의 `Synthetic browser checks`가 같은 명령을 실행하며 기존 `Verify` 범위를 유지합니다.
+실패한 검사만 화면·trace를 `web/test-results/`에 남기고 CI에서 7일 보존합니다.
+이 검사는 설치본·물리 터치·미감 판단을 대신하지 않으며 `memory-grouping-check.html`의
+설치 번들 검사는 아래 기존 절차를 따릅니다. 실행 결과가 같은 후보·환경에 적용되고
+영향이 없는 검사는 재사용하며, 변경에 닿는 시나리오는 `test:e2e --grep '920px'`처럼 선택합니다.
+
 편집기 수명이나 부모 콜백을 바꿀 때는 저장 완료, 기록 갱신, 묶음 생성의 책임을 구분한다. 생성된 묶음은 기록 연결의 성공 여부와 별도로 목록·지도에 반영하고, 갱신은 미저장 초안을 재생성하지 않는다. 같은 패널에서 다음 행동까지 검사하며, 닫았다 다시 여는 것으로 목록 갱신을 대신하지 않는다.
 
 `memory-grouping-check.html`은 같은 시나리오를 실제 설치 JS·CSS로 검사하는 개발 전용 페이지다. 파일 주석대로 임시 외부 모듈과 함께 설치 정적 경로에 두고 1440×900·390×844에서 PASS와 화면을 확인한다. 실제 API로 전달하지 않으며, 끝나면 ‘검증 종료’로 초안을 정리하고 두 임시 파일을 제거한다. 운영 번들에는 포함하지 않는다.
@@ -1106,4 +1120,4 @@ pnpm --dir web exec vite --host 127.0.0.1 --port 47832 --strictPort
 줄이기에서는 전환을 즉시 마친다. 3D 깊이·표면·반짝임·근접 흔들림·연결 끌어당김은
 기존 모션 검사로 함께 확인한다.
 
-`app-reading-check.html`의 모션 검사는 실제 별이 그려질 때의 세계 좌표와 셰이더 값을 관측하여 3D 깊이, 표면·반짝임의 시간 변화, 포인터 근접 흔들림·이탈 복귀와 느린 카메라 회전을 확인한다. 렌더러를 바꿀 때도 이 동작을 보존한다. 미니맵 회전 버튼과 보기 설정의 상태가 함께 바뀌고, 회전·확대만으로 별의 배치를 다시 계산하지 않는지도 검사한다. `reading-check.html`, `app-reading-check.html`, `map-preview.html`은 합성 응답만 사용하며 API를 실제 서버로 전달하지 않는다. 호출 시도와 성공한 JSON 응답 바이트 기록·상한 검사는 `reading-check.html`과 `app-reading-check.html`에서 수행한다. 측정 바이트는 HTTP 전송량이 아니다. DB 호출 수와 응답 크기는 `tests/second_brain.rs`의 `detail_and_subject_queries_stay_bounded_across_cardinalities`가 별도 임시 DB에서 검사한다. 브라우저에서 실행하는 화면 검증은 `verify.sh`에 자동 포함되지 않으며 각 페이지의 PASS와 실제 앱 화면을 함께 확인한다. `memory-grouping-check.html`과 공유하는 DOM 상태 전환 검사는 위 기본 웹 테스트에 포함된다.
+`app-reading-check.html`의 모션 검사는 실제 별이 그려질 때의 세계 좌표와 셰이더 값을 관측하여 3D 깊이, 표면·반짝임의 시간 변화, 포인터 근접 흔들림·이탈 복귀와 느린 카메라 회전을 확인한다. 렌더러를 바꿀 때도 이 동작을 보존한다. 미니맵 회전 버튼과 보기 설정의 상태가 함께 바뀌고, 회전·확대만으로 별의 배치를 다시 계산하지 않는지도 검사한다. `reading-check.html`, `app-reading-check.html`, `map-preview.html`은 합성 응답만 사용하며 API를 실제 서버로 전달하지 않는다. 호출 시도와 성공한 JSON 응답 바이트 기록·상한 검사는 `reading-check.html`과 `app-reading-check.html`에서 수행한다. 측정 바이트는 HTTP 전송량이 아니다. DB 호출 수와 응답 크기는 `tests/second_brain.rs`의 `detail_and_subject_queries_stay_bounded_across_cardinalities`가 별도 임시 DB에서 검사한다. 브라우저에서 실행하는 화면 검증은 `verify.sh`와 별도의 `test:e2e`·CI job이 담당합니다. 위 자동화 범위 밖의 시나리오는 각 페이지의 PASS와 실제 앱 화면을 함께 확인합니다. `memory-grouping-check.html`과 공유하는 DOM 상태 전환 검사는 위 기본 웹 테스트에 포함된다.
