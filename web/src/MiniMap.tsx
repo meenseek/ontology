@@ -4,6 +4,7 @@ import type { PerspectiveCamera } from "three";
 import type { PositionedNode } from "./graph";
 import type { CameraPose } from "./camera-motion";
 import { starColor } from "./presentation";
+import { uiColors } from "./ui-colors";
 
 type XY = { x: number; y: number };
 export function miniMapTransform(points: readonly XY[], width: number, height: number) {
@@ -29,6 +30,7 @@ export default function MiniMap({ nodes, getCamera, onMove, onZoom, onFit, rotat
   useEffect(() => {
     const element = canvas.current, context = element?.getContext("2d");
     if (!element || !context || !visible || collapsed) { navigate.current = null; return; }
+    const ui = uiColors(element);
     let frame = 0, last = -Infinity;
     const right = new Vector3(), up = new Vector3();
     const draw = (now: number) => {
@@ -50,21 +52,23 @@ export default function MiniMap({ nodes, getCamera, onMove, onZoom, onFit, rotat
       const projected = nodes.map(project), transform = miniMapTransform(projected, width, height);
       nodes.forEach((node, index) => {
         const p = transform.toPixel(projected[index]);
-        context.fillStyle = node.kind === "document" || node.kind === "memory" ? starColor(node) : "#71899f";
+        context.fillStyle = node.kind === "document" || node.kind === "memory" ? starColor(node) : ui.subtle;
         context.globalAlpha = .8; context.beginPath(); context.arc(p.x, p.y, node.kind === "subject" ? 2 : 1.2, 0, Math.PI * 2); context.fill();
       });
       const target = project(view.pose.target), center = transform.toPixel(target);
       const distance = new Vector3().copy(view.camera.position).distanceTo(view.pose.target as Vector3);
       const halfHeight = distance * Math.tan(view.camera.fov * Math.PI / 360) * transform.scale;
       const halfWidth = halfHeight * view.camera.aspect;
-      context.globalAlpha = 1; context.fillStyle = "rgba(166,197,219,.06)"; context.strokeStyle = "rgba(183,211,231,.65)"; context.lineWidth = 1;
+      context.fillStyle = ui.primary; context.strokeStyle = ui.primary; context.lineWidth = 1;
       const left = Math.max(1, center.x - halfWidth), top = Math.max(1, center.y - halfHeight);
       const rightEdge = Math.min(width - 1, center.x + halfWidth), bottom = Math.min(height - 1, center.y + halfHeight);
       if (rightEdge > left && bottom > top) {
+        context.globalAlpha = .06;
         context.fillRect(left, top, rightEdge - left, bottom - top);
+        context.globalAlpha = .65;
         context.strokeRect(left, top, rightEdge - left, bottom - top);
       }
-      context.fillStyle = "#d2e2ed"; context.fillRect(center.x - 1.5, center.y - 1.5, 3, 3);
+      context.globalAlpha = 1; context.fillStyle = ui.strong; context.fillRect(center.x - 1.5, center.y - 1.5, 3, 3);
       // Re-read the pose when input arrives, rather than overwriting a newer pan/zoom.
       const basisRight = right.clone(), basisUp = up.clone();
       navigate.current = (x, y, relative = false) => {

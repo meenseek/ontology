@@ -2,6 +2,7 @@ import { constellationSlots, topologySlots } from "./constellation-layout.ts";
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { Positions, compactSlots, fixPosition } from "./positions.ts";
 import { separateDiscs } from "./clearance.ts";
 import { PerspectiveCamera, Vector3 } from "three";
@@ -15,6 +16,23 @@ import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./r
 const doc = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "document", label: id, revision: "1", generation: "1", content_digest: "digest", source_revision: "revision", status: "ok", present: true, current: true });
 const memory = (id: string): GraphNode => ({ id, scope: "meenseek", kind: "memory", label: id, revision: "1", status: "accepted", temporal: "current", supported: true });
 const edge = (source: string, target: string, current = true): GraphLink => ({ source, target, kind: "related", current });
+test("UI color literals stay in semantic tokens rather than controls and state renderers", () => {
+  const literal = /#[\da-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|oklab|oklch|lab|lch)\s*\(/i;
+  const css = readFileSync(new URL("./style.css", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/--[\w-]+\s*:[^;{}]+;/g, "");
+  assert.doesNotMatch(css, literal, "CSS colors belong in semantic token declarations");
+  const sources = new URL("./", import.meta.url);
+  for (const file of [...readdirSync(sources).filter(name => name.endsWith(".tsx") && !/\.(?:test|check)\.tsx$/.test(name) && name !== "map-preview.tsx"), "ui-colors.ts"]) {
+    let source = readFileSync(new URL(file, sources), "utf8");
+    // White is the multiplicative identity of uncolored GPU masks; alpha0
+    // clears the renderer so the token-owned CSS map background remains visible.
+    if (file === "Graph.tsx") source = source.replaceAll('"#ffffff"', "").replaceAll('"rgba(0,0,0,0)"', "");
+    assert.doesNotMatch(source, literal, file);
+  }
+  const assets = new URL("../public/", import.meta.url);
+  for (const file of existsSync(assets) ? readdirSync(assets).filter(name => name.endsWith(".svg")) : [])
+    assert.doesNotMatch(readFileSync(new URL(file, assets), "utf8"), literal, file);
+});
 test("overview emphasis uses real short connections without changing hub relations or parallel direction and state", () => {
   const nodes = Array.from({ length: 7 }, (_, i) => ({ id: `n${i}`, x: i * 10, y: i % 2, z: i % 3 }));
   const links: GraphLink[] = [...nodes.slice(1).map(node => edge("n0", node.id)),

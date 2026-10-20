@@ -17,6 +17,7 @@ import { planCoreView, screenPlane, overviewFrame, spatialCameraFrame, coreReadi
 import { CameraMotion, zoomCameraPose } from "./camera-motion";
 import type { CameraPose } from "./camera-motion";
 import MiniMap from "./MiniMap";
+import { uiColors } from "./ui-colors";
 import { PointerGesture } from "./pointer-gesture";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition";
 
@@ -313,6 +314,7 @@ function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "bod
 const endpoint = (value: string | number | { id?: string | number } | undefined) => typeof value === "object" ? value.id : value;
 const membershipKey = (id: string, level: number) => JSON.stringify([level, id]);
 export default function Graph({ positions, snapshot, nodes, links, selected, filteredGroup = null, hasDisplayFilters = false, explorerOpen = false, rotate, allConnections = false, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onToggleRotation, onFailure }: Props) {
+  const ui = useMemo(() => uiColors(), []);
   const container = useRef<HTMLDivElement>(null);
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
   const cameraMotion = useRef(new CameraMotion());
@@ -1253,15 +1255,15 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       };
       group.add(body);
     }
-    if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("ring", "#89bad2", .7), node, "body", false, 0, 18));
+    if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("ring", ui.primary, .7), node, "body", false, 0, 18));
     const summaryMetrics = summaryPixels ? nodeScreenMetrics(summaryPixels, isSelected, node.changed) : null;
-    if (isSelected) group.add(screenSprite(material("selection", "#dce8f6", .52), node, "selection", isSelected, 0, summaryMetrics?.selection, undefined, undefined, undefined, fade));
-    if (node.changed) group.add(screenSprite(material("change", "#edb66b", .9), node, "change", isSelected, 0, summaryMetrics?.change, undefined, undefined, undefined, fade));
+    if (isSelected) group.add(screenSprite(material("selection", ui.primary, .52), node, "selection", isSelected, 0, summaryMetrics?.selection, undefined, undefined, undefined, fade));
+    if (node.changed) group.add(screenSprite(material("change", ui.warning, .9), node, "change", isSelected, 0, summaryMetrics?.change, undefined, undefined, undefined, fade));
     // The invisible plane follows the star and status rings, with a 36px minimum.
     group.add(screenSprite(material("hit", "#ffffff", 0), node, "hit", isSelected, 0, summaryMetrics?.hit, undefined, undefined, undefined, undefined,
       () => revealRef.current.current.has(node.id)));
     return group;
-  }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal, glyphMembers, summaryCounts, positions, activeExpandedCore, reveal]);
+  }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal, glyphMembers, summaryCounts, positions, activeExpandedCore, reveal, ui]);
   const chooseNode = (id: string) => {
     hoveredId.current = null; setHover(null);
     if (disabled || !revealRef.current.current.has(id)) return;
@@ -1377,12 +1379,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         let material = resources.lines.get(key);
         if (!material) { material = new LineBasicMaterial({ transparent: true, depthWrite: false, opacity: .65 }); resources.lines.set(key, material); }
         const focus = draggingId ?? selected;
-        material.color.set(focus && from !== focus && to !== focus ? "#35404b" : link.current ? linkColor[link.kind] : "#947867");
+        material.color.set(focus && from !== focus && to !== focus ? ui.border : link.current ? linkColor[link.kind] : ui.historical);
         return material;
       }}
       linkColor={link => {
         const focus = draggingId ?? selected;
-        return focus && endpoint(link.source) !== focus && endpoint(link.target) !== focus ? "#35404b" : link.current ? linkColor[link.kind] : "#947867";
+        return focus && endpoint(link.source) !== focus && endpoint(link.target) !== focus ? ui.border : link.current ? linkColor[link.kind] : ui.historical;
       }}
       linkVisibility={link => {
         if (link.kind !== "subject" && link.kind !== "topic" && link.kind !== "area") return true;
