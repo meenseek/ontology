@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
-    "test": "node --import tsx --test src/pointer-gesture.test.ts src/graph.test.ts src/view-layout.test.ts src/document-preview.test.tsx src/context.test.tsx src/grouping-events.test.ts"
+    "test": "node --import tsx --test src/pointer-gesture.test.ts src/graph.test.ts src/view-layout.test.ts src/document-preview.test.tsx src/context.test.tsx src/grouping-events.test.ts src/memory-lifecycle.test.mjs"
   },
   "dependencies": {
     "graphology": "0.26",
@@ -26,6 +26,7 @@
     "@types/react-dom": "19",
     "@types/three": "0.185",
     "@vitejs/plugin-react": "6",
+    "jsdom": "30.1.3",
     "tsx": "4",
     "typescript": "7",
     "vite": "8"

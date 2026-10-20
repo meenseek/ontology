@@ -45,6 +45,7 @@ function enter(node, value) {
 function select(node, value) { node.value = value; node.dispatchEvent(new Event('change', { bubbles: true })); }
 const calls = [], passed = [], streams = new Set();
 let permitDiscard = false, confirmations = 0, failGrouping = false, current, nextSubject = 3, releaseGraph;
+const createdByKey = new Map();
 let draftArea, draftForm, holdReads = false, fixtureHidden = false, graphReads = 0;
 const heldReads = [];
 const visibilityDescriptors = ['hidden', 'visibilityState'].map(key => [key, Object.getOwnPropertyDescriptor(document, key)]);
@@ -55,7 +56,7 @@ function restoreVisibility() {
 }
 const recordId = 'm_00000000-0000-4000-8000-000000000001';
 const subjectId = number => `p_00000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
-const subjects = [{ id: subjectId(1), name: '합성 묶음 A' }, { id: subjectId(2), name: '합성 묶음 B' }];
+const subjects = [{ id: subjectId(1), name: '합성 묶음 A', revision: 1, definition: null }, { id: subjectId(2), name: '합성 묶음 B', revision: 1, definition: null }];
 const grouping = (state = 'unmatched', mode = 'auto', suggestions = {}) => ({ state, mode, suggestions, reason: null });
 const base = { id: recordId, scope: 'personal', revision: 1, kind: 'fact', title: '합성 검증 기록', body: '저장된 합성 본문', subject_id: null, subject_name: null, grouping: grouping(), effective_from: null, effective_until: null, evidence: [{ entity_id: 'e_00000000-0000-4000-8000-000000000001', source_revision: '1', content_digest: '0'.repeat(64), generation: 1, path: 'synthetic.md', current: true }], status: 'accepted', origin: 'user', support: 'user-recorded', updated_at: '2026-10-01T00:00:00Z' };
 current = structuredClone(base);
@@ -143,7 +144,11 @@ try {
     const value = JSON.parse(options.body); assert(value.scope === 'personal', 'fixture command scope'); calls.push(value);
     if (value.op === 'subjects') return json({ items: subjects, next_after: null });
     if (value.op === 'read') { assert(value.id === recordId, 'fixture record only'); if (holdReads) await new Promise(resolve => heldReads.push(resolve)); return json(current); }
-    if (value.op === 'subject-create') { const subject = { id: subjectId(nextSubject++), name: value.name }; subjects.push(subject); return json(subject); }
+    if (value.op === 'subject-create') {
+      let subject = createdByKey.get(value.idempotency_key);
+      if (!subject) { subject = { id: subjectId(nextSubject++), name: value.name, revision: 1, definition: value.definition ?? null }; subjects.push(subject); createdByKey.set(value.idempotency_key, subject); }
+      return json(subject);
+    }
     assert(value.id === recordId, 'writes only target the synthetic record');
     if (value.op === 'grouping-set') {
       if (failGrouping) { failGrouping = false; return json({ error: '합성 묶음 변경 실패' }, 409); }
@@ -160,7 +165,8 @@ try {
     throw new Error(`Forbidden fixture operation: ${value.op}`);
   };
   history.replaceState(null, '', `${location.pathname}?scope=personal`);
-  await import(moduleEntry);
+  // The DOM test mounts source App here; a browser always imports the installed bundle.
+  if (window.ontologyFixtureMount) await window.ontologyFixtureMount(); else await import(moduleEntry);
   await until(() => [...root.querySelectorAll('button')].some(node => node.textContent === '목록 보기'), 'installed App controls');
   button('목록 보기').click(); releaseGraph();
   await until(() => !!root.querySelector('.graph-list > button'), 'fixture list');
@@ -221,11 +227,56 @@ try {
   enter(section.querySelector('input'), '합성 새 묶음'); await settle(); button('만들고 연결', section).click();
   await until(() => current.subject_name === '합성 새 묶음' && idle(), 'new group assigned');
   assert(section.querySelector('input').value === '', 'committed subject-name input cleared'); draftIsIntact('create and assign group');
+  const createdId = current.subject_id;
+  await groupAction('합성 묶음 A에 묶기');
+  await groupAction('합성 새 묶음에 묶기');
+  assert(current.subject_id === createdId, 'same panel can reselect its newly created group'); draftIsIntact('reselect created group in same panel');
+  enter(section.querySelector('input'), '합성 연결 재시도 묶음'); await settle();
+  const beforePartial = current.revision, beforePartialGraphs = graphReads; failGrouping = true;
+  button('만들고 연결', section).click();
+  await until(() => root.textContent.includes('다른 변경이 먼저 저장되었습니다.') && idle(), 'creation succeeded but assignment failed');
+  assert(current.revision === beforePartial && section.querySelector('input').value === '합성 연결 재시도 묶음', 'partial failure preserves record and retry input');
+  assert(graphReads > beforePartialGraphs, 'committed group metadata refreshes graph even if assignment failed');
+  const partialId = subjects.find(subject => subject.name === '합성 연결 재시도 묶음').id;
+  assert([...details('기록 묶음 ·').querySelectorAll('button')].filter(node => node.textContent === '합성 연결 재시도 묶음에 묶기').length === 1, 'committed group is immediately selectable after assignment failure');
+  draftIsIntact('partial creation keeps correction');
+  button('만들고 연결', section).click();
+  await until(() => current.subject_id === partialId && idle(), 'retry reuses the created group');
+  const creates = calls.filter(value => value.op === 'subject-create' && value.name === '합성 연결 재시도 묶음');
+  assert(creates.length === 2 && creates[0].idempotency_key === creates[1].idempotency_key, 'assignment retry retains creation key');
+  assert([...details('기록 묶음 ·').querySelectorAll('button')].filter(node => node.textContent === '합성 연결 재시도 묶음 · 현재 묶음').length === 1, 'retry deduplicates the local subject cache');
+  await groupAction('합성 묶음 B에 묶기'); await groupAction('합성 연결 재시도 묶음에 묶기');
+  draftIsIntact('retried created group remains selectable');
+  await editing();
+  const formCreate = details('새 묶음 만들기', draftForm);
+  enter(formCreate.querySelector('input'), '합성 폼 새 묶음'); await settle();
+  const formBaseline = current.revision;
+  button('묶음 만들기', formCreate).click();
+  const formSelect = draftForm.querySelector('[aria-label="기록 묶음"]');
+  await until(() => subjects.some(subject => subject.name === '합성 폼 새 묶음' && formSelect.value === subject.id) && idle(), 'form creation selects the committed group');
+  const formCreatedId = formSelect.value;
+  assert(current.revision === formBaseline && current.subject_id === partialId, 'form creation does not commit the correction or membership');
+  select(formSelect, subjectId(1)); select(formSelect, formCreatedId); await settle();
+  draftIsIntact('form-created group remains in options', formCreatedId);
+  assert([...formSelect.options].filter(option => option.value === formCreatedId).length === 1, 'form creation deduplicates select options');
+  const optionNames = [...formSelect.options].slice(1).map(option => option.textContent);
+  assert(optionNames.every((name, i) => !i || optionNames[i - 1].localeCompare(name, 'ko') <= 0), 'created and loaded groups stay name sorted');
+  await reading();
+
   await beginCase('suggested', { candidate_ids: [subjectId(1)], candidate_names: { [subjectId(1)]: subjects[0].name } });
   button('합성 묶음 A에 묶기').click(); await until(() => current.subject_id === subjectId(1), 'accept suggested group'); draftIsIntact('suggested existing group');
   await beginCase('suggested', { new_subject: '합성 제안 새 묶음' });
+  const suggestionGraphReads = graphReads; failGrouping = true;
+  button('새 묶음 ‘합성 제안 새 묶음’ 만들고 연결').click();
+  await until(() => root.textContent.includes('다른 변경이 먼저 저장되었습니다.') && idle(), 'suggested creation succeeds while assignment fails');
+  assert(graphReads > suggestionGraphReads, 'suggested creation publishes committed metadata before assignment');
+  assert([...details('기록 묶음 ·').querySelectorAll('button')].some(node => node.textContent === '합성 제안 새 묶음에 묶기'), 'failed suggested assignment retains created group in cache');
+  draftIsIntact('suggested partial creation keeps correction');
   button('새 묶음 ‘합성 제안 새 묶음’ 만들고 연결').click();
   await until(() => current.subject_name === '합성 제안 새 묶음' && idle(), 'accept suggested new group'); draftIsIntact('suggested new group');
+  const suggestedCreates = calls.filter(value => value.op === 'subject-create' && value.name === '합성 제안 새 묶음');
+  assert(suggestedCreates.length === 2 && suggestedCreates[0].idempotency_key === suggestedCreates[1].idempotency_key, 'suggested assignment retry reuses creation key');
+  await groupAction('합성 묶음 A에 묶기'); await groupAction('합성 제안 새 묶음에 묶기'); draftIsIntact('reselect suggested group in same panel');
   await beginCase('error');
   button('다시 시도').click(); await until(() => streams.size > 0, 'error retry watches classification'); draftIsIntact('classification retry after error');
   await editing(); await until(() => streams.size === 0, 'classification watch pauses in the editor');

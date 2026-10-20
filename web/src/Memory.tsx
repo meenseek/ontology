@@ -13,7 +13,17 @@ export type Item = Input & { id: string; scope: Scope; revision: number; status:
 type Page<T> = { items: T[]; next_after?: string | null; next_before_revision?: number | null };
 type History = { revision: number; status: string; subject_id: string | null; document: Input & { curation?: Curation }; changed_at: string };
 type EvidenceSnapshot = { available: boolean; content: string | null; evidence: Evidence };
-type Props = { latestNode?: GraphNode | null; managing?: boolean; initialItem?: Item | null; visible: boolean; scope: Scope; csrf: string; request: Request; selectedId: string | null; onBusy: (busy: boolean) => void; onChange: (item: Item | null) => void; onBackgroundChange?: (item: Item, revisionChanged: boolean) => void; onNavigate: (id: string) => void; onMetadataChange: () => void; onDirtyChange?: (dirty: boolean, item: Item | null) => void };
+// onCommit completes management; record/subject refreshes preserve the editor lifetime.
+type Props = { latestNode?: GraphNode | null; managing?: boolean; initialItem?: Item | null; visible: boolean; scope: Scope; csrf: string; request: Request; selectedId: string | null; onBusy: (busy: boolean) => void; onCommit: (item: Item | null) => void; onRecordRefresh?: (item: Item, revisionChanged: boolean) => void; onNavigate: (id: string) => void; onSubjectsChange: () => void; onDirtyChange?: (dirty: boolean, item: Item | null) => void };
+// A server-committed subject belongs to this cache even if linking fails later.
+const mergeSubjects = (current: Subject[], incoming: Subject[]): Subject[] => {
+  const byId = new Map(current.map(subject => [subject.id, subject]));
+  for (const subject of incoming) {
+    const previous = byId.get(subject.id);
+    if (!previous || subject.revision >= previous.revision) byId.set(subject.id, subject);
+  }
+  return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name, "ko") || a.id.localeCompare(b.id));
+};
 const blank = (): Input => ({ kind: "record", title: "", body: "", subject_id: null, effective_from: null, effective_until: null, evidence: [] });
 const message = (e: unknown) => e instanceof Error ? e.message : "요청에 실패했습니다.";
 const epoch = (value: string) => value ? Math.floor(new Date(value).getTime() / 1000) : null;
@@ -42,7 +52,7 @@ function EvidenceLocation({ evidence }: { evidence: Evidence }) {
 function Validity({ value }: { value: Pick<Input, "effective_from" | "effective_until"> }) {
   return <dl><dt>유효 시작</dt><dd>{date(value.effective_from)}</dd><dt>유효 종료</dt><dd>{date(value.effective_until)}</dd></dl>;
 }
-export default function Memory({ latestNode, managing = false, initialItem, visible, scope, csrf, request, selectedId, onBusy, onChange, onBackgroundChange, onNavigate, onMetadataChange, onDirtyChange }: Props) {
+export default function Memory({ latestNode, managing = false, initialItem, visible, scope, csrf, request, selectedId, onBusy, onCommit, onRecordRefresh, onNavigate, onSubjectsChange, onDirtyChange }: Props) {
   const seed = initialItem?.scope === scope && initialItem.id === selectedId ? initialItem : null;
   const [subjects, setSubjects] = useState<Subject[]>([]), [subjectNext, setSubjectNext] = useState<string | null>(null);
   const subjectsLoaded = useRef(false), subjectsFailed = useRef(false), readFailed = useRef(false);
@@ -96,7 +106,7 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
     command<Page<Subject>>({ op: "subjects" }, controller.signal).then(value => {
       if (!controller.signal.aborted) {
         subjectsLoaded.current = true;
-        setSubjects(current => [...current, ...value.items.filter(item => !current.some(existing => existing.id === item.id))]);
+        setSubjects(current => mergeSubjects(current, value.items));
         setSubjectNext(value.next_after ?? null);
       }
     }).catch(e => {
@@ -131,7 +141,7 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
       });
       setHistory(null); setHistoryNext(null);
     }
-    onBackgroundChange?.(value, value.revision !== selected.revision);
+    onRecordRefresh?.(value, value.revision !== selected.revision);
   }
   async function run(action: () => Promise<void>) {
     if (pending.current) return; pending.current = true; setBusy(true); onBusy(true); setError(""); setNotice("");
@@ -151,7 +161,7 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
         : selected ? { op: "correct", id: selected.id, revision: selected.revision, memory: cleanInput(draft) }
         : { op: proposal ? "propose" : "remember", idempotency_key: key, memory: cleanInput(draft) };
       const value = await command<Item>(body); if (!mounted.current) return;
-      active.current = value.id; setSelected(value); setDraft(draftFromItem(value)); setRecordChangedElsewhere(false); setEditing(false); setHistory(null); setHistoryNext(null); setEvidenceView(null); setEvidenceSnapshots({}); setNotice("기록을 저장했습니다."); onChange(value);
+      active.current = value.id; setSelected(value); setDraft(draftFromItem(value)); setRecordChangedElsewhere(false); setEditing(false); setHistory(null); setHistoryNext(null); setEvidenceView(null); setEvidenceSnapshots({}); setNotice("기록을 저장했습니다."); onCommit(value);
     });
   }
   async function setGroup(subjectId: string | null, mode: "manual" | "auto" | "off") {
@@ -162,10 +172,38 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
       refreshRecord(value, true);
     });
   }
+  async function createSubject(name: string, idempotencyKey: string, definition?: NonNullable<Subject["definition"]>) {
+    const subject = await command<Subject>({ op: "subject-create", idempotency_key: idempotencyKey, name, ...(definition ? { definition } : {}) });
+    if (!mounted.current) return null;
+    setSubjects(current => mergeSubjects(current, [subject]));
+    onSubjectsChange();
+    return subject;
+  }
+  async function createDraftSubject() {
+    const name = subjectName.trim();
+    if (!name) return;
+    await run(async () => {
+      const subject = await createSubject(name, subjectKey, definingSubject ? subjectDefinition : undefined);
+      if (!subject) return;
+      if (definingSubject && (subject.name !== name || !subject.definition || Object.entries(subjectDefinition).some(([key, text]) => subject.definition![key as keyof typeof subjectDefinition] !== text))) throw new Error("만든 묶음의 목적이 이후 변경되었습니다. 현재 정의를 확인하고 묶음을 선택해 주세요.");
+      setSubjectName(""); setSubjectDefinition(blankDefinition()); setSubjectKey(crypto.randomUUID());
+      change({ subject_id: subject.id, grouping_preference: "manual" });
+    });
+  }
+  async function createSuggestedSubject(name: string) {
+    if (!selected) return;
+    await run(async () => {
+      const subject = await createSubject(name, await groupKey(selected.id, selected.revision, name));
+      if (!subject) return;
+      const value = await command<Item>({ op: "grouping-set", id: selected.id, revision: selected.revision, subject_id: subject.id, mode: "manual" });
+      if (mounted.current) refreshRecord(value, true);
+    });
+  }
   async function createAndAssignSubject() {
     if (!selected || !subjectName.trim()) return;
     await run(async () => {
-      const subject = await command<Subject>({ op: "subject-create", idempotency_key: subjectKey, name: subjectName.trim() });
+      const subject = await createSubject(subjectName.trim(), subjectKey);
+      if (!subject) return;
       const value = await command<Item>({ op: "grouping-set", id: selected.id, revision: selected.revision, subject_id: subject.id, mode: "manual" });
       if (!mounted.current) return;
       refreshRecord(value, true); setSubjectName(""); setSubjectKey(crypto.randomUUID());
@@ -178,7 +216,7 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
       const value = await command<Item>({ op, id: snapshot.id, revision: snapshot.revision }); if (!mounted.current || active.current !== snapshot.id) return;
       if (op === "forget") { active.current = null; setSelected(null); setDraft(blank()); setEditing(false); setNotice("이 앱의 기록과 이력을 삭제했습니다."); }
       else { setSelected(value); setDraft(draftFromItem(value)); setNotice(op === "accept" ? "제안을 보관했습니다." : "기록을 철회했습니다."); }
-      setForgetting(false); setHistory(null); setHistoryNext(null); setEvidenceView(null); setEvidenceSnapshots({}); onChange(op === "forget" ? null : value);
+      setForgetting(false); setHistory(null); setHistoryNext(null); setEvidenceView(null); setEvidenceSnapshots({}); onCommit(op === "forget" ? null : value);
     });
   }
   async function loadHistory(before?: number) {
@@ -207,7 +245,7 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
   const subjectStatus = <>
     {subjectsLoading && <p className="hint" role="status">기록 묶음을 불러오는 중…</p>}
     {subjectsError && <p className="error" role="alert">{subjectsError} <button type="button" disabled={subjectsLoading} onClick={() => { subjectsFailed.current = false; setSubjectRetry(value => value + 1); }}>묶음 다시 불러오기</button></p>}
-    {subjectNext && <button type="button" disabled={busy} onClick={() => void run(async () => { const value = await command<Page<Subject>>({ op: "subjects", after: subjectNext }); if (!mounted.current) return; setSubjects(current => [...current, ...value.items.filter(item => !current.some(existing => existing.id === item.id))]); setSubjectNext(value.next_after ?? null); })}>묶음 더 보기</button>}
+    {subjectNext && <button type="button" disabled={busy} onClick={() => void run(async () => { const value = await command<Page<Subject>>({ op: "subjects", after: subjectNext }); if (!mounted.current) return; setSubjects(current => mergeSubjects(current, value.items)); setSubjectNext(value.next_after ?? null); })}>묶음 더 보기</button>}
   </>;
   return <section className="brain">
     {readError && <p className="error" role="alert">{readError} <button disabled={loading} onClick={() => { readFailed.current = false; setReadRetry(value => value + 1); }}>기록 다시 불러오기</button></p>}
@@ -235,7 +273,7 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
             <div className="related-search"><input aria-label="출처 근거 검색" maxLength={120} value={evidenceQuery} onChange={(e) => setEvidenceQuery(e.target.value)} placeholder="자료 경로 검색" /><button type="button" onClick={() => void run(async () => { const v = await command<Page<Evidence>>({ op: "evidence", query: evidenceQuery }); setChoices(v.items); })}>근거 찾기</button></div>
             {choices.map((e) => <button className="evidence-choice" type="button" key={e.entity_id} disabled={draft.evidence.length >= 10 && !draft.evidence.some((v) => v.entity_id === e.entity_id)} onClick={() => change({ evidence: [...draft.evidence.filter((v) => v.entity_id !== e.entity_id), e] })} title={[e.repository, e.path].filter(Boolean).join(" · ")}>{e.path ?? evidenceName(e)}{e.repository && ` · ${fileName(e.repository)}`} · {draft.evidence.some((v) => v.entity_id === e.entity_id) ? "현재 근거로 재확인" : "근거 선택"}</button>)}
           </section>
-          <details className="section"><summary>새 묶음 만들기</summary><label className="topic-label">묶음 이름<input value={subjectName} maxLength={80} onChange={e => { setSubjectName(e.target.value); setSubjectKey(crypto.randomUUID()); }} /></label><DefinitionFields value={subjectDefinition} onChange={setSubjectDefinition} /><p className="hint">목적을 정의하려면 포함·제외 기준도 함께 적어주세요. 이름만 만들면 정의 없음으로 남습니다.</p><button type="button" disabled={busy || !subjectName.trim() || (definingSubject && !completeDefinition(subjectDefinition))} onClick={() => void run(async () => { const value = await command<Subject>({ op: "subject-create", idempotency_key: subjectKey, name: subjectName, ...(definingSubject ? { definition: subjectDefinition } : {}) }); if (definingSubject && (value.name !== subjectName || !value.definition || Object.entries(subjectDefinition).some(([key, text]) => value.definition![key as keyof typeof subjectDefinition] !== text))) throw new Error("만든 묶음의 목적이 이후 변경되었습니다. 현재 정의를 확인하고 묶음을 선택해 주세요."); if (!mounted.current) return; setSubjects(v => [...v.filter(s => s.id !== value.id), value]); onMetadataChange(); setSubjectName(""); setSubjectDefinition(blankDefinition()); setSubjectKey(crypto.randomUUID()); change({ subject_id: value.id, grouping_preference: "manual" }); })}>묶음 만들기</button></details>
+          <details className="section"><summary>새 묶음 만들기</summary><label className="topic-label">묶음 이름<input value={subjectName} maxLength={80} onChange={e => { setSubjectName(e.target.value); setSubjectKey(crypto.randomUUID()); }} /></label><DefinitionFields value={subjectDefinition} onChange={setSubjectDefinition} /><p className="hint">목적을 정의하려면 포함·제외 기준도 함께 적어주세요. 이름만 만들면 정의 없음으로 남습니다.</p><button type="button" disabled={busy || !subjectName.trim() || (definingSubject && !completeDefinition(subjectDefinition))} onClick={() => void createDraftSubject()}>묶음 만들기</button></details>
           {!selected && <label className="proposal-toggle"><input type="checkbox" checked={proposal} onChange={(e) => { setProposal(e.target.checked); setKey(crypto.randomUUID()); }} /> 아직 확정하지 않은 제안으로 남기기</label>}
           </details>
           {new TextEncoder().encode(draft.body).length > 8192 && <p className="warning">내용은 최대 8,192바이트까지 저장할 수 있습니다. 내용을 줄여주세요.</p>}
@@ -250,8 +288,8 @@ export default function Memory({ latestNode, managing = false, initialItem, visi
           {scope === "personal" && selected.grouping?.state === "assigned" && selected.grouping.reason && <p className="hint">Codex 묶음 판단: {selected.grouping.reason}</p>}
           {scope === "personal" && selected.grouping?.state === "error" && <p className="warning">묶음 분류를 완료하지 못했습니다. <button type="button" disabled={busy} onClick={() => void run(async () => { const value = await command<Item>({ op: "grouping-retry", id: selected.id }); refreshRecord(value); })}>다시 시도</button></p>}
           {scope === "personal" && selected.grouping?.state === "unmatched" && <p className="hint">{selected.grouping.reason ?? "적합한 기존 묶음을 찾지 못했습니다."} 새 묶음을 만든 뒤 다시 검토할 수 있습니다. <button type="button" disabled={busy} onClick={() => void run(async () => { const value = await command<Item>({ op: "grouping-retry", id: selected.id }); refreshRecord(value); })}>다시 분류</button></p>}
-          {scope === "personal" && selected.grouping?.state === "suggested" && <section className="section"><h3>묶음 제안</h3><p>{selected.grouping.reason}</p><div className="action-row">{selected.grouping.suggestions.candidate_ids?.map(id => <button type="button" key={id} disabled={busy} onClick={() => void confirmGroup(id)}>{selected.grouping?.suggestions.candidate_names?.[id] ?? subjects.find(item => item.id === id)?.name ?? id}에 묶기</button>)}{selected.grouping.suggestions.new_subject && <button type="button" disabled={busy} onClick={() => void run(async () => { const name = selected.grouping?.suggestions.new_subject; if (!name) return; const subject = await command<Subject>({ op: "subject-create", idempotency_key: await groupKey(selected.id, selected.revision, name), name }); const value = await command<Item>({ op: "grouping-set", id: selected.id, revision: selected.revision, subject_id: subject.id, mode: "manual" }); setSubjects(current => [...current, subject]); refreshRecord(value, true); onMetadataChange(); })}>새 묶음 ‘{selected.grouping.suggestions.new_subject}’ 만들고 연결</button>}</div></section>}
-          {selected.status !== "withdrawn" && <details className="section" onToggle={event => { if (event.currentTarget.open) setSubjectsRequested(true); }}><summary>기록 묶음 · {selected.subject_name ?? (["pending", "processing"].includes(selected.grouping?.state ?? "") ? "자동 분류 중" : "없음")}</summary><p className="hint">기록 내용은 그대로 두고 묶음만 바꿉니다.</p>{subjectStatus}<div className="compact-list">{subjects.map(subject => <button type="button" key={subject.id} disabled={busy || selected.subject_id === subject.id} onClick={() => void setGroup(subject.id, "manual")}>{subject.name}{selected.subject_id === subject.id ? " · 현재 묶음" : "에 묶기"}</button>)}</div><div className="memory-actions"><button type="button" disabled={busy || selected.grouping?.mode === "off"} onClick={() => void setGroup(null, "off")}>묶음 없음</button>{scope === "personal" && <button type="button" disabled={busy || selected.grouping?.mode === "auto"} onClick={() => void setGroup(null, "auto")}>Codex가 다시 분류</button>}</div><details className="section"><summary>새 묶음 만들고 연결</summary><label className="topic-label">묶음 이름<input value={subjectName} maxLength={80} onChange={event => { setSubjectName(event.target.value); setSubjectKey(crypto.randomUUID()); }} /></label><button type="button" disabled={busy || !subjectName.trim()} onClick={() => void createAndAssignSubject()}>만들고 연결</button></details></details>}
+          {scope === "personal" && selected.grouping?.state === "suggested" && <section className="section"><h3>묶음 제안</h3><p>{selected.grouping.reason}</p><div className="action-row">{selected.grouping.suggestions.candidate_ids?.map(id => <button type="button" key={id} disabled={busy} onClick={() => void confirmGroup(id)}>{selected.grouping?.suggestions.candidate_names?.[id] ?? subjects.find(item => item.id === id)?.name ?? id}에 묶기</button>)}{selected.grouping.suggestions.new_subject && <button type="button" disabled={busy} onClick={() => void createSuggestedSubject(selected.grouping!.suggestions.new_subject!)}>새 묶음 ‘{selected.grouping.suggestions.new_subject}’ 만들고 연결</button>}</div></section>}
+          {selected.status !== "withdrawn" && <details className="section" onToggle={event => { if (event.currentTarget.open) setSubjectsRequested(true); }}><summary>기록 묶음 · {selected.subject_name ?? (["pending", "processing"].includes(selected.grouping?.state ?? "") ? "자동 분류 중" : "없음")}</summary><p className="hint">기록 내용은 그대로 두고 묶음만 바꿉니다.</p>{subjectStatus}<div className="compact-list">{subjects.map(subject => <button type="button" key={subject.id} disabled={busy || selected.subject_id === subject.id} onClick={() => void setGroup(subject.id, "manual")}>{subject.name}{selected.subject_id === subject.id ? " · 현재 묶음" : "에 묶기"}</button>)}</div><div className="memory-actions"><button type="button" disabled={busy || selected.grouping?.mode === "off"} onClick={() => void setGroup(null, "off")}>묶음 없음</button>{scope === "personal" && <button type="button" disabled={busy || selected.grouping?.mode === "auto"} onClick={() => void setGroup(null, "auto")}>Codex가 다시 분류</button>}</div><details className="section"><summary>새 묶음 만들고 연결</summary><label className="topic-label">묶음 이름<input disabled={busy} value={subjectName} maxLength={80} onChange={event => { setSubjectName(event.target.value); setSubjectKey(crypto.randomUUID()); }} /></label><button type="button" disabled={busy || !subjectName.trim()} onClick={() => void createAndAssignSubject()}>만들고 연결</button></details></details>}
           {selected.effective_from !== null && selected.effective_from > Date.now() / 1000 && <p className="warning">아직 유효 시작 시점이 되지 않았습니다.</p>}
           {selected.effective_until !== null && selected.effective_until <= Date.now() / 1000 && <p className="warning">유효기간이 지난 기록입니다.</p>}
           {selected.status === "withdrawn" && <p className="warning">철회한 기록입니다. 이전 내용과 이력은 남아 있습니다.</p>}
