@@ -488,3 +488,25 @@ test("a short purpose view preserves final body clearance and actual control spa
     }
   }
 });
+
+
+test("a selected purpose marker frames its disclosed page rather than an individual closeup", () => {
+  for (const size of [{ width: 680, height: 700 }, { width: 780, height: 700 }, { width: 390, height: 540 }]) {
+    const camera = new PerspectiveCamera(60, size.width / size.height, .1, 20000);
+    camera.position.set(0, 0, 500); camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
+    const hub: PositionedNode = { id: "purpose", kind: "subject", scope: "personal", label: "목적", x: 0, y: 0, z: 0 } as PositionedNode;
+    const nodes = [hub, ...Array.from({ length: 12 }, (_, i) => ({ ...hub, id: `member-${i}`, kind: "document" as const,
+      x: (i % 4 - 1.5) * 64, y: (Math.floor(i / 4) - 1) * 74, z: i % 3 * 10 }))];
+    const desired = new Map(nodes.map(node => [node.id, { x: node.x, y: node.y, z: node.z }]));
+    const insets = { top: 110, bottom: 150, left: 40, right: 40 };
+    const plan = planCoreView(desired, new Set(nodes.slice(1).map(node => node.id)), hub.id, {
+      camera, cameraTarget: { x: 0, y: 0, z: 0 }, size, automatic: true, nodes, links: [], counts: new Map(),
+      members: new Set(nodes.map(node => node.id)), selected: hub.id, lod: 0, reading: true, insets,
+    }, values => new Map(values));
+    for (const at of plan.positions.values()) {
+      const p = new Vector3(at.x, at.y, at.z).project(plan.camera), x = (p.x + 1) * size.width / 2, y = (1 - p.y) * size.height / 2;
+      assert.ok(x >= insets.left - 1 && x <= size.width - insets.right + 1 && y >= insets.top - 1 && y <= size.height - insets.bottom + 1,
+        `selected collection member stays in its reading rectangle at ${size.width}px`);
+    }
+  }
+});

@@ -1788,10 +1788,146 @@ async function checkHeaderLayout() {
   }
 }
 
+
+// Only the newly affected map/list/marker transitions; existing editing suites are separate.
+async function checkResidualMap(mouseOnly = false) {
+  const originalUrl = window.location.href;
+  const originalRender = Scene.prototype.onBeforeRender, originalPack = Positions.prototype.packOverview;
+  const root = createRoot(host), samples = new Map<string, { x: number; y: number; z: number }>();
+  let positions: Positions | undefined, apiCalls = 0;
+  const names = ["합성 연구와 실행 목적", "합성 개발과 품질 목적"], subjects = [subjectId, "p_00000000-0000-4000-8000-000000000002"];
+  const members: GraphNode[] = [225, 39].flatMap((count, group) => Array.from({ length: count }, (_, i) => ({
+    id: `residual-${group}-${String(i).padStart(3, "0")}`, scope: "personal", kind: "document", label: `합성 자료 ${group}-${i}`,
+    subject_id: subjects[group], subject_name: names[group], status: "ok", present: true, current: true,
+  })));
+  const nodes: GraphNode[] = [...subjects.map((id, i): GraphNode => ({ id, scope: "personal", kind: "subject", label: names[i], purpose_total: i ? 39 : 225 })), ...members];
+  const links: Snapshot["links"] = members.map(node => ({ source: node.id, target: node.subject_id!, kind: "subject", current: true }));
+  const snapshot: Snapshot = { scope: "personal", query: "", focus: { id: null, found: false }, nodes, links,
+    matched: nodes.length, totals: { documents: members.length, memories: 0, markers: 2, links: links.length },
+    returned: { knowledge: members.length, markers: 2, links: links.length }, omitted: { nodes: 0, links: 0 },
+    eligible: { nodes: nodes.length, links: links.length }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false };
+  const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+  const separate = (a: DOMRect, b: DOMRect) => a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom;
+  const chromeClear = () => {
+    const help = host.querySelector(".graph-quick-help")!.getBoundingClientRect(), mini = host.querySelector(".graph-minimap")!.getBoundingClientRect();
+    assert(separate(help, mini), "the actual canvas keeps minimap and sentence guidance separate");
+    assert(help.left >= 0 && help.right <= innerWidth && mini.right <= innerWidth, "map controls remain inside the screen");
+  };
+  const frameIsReadable = (group: number) => {
+    if (!positions || positions.layoutMoving) return false;
+    const box = host.querySelector(".graph-canvas")!.getBoundingClientRect();
+    const actual = [...samples].filter(([id]) => id.startsWith(`residual-${group}-`));
+    const obstacles = [...host.querySelectorAll<HTMLElement>(".graph-minimap, .graph-quick-help, .graph-core-actions, .map-sidebar")]
+      .filter(element => element.offsetWidth && element.offsetHeight).map(element => element.getBoundingClientRect());
+    return actual.length === 12 && actual.every(([, at]) => {
+      const x = box.left + (at.x + 1) * box.width / 2, y = box.top + (1 - at.y) * box.height / 2;
+      return at.z > -1 && at.z < 1 && x >= box.left + 10 && x <= box.right - 10 && y >= box.top + 10 && y <= box.bottom - 10 &&
+        obstacles.every(other => x + 10 <= other.left || x - 10 >= other.right || y + 10 <= other.top || y - 10 >= other.bottom);
+    });
+  };
+  // Match the application viewport; fixture prose/results stay available in the DOM.
+  document.querySelector<HTMLParagraphElement>("body > p")!.hidden = true;
+  output.hidden = true; host.style.position = "fixed"; host.style.inset = "0";
+  Positions.prototype.packOverview = function (this: Positions, ...args: Parameters<Positions["packOverview"]>) {
+    positions = this; return originalPack.apply(this, args);
+  };
+  Scene.prototype.onBeforeRender = function (...args) {
+    samples.clear();
+    this.traverse(object => {
+      const id = object.userData.nodeId;
+      if (typeof id !== "string" || typeof object.userData.opacity !== "function" || object.userData.opacity() < .99 || object.userData.retiring?.()) return;
+      const p = object.getWorldPosition(new Vector3()).project(args[2]); samples.set(id, { x: p.x, y: p.y, z: p.z });
+    });
+    originalRender.apply(this, args);
+  };
+  window.fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+    assert(!init?.method || init.method === "GET", "the visual fixture never writes real or synthetic records");
+    apiCalls++;
+    if (url.pathname === "/api/session") return json({ csrf: "synthetic-only", areas: [] });
+    if (url.pathname === "/api/sync") return json({ enabled: false, running: false, error: null, report: null });
+    if (url.pathname === "/api/graph") return json({ ...snapshot, focus: { id: url.searchParams.get("focus"), found: !!url.searchParams.get("focus") } });
+    throw new Error(`Unexpected residual-map request: ${url.pathname}`);
+  };
+  window.history.replaceState(null, "", `${window.location.pathname}?scope=personal`);
+  root.render(<App />);
+  await until(() => !!positions && !!host.querySelector(".graph-minimap") && !positions.layoutMoving, "purpose overview is rendered");
+  chromeClear();
+  if (mouseOnly) {
+    await until(() => samples.has(subjects[0]) && !positions!.layoutMoving, "the actual summary is projected");
+    const canvas = host.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, rect = canvas.getBoundingClientRect();
+    const at = samples.get(subjects[0])!;
+    const eventAt = { clientX: rect.left + (at.x + 1) * rect.width / 2, clientY: rect.top + (1 - at.y) * rect.height / 2 };
+    canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", ...eventAt }));
+    await until(() => host.querySelector(".graph-tooltip")?.getAttribute("data-node-id") === subjects[0], "renderer hover state is visible");
+    await new Promise(resolve => setTimeout(resolve, 550));
+    const current = samples.get(subjects[0])!;
+    window.history.replaceState(null, "", originalUrl);
+    output.textContent = `AWAITING_MOUSE\n${JSON.stringify({ x: rect.left + (current.x + 1) * rect.width / 2, y: rect.top + (1 - current.y) * rect.height / 2, hoverMilliseconds: 550 })}`;
+    await new Promise<void>(resolve => canvas.addEventListener("pointerup", function activated(event) {
+      if (!event.isTrusted || event.pointerType !== "mouse" || event.button !== 0) return;
+      canvas.removeEventListener("pointerup", activated); resolve();
+    }));
+    await until(() => host.querySelector(".graph-core-page")?.textContent === "1/19" && !host.querySelector(".management-panel") && frameIsReadable(0), "native mouse release expands the hovered summary once");
+    window.history.replaceState(null, "", originalUrl);
+    return { width: innerWidth, height: innerHeight, hoverMilliseconds: 550, hover: "scripted pointer movement with actual renderer state", activation: "trusted browser mouse release", page: "1/19", apiCalls };
+  }
+  const quick = host.querySelector(".graph-quick-help .pointer-instructions")!.textContent;
+  assert(quick?.includes("묶음을 누르면 펼쳐집니다."), "quick guidance uses complete gesture sentences");
+  button("목록 보기").click(); await openExplorer();
+  if (innerWidth > 900) {
+    const sidebar = host.querySelector(".map-sidebar")!.getBoundingClientRect();
+    for (const title of [...host.querySelectorAll(".graph-list strong")].slice(0, 3))
+      assert(title.getBoundingClientRect().left >= sidebar.right, "list titles remain outside the open filter panel");
+  } else assert(host.querySelector(".galaxy")!.hasAttribute("inert"), "mobile filters are a modal choice rather than a covered list");
+  host.querySelector<HTMLButtonElement>(".map-sidebar .sidebar-heading button")!.click(); await settle();
+  const phases: unknown[] = [];
+  for (const group of [1, 0]) {
+    const row = [...host.querySelectorAll<HTMLButtonElement>(".graph-list > button")].find(row => row.querySelector("strong")?.textContent === names[group])!;
+    row.click(); await until(() => host.querySelector(".management-panel h2")?.textContent === names[group], "purpose detail selection");
+    button("3D 보기").click();
+    await until(() => host.querySelector(".graph-core-page")?.textContent === `1/${group ? 4 : 19}` && frameIsReadable(group), "selected purpose opens a readable 12-member page");
+    if (innerWidth <= 900) {
+      assert(host.querySelector(".galaxy")!.hasAttribute("inert"), "mobile purpose detail owns its modal screen");
+      button("닫기 ×").click(); await settle();
+      const target = host.querySelector<HTMLButtonElement>(`.graph-group-target[data-node-id="${subjects[group]}"]`)!;
+      target.click(); await until(() => !!host.querySelector(".graph-core-page") && frameIsReadable(group), "mobile returns to the same purpose grouping");
+    }
+    chromeClear();
+    button("다음", host.querySelector(".graph-core-actions")!).click();
+    await until(() => host.querySelector(".graph-core-page")?.textContent === `2/${group ? 4 : 19}` && frameIsReadable(group), "page two remains in the reading frame");
+    if (innerWidth > 900) {
+      assert(host.querySelector(".management-panel h2")?.textContent === names[group], "paging preserves the selected purpose detail");
+      await openExplorer();
+      await until(() => frameIsReadable(group), "selected purpose refits after filter obstruction");
+      const sidebar = host.querySelector(".map-sidebar")!.getBoundingClientRect();
+      assert(host.querySelector(".graph-core-actions")!.getBoundingClientRect().left >= sidebar.right, "the open filter leaves every page control readable");
+      const canvas = host.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, box = canvas.getBoundingClientRect();
+      const sample = [...samples].find(([id]) => id.startsWith(`residual-${group}-`))![1];
+      canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: box.left + (sample.x + 1) * box.width / 2, clientY: box.top + (1 - sample.y) * box.height / 2 }));
+      await until(() => !!host.querySelector(".graph-tooltip"), "pointed member guidance is rendered");
+      const tooltip = host.querySelector(".graph-tooltip")!.getBoundingClientRect();
+      assert(tooltip.left >= sidebar.right && [...host.querySelectorAll(".graph-minimap, .graph-quick-help")].every(element => separate(tooltip, element.getBoundingClientRect())), "hover guidance clears the filter, minimap and quick instructions");
+      host.querySelector<HTMLButtonElement>(".map-sidebar .sidebar-heading button")!.click(); await settle();
+    }
+    phases.push({ group: names[group], page: host.querySelector(".graph-core-page")!.textContent, visibleMembers: [...samples.keys()].filter(id => id.startsWith(`residual-${group}-`)).length, labels: checkLabelAssociations() });
+    if (group !== 0) { button("묶음 접기").click(); await settle(); button("목록 보기").click(); await settle(); }
+  }
+  // Restore the fixture entry for a development refresh while retaining the rendered App state.
+  window.history.replaceState(null, "", originalUrl);
+  // The final synthetic screen is deliberately retained for visual inspection.
+  return { width: innerWidth, height: innerHeight, phases, apiCalls, retained: "purpose page two; synthetic APIs only" };
+}
+
 async function run() {
   const results: unknown[] = [];
   try {
     assert(import.meta.env.DEV, "Run this fixture through the development server");
+    if (["residual", "residual-mouse"].includes(new URLSearchParams(window.location.search).get("scenario") ?? "")) {
+      results.push(await checkResidualMap(new URLSearchParams(window.location.search).get("scenario") === "residual-mouse"));
+      output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
+      return;
+    }
     if (new URLSearchParams(window.location.search).get("scenario") === "references") {
       results.push(await checkSourceReferenceDirection());
       output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;

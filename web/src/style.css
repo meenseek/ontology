@@ -323,6 +323,7 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
   .graph-canvas, .graph-list, .map-empty, .galaxy > .loading { grid-column: 1; grid-row: 3; min-height: 0; }
   .map-legend { grid-column: 1; grid-row: 4; }
   .map-sidebar { grid-column: 1 / 2; grid-row: 3 / 4; }
+  .explorer-open .graph-list, .explorer-open .map-empty { margin-inline-start: var(--explorer-width); }
   .management-panel { grid-column: 2; grid-row: 1 / -1; }
   .explorer-open .graph-group-target:focus:not(.core-name) { left: calc(var(--explorer-width) + 16px); top: 120px; bottom: auto; max-width: min(320px, calc(100% - var(--explorer-width) - 32px)); max-height: calc(100% - 136px); overflow-y: auto; z-index: 3; }
   .explorer-open .graph-group-navigation.with-keys { left: calc(var(--explorer-width) + 12px); }
@@ -479,3 +480,26 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
 .graph-group-marker { position: absolute; transform: translate(-50%, -50%); box-shadow: 0 0 9px #a4d6ee33; }
 .graph-group-marker.active { background: #b4d1e5; color: #0a1725; box-shadow: 0 0 12px #a4d6ee80; }
 .graph-group-marker[hidden] { display: none; }
+
+/* The map may be narrower than the viewport when a detail is open. */
+.graph-canvas { container-type: inline-size; }
+.graph-chrome { position: absolute; left: 14px; right: 14px; bottom: 14px; display: flex; align-items: flex-end; gap: 14px; z-index: 2; pointer-events: none; }
+.graph-chrome .graph-quick-help { position: static; flex: 1; min-width: 0; max-width: none; }
+.graph-chrome .graph-quick-help span > span { display: inline; margin: 0; }
+.graph-chrome .graph-minimap { position: static; order: 1; flex-shrink: 0; margin-bottom: 30px; max-width: 100%; pointer-events: auto; }
+@media (min-width: 901px) { .explorer-open .graph-chrome { left: calc(var(--explorer-width) + 14px); } }
+@container (max-width: 520px) {
+  .graph-chrome { flex-direction: column; align-items: flex-end; gap: 10px; }
+  .graph-chrome .graph-minimap { order: 0; margin-bottom: 0; }
+  .graph-chrome .graph-quick-help { width: 100%; }
+}
+
+.graph-tooltip { bottom: var(--graph-help-floor, 42px); max-width: min(420px, calc(100% - 218px)); }
+@media (min-width: 901px) {
+  .explorer-open .graph-core-actions, .explorer-open .graph-core-close { max-width: calc(100% - var(--explorer-width) - 28px); }
+  .explorer-open .graph-tooltip { left: calc(var(--explorer-width) + 18px); max-width: min(420px, calc(100% - var(--explorer-width) - 218px)); }
+}
+@container (max-width: 520px) {
+  .graph-tooltip { bottom: var(--graph-chrome-floor, 100px); max-width: calc(100% - 36px); }
+  @media (min-width: 901px) { .explorer-open .graph-tooltip { max-width: calc(100% - var(--explorer-width) - 36px); } }
+}

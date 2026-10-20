@@ -150,9 +150,12 @@ export function planCoreView(desired: ReadonlyMap<string, Point>, movable: Reado
   view: CoreView, clear: Positions["clearLayout"]) {
   const camera = view.camera.clone(), target = new Vector3(view.cameraTarget.x, view.cameraTarget.y, view.cameraTarget.z);
   const nodes = view.nodes.map(node => ({ ...node, ...(desired.get(node.id) ?? node) }));
-  const focus = desired.get(view.selected ?? hub)!;
+  // A purpose marker selects a collection. Keep its selection ring, while
+  // framing the disclosed members rather than magnifying the marker as a star.
+  const focusSelection = view.reading && view.selected === hub ? null : view.selected;
+  const focus = desired.get(focusSelection ?? hub)!;
   if (view.automatic) {
-    if (!view.selected && view.spatial) {
+    if (!focusSelection && view.spatial) {
       const members = nodes.filter(node => view.spatial!.members.has(node.id));
       if (members.length) {
         const center = members.reduce((sum, node) => ({ x: sum.x + node.x / members.length, y: sum.y + node.y / members.length, z: sum.z + node.z / members.length }), { x: 0, y: 0, z: 0 });
@@ -170,14 +173,14 @@ export function planCoreView(desired: ReadonlyMap<string, Point>, movable: Reado
       const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * view.size.width / view.size.height);
       const frame = expandedCoreCameraFrame(nodes, view.links, hub, view.members);
       const radius = frame?.radius ?? 18;
-      const distance = view.selected ? focusedCameraDistance(offset.length(), view.size.height, camera.projectionMatrix.elements[5]) :
+      const distance = focusSelection ? focusedCameraDistance(offset.length(), view.size.height, camera.projectionMatrix.elements[5]) :
         coreCameraDistance(radius * 1.15 / Math.sin(Math.min(vertical, horizontal) / 2), view.size.height, camera.projectionMatrix.elements[5], offset.length());
       if (offset.lengthSq() < 1e-9) offset.set(0, 0, 1);
-      target.copy(view.selected || !frame ? focus : frame.center); camera.position.copy(target).add(offset.normalize().multiplyScalar(distance));
+      target.copy(focusSelection || !frame ? focus : frame.center); camera.position.copy(target).add(offset.normalize().multiplyScalar(distance));
     }
     camera.lookAt(target);
   }
-  const reading = view.reading && view.automatic && !view.selected && !view.spatial;
+  const reading = view.reading && view.automatic && !focusSelection && !view.spatial;
   const readingNodes = (values: ReadonlyMap<string, Point>) => nodes.filter(node => node.id === hub || view.members.has(node.id)).map(node => values.get(node.id)!);
   const frameReading = (values: ReadonlyMap<string, Point>) => {
     const frame = coreReadingFrame(camera, target, readingNodes(values), view.size, view.insets);
@@ -192,7 +195,7 @@ export function planCoreView(desired: ReadonlyMap<string, Point>, movable: Reado
   const counts = new Map(spatial.counts);
   for (const [id, count] of view.counts) counts.set(id, count - Number(nodes.find(node => node.id === id)?.kind === "folder"));
   const plane = { ...screenPlane(camera, () => view.size, view.selected, counts),
-    visible: spatial.nodes.map(node => node.id), isVisible: () => true, compactReveal: !view.selected };
+    visible: spatial.nodes.map(node => node.id), isVisible: () => true, compactReveal: !focusSelection };
   const next = new Map(desired);
   let moving = new Set(movable);
   let held = hub;
@@ -201,13 +204,13 @@ export function planCoreView(desired: ReadonlyMap<string, Point>, movable: Reado
     if (!adjacency.has(link.source) || !adjacency.has(link.target)) continue;
     adjacency.get(link.source)!.add(link.target); adjacency.get(link.target)!.add(link.source);
   }
-  const fan = view.selected ? starCohort(view.selected, new Set(plane.visible), adjacency) : null;
-  const focusedFan = fan?.hub === hub && fan.leaves.every(id => id === view.selected || moving.has(id)) ? fan : null;
-  if (view.selected && view.automatic) {
+  const fan = focusSelection ? starCohort(focusSelection, new Set(plane.visible), adjacency) : null;
+  const focusedFan = fan?.hub === hub && fan.leaves.every(id => id === focusSelection || moving.has(id)) ? fan : null;
+  if (focusSelection && view.automatic) {
     // Resolve the moving focus first. Translating camera and target in their
     // plane preserves every depth; each fixed star defines a forbidden focus circle.
     if (focusedFan) moving.add(hub);
-    const selected = nodes.find(node => node.id === view.selected)!;
+    const selected = nodes.find(node => node.id === focusSelection)!;
     const selectedRadius = plane.radius(selected, plane.project(focus).depth);
     const circles = spatial.nodes.filter(node => node.id !== selected.id && !moving.has(node.id)).flatMap(node => {
       const at = plane.project(node), radius = plane.radius(node, at.depth), world = plane.worldPerPixel(at.depth);
