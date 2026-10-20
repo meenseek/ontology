@@ -369,10 +369,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   const [corePage, setCorePage] = useState(0);
   const [showAllCore, setShowAllCore] = useState(false);
   const [spatialReveal, setSpatialReveal] = useState<SpatialReveal | null>(null);
-  const groupRequest = filteredGroup ? JSON.stringify([filteredGroup, fit]) : "";
+  const groupRequest = JSON.stringify([filteredGroup, fit]);
   const [appliedGroupRequest, setAppliedGroupRequest] = useState("");
   if (groupRequest !== appliedGroupRequest) {
-    // A sidebar choice uses the same paged disclosure as clicking its actual core.
+    // Apply disclosure and full-fit resets with their render, so a deferred
+    // camera callback cannot enqueue a reset that later erases a sidebar choice.
     const core = filteredGroup ? constellationView(nodes, links, null, null, undefined, snapshot.view).cores
       .sort((a, b) => b.count - a.count || a.hub.localeCompare(b.hub))[0] : null;
     setAppliedGroupRequest(groupRequest); setExpandedCore(core?.hub ?? null);
@@ -478,7 +479,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     return displayNodes.some(node => !visible.has(node.id));
   }, [nodes, snapshot, displayNodes]);
   const layoutCore = activeExpandedCore ?? cores.find(core => selected && core.members.has(selected))?.hub ?? (exposesHiddenMembers ? "*" : null);
-  useEffect(() => { if (expandedCore && !activeExpandedCore) { setExpandedCore(null); coreReturn.current = null; pendingReturn.current = null; restoringCoreReturn.current = null; } }, [expandedCore, activeExpandedCore]);
+  if (groupRequest === appliedGroupRequest && expandedCore && !activeExpandedCore) {
+    setExpandedCore(null); coreReturn.current = null; pendingReturn.current = null; restoringCoreReturn.current = null;
+  }
   const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: visualLinks.map(l => ({ ...l })) }), [displayNodes, visualLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
@@ -573,7 +576,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     return members ? expandedCoreCameraFrame(nodes, links, activeExpandedCore, members)?.key ?? "" : "";
   }, [nodes, links, cores, selected, activeExpandedCore]);
   const spatialCameraKey = spatialReveal?.members.size ? `${positions.structureEpoch}:${[...spatialReveal.members].sort().join("|")}` : "";
-  const cameraKey = `${viewKey}:${selected}:${activeExpandedCore}:${disclosure?.index ?? "all"}:${fit}:${size.width}:${size.height}:${expandedRelationKey}:${spatialCameraKey}:${activeExpandedCore ? minimapRevision : ""}`;
+  const cameraKey = `${snapshot.view}:${filteredGroup}:${viewKey}:${selected}:${activeExpandedCore}:${disclosure?.index ?? "all"}:${fit}:${size.width}:${size.height}:${expandedRelationKey}:${spatialCameraKey}:${activeExpandedCore ? minimapRevision : ""}`;
+  const cameraRequest = useRef(cameraKey); cameraRequest.current = cameraKey;
   const appliedCamera = useRef("");
   const appliedFit = useRef(fit);
   const plannedCamera = useRef<{ key: string; camera: PerspectiveCamera; target: { x: number; y: number; z: number } } | null>(null);
@@ -615,7 +619,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     cores, collapsedCounts, renderKey, cameraKey, size, selected, spatialReveal, movedGroups, purposeCore]);
   const positionCamera = useCallback(() => {
     const instance = graph.current;
-    if (!ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
+    if (cameraRequest.current !== cameraKey || !ready || !instance || !nodes.length || positions.dragging || appliedCamera.current === cameraKey) return;
     const hadCamera = Boolean(appliedCamera.current);
     appliedCamera.current = cameraKey;
     // Fitting a sidebar group frames its disclosure; fitting the full view resets it.
@@ -628,10 +632,6 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     }
     // Empty members denotes a spatial return. Its own camera motion owns this interval.
     if (!fitChanged && spatialReveal && !spatialReveal.members.size) return;
-    if (fitChanged) {
-      setSpatialReveal(null); setExpandedCore(null); coreReturn.current = null; pendingReturn.current = null; restoringCoreReturn.current = null;
-      positions.showCore(exposesHiddenMembers ? "*" : null, performance.now(), reduced);
-    }
     // Frame the settled target while nodes travel there; framing their current
     // positions would zoom into the still-collapsed core and then jump outward.
     const cameraNodes = nodes.map(node => ({ ...node, ...(positions.layoutTarget(node.id) ?? {}) }));
@@ -722,12 +722,14 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     offset.normalize().multiplyScalar(distance);
     // Establish the overview before packing fixed-size glyphs in its screen plane.
     moveCamera({ x: lookAt.x + offset.x, y: lookAt.y + offset.y, z: lookAt.z + offset.z }, lookAt, 0);
-  }, [ready, cameraKey, viewKey, nodes, semanticNodes, links, selected, filteredGroup, activeExpandedCore, cores, disclosure, reduced, size, positions, fit, snapshot.nodes.length, snapshot.view, spatialReveal, exposesHiddenMembers, moveCamera]);
+  }, [ready, cameraKey, viewKey, nodes, semanticNodes, links, selected, filteredGroup, activeExpandedCore, cores, disclosure, reduced, size, positions, fit, snapshot.nodes.length, snapshot.view, spatialReveal, moveCamera]);
   useEffect(() => {
+    // Fixed node coordinates do not wait for a physics engine stop. Apply the
+    // camera after this view's layout effect, and ignore outgoing frame requests.
     let second = 0;
     const first = requestAnimationFrame(() => { second = requestAnimationFrame(positionCamera); });
     return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
-  }, [positionCamera]);
+  }, [positionCamera, draggingId]);
   useEffect(() => {
     const canvas = graph.current?.renderer().domElement;
     const owner = canvas?.ownerDocument;
@@ -1411,7 +1413,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
           suppressClickUntil.current = performance.now() + 350;
         }
       }} enablePointerInteraction={!disabled}
-      cooldownTicks={0} warmupTicks={0} onEngineStop={positionCamera}
+      cooldownTicks={0} warmupTicks={0}
       onNodeClick={node => chooseNode(node.id)}
       onNodeHover={node => {
         rendererHover.current = { id: node?.id ?? null, content: node ? collapsedCounts.has(node.id) ? { title: coreLabel(node, collapsedCounts.get(node.id)!, snapshot.view), detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : spatialCounts.has(node.id) ? { title: `근접 묶음 · ${spatialCounts.get(node.id)}개`, detail: "별 끌기: 함께 이동 · 누르기: 펼치기" } : { title: nodePresentation(node).title, detail: `${nodePresentation(node).subtitle ? `${nodePresentation(node).subtitle} · ` : ""}${kindName[node.kind]} · ${stateName(node)}` } : null };

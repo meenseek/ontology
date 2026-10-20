@@ -608,8 +608,8 @@ async function checkSourceReferenceDirection() {
       if (url.pathname === "/api/context/read") {
         originalReads++; const path = url.searchParams.get("path")!; const index = path.split('/').at(-1)!.split('.')[0];
         assert(url.searchParams.get("scope") === (index === "3" ? "profile" : "personal"), "reference opens the target's exact native scope");
-        return json({ metadata: { scope: url.searchParams.get("scope"), path, source_path: "synthetic", revision: 1, content_digest: "synthetic", byte_len: 120 }, title: `원문 ${index}`,
-          content: `# 원문 ${index}\n\n${index === "1" ? "[본문에서 대상 열기](2.md#part) [다른 범위 원문 열기](../../profile/rules/3.md)" : "대상 본문"}` });
+        const content = `# 원문 ${index}\n\n${index === "1" ? `${Array.from({ length: 30 }, (_, i) => `합성 본문 ${i + 1}. 긴 원문을 읽은 뒤 연결된 자료로 이동합니다.`).join("\n\n")}\n\n[본문에서 대상 열기](2.md#part) [다른 범위 원문 열기](../../profile/rules/3.md)` : "대상 본문"}`;
+        return json({ metadata: { scope: url.searchParams.get("scope"), path, source_path: "synthetic", revision: 1, content_digest: "synthetic", byte_len: encode(content) }, title: `원문 ${index}`, content });
       }
       throw new Error(`Unexpected reference reading request: ${url.pathname}`);
     };
@@ -649,14 +649,29 @@ async function checkSourceReferenceDirection() {
     button("닫기", host.querySelector(".map-sidebar")!).click(); await settle();
     [...host.querySelectorAll<HTMLButtonElement>(".graph-list > button")].find(node => node.querySelector("strong")?.textContent === "원문 1")!.click();
     await until(() => host.querySelectorAll(".original-detail .document-internal-link").length === 2, "return to both authored outgoing references");
-    button("다른 범위 원문 열기", host.querySelector(".original-detail")!).click();
+    const crossScopeReference = button("다른 범위 원문 열기", host.querySelector(".original-detail")!);
+    crossScopeReference.scrollIntoView({ block: "center" }); await settle();
+    assert(host.querySelector<HTMLElement>(".management-panel")!.scrollTop > 100, "outside-filter navigation follows a link after reading and scrolling a long original");
+    crossScopeReference.click();
     await until(() => host.querySelector(".original-detail h1")?.textContent === "원문 3", "cross-native-scope reference opens its exact current target");
     assert(new URL(window.location.href).searchParams.get("focus") === originals[2].id && brainCalls === 0, "cross-scope source reference does not promote incoming evidence or change app scope");
-    assert(host.querySelector(".map-status .notice")?.textContent?.includes("필터 밖") && host.querySelectorAll(".graph-list > button").length === 2, "following a reference outside the filter shows its detail without changing the visible map set");
+    const outsideNotice = host.querySelector<HTMLElement>(".management-panel .notice")!;
+    assert(outsideNotice?.textContent?.includes("필터 밖") && !outsideNotice.closest("[inert]") && host.querySelectorAll(".graph-list > button").length === 2, "following a reference outside the filter shows its notice in the active detail without changing the visible map set");
+    const noticeBounds = outsideNotice.getBoundingClientRect();
+    assert(noticeBounds.top >= 0 && noticeBounds.bottom <= innerHeight && noticeBounds.left >= 0 && noticeBounds.right <= innerWidth && outsideNotice.contains(document.elementFromPoint((noticeBounds.left + noticeBounds.right) / 2, (noticeBounds.top + noticeBounds.bottom) / 2)), "outside-filter guidance is visible and uncovered in the current viewport");
+    assert(!host.querySelector(".map-status .notice"), "outside-filter guidance is not duplicated behind the active detail");
     button("닫기 ×").click(); await until(() => !host.querySelector(".management-panel"), "close out-of-filter reference");
     await openExplorer();
     assert(host.querySelector<HTMLSelectElement>(".topic-label select")?.value === "personal", "out-of-filter navigation preserves the original source condition");
-    return { sourceReferenceDirection: true, outgoing: 2, incoming: 1, inlineNavigation: true, fragmentLookup: true, crossNativeScope: true, outsideFilterPreserved: true, eagerBrainCalls: 0 };
+    button("닫기", host.querySelector(".map-sidebar")!).click(); await settle();
+    [...host.querySelectorAll<HTMLButtonElement>(".graph-list > button")].find(node => node.querySelector("strong")?.textContent === "원문 1")!.click();
+    await until(() => host.querySelectorAll(".original-detail .document-internal-link").length === 2, "return to the filtered reference before explicitly clearing");
+    button("다른 범위 원문 열기", host.querySelector(".original-detail")!).click();
+    await until(() => host.querySelector(".original-detail h1")?.textContent === "원문 3", "reopen outside-filter detail");
+    const clear = button("필터 해제", host.querySelector(".management-panel")!); clear.focus(); clear.click(); await settle();
+    assert(!host.querySelector(".management-panel .notice") && host.querySelectorAll(".graph-list > button").length === 3 && new URL(location.href).searchParams.get("focus") === originals[2].id, "explicit clear includes the selected target while preserving its detail");
+    assert(document.activeElement === button("닫기 ×"), "keyboard clear keeps focus in the active detail after removing its action");
+    return { sourceReferenceDirection: true, outgoing: 2, incoming: 1, inlineNavigation: true, fragmentLookup: true, crossNativeScope: true, outsideFilterPreserved: true, outsideFilterVisible: true, explicitFilterClear: true, eagerBrainCalls: 0 };
   } finally { root.unmount(); window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl); }
 }
 
@@ -1777,6 +1792,11 @@ async function run() {
   const results: unknown[] = [];
   try {
     assert(import.meta.env.DEV, "Run this fixture through the development server");
+    if (new URLSearchParams(window.location.search).get("scenario") === "references") {
+      results.push(await checkSourceReferenceDirection());
+      output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
+      return;
+    }
     if (new URLSearchParams(window.location.search).get("scenario") === "filters") {
       const filters = await checkOriginalFolders();
       output.textContent = `PASS\n${JSON.stringify({ passed: true, filters }, null, 2)}`;

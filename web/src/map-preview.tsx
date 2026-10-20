@@ -123,11 +123,12 @@ window.fetch = async (input, options) => {
   if (url.pathname === "/api/brain" && typeof options?.body === "string" && JSON.parse(options.body).op === "subjects") return json({ items: [], next_after: null });
   return json({ error: "합성 미리보기에서는 자료를 저장하지 않습니다." }, 403);
 };
+const check = new URLSearchParams(window.location.search).get("check");
 createRoot(document.getElementById("root")!).render(<App />);
 
 // Exercise the reported dense scene through the actual App and renderer. Pure
 // placement tests cannot detect an animation interrupted by a changing status row.
-if (new URLSearchParams(window.location.search).has("check")) void (async () => {
+if (check !== null) void (async () => {
   const notice = document.querySelector<HTMLElement>(".fixture-notice")!;
   type Frame = { stars: { id: string; px: number; py: number; radius: number; retiring: boolean; opacity: number }[]; relations: (LabelLeader & { opacity: number })[]; camera: { x: number; y: number; z: number }; width: number; height: number };
   const frame = () => JSON.parse(notice.dataset.frame!) as Frame;
@@ -218,8 +219,63 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
     return crossings.length;
   };
   const results: unknown[] = [];
+  const checkTransitions = async () => {
+    // Folder/view changes and a sidebar choice can arrive before the previous
+    // camera frame runs. The choice must still disclose and frame its members.
+    for (const delay of check === "transitions-settled" ? [-1] : [0, 24, 96]) {
+      const pause = () => delay < 0 ? settled() : wait(delay);
+      if (delay === 96) {
+        document.querySelector<HTMLButtonElement>('.graph-group-target[data-node-id="preview-purpose-0"]')!.click();
+        await settled();
+        assert(document.querySelector(".graph-core-actions"), "묶음 기준 전환 전에 펼침을 준비하지 못했습니다.");
+      }
+      button("필터·묶음").click(); await wait(0);
+      const folderToggle = [...document.querySelectorAll<HTMLInputElement>(".map-sidebar input")].find(input => input.closest("label")?.textContent?.includes("폴더 연결 표시"))!;
+      if (!folderToggle.checked) folderToggle.click();
+      if (delay < 0) await settled();
+      button("닫기").click(); await wait(0);
+      const settings = document.querySelector<HTMLDetailsElement>(".view-options")!;
+      settings.querySelector("summary")!.click();
+      const view = settings.querySelector<HTMLSelectElement>('select[aria-label="묶음 기준"]')!;
+      view.value = "relationships"; view.dispatchEvent(new Event("change", { bubbles: true })); await pause();
+      view.value = "purpose"; view.dispatchEvent(new Event("change", { bubbles: true })); await pause();
+      const connections = [...settings.querySelectorAll<HTMLInputElement>("input")].find(input => input.closest("label")?.textContent?.includes("연결선 모두 보기"))!;
+      if (!connections.checked) connections.click();
+      if (delay < 0) await settled();
+      settings.querySelector("summary")!.click();
+      button("필터·묶음").click(); await wait(0);
+      [...document.querySelectorAll<HTMLInputElement>(".map-sidebar input")].find(input => input.closest("label")?.textContent?.includes("폴더 연결 표시"))!.click(); await pause();
+      [...document.querySelectorAll<HTMLButtonElement>(".cluster-list button")].find(node => node.querySelector("strong")?.textContent === nodes.find(node => node.id === "preview-purpose-1")!.label)!.click();
+      await settled();
+      assert(document.querySelector(".graph-core-actions"), "표시 전환 뒤 필터의 자동 펼침이 사라졌습니다.");
+      results.push({ filteredTransitionDelay: delay, page: 1, ...inspect(1) });
+      button("다음").click(); await settled();
+      results.push({ filteredTransitionDelay: delay, page: 2, ...inspect(1) });
+      if (delay === 0) {
+        button("묶음 접기").click(); await settled();
+        assert(!document.querySelector(".graph-core-actions"), "필터 묶음 접기가 유지되지 않습니다.");
+        button("필터·묶음").click(); await wait(0);
+        [...document.querySelectorAll<HTMLButtonElement>(".cluster-list button")].find(node => node.querySelector("strong")?.textContent === nodes.find(node => node.id === "preview-purpose-1")!.label)!.click();
+        await settled(); results.push({ filteredCloseAndReopen: true, ...inspect(1) });
+      }
+      button("묶음 해제").click(); await settled();
+      settings.querySelector("summary")!.click(); connections.click(); settings.querySelector("summary")!.click(); await settled();
+    }
+    const minimapToggle = document.querySelector<HTMLButtonElement>('button[aria-label="미니맵 펼치기"]');
+    minimapToggle?.click(); if (minimapToggle) await settled();
+    const fit = button("전체 맞춤"); fit.focus(); fit.click(); await settled();
+    assert(document.activeElement === fit && !document.querySelector(".graph-core-actions"), "전체 맞춤의 초점이나 접힌 전체 보기 복귀가 유지되지 않습니다.");
+    if (minimapToggle) { button("미니맵 접기").click(); await settled(); }
+    results.push({ fitOverviewRestored: true, fitFocusPreserved: true });
+  };
   try {
-    await settled(); backdrop(false);
+    await settled();
+    if (check?.startsWith("transitions")) {
+      await checkTransitions();
+      notice.textContent = `PASS · ${innerWidth}px · 합성 자료 검사`;
+      notice.dataset.result = JSON.stringify({ passed: true, results }); return;
+    }
+    backdrop(false);
     const hoverRules: string[] = [];
     const inspectRules = (rules: CSSRuleList, conditions: string[] = []) => {
       for (const rule of rules) {
@@ -246,6 +302,7 @@ if (new URLSearchParams(window.location.search).has("check")) void (async () => 
       notice.textContent = `PASS · ${innerWidth}px · 합성 자료 검사`;
       notice.dataset.result = JSON.stringify({ passed: true, results }); return;
     }
+    await checkTransitions();
     const options = document.querySelector<HTMLDetailsElement>(".view-options")!;
     options.querySelector("summary")!.click();
     const connections = [...options.querySelectorAll<HTMLInputElement>("input[type=checkbox]")].find(input => input.closest("label")!.textContent!.includes("연결선 모두 보기"))!;
