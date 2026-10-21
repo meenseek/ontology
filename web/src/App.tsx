@@ -412,7 +412,7 @@ export default function App() {
   const statusMessages = <>
     {error && <p className="error" role="alert">{error} <button onClick={reload}>다시 불러오기</button></p>}
     {notice && <p className="notice">{notice}</p>}
-    {selected && !shown.nodes.some(n => n.id === selected.id) && <p className="notice">선택한 자료가 현재 필터 밖에 있습니다. <button disabled={busy} onClick={event => { setFilters(initialFilters); if (event.detail === 0) (panel ? closeButton.current : filterButton.current)?.focus(); }}>필터 해제</button></p>}
+    {liveSelected && !shown.nodes.some(n => n.id === liveSelected.id) && <p className="notice">선택한 자료가 현재 필터 밖에 있습니다. <button disabled={busy} onClick={event => { setFilters(initialFilters); if (event.detail === 0) (panel ? closeButton.current : filterButton.current)?.focus(); }}>필터 해제</button></p>}
   </>;
   return <div className="app">
     <header className="app-header" inert={(!!panel || explore) && narrow || explore && overlayExplorer}>

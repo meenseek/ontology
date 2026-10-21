@@ -117,6 +117,7 @@ for (const width of [1440, 390]) test(`original draft survives missing graph and
     present = false;
     for (let i = 0; i < 2; i++) { await refreshGraph(); assert.equal(textarea()?.value, draft, "repeated missing graph never unmounts the draft"); assert.match(w.document.querySelector(".management-panel")!.textContent!, /초안은 유지했습니다/); }
     assert.equal(w.location.search.includes("focus=e_1111111111111111111111111111111111111111111111111111111111111111"), true);
+    assert.ok(!w.document.querySelector(".management-panel")!.textContent!.includes("현재 필터 밖"), "a missing source never offers an ineffective filter reset");
     present = true; sourcePath = "synthetic/moved.md"; await refreshGraph();
     assert.equal(textarea()?.value, draft, "a returned node with a changed path cannot reset the editor");
     sourcePath = "synthetic/original.md"; await refreshGraph(); assert.equal(textarea()?.value, draft);
