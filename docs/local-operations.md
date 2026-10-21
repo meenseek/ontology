@@ -676,9 +676,11 @@ prepare·replay·apply·recover에서 기존 PlanDrift 판정으로 닫힌다. �
 요청을 다시 resolve하고 검토·검증한다. default는 정확한 authority ID와 현재 source digest를
 대조하며, 설정이 request owner·grant·native 읽기 또는 복구 authorization을 넓힐 수 없다.
 
-적용 시도 전 멈춘 native 원문 전용 run은 기존 `recover`에
-`--close-before-apply --reason '<현재 종료 이유>'`를 명시해 종료한다. 이 경로는
-기존 역할 결과를 보존하고 원문·과거 요청을 재실행하지 않는다. 실제 store와 owned
+적용 시도 전 멈춘 native 원문 전용 run 중 상태가 `Begun` 또는 `Executing`인 경우에만
+기존 `recover`에 `--close-before-apply --reason '<현재 종료 이유>'`를 명시해 종료한다. 이 경로는
+기존 역할 결과를 보존하고 원문·과거 요청을 재실행하지 않는다. `Evaluated` 등 그 밖의 상태는
+이 종료 경로가 지원하지 않으므로 현재 상태와 기존 적용·복구 계약을 먼저 확인한다.
+실제 store와 owned
 prepared/head, workspace·source-view identity, 적용 시도·미해결 journal 부재와 DB의
 정확한 run ID 또는 prepared digest에 연결된 모든 상태의 반영 기록 부재를 잠금 안에서
 확인한다. 영향이 있거나 확인할 수 없으면 일반 적용 복구로 처리한다.
