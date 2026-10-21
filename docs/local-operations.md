@@ -725,7 +725,7 @@ Source view나 DB를 직접 고치거나 별도 protocol·version 축·호환 �
 결합한 뒤 전체 요청 검증을 통과해야 실행 계획을 발급한다. 완성된 envelope는 이 옵션
 없이 사용한다. 구성 결과는 별도 실행 protocol이나 원문 복사본으로 저장하지 않는다.
 
-`begin`·`advance`의 `--codex-binary /absolute/path/to/codex`는 Core가 발급한
+`begin`·`advance`·`revise`의 `--codex-binary /absolute/path/to/codex`는 Core가 발급한
 Writer·Specialist·Reviewer·Verifier 호출을 실행한다. Writer·Specialist 자동 실행은
 도구 계획이 없는 경우에 지원한다. 도구 계획이 있으면 기존 명시적 도구 실행 흐름을
 사용한다. Writer·Specialist가 필요한 변경을 모두 마치면 결과를 제출하고 현재 Core
@@ -736,6 +736,9 @@ head에 따라 후속 역할을 실행한다. 준비된
 현재 Core head에 제출한다. Non-completed 결과나 제출 오류가 나면 이미 시작한 다른
 호출을 기존 lifecycle 안에서 종료하고 이후 결과는 제출하지 않는다. 자동 재시도는 없다.
 이 실행 순서 변경은 필수 역할·검증·적용과 복구의 판정을 줄이거나 바꾸지 않는다.
+`revise`는 평가가 `RevisionRequired`인 쓰기 후보에만 사용할 수 있다. 실행 파일과
+생산자 역할 지원 여부를 상태 전이 전에 검사하고, 기존 검토 지적과 이력을 결합해
+Core가 새로 발급한 수정 호출부터 실행한다. 옵션을 생략하면 기존 JSON 반환 경로를 유지한다.
 
 Shared DB gate는 별도 source view를 사용하는 여러 세션의 동시 읽기를 허용한다.
 같은 source view는 파일 생성·갱신을 보호하는 exclusive 잠금을 유지한다.

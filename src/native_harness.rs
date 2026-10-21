@@ -110,7 +110,7 @@ impl Command {
             "replay" => self.run_replay_harness_command(arguments),
             "begin" => self.run_begin_harness_command(arguments, observations),
             "advance" => self.run_advance_harness_command(arguments, observations),
-            "revise" => self.run_revise_harness_command(arguments),
+            "revise" => self.run_revise_harness_command(arguments, observations),
             "evaluate" => self.run_evaluate_harness_command(arguments),
             "validate" => self.run_validate_harness_command(arguments),
             "attest-career" => self.run_attest_career_harness_command(arguments),
@@ -434,16 +434,44 @@ impl Command {
     fn run_revise_harness_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
+        observations: &RoleObservations,
     ) -> Result<String> {
         let paths = required_harness_paths(
             arguments,
             &["--context-view", "--workspace-root", "--run-id"],
-            &[],
+            &["--codex-binary"],
         )?;
         let (engine, run_identifier) = self.durable_harness_context(&paths)?;
+        let codex_prepared = paths
+            .get("--codex-binary")
+            .map(|binary| {
+                validate_codex_binary(binary)?;
+                let (_, prepared) = HarnessExecutionRecord::load_durable_prepared(
+                    &paths["--workspace-root"],
+                    &run_identifier,
+                )
+                .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+                validate_codex_producer_frontier(
+                    &prepared,
+                    [prepared.plan.resolved_request.plan.primary_producer_role],
+                )?;
+                Ok(prepared)
+            })
+            .transpose()?;
         let next = HarnessExecutionRecord::revise_durable(&engine, &run_identifier)
             .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
-        serialize_json(&next, "revised Harness execution record")
+        let next = match (paths.get("--codex-binary"), codex_prepared.as_ref()) {
+            (Some(binary), Some(prepared)) => execute_codex_frontier(
+                &engine,
+                prepared,
+                next,
+                binary,
+                Some(&self.source),
+                observations,
+            ),
+            _ => Ok(next),
+        };
+        next.and_then(|next| serialize_json(&next, "revised Harness execution record"))
     }
 
     fn run_evaluate_harness_command(
@@ -1024,7 +1052,8 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
         "replay" => &["--prepared-run"],
         "begin" => &["--prepared-run", "--run-id", "--codex-binary"],
         "advance" => &["--run-id", "--event", "--codex-binary"],
-        "revise" | "validate" | "apply" => &["--run-id"],
+        "revise" => &["--run-id", "--codex-binary"],
+        "validate" | "apply" => &["--run-id"],
         "recover" => &["--run-id", "--close-before-apply", "--reason"],
         "evaluate" => &["--run-id", "--tool-evidence"],
         "attest-career" => &["--prepared-run", "--execution-record"],
@@ -3576,6 +3605,138 @@ cat "$0.events.$n"
 
     #[cfg(unix)]
     #[test]
+    fn codex_revise_preserves_history_and_executes_only_the_new_frontier() {
+        use context_core::harness::{FileChange, HarnessCompletionState, WriterArtifact};
+
+        for automatic in [false, true] {
+            let temp = TempDirectory::new("codex-revise");
+            let (engine, prepared, raw, workspace) =
+                codex_fixture_for_action(&temp, 2, 8, HarnessAction::DocumentWrite);
+            let original = fs::read(workspace.join("document-0.md")).unwrap();
+            let begun =
+                HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "revise-write")
+                    .unwrap();
+            codex_finish_write_scenario(&engine, &prepared, begun, "completed-rejected");
+            let rejected =
+                HarnessExecutionRecord::evaluate_durable(&engine, "revise-write", None).unwrap();
+            assert_eq!(
+                rejected.evaluation.as_ref().unwrap().completion_state,
+                HarnessCompletionState::RevisionRequired
+            );
+            let head_path =
+                workspace.join(".llm-context-vault-harness/runs/revise-write/head.json");
+            let mut arguments = vec![
+                "--context-view".to_owned(),
+                temp.path().join("source-placeholder").display().to_string(),
+                "--workspace-root".to_owned(),
+                workspace.display().to_string(),
+                "--run-id".to_owned(),
+                "revise-write".to_owned(),
+            ];
+            let mut invalid = arguments.clone();
+            invalid.extend([
+                "--codex-binary".to_owned(),
+                temp.path().join("missing-codex").display().to_string(),
+            ]);
+            run_revise_harness_command(invalid).expect_err("invalid runtime must not revise");
+            let unchanged: HarnessExecutionRecord = read_harness_json(&head_path, "head").unwrap();
+            assert_eq!(
+                unchanged, rejected,
+                "runtime validation precedes state mutation"
+            );
+
+            let binary = codex_test_script(&temp, CODEX_CAPTURE);
+            if automatic {
+                let mut preview = rejected.revise(&engine, &raw, &prepared).unwrap();
+                let mut number = 0;
+                while let Some(invocation) = preview.ready_role_invocations.first() {
+                    number += 1;
+                    let mut outcome =
+                        codex_write_scenario_outcome(&prepared, invocation, "accepted");
+                    if let RoleExecutionOutcome::Completed {
+                        result:
+                            CompletedRoleResult::Writer {
+                                artifact: WriterArtifact::Changes { changes },
+                            },
+                    } = &mut outcome
+                    {
+                        for change in changes {
+                            if let FileChange::Update { content, .. } = change {
+                                *content = "# Corrected synthetic document\n".to_owned();
+                            }
+                        }
+                    }
+                    codex_test_events(&binary, number, outcome.clone());
+                    let result = invocation
+                        .bind_result(
+                            codex_test_lifecycle(
+                                invocation.role,
+                                format!("preview-{number}"),
+                                &outcome,
+                            ),
+                            outcome,
+                        )
+                        .unwrap();
+                    preview = preview
+                        .advance(
+                            &engine,
+                            &raw,
+                            &prepared,
+                            HarnessExecutionEvent::RoleResult {
+                                result: Box::new(result),
+                            },
+                        )
+                        .unwrap();
+                }
+                arguments.extend(["--codex-binary".to_owned(), binary.display().to_string()]);
+            }
+            run_revise_harness_command(arguments).unwrap();
+            let head: HarnessExecutionRecord =
+                read_harness_json(&head_path, "revised head").unwrap();
+            assert_eq!(
+                head.revision_history,
+                vec![rejected.evaluation.clone().unwrap()]
+            );
+            assert_eq!(
+                head.role_execution
+                    .revision_contract
+                    .previous_candidate_digest,
+                rejected.candidate_digest
+            );
+            assert!(!head.role_execution.revision_contract.corrections.is_empty());
+            if automatic {
+                assert_eq!(
+                    codex_calls(&binary).len(),
+                    3,
+                    "only revised Writer and independent reviews execute"
+                );
+                assert_eq!(head.state, HarnessExecutionState::Evaluated);
+                assert_eq!(
+                    head.evaluation.as_ref().unwrap().completion_state,
+                    HarnessCompletionState::ValidatedPendingApply
+                );
+                assert_ne!(head.candidate_digest, rejected.candidate_digest);
+            } else {
+                assert!(codex_calls(&binary).is_empty());
+                assert_eq!(head.state, HarnessExecutionState::Begun);
+                assert_eq!(head.ready_role_invocations.len(), 1);
+                assert_eq!(head.ready_role_invocations[0].role, HarnessRole::Writer);
+            }
+            assert_eq!(fs::read(workspace.join("document-0.md")).unwrap(), original);
+            assert!(head.validation_receipt_digest.is_none());
+            assert!(head.finalization_digest.is_none());
+            assert!(
+                !head_path
+                    .parent()
+                    .unwrap()
+                    .join("apply-attempt.json")
+                    .exists()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn codex_tool_plan_waits_for_evidence_then_returns_head_for_manual_evaluation() {
         let temp = TempDirectory::new("codex-tool-evidence");
         let (engine, prepared, raw, workspace) =
@@ -5345,6 +5506,9 @@ wait
     }
     fn run_advance_harness_command(arguments: impl IntoIterator<Item = String>) -> Result<()> {
         run_harness_command(std::iter::once("advance".to_owned()).chain(arguments))
+    }
+    fn run_revise_harness_command(arguments: impl IntoIterator<Item = String>) -> Result<()> {
+        run_harness_command(std::iter::once("revise".to_owned()).chain(arguments))
     }
     fn run_evaluate_harness_command(arguments: impl IntoIterator<Item = String>) -> Result<()> {
         run_harness_command(std::iter::once("evaluate".to_owned()).chain(arguments))

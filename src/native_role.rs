@@ -45,7 +45,7 @@ pub(crate) fn execute_codex_frontier(
     source: Option<&crate::native_context::NativeContextSource>,
     observations: &RoleObservations,
 ) -> Result<HarnessExecutionRecord> {
-    // Only callers holding the typed return of begin_durable/advance_durable enter
+    // Only callers holding the typed return of begin/advance/revise_durable enter
     // here. Never deserialize a caller-supplied frontier or replay a stale sibling.
     let mut executed = std::collections::BTreeSet::new();
     loop {
