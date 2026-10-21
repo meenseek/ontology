@@ -1830,11 +1830,13 @@ async function checkRelatedMaterialKinds() {
   } finally { root.unmount(); window.fetch = originalFetch; window.history.replaceState(null, "", originalUrl); }
 }
 
-async function checkResidualMap(mouseOnly = false) {
+async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
   const originalUrl = window.location.href;
-  const originalRender = Scene.prototype.onBeforeRender, originalPack = Positions.prototype.packOverview;
+  const originalRender = Scene.prototype.onBeforeRender, originalPack = Positions.prototype.packOverview, originalInstall = Positions.prototype.install;
   const root = createRoot(host), samples = new Map<string, { x: number; y: number; z: number; radius: number }>();
   let positions: Positions | undefined, apiCalls = 0;
+  let releaseOverview!: () => void;
+  const overviewWait = new Promise<void>(resolve => { releaseOverview = resolve; });
   const names = ["제품 전략과 의사결정", "보안 플랫폼 개발·검증과 사용자 경험을 함께 개선하기"], subjects = [subjectId, "p_00000000-0000-4000-8000-000000000002"];
   const members: GraphNode[] = [225, 39].flatMap((count, group) => Array.from({ length: count }, (_, i) => ({
     id: `residual-${group}-${String(i).padStart(3, "0")}`, scope: "personal", kind: "document", label: `합성 자료 ${group}-${i}`, title: ["사용자의 맥락을 이해하는 방법", "변화하는 지식을 연결하는 방식", "자연스럽게 이어지는 인터랙션"][i % 3],
@@ -1871,6 +1873,9 @@ async function checkResidualMap(mouseOnly = false) {
   // Match the application viewport; fixture prose/results stay available in the DOM.
   document.querySelector<HTMLParagraphElement>("body > p")!.hidden = true;
   output.hidden = true; host.style.position = "fixed"; host.style.inset = "0";
+  if (groupsAndHelpOnly) Positions.prototype.install = function (this: Positions, ...args: Parameters<Positions["install"]>) {
+    positions = this; return originalInstall.apply(this, args);
+  };
   Positions.prototype.packOverview = function (this: Positions, ...args: Parameters<Positions["packOverview"]>) {
     positions = this; return originalPack.apply(this, args);
   };
@@ -1893,13 +1898,65 @@ async function checkResidualMap(mouseOnly = false) {
     apiCalls++;
     if (url.pathname === "/api/session") return json({ csrf: "synthetic-only", areas: [] });
     if (url.pathname === "/api/sync") return json({ enabled: false, running: false, error: null, report: null });
-    if (url.pathname === "/api/graph") return json({ ...snapshot, focus: { id: url.searchParams.get("focus"), found: !!url.searchParams.get("focus") } });
+    if (url.pathname === "/api/graph") {
+      if (groupsAndHelpOnly) await overviewWait;
+      return json({ ...snapshot, focus: { id: url.searchParams.get("focus"), found: !!url.searchParams.get("focus") } });
+    }
     throw new Error(`Unexpected residual-map request: ${url.pathname}`);
   };
-  window.history.replaceState(null, "", `${window.location.pathname}?scope=personal`);
+  window.history.replaceState(null, "", `${window.location.pathname}?scope=personal${groupsAndHelpOnly ? "&scenario=group-labels-help" : ""}`);
   root.render(<App />);
+  if (groupsAndHelpOnly) {
+    await until(() => !!host.querySelector(".map-legend summary"), "help is available before graph response");
+    assert(!host.querySelector(".graph-canvas"), "the early-help scenario starts without a canvas");
+    details("관계·상태 읽기").summary.click(); releaseOverview();
+  }
   await until(() => !!positions && !!host.querySelector(".graph-minimap") && !positions.layoutMoving, "purpose overview is rendered");
   chromeClear();
+  if (groupsAndHelpOnly) {
+    const legend = details("관계·상태 읽기");
+    await until(() => {
+      const guide = host.querySelector<HTMLElement>(".legend-guide")!, names = host.querySelector<HTMLElement>(".graph-group-navigation.with-keys");
+      return guide.getBoundingClientRect().height > 100 && guide.getBoundingClientRect().top >= (names?.getBoundingClientRect().bottom ?? host.querySelector(".graph-canvas")!.getBoundingClientRect().top) + 13;
+    }, "help opened before Graph readiness measures the mounted canvas and names");
+    legend.summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await settle();
+    const inspectHelp = async () => {
+      legend.summary.click();
+      await until(() => legend.element.open && !!host.querySelector<HTMLElement>(".legend-guide")?.style.maxHeight, "legend measures actual map height");
+      const guide = host.querySelector<HTMLElement>(".legend-guide")!, box = guide.getBoundingClientRect();
+      const names = host.querySelector<HTMLElement>(".graph-group-navigation.with-keys");
+      const canvas = host.querySelector(".graph-canvas")!.getBoundingClientRect();
+      assert(box.top >= (names?.getBoundingClientRect().bottom ?? canvas.top) + 13, "help stays below the actual name strip or canvas top");
+      assert(box.bottom <= canvas.bottom && box.height > 100, "help fits the actual map with a readable scroll area");
+      guide.scrollTop = guide.scrollHeight;
+      assert(guide.scrollTop > 0 || guide.scrollHeight <= guide.clientHeight, "the complete help remains reachable");
+      legend.summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await until(() => !legend.element.open, "Escape closes help without losing its control");
+    };
+    await inspectHelp();
+    await chooseDiagramMode("relationships");
+    await until(() => !positions!.layoutMoving && !!host.querySelector(`.graph-group-target[data-node-id="${subjects[0]}"]`), "relationship summaries render");
+    host.querySelector<HTMLButtonElement>(`.graph-group-target[data-node-id="${subjects[0]}"]`)!.click();
+    await until(() => !!host.querySelector(".graph-core-actions") && !positions!.layoutMoving, "relationship group opens");
+    await new Promise(resolve => setTimeout(resolve, 800));
+    const labels = () => [...host.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].filter(label => +label.style.opacity > .99);
+    const own = new Set([subjects[0], ...members.filter(node => node.subject_id === subjects[0]).map(node => node.id)]);
+    assert(labels().some(label => own.has(label.dataset.nodeId!)), "the opened group has readable member titles");
+    assert(labels().every(label => own.has(label.dataset.nodeId!)), `outside summaries are not member titles: ${labels().filter(label => !own.has(label.dataset.nodeId!)).map(label => label.textContent)}`);
+    button("다음").click(); await new Promise(resolve => setTimeout(resolve, 800));
+    assert(labels().every(label => own.has(label.dataset.nodeId!)), "paging preserves the relationship title boundary");
+    legend.summary.click(); await settle();
+    button("묶음 접기").click(); await new Promise(resolve => setTimeout(resolve, 800));
+    const guide = host.querySelector<HTMLElement>(".legend-guide")!, names = host.querySelector<HTMLElement>(".graph-group-navigation.with-keys");
+    assert(guide.getBoundingClientRect().top >= (names?.getBoundingClientRect().bottom ?? host.querySelector(".graph-canvas")!.getBoundingClientRect().top) + 13 && guide.getBoundingClientRect().height > 100, "folding with help open updates the actual name-strip boundary");
+    host.querySelector<HTMLButtonElement>(`.graph-group-target[data-node-id="${subjects[0]}"]`)!.click();
+    await new Promise(resolve => setTimeout(resolve, 800));
+    assert(guide.getBoundingClientRect().height > 100 && guide.getBoundingClientRect().top >= host.querySelector(".graph-canvas")!.getBoundingClientRect().top + 13, "opening with help open keeps a usable reading area");
+    legend.summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle(); await inspectHelp();
+    window.history.replaceState(null, "", originalUrl);
+    return { groupLabelsAndHelp: true, viewport: { width: innerWidth, height: innerHeight }, memberTitles: labels().length, apiCalls };
+  }
   if (mouseOnly) {
     await until(() => samples.has(subjects[0]) && !positions!.layoutMoving, "the actual summary is projected");
     const canvas = host.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, rect = canvas.getBoundingClientRect();
@@ -1983,6 +2040,11 @@ async function run() {
   const results: unknown[] = [];
   try {
     assert(import.meta.env.DEV, "Run this fixture through the development server");
+    if (new URLSearchParams(window.location.search).get("scenario") === "group-labels-help") {
+      results.push(await checkResidualMap(false, true));
+      output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;
+      return;
+    }
     if (new URLSearchParams(window.location.search).get("scenario") === "related-materials") {
       results.push(await checkRelatedMaterialKinds());
       output.textContent = `PASS\n${JSON.stringify({ passed: true, results }, null, 2)}`;

@@ -1,5 +1,5 @@
 import GraphInstructions from "./GraphInstructions";
-import { Component, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Documents from "./Documents";
 import OriginalDetail from "./OriginalDetail";
@@ -9,7 +9,7 @@ import type { Item as MemoryItem } from "./Memory";
 import { Positions } from "./positions";
 import { nodePresentation, searchExcerpt, starColor } from "./presentation";
 import { graphUrl, isNativeOriginal, kindName, knowledge, linkName, listNodes, listTimestamp, nativeFolders, parseLocation, reconcile, relatedKnowledge, sameGraphLocation, searchResults, stateName, visibleClusterOptions, visibleGraph } from "./graph";
-import type { Filters, GraphNode, GraphView, ListSort, Model, Scope, Snapshot } from "./graph";
+import type { Filters, GraphNode, GraphView, ListSort, Model, PositionedNode, Scope, Snapshot } from "./graph";
 const Graph = lazy(() => import("./Graph.tsx"));
 type Session = { csrf: string; areas: { id: string; label: string }[] };
 type GraphTiming = { location: ReturnType<typeof parseLocation>; responseMs: number; displayMs: number; list: boolean };
@@ -81,7 +81,7 @@ export default function App() {
   const positions = useMemo(() => new Positions(), [route.scope, route.q]);
   const routeRef = useRef(route); routeRef.current = route;
   const [session, setSession] = useState<Session | null>(null);
-  const [stored, setStored] = useState<{ snapshot: Snapshot; model: Model } | null>(null);
+  const [stored, setStored] = useState<{ snapshot: Snapshot; model: Model; location: typeof route } | null>(null);
   const previous = useRef<Model | undefined>(undefined);
   const pendingTiming = useRef<{ location: typeof route; startedAt: number; responseMs: number } | null>(null);
   const [timing, setTiming] = useState<GraphTiming | null>(null);
@@ -103,15 +103,29 @@ export default function App() {
   const updateBusy = useCallback((value: boolean) => { originalBusy.current = value; busyRef.current = value || purposeBusy.current; setBusy(busyRef.current); }, []);
   const updatePurposeBusy = useCallback((value: boolean) => { purposeBusy.current = value; busyRef.current = value || originalBusy.current; setBusy(busyRef.current); }, []);
   const dirtyRef = useRef(false);
+  // A dirty editor owns its source identity until save or explicit discard.
+  // Graph refreshes describe the map, not the lifetime of an in-progress draft.
+  const [editorSelection, setEditorSelection] = useState<PositionedNode | null>(null);
+  const currentSelection = useRef<PositionedNode | null>(null);
   const originalDirty = useRef(false), purposeDirty = useRef(false);
-  const updateDirty = useCallback((value: boolean) => { originalDirty.current = value; dirtyRef.current = value || purposeDirty.current; }, []);
+  const updateDirty = useCallback((value: boolean) => {
+    originalDirty.current = value; dirtyRef.current = value || purposeDirty.current;
+    if (dirtyRef.current && currentSelection.current?.kind !== "memory") setEditorSelection(currentSelection.current);
+    else if (!dirtyRef.current) setEditorSelection(null);
+  }, []);
   const memoryDirty = useRef(false);
   const updateMemoryDirty = useCallback((value: boolean, item: MemoryItem | null) => {
     memoryDirty.current = value; updateDirty(value);
     if (item) setMemoryItem(item);
   }, [updateDirty]);
-  const updatePurposeDirty = useCallback((value: boolean) => { purposeDirty.current = value; dirtyRef.current = value || originalDirty.current; }, []);
+  const updatePurposeDirty = useCallback((value: boolean) => {
+    purposeDirty.current = value; dirtyRef.current = value || originalDirty.current;
+    if (dirtyRef.current && currentSelection.current?.kind !== "memory") setEditorSelection(currentSelection.current);
+    else if (!dirtyRef.current) setEditorSelection(null);
+  }, []);
   const [notice, setNotice] = useState(""), [listMode, setListMode] = useState(false), [webglFailed, setWebglFailed] = useState(false);
+  const legendElement = useRef<HTMLDetailsElement>(null);
+  const [legendOpen, setLegendOpen] = useState(false), [legendHeight, setLegendHeight] = useState<number>();
   const [listSort, setListSort] = useState<ListSort>("updated");
   const [visible, setVisible] = useState(document.visibilityState !== "hidden");
   const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -143,7 +157,11 @@ export default function App() {
     window.addEventListener("resize", measure);
     measure(); return () => window.removeEventListener("resize", measure);
   }, [!!panel, !!session]);
-  const selected = data?.model.nodes.find(n => n.id === route.focus) ?? null;
+  const liveSelected = data?.model.nodes.find(n => n.id === route.focus) ?? null;
+  const heldSelection = editorSelection?.scope === route.scope && editorSelection.id === route.focus ? editorSelection : null;
+  const selected = heldSelection ?? liveSelected;
+  currentSelection.current = selected;
+  const editorSourceChanged = !!heldSelection && !!data && (!liveSelected || liveSelected.context_scope !== heldSelection.context_scope || liveSelected.context_path !== heldSelection.context_path);
   const relatedOriginals = selected && data ? relatedKnowledge(data.model, selected.id) : [];
   const references = selected ? data?.model.links.flatMap(link => {
     if (link.kind !== "reference") return [];
@@ -157,6 +175,33 @@ export default function App() {
   const shown = useMemo(() => data ? visibleGraph(data.model, filters) : { nodes: [], links: [] }, [data, filters]);
   const fallback = listMode || webglFailed;
   const displayed = fallback ? route.q ? searchResults(shown.nodes, route.q) : listNodes(shown.nodes, listSort) : shown.nodes;
+  useLayoutEffect(() => {
+    const legend = legendElement.current, workspace = workspaceElement.current;
+    const guide = legend?.querySelector<HTMLElement>(".legend-guide"), galaxy = legend?.closest(".galaxy");
+    if (!legendOpen || !legend || !workspace || !guide || !galaxy) return;
+    let canvas: HTMLElement | null = null, names: HTMLElement | null = null;
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    function measure() {
+      const next = workspace!.querySelector<HTMLElement>(".graph-canvas, .graph-list, .map-empty, .galaxy > .loading");
+      if (!next) return;
+      if (next !== canvas) {
+        if (canvas) observer?.unobserve(canvas);
+        if (names) observer?.unobserve(names);
+        canvas = next; names = canvas.querySelector<HTMLElement>(".graph-group-navigation");
+        observer?.observe(canvas); if (names) observer?.observe(names);
+      }
+      const canvasTop = canvas.getBoundingClientRect().top;
+      const top = Math.max(canvasTop, names?.classList.contains("with-keys") ? names.getBoundingClientRect().bottom : canvasTop) + 14;
+      setLegendHeight(Math.max(0, Math.min(520, guide!.getBoundingClientRect().bottom - top)));
+    }
+    measure();
+    observer?.observe(workspace); if (legend.parentElement) observer?.observe(legend.parentElement);
+    // Suspense can replace the loading row without rerendering App. Observe
+    // only these direct children, never the per-frame label text subtree.
+    const children = new MutationObserver(measure); children.observe(galaxy, { childList: true });
+    window.addEventListener("resize", measure);
+    return () => { observer?.disconnect(); children.disconnect(); window.removeEventListener("resize", measure); };
+  }, [legendOpen, data, fallback, view, panel, explore]);
   const failed = useCallback(() => { setWebglFailed(true); }, []);
   const syncRoute = (next: typeof route, replace = false) => {
     const current = routeRef.current;
@@ -194,18 +239,19 @@ export default function App() {
       positions.install(model, true);
       previous.current = { ...model, nodes: model.nodes.map(node => ({ ...node })) };
       pendingTiming.current = { location: current, startedAt, responseMs };
-      setStored({ snapshot, model });
+      setStored({ snapshot, model, location: current });
       setFilters(f => f.cluster && !model.clusters.some(c => c.id === f.cluster) ? { ...f, cluster: null } : f);
-      const focus = routeRef.current.focus;
-      if (focus && !model.nodes.some(n => n.id === focus)) {
-        const preserveMemory = memoryDirty.current;
-        setNotice(preserveMemory ? "기록을 다시 찾지 못했습니다. 입력 중인 초안은 유지했습니다." : "초점을 지정한 자료가 없거나 이 범위에서 찾을 수 없습니다.");
-        syncRoute({ ...routeRef.current, focus: null }, true);
-        if (!preserveMemory) setPanel(null);
-      }
     }).catch(e => { if (!controller.signal.aborted && sameGraphLocation(current, routeRef.current)) setError(message(e)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [visible, session, route.scope, route.q, route.focus, refresh, positions]);
+  useEffect(() => {
+    const focus = routeRef.current.focus;
+    if (loading || !data || !sameGraphLocation(data.location, routeRef.current) || !focus || data.model.nodes.some(node => node.id === focus) || heldSelection && dirtyRef.current) return;
+    const preserveMemory = memoryDirty.current;
+    setNotice(preserveMemory ? "기록을 다시 찾지 못했습니다. 입력 중인 초안은 유지했습니다." : "초점을 지정한 자료가 없거나 이 범위에서 찾을 수 없습니다.");
+    syncRoute({ ...routeRef.current, focus: null }, true);
+    if (!preserveMemory) setPanel(null);
+  }, [data, loading, route.focus, heldSelection]);
   useEffect(() => {
     const pending = pendingTiming.current;
     if (!visible || !pending || loading || !data || !sameGraphLocation(pending.location, routeRef.current)) return;
@@ -293,7 +339,7 @@ export default function App() {
       const model = reconcile(data.snapshot, data.model, value, viewRef.current);
       positions.install(model, true);
       previous.current = { ...model, nodes: model.nodes.map(node => ({ ...node })) };
-      setStored({ snapshot: data.snapshot, model });
+      setStored({ ...data, model });
     }
     setFilters(f => f.kind === "folder" && !value ? { ...f, kind: "all" } : f);
     setFit(v => v + 1);
@@ -305,7 +351,7 @@ export default function App() {
       const model = reconcile(data.snapshot, data.model, showFoldersRef.current, value);
       positions.install(model, true);
       previous.current = { ...model, nodes: model.nodes.map(node => ({ ...node })) };
-      setStored({ snapshot: data.snapshot, model });
+      setStored({ ...data, model });
     }
   }
   function closePanel(): boolean {
@@ -429,11 +475,11 @@ export default function App() {
           {data && shown.nodes.length > 0 && !shown.links.length && <p className="hint no-relations">{data.snapshot.totals.links === 0 ? "아직 등록된 관계가 없습니다." : "현재 표시한 항목 사이에는 조회된 관계가 없습니다."}</p>}
         </div>
         {data && !loading && !displayed.length ? <div className="map-empty"><h2>표시할 항목이 없습니다.</h2><p>{hasDisplayFilters ? "검색어와 표시 조건을 바꿔보세요." : "등록한 문서와 저장한 기록이 이곳에 나타납니다."}</p><div className="action-row">{hasDisplayFilters && <button disabled={busy} onClick={() => search("")}>검색·조건 초기화</button>}<button disabled={!session || busy} onClick={startRecord}>기록 남기기</button></div></div> : data && (fallback ? <div className="graph-list" aria-label="지식 지도 목록">{displayed.map(n => { const label = nodePresentation(n), at = listTimestamp(n, listSort), excerpt = route.q && n.excerpt ? searchExcerpt(n.excerpt, label.title) : null; return <button key={n.id} disabled={busy} aria-pressed={route.focus === n.id} onClick={() => choose(n.id)}><span className={`node-symbol ${n.kind}`} style={{ color: knowledge(n) ? starColor(n) : n.taxonomyColor ?? n.color }} aria-hidden="true">{knowledge(n) ? <i /> : "○"}</span><span><strong>{label.title}</strong>{route.q && n.historical_match && <small className="warning">이전 내용에서 일치 · 현재 상태를 확인하세요</small>}{excerpt && <span className="search-excerpt">{excerpt}</span>}<small className="node-meta">{kindName[n.kind]} · {stateName(n)}</small>{label.subtitle && <span className="node-location" title={label.subtitle}>{label.subtitle}</span>}</span>{!route.q && knowledge(n) && listSort !== "name" && <small className="node-date">{at === null ? listSort === "created" ? "추가일 미확인" : "수정일 미확인" : <time dateTime={new Date(at).toISOString()} title={new Date(at).toLocaleString("ko-KR")}>{listSort === "created" ? "추가" : "수정"} · {new Date(at).toLocaleDateString("ko-KR")}</time>}</small>}{n.changed && <em>변경</em>}</button>; })}</div> : <GraphBoundary onFailure={failed}><Suspense fallback={<p className="loading">3D 화면 준비 중…</p>}><Graph key={`${route.scope}:${route.q}`} positions={positions} snapshot={data.model} nodes={shown.nodes} links={shown.links} selected={route.focus} filteredGroup={filters.cluster} hasDisplayFilters={hasDisplayFilters} explorerOpen={explore && !overlayExplorer} rotate={rotating} allConnections={allConnections} reduced={reduced} visible={visible} fit={fit} disabled={busy} onSelect={choose} onClearSelection={closePanel} onFit={() => fitView()} onToggleRotation={() => setRotate(value => !value)} onFailure={failed} /></Suspense></GraphBoundary>)}
-        <div className="map-legend">{!!displayed.length && <><span><i className="legend-star" aria-hidden="true" />문서·기록</span><span>색: {view === "purpose" ? "목적 소속" : "분류 소속"}</span><span>○ 분류 표식{showFolders ? "·폴더" : ""}</span>{!fallback && <><span>{allConnections ? "연결선 모두 보기" : "선 간략히"}</span>{!allConnections && <span className="map-legend-hint">가리키면 연결 보기</span>}</>}</>}<details onKeyDown={event => {
+        <div className="map-legend">{!!displayed.length && <><span><i className="legend-star" aria-hidden="true" />문서·기록</span><span>색: {view === "purpose" ? "목적 소속" : "분류 소속"}</span><span>○ 분류 표식{showFolders ? "·폴더" : ""}</span>{!fallback && <><span>{allConnections ? "연결선 모두 보기" : "선 간략히"}</span>{!allConnections && <span className="map-legend-hint">가리키면 연결 보기</span>}</>}</>}<details ref={legendElement} onToggle={event => setLegendOpen(event.currentTarget.open)} onKeyDown={event => {
           if (event.key !== "Escape" || !event.currentTarget.open) return;
           event.preventDefault(); event.stopPropagation();
           event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();
-        }}><summary>관계·상태 읽기</summary><div className="legend-guide" role="region" aria-label="관계와 상태 설명" tabIndex={0}>
+        }}><summary>관계·상태 읽기</summary><div className="legend-guide" style={{ maxHeight: legendHeight }} role="region" aria-label="관계와 상태 설명" tabIndex={0}>
           <section><h3>보기와 실제 연결</h3><p>목적 보기에서는 저장된 목적 소속으로 묶고, 같은 목적 안의 실제 관련 자료, 원문 링크, 출처 근거를 선으로 그립니다. 분류 소속선은 해당 별을 선택하거나 가리킬 때 확인하며, 켜 둔 폴더 연결은 계속 표시합니다. 목적 이름이 붙은 별은 같은 목적의 문서와 기록 19개 이상을 접어 표시하며, 참조 관계가 바뀌어도 같은 소속을 유지합니다. 관계 보기에서는 조회된 전체 관련 자료, 원문 링크, 출처 근거를 탐색합니다.</p></section>
           <section><h3>연결선 읽기</h3><p>제목 옆 점선은 제목이 가리키는 별을 안내하고, 다른 이름을 피할 때 꺾입니다. 평소에는 짧은 실제 연결로 윤곽을 드러내고 한 별에 몰린 나머지 선과 화살표는 낮은 강조로 남깁니다. 선의 강약은 의미의 중요도나 관계 유무를 뜻하지 않습니다. 별을 가리키거나 선택하거나 끌면 그 별의 연결을 모두 강조하며 보기 설정의 <span className="legend-term">‘연결선 모두 보기’</span>로 전체 선을 계속 볼 수 있습니다. 분류 소속선은 두 보기 모두 해당 별을 선택하거나 가리키거나 끌 때 확인합니다. 원문으로 들어오거나 나가는 링크는 두 보기 모두 자료 상세에서 읽을 수 있습니다.</p></section>
           <section><h3>묶음과 크기</h3><p>‘관계 묶음’은 한 별에 현재 연결된 이웃이 19개 이상인 묶음입니다. ‘근접 묶음’은 멀리서 볼 때 화면상 가까운 관계 없는 문서와 기록 6개 이상을 잠시 합쳐 보인 것입니다. 근접 묶음은 내용의 유사성이나 관계를 뜻하지 않으며, 확대하거나 누르면 개별 별이 보입니다. 묶음 크기는 항목 수가 10개, 30개, 50개, 100개 이상인 구간에 따라 커집니다. 접힌 지도는 보이는 별과 묶음의 실제 크기에 맞춰 간격을 줄이며, 펼치면 구성원을 다시 봅니다.</p></section>
@@ -445,6 +491,7 @@ export default function App() {
       {panel && session && <aside ref={panelElement} className="management-panel" inert={explore && overlayExplorer} role="dialog" aria-modal={narrow || undefined} aria-label={panel === "manage" ? "기록 남기기" : "선택한 자료 상세"}>
         <div className="panel-heading"><span>{panel === "manage" ? "기록 남기기" : selected ? kindName[selected.kind] : memorySeed ? "기록" : "자료 상세"}</span><div className="panel-actions">{panel === "node" && selected?.kind === "document" && <button disabled={busy} onClick={() => { const section = documentContext.current; if (section) { section.open = true; section.scrollIntoView({ block: "start" }); section.querySelector("summary")?.focus(); } }}>분류·연결</button>}{panel === "node" && (memorySeed || selected && knowledge(selected) && !isNativeOriginal(selected)) && <button disabled={busy} aria-expanded={managing} onClick={toggleManagement}>{managing ? "읽기로 돌아가기" : "관리"}</button>}<button ref={closeButton} disabled={busy} aria-label="관리 패널 닫기" onClick={closePanel}>닫기 ×</button></div></div>
         <div aria-live="polite">{statusMessages}</div>
+        {editorSourceChanged && <p className="notice" role="status">지도에서 편집 중인 자료를 같은 위치로 확인하지 못했습니다. 초안은 유지했습니다. 원문을 다시 확인하거나 초안을 복사한 뒤 이동하세요.</p>}
         {panel === "manage" ? <><Memory visible={visible} managing key={`${route.scope}:manage:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={null} onDirtyChange={updateMemoryDirty} onBusy={updateBusy} onCommit={changed} onNavigate={choose} onSubjectsChange={() => setRefresh(v => v + 1)} /><SyncPanel key={panelEpoch} visible={visible} /></> : !selected && !memorySeed ? <p className="empty">선택한 자료를 불러오는 중…</p> : <>
           {selected?.changed && <p className="notice">이전 조회 이후 기록이나 관계가 변경되었습니다.</p>}
           {selected?.kind === "document" ? isNativeOriginal(selected) ? <OriginalDetail key={`${selected.id}:${panelEpoch}`} scope={selected.context_scope!} path={selected.context_path!} request={request} related={listNodes(relatedOriginals)} references={listNodes(references.filter(item => item.outgoing).map(item => item.node))} onNavigate={choose} csrf={session.csrf} onBusy={updateBusy} onChange={() => setRefresh(v => v + 1)} onDirtyChange={updateDirty} /> : <Documents visible={visible} managing={managing} key={`${route.scope}:${selected.id}:${panelEpoch}`} scope={route.scope} id={selected.id} csrf={session.csrf} allAreas={session.areas} request={request} onBusy={updateBusy} onChange={() => setRefresh(v => v + 1)} onNavigate={choose} contextScope={selected.context_scope} contextPath={selected.context_path} onDirtyChange={updateDirty} /> : selected?.kind === "memory" || memorySeed ? <Memory latestNode={selected} visible={visible} managing={managing} initialItem={memorySeed} key={`${route.scope}:${memoryId}:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={memoryId} onDirtyChange={updateMemoryDirty} onBusy={updateBusy} onCommit={changed} onRecordRefresh={memoryRefreshed} onNavigate={choose} onSubjectsChange={() => setRefresh(v => v + 1)} /> : selected && <><div className="marker-overview"><h2>{selected.label}</h2><button onClick={() => fitView(selected.cluster)}>이 묶음 보기</button></div>{selected.kind === "subject" && <SubjectPurpose key={`${route.scope}:${selected.id}:${panelEpoch}:definition`} node={selected} scope={route.scope} csrf={session.csrf} request={request} visible={visible} disabled={busy} onBusy={updatePurposeBusy} onDirtyChange={updatePurposeDirty} onChange={() => setRefresh(v => v + 1)} />}{selected.kind === "subject" && <SubjectDelete key={selected.id} scope={route.scope} id={selected.id} label={selected.label} csrf={session.csrf} disabled={busy} onBusy={updateBusy} onDeleted={subjectDeleted} />}{data && <MarkerConnections model={data.model} selected={selected} disabled={busy} onSelect={choose} />}</>}

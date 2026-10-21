@@ -40,10 +40,12 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
   const [loadingVersion, setLoadingVersion] = useState(false);
   const [editing, setEditing] = useState(false), [draft, setDraft] = useState(""), [baseline, setBaseline] = useState<Original | null>(null);
   const [saving, setSaving] = useState(false), [saveError, setSaveError] = useState(""), [saveNotice, setSaveNotice] = useState("");
+  const [conflict, setConflict] = useState<{ latest: Original | null; loading: boolean } | null>(null);
+  const conflictRequest = useRef<AbortController | null>(null);
   const versionRequest = useRef<AbortController | null>(null), olderRequest = useRef<AbortController | null>(null), historyRequest = useRef<AbortController | null>(null);
   const [refresh, setRefresh] = useState(0);
   const newlines = editorNewlines(baseline?.content ?? original?.content ?? "");
-  const dirty = baseline !== null && draft !== editorDraft(baseline.content);
+  const dirty = baseline !== null && (draft !== editorDraft(baseline.content) || conflict !== null);
   const editAllowed = !!csrf && scope !== "profile" && /\.(md|markdown)$/i.test(path) && newlines !== null && (original?.metadata.byte_len ?? 0) <= MAX_ORIGINAL_EDIT_BYTES;
   const draftBytes = new TextEncoder().encode(editorContent(draft, newlines ?? "lf")).length;
   useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false); }, [dirty, onDirtyChange]);
@@ -57,13 +59,14 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
   }
   useEffect(() => {
     const controller = new AbortController();
-    versionRequest.current?.abort(); olderRequest.current?.abort(); historyRequest.current?.abort();
+    versionRequest.current?.abort(); olderRequest.current?.abort(); historyRequest.current?.abort(); conflictRequest.current?.abort();
     setOriginal(null); setReadError(""); setHistory(null); setHistoryError(""); setSelected(null); setVersionError(""); setLoadingVersion(false); setEditing(false); setBaseline(null); setDraft(""); setSaveError(""); setSaveNotice("");
+    setConflict(null);
     request<Original>(contextUrl("read", scope, path), { signal: controller.signal }).then(value => {
       if (!controller.signal.aborted) setOriginal(value);
     }).catch(error => { if (!controller.signal.aborted) setReadError(failure(error, true)); });
     reloadHistory();
-    return () => { controller.abort(); versionRequest.current?.abort(); olderRequest.current?.abort(); historyRequest.current?.abort(); };
+    return () => { controller.abort(); versionRequest.current?.abort(); olderRequest.current?.abort(); historyRequest.current?.abort(); conflictRequest.current?.abort(); };
   }, [scope, path, request, refresh]);
   async function older(before: number) {
     olderRequest.current?.abort();
@@ -94,14 +97,33 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
   function read() {
     if (saving) return;
     setEditing(false);
-    if (!dirty) { setBaseline(null); setSaveError(""); }
+    if (!dirty && !conflict) { setBaseline(null); setSaveError(""); }
   }
   function cancel() {
     if (saving || dirty && !window.confirm("저장하지 않은 변경을 버릴까요?")) return;
+    conflictRequest.current?.abort(); setConflict(null);
     setEditing(false); setBaseline(null); setDraft(""); setSaveError("");
   }
+  async function readConflict() {
+    conflictRequest.current?.abort();
+    const controller = new AbortController(); conflictRequest.current = controller;
+    setConflict({ latest: null, loading: true }); setSaveError("");
+    try {
+      const latest = await request<Original>(contextUrl("read", scope, path), { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      // Reading the latest source must never silently authorize overwriting it.
+      setOriginal(latest); setConflict({ latest, loading: false });
+    } catch (error) {
+      if (!controller.signal.aborted) { setConflict({ latest: null, loading: false }); setSaveError(`${failure(error, true)} 초안은 유지했습니다.`); }
+    }
+  }
+  function acceptComparison() {
+    const latest = conflict?.latest;
+    if (!latest || conflict?.loading || editorNewlines(latest.content) === null || latest.metadata.byte_len > MAX_ORIGINAL_EDIT_BYTES) return;
+    setBaseline(latest); setConflict(null); setSaveError(""); setEditing(true);
+  }
   async function save() {
-    if (!baseline || !csrf || !dirty || saving || newlines === null || draftBytes > MAX_ORIGINAL_EDIT_BYTES) return;
+    if (!baseline || !csrf || !dirty || saving || conflict || newlines === null || draftBytes > MAX_ORIGINAL_EDIT_BYTES) return;
     const submitted = editorContent(draft, newlines);
     setSaving(true); onBusy?.(true); setSaveError(""); setSaveNotice("");
     let verified = false;
@@ -115,7 +137,8 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
       verified = true;
     } catch (error) {
       const status = error && typeof error === "object" && "status" in error ? error.status : null;
-      setSaveError(status === 409 ? "원문이 바뀌었거나 반영 작업 중입니다. 초안은 유지했습니다. 현재 원문을 확인한 뒤 다시 저장하세요." : error instanceof Error && error.message.startsWith("저장 후") ? error.message : `${failure(error)} 초안은 유지했습니다.`);
+      if (status === 409) await readConflict();
+      else setSaveError(error instanceof Error && error.message.startsWith("저장 후") ? error.message : `${failure(error)} 초안은 유지했습니다.`);
     } finally { setSaving(false); onBusy?.(false); }
     if (verified) onChange?.();
   }
@@ -126,7 +149,7 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
     };
     document.addEventListener("keydown", keydown);
     return () => document.removeEventListener("keydown", keydown);
-  }, [editing, draft, baseline, saving, csrf]);
+  }, [editing, draft, baseline, saving, conflict, csrf]);
   const showing = selected?.content ?? original?.content;
   const title = (selected ? selected.title : original?.title) || originalFilename(path);
   const markdown = /(\.md|\.markdown)$/i.test(path);
@@ -159,13 +182,17 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
     {!editing && dirty && <p className="notice" role="status">저장하지 않은 변경이 있습니다. 편집으로 돌아가 이어서 작성할 수 있습니다.</p>}
     {saveNotice && <p className="notice" role="status">{saveNotice}</p>}
     {saveError && <p className="error" role="alert">{saveError}</p>}
+    {conflict && <section className="notice original-conflict" aria-label="저장 충돌 복구" aria-live="polite">
+      <p>다른 변경이 먼저 저장됐거나 원문 반영 중입니다. 초안은 유지했습니다. 읽기에서 최신 원문을 확인하고 편집에서 필요한 변경을 합쳐 주세요.</p>
+      {conflict.loading ? <p role="status">최신 원문을 확인하는 중…</p> : conflict.latest ? <><p>읽기에 버전 {conflict.latest.metadata.revision}을 표시합니다. 비교를 마친 뒤 저장 기준을 갱신하세요.</p><button disabled={saving || editorNewlines(conflict.latest.content) === null || conflict.latest.metadata.byte_len > MAX_ORIGINAL_EDIT_BYTES} onClick={acceptComparison}>비교 완료 · 편집 계속</button>{(editorNewlines(conflict.latest.content) === null || conflict.latest.metadata.byte_len > MAX_ORIGINAL_EDIT_BYTES) && <p>최신 원문은 앱 편집 범위를 벗어납니다. 초안을 복사하고 원본 다운로드로 확인하세요.</p>}</> : <button disabled={saving} onClick={() => void readConflict()}>최신 원문 다시 확인</button>}
+    </section>}
     {readError && <p className="error" role="alert">{readError} <button onClick={() => setRefresh(value => value + 1)}>다시 불러오기</button></p>}
     {!original && !readError && <p role="status">원문을 불러오는 중…</p>}
     {loadingVersion && <p role="status">버전 원문을 불러오는 중…</p>}
     {versionError && <p className="error" role="alert">{versionError}</p>}
     {selected && <p className="notice">버전 {selected.revision} 원문 · 이전 버전은 읽기만 가능합니다. 첨부 링크는 현재 원본을 다운로드합니다.</p>}
   </>;
-  const editor = <section className="section original-editor" aria-label="원문 편집"><label htmlFor="original-draft">원문 전체</label><textarea id="original-draft" value={draft} disabled={saving} onChange={event => setDraft(event.target.value)} spellCheck={false} rows={20} aria-describedby="original-draft-hint" /><p id="original-draft-hint" className="hint">{draftBytes.toLocaleString("ko-KR")} / {MAX_ORIGINAL_EDIT_BYTES.toLocaleString("ko-KR")} 바이트 · ⌘S 또는 Ctrl+S로 저장</p><div className="original-editor-actions"><button className="primary" disabled={!dirty || saving || draftBytes > MAX_ORIGINAL_EDIT_BYTES} onClick={() => void save()}>{saving ? "저장 중…" : "저장"}</button><button disabled={saving} onClick={cancel}>변경 취소</button></div></section>;
+  const editor = <section className="section original-editor" aria-label="원문 편집"><label htmlFor="original-draft">원문 전체</label><textarea id="original-draft" value={draft} disabled={saving} onChange={event => setDraft(event.target.value)} spellCheck={false} rows={20} aria-describedby="original-draft-hint" /><p id="original-draft-hint" className="hint">{draftBytes.toLocaleString("ko-KR")} / {MAX_ORIGINAL_EDIT_BYTES.toLocaleString("ko-KR")} 바이트 · ⌘S 또는 Ctrl+S로 저장</p><div className="original-editor-actions"><button className="primary" disabled={!dirty || saving || !!conflict || draftBytes > MAX_ORIGINAL_EDIT_BYTES} onClick={() => void save()}>{saving ? "저장 중…" : "저장"}</button><button disabled={saving} onClick={cancel}>변경 취소</button></div></section>;
   return <section className="documents original-detail" aria-label="원문과 이력">
     {markdown && showing !== undefined ? <DocumentPreview path={path} content={showing} kind="context" title={title} preferTitle afterTitle={controls} bodyOverride={editing ? editor : undefined} resolveInternalLink={resolveInternalLink} resolveInternalDownload={resolveInternalDownload} resolveInternalMedia={resolveInternalMedia} /> : <><h2>{title}</h2>{controls}{showing !== undefined && <OriginalText content={showing} />}</>}
     {historyError && <p className="error" role="alert">이력 확인 실패: {historyError} <button onClick={reloadHistory}>다시 확인</button></p>}

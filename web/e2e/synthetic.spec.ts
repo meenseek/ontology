@@ -29,6 +29,11 @@ for (const viewport of viewports) {
   test.describe(`${viewport.width}px`, () => {
     test.use({ viewport });
 
+    test("expanded relationship titles and actual help bounds", async ({ page }) => {
+      await page.goto("/app-reading-check.html?scenario=group-labels-help");
+      await passed(page);
+    });
+
     test("purpose detail, paging and available map boundaries", async ({ page }) => {
       await page.goto("/app-reading-check.html?scenario=residual");
       // Some scenarios hide their diagnostic output to preserve the app viewport.
@@ -89,3 +94,10 @@ for (const viewport of viewports) {
     });
   });
 }
+
+// The narrowest supported screen must protect the name strip as well.
+test("360px expanded relationship titles and actual help bounds", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 800 });
+  await page.goto("/app-reading-check.html?scenario=group-labels-help");
+  await passed(page);
+});

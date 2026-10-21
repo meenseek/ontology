@@ -1095,12 +1095,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
             marker.classList.toggle("active", star.id === hoveredId.current || star.id === focusedSummary);
           }
           const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
-          const labelCandidates = candidates.filter(node => !obstacles.some(box => node.x + node.radius > box.left && node.x - node.radius < box.right && node.y + node.radius > box.top && node.y - node.radius < box.bottom) && (!readingMembers || readingMembers.has(node.id) || node.id === activeExpandedCore || node.id === hoveredId.current || node.id === focusedSummary || node.id === selected) &&
+          const opened = spatialReveal?.members.size ? spatialReveal.members : activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : undefined;
+          const labelCandidates = candidates.filter(node => !obstacles.some(box => node.x + node.radius > box.left && node.x - node.radius < box.right && node.y + node.radius > box.top && node.y - node.radius < box.bottom) && (!opened || opened.has(node.id) || node.id === activeExpandedCore || node.id === hoveredId.current || node.id === focusedSummary || node.id === selected || node.id === dragged.current) &&
             (!spatialCounts.has(node.id) || (!activeExpandedCore && spatialLabels.has(node.id)) || node.id === hoveredId.current || node.id === focusedSummary) &&
             (!pinnedNames.has(node.id) || node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current));
           const priorityId = focusedSummary ?? dragged.current ?? selected;
           // An opened group or revealed nearby stars show their own titles; other star titles wait.
-          const opened = spatialReveal?.members.size ? spatialReveal.members : activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : undefined;
           const starTitles = opened ? { limit: 0, exempt: opened, reach: readingMembers ? showAllCore ? 38 : 84 : undefined } : { limit: MAX_RESTING_STAR_LABELS };
           const environment = { stars: readingMembers ? candidates.filter(node => readingMembers.has(node.id) || node.id === activeExpandedCore) : candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : undefined };
           let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);

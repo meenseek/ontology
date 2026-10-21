@@ -196,7 +196,7 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .legend-star { width: 10px; height: 10px; display: inline-block; background: radial-gradient(circle, var(--text) 0 13%, color-mix(in srgb, var(--text) 44%, transparent) 25%, transparent 70%); }
 .map-legend details { margin-left: auto; }
 .map-legend summary { font-size: 11px; }
-.legend-guide { max-width: 480px; max-height: min(520px, calc(100dvh - 220px)); overflow-y: auto; overscroll-behavior: contain; background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 6px; padding: 18px; position: absolute; bottom: calc(100% + 14px); right: 14px; left: 14px; margin-left: auto; font-size: 13px; line-height: 1.75; word-break: keep-all; overflow-wrap: anywhere; color: var(--text-secondary); z-index: 3; }
+.legend-guide { max-width: 480px; max-height: 520px; overflow-y: auto; overscroll-behavior: contain; background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 6px; padding: 18px; position: absolute; bottom: calc(100% + 14px); right: 14px; left: 14px; margin-left: auto; font-size: 13px; line-height: 1.75; word-break: keep-all; overflow-wrap: anywhere; color: var(--text-secondary); z-index: 3; }
 .legend-guide section + section { margin-top: 20px; }
 .legend-guide h3 { margin: 0 0 7px; font-size: 14px; font-weight: 600; color: var(--text-strong); }
 .legend-guide p { margin: 0; }
