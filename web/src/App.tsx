@@ -81,7 +81,7 @@ export default function App() {
   const positions = useMemo(() => new Positions(), [route.scope, route.q]);
   const routeRef = useRef(route); routeRef.current = route;
   const [session, setSession] = useState<Session | null>(null);
-  const [stored, setStored] = useState<{ snapshot: Snapshot; model: Model; location: typeof route } | null>(null);
+  const [stored, setStored] = useState<{ snapshot: Snapshot; model: Model; location: typeof route; refreshVersion: number } | null>(null);
   const previous = useRef<Model | undefined>(undefined);
   const pendingTiming = useRef<{ location: typeof route; startedAt: number; responseMs: number } | null>(null);
   const [timing, setTiming] = useState<GraphTiming | null>(null);
@@ -243,19 +243,19 @@ export default function App() {
       positions.install(model, true);
       previous.current = { ...model, nodes: model.nodes.map(node => ({ ...node })) };
       pendingTiming.current = { location: current, startedAt, responseMs };
-      setStored({ snapshot, model, location: current });
+      setStored({ snapshot, model, location: current, refreshVersion: refresh });
       setFilters(f => f.cluster && !model.clusters.some(c => c.id === f.cluster) ? { ...f, cluster: null } : f);
     }).catch(e => { if (!controller.signal.aborted && sameGraphLocation(current, routeRef.current)) setError(message(e)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [visible, session, route.scope, route.q, route.focus, refresh, positions]);
   useEffect(() => {
     const focus = routeRef.current.focus;
-    if (loading || !data || !sameGraphLocation(data.location, routeRef.current) || !focus || data.model.nodes.some(node => node.id === focus) || heldSelection && dirtyRef.current) return;
+    if (loading || !data || data.refreshVersion !== refresh || !sameGraphLocation(data.location, routeRef.current) || !focus || data.model.nodes.some(node => node.id === focus) || heldSelection && dirtyRef.current) return;
     const preserveMemory = memoryDirty.current;
     setNotice(preserveMemory ? "기록을 다시 찾지 못했습니다. 입력 중인 초안은 유지했습니다." : "초점을 지정한 자료가 없거나 이 범위에서 찾을 수 없습니다.");
     syncRoute({ ...routeRef.current, focus: null }, true);
     if (!preserveMemory) setPanel(null);
-  }, [data, loading, route.focus, heldSelection]);
+  }, [data, loading, route.focus, refresh, heldSelection]);
   useEffect(() => {
     const pending = pendingTiming.current;
     if (!visible || !pending || loading || !data || !sameGraphLocation(pending.location, routeRef.current)) return;

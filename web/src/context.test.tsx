@@ -72,11 +72,11 @@ for (const width of [1440, 390]) test(`original draft survives missing graph and
   let permitDiscard = false, confirmations = 0, visible = true;
   w.confirm = () => { confirmations++; return permitDiscard; };
   Object.defineProperty(w.document, "visibilityState", { configurable: true, get: () => visible ? "visible" : "hidden" });
-  let content = "# 합성 원문\n\n기존 내용", revision = 1, present = true, sourcePath = "synthetic/original.md", graphCalls = 0, writes = 0, readFailure = false;
+  let content = "# 합성 원문\n\n기존 내용", revision = 1, present = true, sourcePath = "synthetic/original.md", graphCalls = 0, writes = 0, readFailure = false, restoreAfterWrite = false;
   const draft = "# 합성 원문\n\n보존할 초안", digest = () => `revision-${revision}`;
   let currentId = "e_1111111111111111111111111111111111111111111111111111111111111111";
   const node = (): GraphNode => ({ id: currentId, scope: "personal", kind: "document", label: "합성 원문", context_scope: "personal", context_path: sourcePath, source_kind: "original", status: "ok", present: true, current: true });
-  const snapshot = (): Snapshot => ({ scope: "personal", query: "", focus: { id: "e_1111111111111111111111111111111111111111111111111111111111111111", found: present }, nodes: present ? [node()] : [], links: [], matched: present ? 1 : 0, totals: { documents: +present, memories: 0, markers: 0, links: 0 }, returned: { knowledge: +present, markers: 0, links: 0 }, omitted: { nodes: 0, links: 0 }, eligible: { nodes: +present, links: 0 }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false });
+  const snapshot = (focus: string | null): Snapshot => ({ scope: "personal", query: "", focus: { id: focus, found: present && focus === currentId }, nodes: present ? [node()] : [], links: [], matched: present ? 1 : 0, totals: { documents: +present, memories: 0, markers: 0, links: 0 }, returned: { knowledge: +present, markers: 0, links: 0 }, omitted: { nodes: 0, links: 0 }, eligible: { nodes: +present, links: 0 }, limits: { nodes: 800, links: 2000, response_bytes: 1048576, byte_limited: false }, truncated: false });
   const original = () => ({ content, title: "합성 원문", metadata: { scope: "personal", path: "synthetic/original.md", source_path: "synthetic", revision, content_digest: digest(), source_digest: null, origin_kind: "native", byte_len: new TextEncoder().encode(content).length } });
   const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
   let release!: () => void;
@@ -85,7 +85,7 @@ for (const width of [1440, 390]) test(`original draft survives missing graph and
     const url = new URL(String(input), w.location.href);
     assert.equal(url.origin, "http://localhost", "synthetic requests never leave this test");
     if (url.pathname === "/api/session") return json({ csrf: "synthetic-only", areas: [] });
-    if (url.pathname === "/api/graph") { if (++graphCalls === 1) await first; return json(snapshot()); }
+    if (url.pathname === "/api/graph") { if (++graphCalls === 1) await first; return json(snapshot(url.searchParams.get("focus"))); }
     if (url.pathname === "/api/context/history") return json({ items: [], next_before: null });
     if (url.pathname === "/api/context/read") {
       assert.equal(url.searchParams.get("path"), "synthetic/original.md", "dirty editor retains its exact source identity");
@@ -95,7 +95,7 @@ for (const width of [1440, 390]) test(`original draft survives missing graph and
       assert.equal(options?.method, "POST"); writes++;
       const body = JSON.parse(String(options?.body));
       if (body.expected_revision !== revision || body.expected_digest !== digest()) return json({}, 409);
-      content = body.content; revision++; return json({ revision, content_digest: digest(), changed: true });
+      content = body.content; revision++; if (restoreAfterWrite) present = true; return json({ revision, content_digest: digest(), changed: true });
     }
     assert.fail(`Forbidden synthetic request: ${url.pathname}`);
   });
@@ -151,6 +151,12 @@ for (const width of [1440, 390]) test(`original draft survives missing graph and
     assert.equal(new URLSearchParams(w.location.search).get("focus"), currentId);
     assert.ok(w.document.querySelector(".management-panel"), "old graph cannot dismiss a newly requested selection");
     assert.ok(!w.document.querySelector(".management-panel")!.textContent!.includes("초점을 지정한 자료가 없거나"), "new navigation clears the previous missing-source notice");
+    button("편집").click(); await until(() => !!textarea(), "edit the new source"); enter("지도 갱신 뒤에도 선택을 유지할 저장"); await until(() => !button("저장").disabled, "new draft");
+    present = false; await refreshGraph(); assert.equal(textarea()?.value, "지도 갱신 뒤에도 선택을 유지할 저장");
+    restoreAfterWrite = true; button("저장").click();
+    await until(() => !textarea() && w.document.querySelector(".galaxy")?.getAttribute("aria-busy") === "false" && w.document.querySelector(".original-detail")?.textContent?.includes("지도 갱신 뒤에도 선택을 유지할 저장") === true, "successful save waits for its own refreshed graph before missing-selection cleanup");
+    assert.equal(new URLSearchParams(w.location.search).get("focus"), currentId); assert.equal(writes, 3);
+    assert.ok(!w.document.querySelector(".management-panel")!.textContent!.includes("초점을 지정한 자료가 없거나"), "pre-save missing data cannot cancel a successful save's new selection");
     assert.deepEqual(errors, []);
   } finally {
     root.unmount(); await new Promise(resolve => setTimeout(resolve, 30)); w.close();
