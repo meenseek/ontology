@@ -148,6 +148,7 @@ for (const width of [1440, 390]) test(`original draft survives missing graph and
     await until(() => !!w.document.querySelector(".original-view-switch") && w.document.querySelector(".galaxy")?.getAttribute("aria-busy") === "false", "a focus absent from the previous graph opens from its own response");
     assert.equal(new URLSearchParams(w.location.search).get("focus"), currentId);
     assert.ok(w.document.querySelector(".management-panel"), "old graph cannot dismiss a newly requested selection");
+    assert.ok(!w.document.querySelector(".management-panel")!.textContent!.includes("초점을 지정한 자료가 없거나"), "new navigation clears the previous missing-source notice");
     assert.deepEqual(errors, []);
   } finally {
     root.unmount(); await new Promise(resolve => setTimeout(resolve, 30)); w.close();
