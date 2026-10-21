@@ -124,6 +124,7 @@ for (const width of [1440, 390]) test(`original draft survives missing graph and
     revision = 2; content = "# 합성 원문\n\n다른 사람이 저장한 내용"; readFailure = true;
     button("저장").click(); await until(() => !!w.document.querySelector(".original-conflict") && !button("변경 취소").disabled, "409 recovery is available");
     assert.equal(textarea()?.value, draft); assert.equal(button("저장").disabled, true);
+    assert.ok(w.document.querySelector('.original-conflict[role="alert"].error'), "a blocked save retains its error alert while offering recovery");
     w.document.dispatchEvent(new w.KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true }));
     await new Promise(resolve => setTimeout(resolve, 30)); assert.equal(writes, 1, "keyboard retry cannot send stale CAS");
     enter("# 합성 원문\n\n기존 내용"); present = false; await refreshGraph();

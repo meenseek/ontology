@@ -182,7 +182,7 @@ export default function OriginalDetail({ scope, path, request, related = noRelat
     {!editing && dirty && <p className="notice" role="status">저장하지 않은 변경이 있습니다. 편집으로 돌아가 이어서 작성할 수 있습니다.</p>}
     {saveNotice && <p className="notice" role="status">{saveNotice}</p>}
     {saveError && <p className="error" role="alert">{saveError}</p>}
-    {conflict && <section className="notice original-conflict" aria-label="저장 충돌 복구" aria-live="polite">
+    {conflict && <section className="error original-conflict" role="alert" aria-label="저장 충돌 복구">
       <p>다른 변경이 먼저 저장됐거나 원문 반영 중입니다. 초안은 유지했습니다. 읽기에서 최신 원문을 확인하고 편집에서 필요한 변경을 합쳐 주세요.</p>
       {conflict.loading ? <p role="status">최신 원문을 확인하는 중…</p> : conflict.latest ? <><p>읽기에 버전 {conflict.latest.metadata.revision}을 표시합니다. 비교를 마친 뒤 저장 기준을 갱신하세요.</p><button disabled={saving || editorNewlines(conflict.latest.content) === null || conflict.latest.metadata.byte_len > MAX_ORIGINAL_EDIT_BYTES} onClick={acceptComparison}>비교 완료 · 편집 계속</button>{(editorNewlines(conflict.latest.content) === null || conflict.latest.metadata.byte_len > MAX_ORIGINAL_EDIT_BYTES) && <p>최신 원문은 앱 편집 범위를 벗어납니다. 초안을 복사하고 원본 다운로드로 확인하세요.</p>}</> : <button disabled={saving} onClick={() => void readConflict()}>최신 원문 다시 확인</button>}
     </section>}

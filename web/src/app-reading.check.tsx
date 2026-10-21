@@ -1928,6 +1928,7 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
       const canvas = host.querySelector(".graph-canvas")!.getBoundingClientRect();
       assert(box.top >= (names?.getBoundingClientRect().bottom ?? canvas.top) + 13, "help stays below the actual name strip or canvas top");
       assert(box.bottom <= canvas.bottom && box.height > 100, "help fits the actual map with a readable scroll area");
+      assert([...host.querySelectorAll(".graph-core-actions, .graph-core-close")].every(control => box.top >= control.getBoundingClientRect().bottom + 13), "help keeps every expanded-group control unobstructed");
       guide.scrollTop = guide.scrollHeight;
       assert(guide.scrollTop > 0 || guide.scrollHeight <= guide.clientHeight, "the complete help remains reachable");
       legend.summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
@@ -1952,6 +1953,7 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
     host.querySelector<HTMLButtonElement>(`.graph-group-target[data-node-id="${subjects[0]}"]`)!.click();
     await new Promise(resolve => setTimeout(resolve, 800));
     assert(guide.getBoundingClientRect().height > 100 && guide.getBoundingClientRect().top >= host.querySelector(".graph-canvas")!.getBoundingClientRect().top + 13, "opening with help open keeps a usable reading area");
+    assert(guide.getBoundingClientRect().top >= host.querySelector(".graph-core-actions")!.getBoundingClientRect().bottom + 13, "opening with help already open never covers paging controls");
     legend.summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await settle(); await inspectHelp();
     window.history.replaceState(null, "", originalUrl);

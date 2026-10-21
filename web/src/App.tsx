@@ -179,26 +179,30 @@ export default function App() {
     const legend = legendElement.current, workspace = workspaceElement.current;
     const guide = legend?.querySelector<HTMLElement>(".legend-guide"), galaxy = legend?.closest(".galaxy");
     if (!legendOpen || !legend || !workspace || !guide || !galaxy) return;
-    let canvas: HTMLElement | null = null, names: HTMLElement | null = null;
+    let canvas: HTMLElement | null = null, controls: HTMLElement[] = [];
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    const children = new MutationObserver(measure);
     function measure() {
       const next = workspace!.querySelector<HTMLElement>(".graph-canvas, .graph-list, .map-empty, .galaxy > .loading");
       if (!next) return;
       if (next !== canvas) {
         if (canvas) observer?.unobserve(canvas);
-        if (names) observer?.unobserve(names);
-        canvas = next; names = canvas.querySelector<HTMLElement>(".graph-group-navigation");
-        observer?.observe(canvas); if (names) observer?.observe(names);
+        canvas = next; observer?.observe(canvas);
+        // Only direct children: this covers lazy readiness and top-control
+        // replacement without observing per-frame label text.
+        children.disconnect(); children.observe(galaxy!, { childList: true }); children.observe(canvas, { childList: true });
       }
-      const canvasTop = canvas.getBoundingClientRect().top;
-      const top = Math.max(canvasTop, names?.classList.contains("with-keys") ? names.getBoundingClientRect().bottom : canvasTop) + 14;
+      const nextControls = [...canvas.querySelectorAll<HTMLElement>(".graph-group-navigation, .graph-core-actions, .graph-core-close")];
+      for (const old of controls) if (!nextControls.includes(old)) observer?.unobserve(old);
+      for (const item of nextControls) if (!controls.includes(item)) observer?.observe(item);
+      controls = nextControls;
+      const top = Math.max(canvas.getBoundingClientRect().top, ...controls
+        .filter(item => !item.classList.contains("graph-group-navigation") || item.classList.contains("with-keys"))
+        .map(item => item.getBoundingClientRect().bottom)) + 14;
       setLegendHeight(Math.max(0, Math.min(520, guide!.getBoundingClientRect().bottom - top)));
     }
-    measure();
+    children.observe(galaxy, { childList: true }); measure();
     observer?.observe(workspace); if (legend.parentElement) observer?.observe(legend.parentElement);
-    // Suspense can replace the loading row without rerendering App. Observe
-    // only these direct children, never the per-frame label text subtree.
-    const children = new MutationObserver(measure); children.observe(galaxy, { childList: true });
     window.addEventListener("resize", measure);
     return () => { observer?.disconnect(); children.disconnect(); window.removeEventListener("resize", measure); };
   }, [legendOpen, data, fallback, view, panel, explore]);
