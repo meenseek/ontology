@@ -286,6 +286,17 @@ pub(crate) fn codex_role_output_schema(task: &RoleTaskContract) -> Result<String
         .cloned()
         .ok_or_else(|| NativeHarnessError::invalid_input("missing Codex role result schema"))?;
     schema["$defs"]["result"] = result;
+    // Process cancellation/deadlines are observed by the supervisor, not
+    // self-reported by a completed model turn. Core permits missing-context
+    // requests only from Reviewer.
+    schema["properties"]["outcome"]["anyOf"]
+        .as_array_mut()
+        .ok_or_else(|| NativeHarnessError::invalid_input("missing Codex outcome schema"))?
+        .retain(|choice| {
+            let status = choice["properties"]["status"]["enum"][0].as_str();
+            !matches!(status, Some("cancelled" | "timed-out"))
+                && (role == "reviewer" || status != Some("missing-context"))
+        });
     if role != "writer" {
         let results = &mut schema["$defs"]["result"]["properties"]["requirement_results"];
         results["minItems"] = requirements.len().into();
@@ -504,8 +515,7 @@ impl CodexNativeOutput {
         let Some(text) = &self.message else {
             return Err("native Codex completed without an agent_message");
         };
-        decode_current_json::<CodexResponse>(text.as_bytes(), "native Codex role response")
-            .map(|response| response.outcome)
+        let response = decode_current_json::<CodexResponse>(text.as_bytes(), "native Codex role response")
             .map_err(|_| {
                 // Diagnose shape only. Never include model text, keys, values, or
                 // serde error strings in durable execution failures.
@@ -514,7 +524,13 @@ impl CodexNativeOutput {
                 } else {
                     "native Codex role response is incompatible with Core output types or strict JSON validation"
                 }
-            })
+            })?;
+        match response.outcome {
+            RoleExecutionOutcome::Cancelled | RoleExecutionOutcome::TimedOut => {
+                Err("native Codex model response cannot report runtime-owned termination")
+            }
+            outcome => Ok(outcome),
+        }
     }
 }
 
@@ -1392,6 +1408,42 @@ mod observation_tests {
         assert_eq!(exit_observation.get().and_then(|exit| exit.code()), Some(7));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn observed_cancellation_does_not_depend_on_a_model_terminal_response() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = CodexDirectory::create().unwrap();
+        let binary = directory.0.join("fake-codex");
+        let ready = directory.0.join("ready");
+        fs::write(&binary, format!(
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"observed-cancel\"}}' '{{\"type\":\"turn.started\"}}'\ntouch '{}'\nexec sleep 30\n",
+            ready.display()
+        )).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let limits = RoleLifecycleLimits {
+            max_role_execution_millis: 3000,
+            max_role_grace_millis: 100,
+            max_role_close_millis: 500,
+            max_total_role_millis: 3600,
+        };
+        let (_, outcome) = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while !ready.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                assert!(
+                    ready.exists(),
+                    "synthetic role must have emitted its native context"
+                );
+                cancelled.store(true, Ordering::Relaxed);
+            });
+            run_codex_process(&binary, b"[]", HarnessRole::Verifier, &limits, &cancelled).unwrap()
+        });
+        assert_eq!(outcome, RoleExecutionOutcome::Cancelled);
+    }
+
     #[test]
     fn progress_retains_allowlisted_metadata_without_command_or_response() {
         let mut native = CodexNativeOutput::default();
@@ -1536,7 +1588,9 @@ mod observation_tests {
             let directory = CodexDirectory::create().unwrap();
             let binary = directory.0.join("fake-codex");
             let message = serde_json::to_string(&CodexResponse {
-                outcome: RoleExecutionOutcome::Cancelled,
+                outcome: RoleExecutionOutcome::Unsupported {
+                    reason: "synthetic unsupported response".to_owned(),
+                },
             })
             .unwrap();
             let events = [
@@ -1576,7 +1630,12 @@ mod observation_tests {
                 libc::STDERR_FILENO
             );
             let (_, outcome) = result.unwrap();
-            assert_eq!(outcome, RoleExecutionOutcome::Cancelled);
+            assert_eq!(
+                outcome,
+                RoleExecutionOutcome::Unsupported {
+                    reason: "synthetic unsupported response".to_owned(),
+                }
+            );
             let values = sink.0.lock().unwrap();
             assert_eq!(values.len(), 1);
             assert_eq!(values[0].delivered_input_bytes, 2);

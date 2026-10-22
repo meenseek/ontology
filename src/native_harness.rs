@@ -1592,6 +1592,68 @@ mod tests {
     }
 
     #[test]
+    fn codex_role_schema_leaves_runtime_termination_to_supervision() {
+        for (task, reviewer) in [
+            (
+                RoleTaskContract::Verifier {
+                    targets: vec![],
+                    verification_requirements: vec![],
+                },
+                false,
+            ),
+            (
+                RoleTaskContract::Reviewer {
+                    targets: vec![],
+                    verification_requirements: vec![],
+                },
+                true,
+            ),
+            (
+                RoleTaskContract::Writer {
+                    targets: vec![],
+                    curation_kind: None,
+                },
+                false,
+            ),
+        ] {
+            let schema: serde_json::Value =
+                serde_json::from_str(&codex_role_output_schema(&task).unwrap()).unwrap();
+            let statuses = schema["properties"]["outcome"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|choice| choice["properties"]["status"]["enum"][0].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert!(!statuses.contains(&"cancelled"));
+            assert!(!statuses.contains(&"timed-out"));
+            assert_eq!(statuses.contains(&"missing-context"), reviewer);
+            assert!(
+                statuses.contains(&"completed")
+                    && statuses.contains(&"failed")
+                    && statuses.contains(&"unsupported")
+            );
+        }
+    }
+
+    #[test]
+    fn codex_role_model_cannot_self_report_runtime_termination() {
+        for outcome in [
+            RoleExecutionOutcome::Cancelled,
+            RoleExecutionOutcome::TimedOut,
+        ] {
+            let native = CodexNativeOutput {
+                message: Some(serde_json::to_string(&CodexResponse { outcome }).unwrap()),
+                terminal: Some((1, true)),
+                ..CodexNativeOutput::default()
+            };
+            assert_eq!(
+                native.outcome(true).unwrap_err(),
+                "native Codex model response cannot report runtime-owned termination"
+            );
+        }
+    }
+
+    #[test]
     fn codex_promotion_intent_schema_supports_current_career_surfaces() {
         let schema: serde_json::Value =
             serde_json::from_str(codex_output_schema()).expect("native schema must parse");
@@ -4057,7 +4119,17 @@ cat "$0.events.$n"
             .expect("terminal result must be evaluated by Core");
             assert_eq!(codex_calls(&binary).len(), 1);
             assert_eq!(evaluated.role_execution.role_results.len(), 1);
-            assert_eq!(evaluated.role_execution.role_results[0].outcome, outcome);
+            let actual = &evaluated.role_execution.role_results[0].outcome;
+            if matches!(
+                outcome,
+                RoleExecutionOutcome::Cancelled | RoleExecutionOutcome::TimedOut
+            ) {
+                assert!(
+                    matches!(actual, RoleExecutionOutcome::Failed { message } if message.contains("runtime-owned termination"))
+                );
+            } else {
+                assert_eq!(*actual, outcome);
+            }
             assert!(evaluated.ready_role_invocations.is_empty());
         }
     }
