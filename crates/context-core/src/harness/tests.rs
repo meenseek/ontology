@@ -2498,6 +2498,80 @@ fn exact_career_evidence_sources_are_hashed_and_sent_only_to_the_owner_roles() {
         control["career_claim_lineage"],
         serde_json::to_value(&manifest.claim_lineage).unwrap()
     );
+    assert_eq!(control["career_review_scope"]["kind"], "owner-evidence");
+    assert_eq!(
+        control["career_review_scope"]["evidence_owner"],
+        serde_json::to_value(&resolved.context_grants[0].owner).unwrap()
+    );
+}
+
+#[test]
+fn career_review_scope_distinguishes_primary_review_without_changing_other_work() {
+    let (_workspace, engine) = external_engine();
+    let request = career_review_request(vec!["README.md".to_owned()]);
+    let manifest = selected_career_manifest(
+        request.targets.clone(),
+        vec![(
+            DataOwner::PersonalProject {
+                project: "sample".to_owned(),
+            },
+            vec!["vault/personal/projects/sample.md".to_owned()],
+        )],
+    );
+    let holistic = engine
+        .resolve_with_career_composition(
+            &request,
+            &[],
+            Some(CareerOutputSurface::Resume),
+            &[],
+            Some(&manifest),
+        )
+        .unwrap();
+    let prepared = prepared_run_with(&engine, &holistic);
+    let step = engine.begin_execution(&holistic, &prepared, &[]).unwrap();
+    for invocation in step.ready_role_invocations {
+        let head = invocation
+            .segments
+            .iter()
+            .find_map(|segment| match segment {
+                RoleInvocationSegment::ControlHead { content, .. } => Some(content),
+                _ => None,
+            })
+            .unwrap();
+        let control: serde_json::Value = serde_json::from_str(head).unwrap();
+        assert_eq!(control["career_review_scope"]["kind"], "holistic");
+        assert!(control["context_grants"].as_array().unwrap().is_empty());
+        assert!(
+            control["career_review_scope"]
+                .get("evidence_owner")
+                .is_none()
+        );
+    }
+
+    let general = engine
+        .resolve_with_intent(&request, HarnessIntent::General)
+        .unwrap();
+    let mut write_request = request;
+    write_request.action = HarnessAction::DocumentWrite;
+    let write = engine
+        .resolve_with_career_surface(&write_request, CareerOutputSurface::Resume)
+        .unwrap();
+    for resolved in [general, write] {
+        let prepared = prepared_run_with(&engine, &resolved);
+        let step = engine.begin_execution(&resolved, &prepared, &[]).unwrap();
+        for invocation in step.ready_role_invocations {
+            let head = invocation
+                .segments
+                .iter()
+                .find_map(|segment| match segment {
+                    RoleInvocationSegment::ControlHead { content, .. } => Some(content),
+                    _ => None,
+                })
+                .unwrap();
+            let control: serde_json::Value = serde_json::from_str(head).unwrap();
+            assert!(control.get("career_review_scope").is_none());
+        }
+    }
 }
 
 #[test]

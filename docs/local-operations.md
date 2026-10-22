@@ -606,6 +606,11 @@ Native 파생 CareerArtifact는 같은 전체 comparison을 기존 manifest에 �
 owner의 현재 검토 receipt를 먼저 확인하고 `CareerCompositionManifest::holistic_task_statement`
 로 exact owner·receipt digest refs를 원래 요청 뒤에 붙여 primary holistic review에 전달한다.
 `compose-career`는 실제 receipt를 다시 검증하고 holistic 입력의 exact refs와 대조한다.
+Owner 검토의 control-head는 선택 owner의 사실·계보 범위와 전체 문서의 일관성·가독성·공개 안전성
+책임을 구분한다. 출력 claim이 없는 owner도 원천과 비교 후보의 제외 이유를 실제 검토한다.
+Personal 수상처럼 다른 owner가 소유한 주장은 해당 검토와 primary holistic에서 확인하며,
+이 구분은 필수 unit·수락 조건을 면제하거나 원천 접근 권한을 넓히지 않는다. Control bytes를
+바꾸면 기존 prepared와 receipt를 새 실행에 섞지 않고, 영향을 받는 검토를 새로 발급·실행한다.
 Primary-only의 foreign receipt 집합은 비어 있다. Compose 선행·apply 순서는 상위 실행자가
 수행하며 apply 자체에 composition receipt 검사기를 추가하지 않는다. 외부 경력 파일·form의
 최종화는 caller의 직접 독립 검토 정책을 따른다.

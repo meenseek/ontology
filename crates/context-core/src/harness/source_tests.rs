@@ -1564,7 +1564,7 @@ fn source_granted_evidence_keeps_selection_and_binds_non_target_revision() {
             HarnessIntent::CareerArtifact {
                 surface: CareerOutputSurface::General,
             },
-            &[grant],
+            std::slice::from_ref(&grant),
             &[evidence.to_owned()],
             Some(&manifest),
         )
@@ -1586,6 +1586,93 @@ fn source_granted_evidence_keeps_selection_and_binds_non_target_revision() {
                 |document| document.source == HarnessBoundDocumentSource::Evidence
                     && document.relative_path == evidence
             )
+    );
+    let mut excluded = manifest.clone();
+    let comparison = excluded.comparison.as_mut().unwrap();
+    for decision in &mut comparison.decisions {
+        decision.disposition = if decision.candidate_path == evidence {
+            CareerDisposition::Excluded
+        } else {
+            CareerDisposition::Selected
+        };
+        decision.reason =
+            "retain the personal profile; exclude this project from the output".into();
+    }
+    comparison.placements[0] = CareerPlacement {
+        claim_id: "personal-claim".into(),
+        candidate_path: "vault/personal/profile.md".into(),
+        requirement_ids: vec!["work".into()],
+        source_locators: vec![CareerLocator {
+            path: "vault/personal/profile.md".into(),
+            original_span: CareerSpan { start: 0, end: 5 },
+        }],
+        target: request.targets[0].clone(),
+        slot: "personal profile only".into(),
+    };
+    excluded.claim_lineage = vec![CareerClaimLineage {
+        claim_id: "personal-claim".into(),
+        evidence_owner: DataOwner::Personal,
+        evidence_source_paths: vec!["vault/personal/profile.md".into()],
+    }];
+    let excluded_resolved = engine
+        .resolve_with_intent_and_career_composition(
+            &request,
+            HarnessIntent::CareerArtifact {
+                surface: CareerOutputSurface::General,
+            },
+            std::slice::from_ref(&grant),
+            &[evidence.to_owned()],
+            Some(&excluded),
+        )
+        .expect("an excluded owner must still receive its comparison review");
+    let excluded_prepared = engine
+        .prepare(&excluded_resolved, &capabilities(), None)
+        .unwrap();
+    let step = engine
+        .begin_execution(&excluded_resolved, &excluded_prepared, &[])
+        .unwrap();
+    for invocation in step.ready_role_invocations {
+        let head = invocation
+            .segments
+            .iter()
+            .find_map(|segment| match segment {
+                RoleInvocationSegment::ControlHead { content, .. } => Some(content),
+                _ => None,
+            })
+            .unwrap();
+        let control: serde_json::Value = serde_json::from_str(head).unwrap();
+        assert_eq!(control["career_review_scope"]["kind"], "owner-evidence");
+        assert_eq!(
+            control["career_review_scope"]["evidence_owner"],
+            serde_json::to_value(&grant.owner).unwrap()
+        );
+        assert!(
+            control["career_claim_lineage"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            control["career_comparison"]["decisions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            control["career_comparison"]["decisions"][0]["disposition"],
+            "excluded"
+        );
+        assert!(
+            control["career_comparison"]["placements"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        excluded_resolved.plan.verification_requirements,
+        resolved.plan.verification_requirements
     );
     fixture.source.bump(evidence);
     assert!(engine.begin_execution(&resolved, &prepared, &[]).is_err());

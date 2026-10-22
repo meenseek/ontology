@@ -8116,6 +8116,37 @@ fn role_task_contract(plan: &ResolvedHarnessPlan, role: HarnessRole) -> RoleTask
 }
 
 #[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum CareerReviewScope<'a> {
+    OwnerEvidence {
+        evidence_owner: &'a DataOwner,
+        boundary: &'static str,
+    },
+    Holistic {
+        boundary: &'static str,
+    },
+}
+
+fn career_review_scope(resolved: &ResolvedHarnessRequest) -> Option<CareerReviewScope<'_>> {
+    if resolved.plan.action != HarnessAction::DocumentReview
+        || !resolved.plan.intent.is_career_artifact()
+        || resolved.career_composition_manifest.is_none()
+    {
+        return None;
+    }
+    match resolved.context_grants.as_slice() {
+        [grant] => Some(CareerReviewScope::OwnerEvidence {
+            evidence_owner: &grant.owner,
+            boundary: "This is the selected evidence owner's review, not the holistic review. Judge facts and evidence lineage within this owner's career_claim_lineage and career_comparison. Claims assigned to other owners are reviewed in their own stages; their unavailable originals are not missing context for this stage. Do not request sources outside the granted owner. If this owner has no output claims, still inspect its compared candidates, exclusion decisions and reasons against the bound originals and complete target; zero claims is not automatic success. Report unsupported owned claims or exclusions. Only Reviewer may request valid within-owner MissingContext when needed; Verifier must report unverified or failed assigned checks in RequirementResult and must not emit MissingContext. Review the complete target for consistency, readability and public safety. No verification unit or acceptance condition is waived.",
+        }),
+        [] => Some(CareerReviewScope::Holistic {
+            boundary: "This is the primary holistic review. Verify Personal-owned claims, including awards, against the bound primary originals, and assess the complete target and cross-owner integration using the exact owner receipt references. Owner-scoped reviews do not replace this whole-artifact review. Preserve all required consistency, readability, public-safety, verification and acceptance checks.",
+        }),
+        _ => None,
+    }
+}
+
+#[derive(Serialize)]
 struct RoleControlHead<'a> {
     segment: &'static str,
     task_statement: &'a str,
@@ -8127,6 +8158,8 @@ struct RoleControlHead<'a> {
     context_grants: &'a [ContextGrant],
     career_manifest_digest: Option<&'a str>,
     career_claim_lineage: &'a [CareerClaimLineage],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    career_review_scope: Option<CareerReviewScope<'a>>,
     career_comparison: Option<crate::career::CareerReviewView>,
     allowed_context_roots: &'a [ContextRoot],
     denied_context_roots: &'a [ContextRoot],
@@ -8167,6 +8200,7 @@ fn role_control_segments(
         context_grants: &resolved.plan.context_grants,
         career_manifest_digest: resolved.plan.career_manifest_digest.as_deref(),
         career_claim_lineage,
+        career_review_scope: career_review_scope(resolved),
         career_comparison: career_comparison_for_role(resolved)?,
         allowed_context_roots: &resolved.plan.allowed_context_roots,
         denied_context_roots: &resolved.plan.denied_context_roots,
