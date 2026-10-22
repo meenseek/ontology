@@ -1501,6 +1501,97 @@ mod tests {
     }
 
     #[test]
+    fn codex_role_schema_keeps_unassigned_verifier_results_empty() {
+        let task = RoleTaskContract::Verifier {
+            targets: vec![],
+            verification_requirements: vec![],
+        };
+        let schema: serde_json::Value =
+            serde_json::from_str(&codex_role_output_schema(&task).unwrap()).unwrap();
+        let result = &schema["$defs"]["result"];
+        assert_eq!(
+            result["properties"]["role"]["enum"],
+            serde_json::json!(["verifier"])
+        );
+        let requirements = &result["properties"]["requirement_results"];
+        assert_eq!(requirements["minItems"], 0);
+        assert_eq!(requirements["maxItems"], 0);
+        assert_eq!(result["properties"]["subject_evidence"]["type"], "array");
+        assert!(
+            result["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("subject_evidence"))
+        );
+        assert_eq!(
+            schema["$defs"]["verification-unit"]["enum"]
+                .as_array()
+                .unwrap()
+                .len(),
+            28
+        );
+    }
+
+    #[test]
+    fn codex_role_schema_preserves_reviewers_core_assignment() {
+        use context_core::harness::{VerificationRequirement, VerificationUnit};
+        let units = [
+            VerificationUnit::CompletionContract,
+            VerificationUnit::SourceOwnership,
+        ];
+        let task = RoleTaskContract::Reviewer {
+            targets: vec![],
+            verification_requirements: units
+                .into_iter()
+                .map(|unit| VerificationRequirement {
+                    unit,
+                    owner: VerificationOwner::Role {
+                        role: HarnessRole::Reviewer,
+                    },
+                    subject: context_core::harness::EvaluationSubjectKind::FrozenTargets,
+                })
+                .collect(),
+        };
+        let schema: serde_json::Value =
+            serde_json::from_str(&codex_role_output_schema(&task).unwrap()).unwrap();
+        let result = &schema["$defs"]["result"];
+        assert_eq!(
+            result["properties"]["role"]["enum"],
+            serde_json::json!(["reviewer"])
+        );
+        let requirements = &result["properties"]["requirement_results"];
+        assert_eq!(requirements["minItems"], 2);
+        assert_eq!(requirements["maxItems"], 2);
+        assert_eq!(
+            requirements["items"]["properties"]["unit"]["enum"],
+            serde_json::to_value(units).unwrap()
+        );
+        assert!(
+            result["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("blocking_findings"))
+        );
+        let writer: serde_json::Value = serde_json::from_str(
+            &codex_role_output_schema(&RoleTaskContract::Writer {
+                targets: vec![],
+                curation_kind: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            writer["$defs"]["result"]["properties"]["role"]["enum"],
+            serde_json::json!(["writer"])
+        );
+        assert!(
+            writer["$defs"]["result"]["properties"]
+                .get("requirement_results")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn codex_promotion_intent_schema_supports_current_career_surfaces() {
         let schema: serde_json::Value =
             serde_json::from_str(codex_output_schema()).expect("native schema must parse");
@@ -3429,7 +3520,11 @@ cat "$0.events.$n"
     }
 
     #[cfg(unix)]
-    fn codex_assert_process_isolation(binary: &Path, pid: &str) -> String {
+    fn codex_assert_process_isolation(
+        binary: &Path,
+        pid: &str,
+        expected_schema: Option<&str>,
+    ) -> String {
         let cwd = fs::read_to_string(format!("{}.cwd.{pid}", binary.display()))
             .expect("cwd must be captured");
         let mut lines = cwd.lines();
@@ -3466,7 +3561,19 @@ cat "$0.events.$n"
         assert_eq!(Path::new(args[9]).parent(), Some(Path::new(cwd_path)));
         let schema = fs::read(format!("{}.schema.{pid}", binary.display()))
             .expect("schema must be captured");
-        assert_eq!(schema, codex_output_schema().as_bytes());
+        if let Some(expected_schema) = expected_schema {
+            assert_eq!(schema, expected_schema.as_bytes());
+        } else {
+            let schema: serde_json::Value = serde_json::from_slice(&schema).unwrap();
+            assert_eq!(schema["additionalProperties"], false);
+            assert_eq!(
+                schema["$defs"]["result"]["properties"]["role"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
         cwd_path.to_owned()
     }
 
@@ -3504,8 +3611,16 @@ cat "$0.events.$n"
                 "complete ordered segments must be byte exact"
             );
             transmitted += actual.len();
+            let task = &prepared
+                .role_run
+                .role_metadata
+                .iter()
+                .find(|metadata| metadata.role == *role)
+                .unwrap()
+                .task;
+            let schema = codex_role_output_schema(task).unwrap();
             assert!(
-                cwds.insert(codex_assert_process_isolation(binary, pid)),
+                cwds.insert(codex_assert_process_isolation(binary, pid, Some(&schema))),
                 "each role must use a fresh cwd"
             );
             let result = head
@@ -4006,7 +4121,7 @@ cat "$0.events.$role"
                 std::io::Error::last_os_error().raw_os_error(),
                 Some(libc::ESRCH)
             );
-            codex_assert_process_isolation(binary, pid.trim());
+            codex_assert_process_isolation(binary, pid.trim(), None);
         }
         assert_eq!(
             codex_calls(binary).len(),

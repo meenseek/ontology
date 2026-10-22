@@ -5,7 +5,7 @@ use context_core::harness::{
     FrozenReviewArtifact, HarnessEngine, HarnessExecutionEvent, HarnessExecutionRecord,
     HarnessRole, PreparedHarnessRun, ReportedRoleLifecycle, ReviewArtifactFormat,
     RoleExecutionOutcome, RoleExecutionResult, RoleInvocationContract, RoleLifecycleLimits,
-    RoleTerminalState, decode_current_json,
+    RoleTaskContract, RoleTerminalState, VerificationRequirement, decode_current_json,
 };
 use std::{
     env, fs,
@@ -255,6 +255,54 @@ pub(crate) fn codex_output_schema() -> &'static str {
 }"##
 }
 
+// Narrow formatting to Core's already assigned task. This never changes the
+// assigned requirements, role outcome, evidence, or Core's acceptance checks.
+pub(crate) fn codex_role_output_schema(task: &RoleTaskContract) -> Result<String> {
+    let (role, requirements): (&str, &[VerificationRequirement]) = match task {
+        RoleTaskContract::Writer { .. } => ("writer", &[]),
+        RoleTaskContract::Specialist {
+            verification_requirements,
+            ..
+        } => ("specialist", verification_requirements),
+        RoleTaskContract::Verifier {
+            verification_requirements,
+            ..
+        } => ("verifier", verification_requirements),
+        RoleTaskContract::Reviewer {
+            verification_requirements,
+            ..
+        } => ("reviewer", verification_requirements),
+    };
+    let mut schema: serde_json::Value =
+        decode_current_json(codex_output_schema().as_bytes(), "built-in Codex schema")
+            .map_err(|_| NativeHarnessError::invalid_input("invalid built-in Codex schema"))?;
+    let result = schema["$defs"]["result"]["anyOf"]
+        .as_array()
+        .and_then(|choices| {
+            choices
+                .iter()
+                .find(|choice| choice["properties"]["role"]["enum"][0] == role)
+        })
+        .cloned()
+        .ok_or_else(|| NativeHarnessError::invalid_input("missing Codex role result schema"))?;
+    schema["$defs"]["result"] = result;
+    if role != "writer" {
+        let results = &mut schema["$defs"]["result"]["properties"]["requirement_results"];
+        results["minItems"] = requirements.len().into();
+        results["maxItems"] = requirements.len().into();
+        if !requirements.is_empty() {
+            let mut item = schema["$defs"]["requirement"].clone();
+            item["properties"]["unit"] = serde_json::json!({
+                "type": "string",
+                "enum": requirements.iter().map(|r| r.unit).collect::<Vec<_>>()
+            });
+            schema["$defs"]["result"]["properties"]["requirement_results"]["items"] = item;
+        }
+    }
+    serde_json::to_string(&schema)
+        .map_err(|_| NativeHarnessError::invalid_input("cannot encode Codex role schema"))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum CodexEvent {
@@ -352,6 +400,43 @@ pub(crate) struct CodexNativeOutput {
     pub(crate) message: Option<String>,
     pub(crate) terminal: Option<(u64, bool)>,
     pub(crate) usage: Option<CodexUsage>,
+    pub(crate) progress: CodexProgress,
+}
+
+// Only allowlisted event metadata is retained. In particular, commands, tool
+// output, message text, IDs and error payloads never enter diagnostics.
+#[derive(Clone, Default, serde::Serialize)]
+pub(crate) struct CodexProgress {
+    last_event: Option<&'static str>,
+    last_event_at_millis: Option<u64>,
+    last_item_kind: Option<&'static str>,
+    last_tool_status: Option<CodexCommandStatus>,
+    last_tool_exit_code: Option<i32>,
+}
+
+impl CodexProgress {
+    fn observe(&mut self, event: &CodexEvent, now: u64) {
+        self.last_event_at_millis = Some(now);
+        self.last_event = Some(match event {
+            CodexEvent::ThreadStarted { .. } => "thread.started",
+            CodexEvent::TurnStarted => "turn.started",
+            CodexEvent::ItemStarted { .. } => "item.started",
+            CodexEvent::ItemCompleted { .. } => "item.completed",
+            CodexEvent::TurnCompleted { .. } => "turn.completed",
+        });
+        if let CodexEvent::ItemStarted { item } | CodexEvent::ItemCompleted { item } = event {
+            self.last_item_kind = Some(match item {
+                CodexItem::AgentMessage { .. } => "agent_message",
+                CodexItem::CommandExecution {
+                    status, exit_code, ..
+                } => {
+                    self.last_tool_status = Some(status.clone());
+                    self.last_tool_exit_code = *exit_code;
+                    "command_execution"
+                }
+            });
+        }
+    }
 }
 
 impl CodexNativeOutput {
@@ -362,6 +447,8 @@ impl CodexNativeOutput {
     ) -> std::result::Result<(), &'static str> {
         let event: CodexEvent = decode_current_json(line, "native Codex event")
             .map_err(|_| "invalid or unsupported native Codex JSONL")?;
+        let mut progress = self.progress.clone();
+        progress.observe(&event, now);
         match event {
             CodexEvent::ThreadStarted { thread_id } => {
                 if self.context.is_some() || self.turn_started || self.terminal.is_some() {
@@ -403,6 +490,7 @@ impl CodexNativeOutput {
                 self.usage = Some(usage);
             }
         }
+        self.progress = progress;
         Ok(())
     }
 
@@ -421,12 +509,10 @@ impl CodexNativeOutput {
             .map_err(|_| {
                 // Diagnose shape only. Never include model text, keys, values, or
                 // serde error strings in durable execution failures.
-                match serde_json::from_str::<CodexResponse>(text) {
-                    Err(error) if error.is_syntax() || error.is_eof() => {
-                        "native Codex role response contains invalid JSON syntax"
-                    }
-                    Err(_) => "native Codex role response is incompatible with Core output types",
-                    Ok(_) => "native Codex role response failed strict JSON validation",
+                if decode_current_json::<serde_json::Value>(text.as_bytes(), "native Codex role response JSON").is_err() {
+                    "native Codex role response contains invalid JSON syntax or duplicate keys"
+                } else {
+                    "native Codex role response is incompatible with Core output types or strict JSON validation"
                 }
             })
     }
@@ -443,6 +529,50 @@ struct CodexObservation {
     delivered_input_bytes: usize,
     reported_terminal_state: Option<RoleTerminalState>,
     usage: Option<CodexUsage>,
+    progress: CodexProgress,
+    child_pid: Option<u32>,
+    process_group: Option<i32>,
+    process_exit_code: Option<i32>,
+    process_exit_signal: Option<i32>,
+    launcher_identity: Option<ExecutableIdentity>,
+    adapter_identity: Option<ExecutableIdentity>,
+    // Neither approval decisions nor model identity are exposed by the
+    // supported event schema. Absence must not be reported as approval or a
+    // particular model. The adapter does not override inherited CLI settings.
+    approval_state: &'static str,
+    model_selection: &'static str,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct ExecutableIdentity {
+    path: PathBuf,
+    size_bytes: u64,
+    modified_at_millis: Option<u128>,
+}
+impl ExecutableIdentity {
+    fn adapter() -> Option<Self> {
+        env::current_exe()
+            .ok()
+            .and_then(|path| Self::inspect(&path))
+    }
+
+    fn inspect(path: &Path) -> Option<Self> {
+        let path = path.canonicalize().ok()?;
+        let metadata = fs::metadata(&path).ok()?;
+        // Observe metadata only: never add a file scan to lifecycle startup.
+        if !metadata.is_file() {
+            return None;
+        }
+        Some(Self {
+            path,
+            size_bytes: metadata.len(),
+            modified_at_millis: metadata
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|elapsed| elapsed.as_millis()),
+        })
+    }
 }
 impl CodexObservation {
     fn write(&self, writer: &mut impl Write) {
@@ -486,10 +616,16 @@ struct CodexObservations<'a> {
     input_bytes: usize,
     delivered_bytes: usize,
     terminal_state: Option<RoleTerminalState>,
+    child_pid: Option<u32>,
+    process_group: Option<i32>,
+    process_exit: std::rc::Rc<std::cell::Cell<Option<process::ExitStatus>>>,
+    launcher_identity: Option<ExecutableIdentity>,
+    adapter_identity: Option<ExecutableIdentity>,
 }
 #[cfg(unix)]
 impl Drop for CodexObservations<'_> {
     fn drop(&mut self) {
+        use std::os::unix::process::ExitStatusExt as _;
         if let Some(sink) = self.sink {
             sink.record(CodexObservation {
                 kind: "native-role-observation",
@@ -500,6 +636,15 @@ impl Drop for CodexObservations<'_> {
                 delivered_input_bytes: self.delivered_bytes,
                 reported_terminal_state: self.terminal_state,
                 usage: self.native.usage.take(),
+                progress: std::mem::take(&mut self.native.progress),
+                child_pid: self.child_pid,
+                process_group: self.process_group,
+                process_exit_code: self.process_exit.get().and_then(|exit| exit.code()),
+                process_exit_signal: self.process_exit.get().and_then(|exit| exit.signal()),
+                launcher_identity: self.launcher_identity.take(),
+                adapter_identity: self.adapter_identity.take(),
+                approval_state: "not-exposed-by-supported-events",
+                model_selection: "inherited-cli-configuration-unobserved",
             });
         }
     }
@@ -572,11 +717,19 @@ pub(crate) fn execute_codex_role(
         limits.max_role_grace_millis = limits
             .max_role_grace_millis
             .min(prepared.role_run.runtime_capabilities.max_role_grace_millis);
+        let task = &prepared
+            .role_run
+            .role_metadata
+            .iter()
+            .find(|metadata| metadata.role == invocation.role)
+            .ok_or_else(|| NativeHarnessError::invalid_input("missing prepared Codex role task"))?
+            .task;
+        let schema = codex_role_output_schema(task)?;
         let (lifecycle, outcome) = run_codex_process_observed(
             binary,
             &input,
             artifacts,
-            invocation.role,
+            (invocation.role, &schema),
             &limits,
             cancelled,
             Some(observations),
@@ -599,6 +752,7 @@ pub(crate) struct CodexProcess {
     child: process::Child,
     group: i32,
     cleaned: bool,
+    exit_observation: std::rc::Rc<std::cell::Cell<Option<process::ExitStatus>>>,
 }
 
 #[cfg(unix)]
@@ -626,7 +780,9 @@ impl Drop for CodexProcess {
         // blocking wait here, including when the OS cannot reap before the bound.
         if !self.cleaned {
             let _ = self.signal(libc::SIGKILL);
-            let _ = self.child.try_wait();
+            if let Ok(Some(exit)) = self.child.try_wait() {
+                self.exit_observation.set(Some(exit));
+            }
         }
     }
 }
@@ -692,7 +848,15 @@ pub(crate) fn run_codex_process(
     limits: &RoleLifecycleLimits,
     cancelled: &AtomicBool,
 ) -> Result<(ReportedRoleLifecycle, RoleExecutionOutcome)> {
-    run_codex_process_observed(binary, input, &[], role, limits, cancelled, None)
+    run_codex_process_observed(
+        binary,
+        input,
+        &[],
+        (role, codex_output_schema()),
+        limits,
+        cancelled,
+        None,
+    )
 }
 
 #[cfg(unix)]
@@ -740,11 +904,12 @@ fn run_codex_process_observed(
     binary: &Path,
     input: &[u8],
     artifacts: &[FrozenReviewArtifact],
-    role: HarnessRole,
+    role_schema: (HarnessRole, &str),
     limits: &RoleLifecycleLimits,
     cancelled: &AtomicBool,
     sink: Option<&RoleObservations>,
 ) -> Result<(ReportedRoleLifecycle, RoleExecutionOutcome)> {
+    let (role, schema) = role_schema;
     use std::os::unix::{
         fs::OpenOptionsExt as _,
         process::{CommandExt as _, ExitStatusExt as _},
@@ -753,7 +918,7 @@ fn run_codex_process_observed(
     let directory = CodexDirectory::create()?;
     let image_paths = materialize_review_artifacts(&directory.0, artifacts)?;
     let schema_path = directory.0.join("outcome-schema.json");
-    let schema = codex_output_schema().as_bytes();
+    let schema = schema.as_bytes();
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -763,6 +928,8 @@ fn run_codex_process_observed(
         .map_err(|error| {
             NativeHarnessError::io("write Codex output schema", &schema_path, error)
         })?;
+    let launcher_identity = ExecutableIdentity::inspect(binary);
+    let adapter_identity = ExecutableIdentity::adapter();
     let started_at_millis = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -809,6 +976,11 @@ fn run_codex_process_observed(
         input_bytes: input.len(),
         delivered_bytes: 0,
         terminal_state: None,
+        child_pid: None,
+        process_group: None,
+        process_exit: Default::default(),
+        launcher_identity,
+        adapter_identity,
     };
     let mut command = process::Command::new(binary);
     command
@@ -838,10 +1010,13 @@ fn run_codex_process_observed(
         .map_err(|error| NativeHarnessError::io("start Codex role", binary, error))?;
     let group =
         i32::try_from(child.id()).expect("a Unix child PID must fit the native signed pid_t");
+    observations.child_pid = Some(child.id());
+    observations.process_group = Some(group);
     let mut process = CodexProcess {
         child,
         group,
         cleaned: false,
+        exit_observation: observations.process_exit.clone(),
     };
     let mut stdin = process.child.stdin.take();
     let mut stdout = process.child.stdout.take();
@@ -981,6 +1156,7 @@ fn run_codex_process_observed(
         if status.is_none() {
             match process.child.try_wait() {
                 Ok(Some(exit)) => {
+                    observations.process_exit.set(Some(exit));
                     status = Some(exit);
                     progressed = true;
                 }
@@ -1177,6 +1353,121 @@ fn run_codex_process_observed(
 mod observation_tests {
     use super::*;
     #[test]
+    fn rejected_events_cannot_replace_last_accepted_progress() {
+        let mut native = CodexNativeOutput::default();
+        let item = serde_json::json!({"type":"item.started","item":{"type":"command_execution","id":"private-item","command":"private-command","aggregated_output":"private-output","exit_code":null,"status":"in_progress"}});
+        assert!(native.observe(item.to_string().as_bytes(), 1).is_err());
+        assert!(native.progress.last_event.is_none());
+        native
+            .observe(
+                br#"{"type":"thread.started","thread_id":"private-thread"}"#,
+                2,
+            )
+            .unwrap();
+        assert!(native.observe(item.to_string().as_bytes(), 3).is_err());
+        assert_eq!(native.progress.last_event, Some("thread.started"));
+        assert_eq!(native.progress.last_event_at_millis, Some(2));
+        assert!(native.progress.last_tool_status.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn error_cleanup_preserves_observed_exit_status() {
+        use std::os::unix::process::CommandExt as _;
+        let child = process::Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let exit_observation = std::rc::Rc::new(std::cell::Cell::new(None));
+        let mut process = CodexProcess {
+            group: i32::try_from(child.id()).unwrap(),
+            child,
+            cleaned: false,
+            exit_observation: exit_observation.clone(),
+        };
+        // Deterministically make the later cleanup's try_wait observe an exit.
+        process.child.wait().unwrap();
+        drop(process);
+        assert_eq!(exit_observation.get().and_then(|exit| exit.code()), Some(7));
+    }
+
+    #[test]
+    fn progress_retains_allowlisted_metadata_without_command_or_response() {
+        let mut native = CodexNativeOutput::default();
+        let events = [
+            serde_json::json!({"type":"thread.started","thread_id":"private-thread"}),
+            serde_json::json!({"type":"turn.started"}),
+            serde_json::json!({"type":"item.started","item":{"type":"command_execution","id":"private-item","command":"private-command","aggregated_output":"private-output","exit_code":null,"status":"in_progress"}}),
+            serde_json::json!({"type":"item.completed","item":{"type":"command_execution","id":"private-item","command":"private-command","aggregated_output":"private-output","exit_code":17,"status":"failed"}}),
+            serde_json::json!({"type":"item.completed","item":{"type":"agent_message","id":"private-message","text":"private-response"}}),
+        ];
+        for (at, event) in events.iter().enumerate() {
+            native
+                .observe(event.to_string().as_bytes(), at as u64)
+                .unwrap();
+        }
+        let value = serde_json::to_value(&native.progress).unwrap();
+        assert_eq!(value["last_event"], "item.completed");
+        assert_eq!(value["last_event_at_millis"], 4);
+        assert_eq!(value["last_item_kind"], "agent_message");
+        assert_eq!(value["last_tool_status"], "failed");
+        assert_eq!(value["last_tool_exit_code"], 17);
+        assert!(!value.to_string().contains("private-"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_retains_running_tool_and_process_identity_without_payload() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = CodexDirectory::create().unwrap();
+        let binary = directory.0.join("fake-codex");
+        let events = [
+            serde_json::json!({"type":"thread.started","thread_id":"private-thread"}),
+            serde_json::json!({"type":"turn.started"}),
+            serde_json::json!({"type":"item.started","item":{"type":"command_execution","id":"private-item","command":"private-command","aggregated_output":"private-output","exit_code":null,"status":"in_progress"}}),
+        ].map(|value| value.to_string()).join("\n");
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{events}'\nexec sleep 10\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let sink = RoleObservations::default();
+        let limits = RoleLifecycleLimits {
+            max_role_execution_millis: 1000,
+            max_role_grace_millis: 100,
+            max_role_close_millis: 500,
+            max_total_role_millis: 1600,
+        };
+        let (_, outcome) = run_codex_process_observed(
+            &binary,
+            b"[]",
+            &[],
+            (HarnessRole::Writer, codex_output_schema()),
+            &limits,
+            &AtomicBool::new(false),
+            Some(&sink),
+        )
+        .unwrap();
+        assert_eq!(outcome, RoleExecutionOutcome::TimedOut);
+        let values = sink.0.lock().unwrap();
+        assert_eq!(values.len(), 1);
+        let value = serde_json::to_value(&values[0]).unwrap();
+        assert_eq!(value["progress"]["last_event"], "item.started");
+        assert_eq!(value["progress"]["last_tool_status"], "in_progress");
+        assert!(value["child_pid"].as_u64().is_some());
+        assert_eq!(value["child_pid"], value["process_group"]);
+        assert!(value["process_exit_signal"].as_i64().is_some());
+        assert_eq!(
+            value["launcher_identity"]["size_bytes"],
+            fs::metadata(&binary).unwrap().len()
+        );
+        assert!(!value.to_string().contains("private-"));
+        assert!(value["usage"].is_null());
+    }
+
+    #[test]
     fn observation_is_content_free_and_unknown_usage_stays_null() {
         let observation = CodexObservation {
             kind: "native-role-observation",
@@ -1186,14 +1477,24 @@ mod observation_tests {
             delivered_input_bytes: 40,
             reported_terminal_state: None,
             usage: None,
+            progress: CodexProgress::default(),
+            child_pid: None,
+            process_group: None,
+            process_exit_code: None,
+            process_exit_signal: None,
+            launcher_identity: None,
+            adapter_identity: None,
+            approval_state: "not-exposed-by-supported-events",
+            model_selection: "inherited-cli-configuration-unobserved",
         };
         let mut bytes = Vec::new();
         observation.write(&mut bytes);
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(value["usage"].is_null());
         assert_eq!(value["delivered_input_bytes"], 40);
-        assert_eq!(value.as_object().unwrap().len(), 7);
-        assert!(bytes.len() < 1024);
+        assert!(value["process_exit_code"].is_null());
+        assert_eq!(value["approval_state"], "not-exposed-by-supported-events");
+        assert!(bytes.len() < 2048);
         struct Broken;
         impl Write for Broken {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -1263,7 +1564,7 @@ mod observation_tests {
                 &binary,
                 b"[]",
                 &[],
-                HarnessRole::Reviewer,
+                (HarnessRole::Reviewer, codex_output_schema()),
                 &limits,
                 &AtomicBool::new(false),
                 Some(&sink),
