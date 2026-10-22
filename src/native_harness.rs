@@ -1439,6 +1439,68 @@ mod tests {
     use context_core::harness::{ContextSource, RoleInvocationContract};
 
     #[test]
+    fn codex_verification_unit_schema_matches_core_and_reuses_one_definition() {
+        let schema: serde_json::Value = serde_json::from_str(codex_output_schema()).unwrap();
+        let values = schema["$defs"]["verification-unit"]["enum"]
+            .as_array()
+            .unwrap();
+        assert_eq!(values.len(), 28);
+        for value in values {
+            let unit: context_core::harness::VerificationUnit =
+                serde_json::from_value(value.clone()).expect("schema must use a real Core unit");
+            assert_eq!(serde_json::to_value(unit).unwrap(), *value);
+            let response = serde_json::json!({"outcome":{"status":"completed","result":{
+                "role":"verifier", "subject_evidence":[], "requirement_results":[{
+                    "unit":value, "passed":true, "detail":"synthetic", "evidence":[]
+                }]
+            }}});
+            let native = CodexNativeOutput {
+                message: Some(response.to_string()),
+                terminal: Some((1, true)),
+                ..CodexNativeOutput::default()
+            };
+            assert!(native.outcome(true).is_ok());
+        }
+        assert!(!values.contains(&serde_json::json!("not-a-unit")));
+        for pointer in [
+            "/$defs/evidence/anyOf/2/properties/unit/$ref",
+            "/$defs/requirement/properties/unit/$ref",
+            "/$defs/learning/properties/failed_unit/$ref",
+            "/$defs/request/properties/blocked_verification_units/items/$ref",
+            "/$defs/promotion-origin/anyOf/1/properties/failed_unit/$ref",
+        ] {
+            assert_eq!(
+                schema.pointer(pointer).unwrap(),
+                "#/$defs/verification-unit"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_role_decode_diagnostics_never_echo_response_content() {
+        for (message, category) in [
+            ("{private-marker", "invalid JSON syntax"),
+            (
+                r#"{"outcome":{"status":"private-marker"}}"#,
+                "incompatible with Core output types",
+            ),
+            (
+                r#"{"outcome":{"status":"completed","result":{"role":"verifier","subject_evidence":[],"requirement_results":[{"unit":"private-marker","passed":true,"detail":"synthetic","evidence":[]}]}}}"#,
+                "incompatible with Core output types",
+            ),
+        ] {
+            let native = CodexNativeOutput {
+                message: Some(message.into()),
+                terminal: Some((1, true)),
+                ..CodexNativeOutput::default()
+            };
+            let error = native.outcome(true).unwrap_err();
+            assert!(error.contains(category));
+            assert!(!error.contains("private-marker"));
+        }
+    }
+
+    #[test]
     fn codex_promotion_intent_schema_supports_current_career_surfaces() {
         let schema: serde_json::Value =
             serde_json::from_str(codex_output_schema()).expect("native schema must parse");
