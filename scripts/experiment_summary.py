@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Read small decision cards; explicit integrity and retention checks never execute models."""
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import sys
 
@@ -122,7 +125,8 @@ def render(document, state):
             f'{row["independent_incidents"]}/{row["comparable_incidents"]} · {row["model_calls"]}',
             row["result"] + " / " + row["improvement"], row["adoption"],
             f'요약검증={row["historical_summary_verified"]}; {row["applicability"]}; '
-            f'실전완료증거={row["real_completion_evidence"]}'))) + " |")
+            f'실전완료증거={row["real_completion_evidence"]}'
+            + ('; 현재 적용성 재검증 필요' if row['applicability'] == 'stale' else '')))) + " |")
     for row in rows:
         result += ["", f'## {row["id"]}', "",
                    f'증거 충분성: {row["evidence"]}',
@@ -143,8 +147,8 @@ def render(document, state):
                "새 입력/코드/평가기준, 모순, 재현 요청, 검증 누락이 있을 때만 필요한 증거를 명시적으로 검사한다.",
                "원장 전체 재독은 기본값이 아니다. 재채점·캐시 재생성·과거 실행 재현은 별개 능력이다. "
                "증거가 삭제되면 해당 능력 상실을 먼저 표시하고 과거 검증 기록은 보존한다.",
-               "보관 분류와 용량은 sibling manifest의 retention에 있다. GC는 dry-run만 제공하며 "
-               "실제 삭제·이동·압축은 수행하지 않는다.", ""]
+               "보관 분류와 용량은 sibling manifest의 retention에 있다. 분류는 dry-run이며 "
+               "격리·복원은 별도 명시 호출이며 영구 삭제·압축은 제공하지 않는다.", ""]
     return "\n".join(result)
 
 
@@ -176,10 +180,9 @@ def integrity(root, document, inventory):
             "problems": problems, "meaning": "Byte integrity only; no truth or model rerun proof"}
 
 
-def retention(root, document, inventory):
+def protected_paths(root, document, inventory):
     require(root.is_dir(), "Archive unavailable; do not create a fallback")
     policy = inventory["retention"]
-    files = index_files(root, inventory)
     graph = policy["dependencies"]
     for name, dependencies in graph.items():
         local_path(root, name)
@@ -197,6 +200,12 @@ def retention(root, document, inventory):
             continue
         protected.add(name)
         pending.extend(graph.get(name, []))
+    return protected
+
+
+def retention(root, document, inventory):
+    files = index_files(root, inventory)
+    protected = protected_paths(root, document, inventory)
     missing = sorted(name for name in protected if not local_path(root, name).is_file())
     groups = {}
     for item in files.values():
@@ -216,16 +225,241 @@ def retention(root, document, inventory):
             "physical_recoverable_bytes": None}
 
 
+@contextmanager
+def archive_lock(root, quarantine=None):
+    # One cooperating owner; never replace or remove a lock file/inode.
+    require(root.is_absolute() and root == root.resolve() and root.is_dir(),
+            "Archive must be an existing canonical absolute directory")
+    if quarantine is not None:
+        require(quarantine.parent == root.parent and quarantine != root
+                and quarantine == quarantine.resolve(),
+                "Quarantine must be a canonical sibling of the archive")
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def write_receipt(quarantine, receipt):
+    atomic_write(quarantine / "receipt.json", encode(receipt))
+    sync_directory(quarantine)
+
+
+def checked_file(path, expected):
+    require(path.is_file() and not path.is_symlink(), "Missing or unsafe payload: " + str(path))
+    stat = path.stat()
+    require(stat.st_size == expected["bytes"]
+            and hashlib.sha256(read_bytes(path)).hexdigest() == expected["sha256"],
+            "Payload bytes changed: " + str(path))
+    return stat
+
+
+def restore_probe(source, quarantine, expected):
+    # A separate inode exercises byte restoration before either source name is removed.
+    temporary = local_path(quarantine, ".restore-check")
+    if temporary.exists():
+        require(temporary.is_file() and temporary.stat().st_nlink == 1,
+                "Unsafe abandoned restore probe")
+        temporary.unlink()  # reserved regenerable scratch in this owned batch, including partial copies
+    try:
+        with temporary.open("xb") as target, source.open("rb") as original:
+            data = original.read(expected["bytes"] + 1)
+            require(len(data) == expected["bytes"], "Payload size changed during restore probe")
+            target.write(data)
+            target.flush()
+            os.fsync(target.fileno())
+            os.fsync(original.fileno())
+        checked_file(temporary, expected)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def read_receipt(root, quarantine):
+    receipt = decode_json(read_bytes(local_path(quarantine, "receipt.json")))
+    require(receipt["root"] == str(root)
+            and (receipt["archive_device"], receipt["archive_inode"])
+                == (root.stat().st_dev, root.stat().st_ino)
+            and receipt["status"] in
+            {"prepared", "quarantined", "restored"}, "Receipt belongs to another archive/state")
+    entries = receipt["files"]
+    require(isinstance(entries, list) and entries, "Empty receipt")
+    names = [entry["path"] for entry in entries]
+    require(len(names) == len(set(names)), "Duplicate receipt path")
+    for entry in entries:
+        local_path(root, entry["path"])
+        local_path(quarantine, "files/" + entry["path"])
+        require(count(entry["bytes"]) and isinstance(entry["sha256"], str)
+                and len(entry["sha256"]) == 64, "Invalid receipt payload")
+    return receipt
+
+
+def payload_pair(root, quarantine, entry):
+    source = local_path(root, entry["path"])
+    stored = local_path(quarantine, "files/" + entry["path"])
+    require(source.exists() or stored.exists(), "Both payload locations are missing")
+    for path in (source, stored):
+        if path.exists():
+            stat = checked_file(path, entry)
+            require(stat.st_dev == entry["device"] and stat.st_ino == entry["inode"],
+                    "Payload identity changed: " + str(path))
+    if source.exists() and stored.exists():
+        require(source.samefile(stored), "Destination collision; never overwrite")
+    return source, stored
+
+
+def current_inputs(root, manifest):
+    document_bytes = read_bytes(local_path(root, "completion-outcome.json"))
+    manifest_bytes = read_bytes(manifest)
+    return (decode_json(document_bytes), decode_json(manifest_bytes),
+            hashlib.sha256(document_bytes).hexdigest(), hashlib.sha256(manifest_bytes).hexdigest())
+
+
+def quarantine_files(root, manifest, quarantine, selected, expected_document, expected_manifest):
+    """Explicit duplicates only. No recipe execution, permanent deletion, or index rewriting."""
+    with archive_lock(root, quarantine):
+        document, inventory, document_digest, manifest_digest = current_inputs(root, manifest)
+        require((document_digest, manifest_digest) == (expected_document, expected_manifest),
+                "Archive metadata changed; review the new selection")
+        report = retention(root, document, inventory)
+        require(report["status"] == "classified" and integrity(root, document, inventory)["status"]
+                == "verified_required_bytes", "Protected evidence is unavailable or changed")
+        require(selected and len(selected) == len(set(selected)), "Select unique candidate paths explicitly")
+        require(set(selected) <= set(report["unreferenced_candidates"]), "Selected path is protected or not a candidate")
+        protected = protected_paths(root, document, inventory)
+        files = index_files(root, inventory)
+        entries = []
+        for name in sorted(selected):
+            item = files[name]
+            canonical = item.get("canonical_duplicate_of")
+            require(canonical in protected and canonical not in selected,
+                    "Candidate needs an independently retained canonical duplicate")
+            require(canonical in files and files[canonical]["sha256"] == item["sha256"],
+                    "Canonical duplicate binding is missing or different")
+            checked_file(local_path(root, canonical), item)
+            entries.append(dict(path=name, bytes=item["bytes"], sha256=item["sha256"]))
+        new_batch = not quarantine.exists()
+        if not new_batch:
+            receipt = read_receipt(root, quarantine)
+            require(receipt["status"] != "restored", "Restored batch cannot be quarantined again")
+            require(receipt["document_sha256"] == document_digest
+                    and receipt["manifest_sha256"] == manifest_digest
+                    and [{k:entry[k] for k in ("path", "bytes", "sha256")}
+                         for entry in receipt["files"]] == entries, "Receipt selection changed")
+        else:
+            for entry in entries:
+                stat = checked_file(local_path(root, entry["path"]), entry)
+                require(stat.st_nlink == 1 and stat.st_dev == root.stat().st_dev,
+                        "Source must be an unaliased file on the archive device")
+                entry.update(device=stat.st_dev, inode=stat.st_ino)
+            receipt = dict(root=str(root), archive_device=root.stat().st_dev,
+                           archive_inode=root.stat().st_ino, document_sha256=document_digest,
+                           manifest_sha256=manifest_digest, status="prepared", files=entries)
+        protected_identities = set()
+        for name in protected:
+            stat = local_path(root, name).stat()
+            protected_identities.add((stat.st_dev, stat.st_ino))
+        selected_identities = [(entry["device"], entry["inode"]) for entry in receipt["files"]]
+        require(not protected_identities.intersection(selected_identities),
+                "Selected filesystem entry is protected through another path")
+        require(len(selected_identities) == len(set(selected_identities)),
+                "Selected paths alias the same filesystem entry")
+        if new_batch:
+            quarantine.mkdir(mode=0o700)
+            write_receipt(quarantine, receipt)
+            sync_directory(quarantine.parent)
+        require(quarantine.stat().st_dev == root.stat().st_dev, "Cross-device quarantine is unsupported")
+        # Preflight the whole batch before modifying any source name, including on resume.
+        for entry in receipt["files"]:
+            payload_pair(root, quarantine, entry)
+        for entry in receipt["files"]:
+            source, stored = payload_pair(root, quarantine, entry)
+            if not stored.exists():
+                stored.parent.mkdir(parents=True, exist_ok=True)
+                os.link(source, stored, follow_symlinks=False)  # fails rather than overwriting
+                sync_directory(stored.parent)
+            checked_file(stored, entry)
+            restore_probe(stored, quarantine, entry)
+        require(integrity(root, document, inventory)["status"] == "verified_required_bytes",
+                "Protected evidence changed during restore probes")
+        for entry in receipt["files"]:
+            require(current_inputs(root, manifest)[2:] == (document_digest, manifest_digest),
+                    "Archive metadata changed during quarantine; restore before reselection")
+            checked_file(local_path(root, files[entry["path"]]["canonical_duplicate_of"]), entry)
+            source, stored = payload_pair(root, quarantine, entry)
+            if source.exists():
+                require(source.stat().st_nlink == 2, "Unexpected additional payload alias")
+                source.unlink()
+                sync_directory(source.parent)
+        receipt["status"] = "quarantined"
+        write_receipt(quarantine, receipt)
+        return dict(status="quarantined", files=len(receipt["files"]),
+                    restore_verified=True, permanent_deleted_files=0, actual_savings_bytes=0)
+
+
+def restore_files(root, quarantine):
+    """Restore without overwriting; also recovers any prepared/partially moved batch."""
+    with archive_lock(root, quarantine):
+        receipt = read_receipt(root, quarantine)
+        for entry in receipt["files"]:
+            source, stored = payload_pair(root, quarantine, entry)
+            require(source.parent.is_dir(), "Original parent is missing; resolve before restoring")
+            if stored.exists():
+                restore_probe(stored, quarantine, entry)
+        for entry in receipt["files"]:
+            source, stored = payload_pair(root, quarantine, entry)
+            if not source.exists():
+                os.link(stored, source, follow_symlinks=False)
+                sync_directory(source.parent)
+            checked_file(source, entry)
+            if stored.exists():
+                require(source.samefile(stored), "Restore collision")
+                stored.unlink()
+                sync_directory(stored.parent)
+        receipt["status"] = "restored"
+        write_receipt(quarantine, receipt)
+        return dict(status="restored", files=len(receipt["files"]), permanent_deleted_files=0)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("render", "integrity", "retention"))
+    parser.add_argument("action", choices=("render", "integrity", "retention", "quarantine", "restore"))
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--quarantine", type=Path, help="Explicit batch directory beside the archive")
+    parser.add_argument("--select", action="append", help="Exact candidate path; repeat for each selected file")
+    parser.add_argument("--expected-document-sha256")
+    parser.add_argument("--expected-manifest-sha256")
     args = parser.parse_args(argv)
     try:
         require(args.root.is_dir(), "Archive unavailable; no fallback is allowed")
-        # Only these two small files are used by the normal path.
+        if args.action in {"quarantine", "restore"}:
+            require(args.quarantine is not None and args.output is None, "Explicit quarantine directory required; no output file allowed")
+            if args.action == "quarantine":
+                require(args.manifest is not None, "Explicit manifest is required")
+                result = quarantine_files(args.root, args.manifest, args.quarantine, args.select,
+                                          args.expected_document_sha256, args.expected_manifest_sha256)
+            else:
+                require(args.select is None and args.manifest is None
+                        and args.expected_document_sha256 is None and args.expected_manifest_sha256 is None,
+                        "Restore uses its receipt; selection and manifest options are not accepted")
+                result = restore_files(args.root, args.quarantine)
+            sys.stdout.buffer.write(encode(result))
+            return 0
+        require(args.quarantine is None and args.select is None
+                and args.expected_document_sha256 is None and args.expected_manifest_sha256 is None,
+                "Mutation options require quarantine or restore")
+        # Only this small file is used by the normal path.
         document = decode_json(read_bytes(local_path(args.root, "completion-outcome.json")))
         if args.action != "render":
             require(args.manifest is not None, "Explicit manifest is required for evidence checks")
@@ -247,7 +481,8 @@ def main(argv=None):
             require(args.output.resolve() not in protected, "Output collides with retained input")
             require(args.output.parent.resolve() == args.root.resolve(),
                     "Output must stay in the existing archive root")
-            atomic_write(args.output, result)
+            with archive_lock(args.root.resolve()):
+                atomic_write(args.output, result)
         else:
             sys.stdout.buffer.write(result)
         return int(args.action != "render" and

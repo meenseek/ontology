@@ -860,9 +860,31 @@ python3 scripts/experiment_summary.py integrity --root /approved/external/archiv
 python3 scripts/experiment_summary.py retention --root /approved/external/archive --manifest /approved/external/archive.manifest.json
 ```
 
-정상 `render`는 카드 파일만 읽고 raw 원장·inventory를 순회하지 않는다. `integrity`는 명시 요청 시 필수 증거 bytes를 manifest 해시와 대조한다. `retention`은 manifest의 `files`와 `retention.roots/dependencies`로 참조 closure와 파일 존재를 확인하는 dry-run이다. 각 파일의 `retention_class`는 1(현재 최소자료), 2(미결 최소자료), 3(저빈도 보관), 4(중복·캐시·재생성 후보)다. 보존 중인 카드/영수증과 명시한 능력의 필수 참조, 채택/rollback/미결재개/공유fixture/hold를 root로 고정한다. 분류 4라도 참조 중이면 정리 후보에서 제외한다. 필수 root 누락은 차단 상태다. 실제 삭제·이동·압축은 구현하지 않는다.
+정상 `render`는 카드 파일만 읽고 raw 원장·inventory를 순회하지 않는다. `integrity`는 명시 요청 시 필수 증거 bytes를 manifest 해시와 대조한다. `retention`은 manifest의 `files`와 `retention.roots/dependencies`로 참조 closure와 파일 존재를 확인하는 dry-run이다. 각 파일의 `retention_class`는 1(현재 최소자료), 2(미결 최소자료), 3(저빈도 보관), 4(중복·캐시·재생성 후보)다. 보존 중인 카드/영수증과 명시한 능력의 필수 참조, 채택/rollback/미결재개/공유fixture/hold를 root로 고정한다. 분류 4라도 참조 중이면 정리 후보에서 제외한다. 필수 root 누락은 차단 상태다. 분류 호출은 파일을 바꾸지 않는다. 명시적인 격리·복원은 아래 별도 경계를 따르며 영구 삭제·압축은 제공하지 않는다. 입력 JSON과 payload 파일 크기는 재사용하는 `compare_harness.read_bytes/MAX_BYTES` 한도를 따른다.
 
 외장 archive가 없으면 unavailable로 종료하고 대체 경로를 만들지 않는다. 논리 용량·중복 바이트·회수 가능한 물리 용량은 다르다. 이 도구는 검토자의 진실성, 외부 서비스 실제 완료, 자동 버전 감시, 과거 모델 재실행의 재현성을 보증하지 않는다.
+
+#### 복구 가능한 격리·복원
+
+`quarantine`은 현재 카드 파일·manifest의 **원본 bytes SHA-256**, 반복한 `--select` 경로와 기존 archive의 형제 batch 경로를 명시해야 한다. 해시는 선택 검토 이후의 변경을 감지하는 조건이며 승인·진실·서명을 대신하지 않는다. 운영 자료 이동에는 소유자의 별도 범위 승인이 필요하다. 도구가 직접 다른 프로세스의 사용 여부나 참조 원장의 완전성을 확인하지 않으므로 호출자가 단일 소유와 닫힌 참조 범위를 먼저 확인한다.
+
+```bash
+python3 -B scripts/experiment_summary.py quarantine --root /approved/archive \
+  --manifest /approved/archive.manifest.json --quarantine /approved/archive-quarantine \
+  --select cache/duplicate.json \
+  --expected-document-sha256 REVIEWED_DOCUMENT_SHA256 \
+  --expected-manifest-sha256 REVIEWED_MANIFEST_SHA256
+python3 -B scripts/experiment_summary.py restore --root /approved/archive \
+  --quarantine /approved/archive-quarantine
+```
+
+기존 보호 참조 폐쇄와 필수 증거 무결성 검사를 재사용한다. 분류4이면서 보호 참조 밖인 파일만 선택할 수 있고, `canonical_duplicate_of`가 보호 중인 정본을 가리키며 manifest·현재 양쪽 bytes가 같아야 한다. 재생성 가능하다는 선언이나 recipe만으로는 격리하지 않는다. 재생성한 동일 bytes 정본이 보호된 경우 같은 중복 경계를 사용할 수 있다. 현재 채택·롤백·미결·공유·hold는 기존 `retention.roots/dependencies`가 소유하며 격리 기능에 별도 판단 규칙을 복제하지 않는다.
+
+먼저 batch의 `receipt.json`에 입력 해시·archive 디렉터리 식별자·상대경로·크기·SHA·파일 식별자를 고정한다. 선택 파일이 보호 파일이나 다른 선택 경로와 같은 filesystem identity를 공유하면 철자가 달라도 거절한다. 같은 파일시스템의 hard link로 격리 위치를 확보하고 별도 inode에 복사한 복원 검사를 통과한 뒤에만 원래 이름을 제거한다. 실제 payload와 권한·mtime·inode를 유지하고 물리 공간 절감은 주장하지 않는다. archive 디렉터리의 nonblocking lock은 `quarantine`·`restore`와 `render --output`의 쓰기를 직렬화하며, 비협조적 동시 쓰기를 격리하는 sandbox나 별도 장치 백업은 아니다. symlink·기존 hard link·다른 device·기존 목적지 충돌은 거절한다.
+
+중단 시 원래 이름과 격리 이름이 둘 다 있거나 일부만 이동돼도 영수증을 보존한다. 같은 입력·선택으로 `quarantine`을 재개하거나, 현재 카드·manifest가 달라졌으면 먼저 `restore`한다. 복원은 전체 batch의 bytes·식별자·원래 부모 경로를 검사하고 기존 파일을 덮어쓰지 않는다. 완료한 복원은 재호출 가능하고, 복원된 batch를 다시 격리하려면 새 검토·별도 batch가 필요하다. batch 안의 `.restore-check`는 단일 재생성 임시 파일이며 중단된 부분 사본도 다음 복원 검사에서 교체한다. 영수증과 빈 batch 디렉터리는 수동 검토·복구 근거로 남긴다. 전원 손실·저장장치 고장에 대한 복구나 외부 변경과의 전역 원자성을 보증하지 않는다.
+
+의존 버전 변경은 기존 `current_state.decision_bindings` 비교를 그대로 사용한다. 불일치하면 표에 `stale`과 현재 적용성 재검증 필요를 표시하며 과거 카드·검증 영수증을 바꾸지 않는다. 메타데이터 수집·자동 감시는 제공하지 않는다. 합성 검사는 정상 왕복, 보호 참조, 입력·정본 변경, 경로·내용 충돌, 동시 호출과 이동·복원 중단을 다룬다. 합성 통과를 실제 archive 정리 완료로 표현하지 않는다.
 
 ### 사용자가 직접 작성한 원문 저장
 
