@@ -297,6 +297,14 @@ pub(crate) fn codex_role_output_schema(task: &RoleTaskContract) -> Result<String
             !matches!(status, Some("cancelled" | "timed-out"))
                 && (role == "reviewer" || status != Some("missing-context"))
         });
+    if role == "reviewer"
+        && requirements.iter().any(|requirement| {
+            requirement.unit == context_core::harness::VerificationUnit::ProfessionalProfileArtifact
+        })
+    {
+        schema["$defs"]["result"]["properties"]["improvements"]["description"] =
+            serde_json::json!("Core requires a non-empty improvements list to accompany a failed professional-profile-artifact requirement result. Report actual unresolved improvements with that result passed=false and supporting subject evidence; if there are no unresolved improvements, use an empty list. Never mark every requirement passed while reporting improvements, and never suppress a real improvement to obtain acceptance.");
+    }
     if role != "writer" {
         let results = &mut schema["$defs"]["result"]["properties"]["requirement_results"];
         results["minItems"] = requirements.len().into();

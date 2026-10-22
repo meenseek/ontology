@@ -1592,6 +1592,39 @@ mod tests {
     }
 
     #[test]
+    fn codex_role_schema_explains_professional_profile_improvement_consistency() {
+        use context_core::harness::{EvaluationSubjectKind, VerificationRequirement, VerificationUnit};
+        for (units, expected) in [
+            (vec![VerificationUnit::ProfessionalProfileArtifact], true),
+            (vec![VerificationUnit::SourceOwnership], false),
+            (vec![], false),
+        ] {
+            let task = RoleTaskContract::Reviewer {
+                targets: vec![],
+                verification_requirements: units
+                    .into_iter()
+                    .map(|unit| VerificationRequirement {
+                        unit,
+                        owner: VerificationOwner::Role {
+                            role: HarnessRole::Reviewer,
+                        },
+                        subject: EvaluationSubjectKind::FrozenTargets,
+                    })
+                    .collect(),
+            };
+            let schema: serde_json::Value =
+                serde_json::from_str(&codex_role_output_schema(&task).unwrap()).unwrap();
+            let description = &schema["$defs"]["result"]["properties"]["improvements"]["description"];
+            assert_eq!(description.is_string(), expected);
+            if expected {
+                let description = description.as_str().unwrap();
+                assert!(description.contains("passed=false"));
+                assert!(description.contains("never suppress a real improvement"));
+            }
+        }
+    }
+
+    #[test]
     fn codex_role_schema_leaves_runtime_termination_to_supervision() {
         for (task, reviewer) in [
             (
