@@ -840,6 +840,25 @@ SIGINT·SIGTERM·SIGHUP 중단은 자식 프로세스 종료와 중단 기록으
 캐시·설정·내부 저장 위치까지 강제로 바꾸지는 않는다. 임의 명령의 파일 접근을 격리하는
 sandbox가 아니므로 기존 읽기 전용 실행 경로와 권한 경계를 유지한다.
 
+
+### 실험 판단 카드 조회
+
+`scripts/experiment_summary.py`는 기존 실험의 작은 판단 카드에서 표를 생성한다. 모델·Core 역할·정책 반영·자동 삭제에 참여하지 않는다. 공개 합성 반례는 `python3 -B scripts/test_experiment_summary.py`로 실행한다. 호스트의 기존 자원 gate를 적용한다.
+
+`completion-outcome.json`의 `experiment_decisions`가 판단 정본이다. `decision_verifications`는 카드의 정규화 JSON SHA-256, 검토자·시각, `status: verified_summary`를 결속한다. 로컬 검토 기록이며 서명·SLSA 인증은 아니다. `current_state`에는 `observed_at`, `decision_bindings`, `revoked`를 둔다. `snapshot_match`는 제공된 메타데이터 관측 시점의 일치이며 현재 파일 존재나 실제 완료를 재검증했다는 뜻이 아니다. 자동 감시 기능은 없다.
+
+필수 필드와 허용 값은 [도구](../scripts/experiment_summary.py)의 `cards`가 소유한다. `required_evidence`는 필수 archive 상대 경로, `capabilities`는 실제 보유한 재채점·재생성·과거 재현 능력이다. 카드에 원문·비밀값을 복제하지 않는다.
+
+```bash
+python3 scripts/experiment_summary.py render --root /approved/external/archive --output /approved/external/archive/README.md
+python3 scripts/experiment_summary.py integrity --root /approved/external/archive --manifest /approved/external/archive.manifest.json
+python3 scripts/experiment_summary.py retention --root /approved/external/archive --manifest /approved/external/archive.manifest.json
+```
+
+정상 `render`는 카드 파일만 읽고 raw 원장·inventory를 순회하지 않는다. `integrity`는 명시 요청 시 필수 증거 bytes를 manifest 해시와 대조한다. `retention`은 manifest의 `files`와 `retention.roots/dependencies`로 참조 closure와 파일 존재를 확인하는 dry-run이다. 각 파일의 `retention_class`는 1(현재 최소자료), 2(미결 최소자료), 3(저빈도 보관), 4(중복·캐시·재생성 후보)다. 보존 중인 카드/영수증과 명시한 능력의 필수 참조, 채택/rollback/미결재개/공유fixture/hold를 root로 고정한다. 분류 4라도 참조 중이면 정리 후보에서 제외한다. 필수 root 누락은 차단 상태다. 실제 삭제·이동·압축은 구현하지 않는다.
+
+외장 archive가 없으면 unavailable로 종료하고 대체 경로를 만들지 않는다. 논리 용량·중복 바이트·회수 가능한 물리 용량은 다르다. 이 도구는 검토자의 진실성, 외부 서비스 실제 완료, 자동 버전 감시, 과거 모델 재실행의 재현성을 보증하지 않는다.
+
 ### 사용자가 직접 작성한 원문 저장
 
 열람 가능한 기존 `personal`·`work/<slug>` Markdown은 현재 revision·SHA를 함께 제출해 직접 저장할 수 있다. 저장은 충돌 시 중단하고 새 버전·이력·조회 사본을 한 transaction에 기록한다. 최초 출처와 digest는 그대로 남으며 Core 검토·수락으로 표시하지 않는다. `profile`, 제한 자료, 새 원문 생성·삭제와 에이전트가 작성·수정한 내용은 이 경로가 아니라 위 Harness 경계를 따른다. CLI의 읽기·검색은 에이전트도 사용할 수 있지만, `context edit`은 사용자가 직접 작성한 내용을 저장할 때만 사용한다.
