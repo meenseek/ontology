@@ -1593,7 +1593,9 @@ mod tests {
 
     #[test]
     fn codex_role_schema_explains_professional_profile_improvement_consistency() {
-        use context_core::harness::{EvaluationSubjectKind, VerificationRequirement, VerificationUnit};
+        use context_core::harness::{
+            EvaluationSubjectKind, VerificationRequirement, VerificationUnit,
+        };
         for (units, expected) in [
             (vec![VerificationUnit::ProfessionalProfileArtifact], true),
             (vec![VerificationUnit::SourceOwnership], false),
@@ -1614,7 +1616,8 @@ mod tests {
             };
             let schema: serde_json::Value =
                 serde_json::from_str(&codex_role_output_schema(&task).unwrap()).unwrap();
-            let description = &schema["$defs"]["result"]["properties"]["improvements"]["description"];
+            let description =
+                &schema["$defs"]["result"]["properties"]["improvements"]["description"];
             assert_eq!(description.is_string(), expected);
             if expected {
                 let description = description.as_str().unwrap();
