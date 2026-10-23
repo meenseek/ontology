@@ -91,6 +91,15 @@ const GRAPH_SQL: &str = concat!(
  JOIN entities e ON e.scope=s.scope AND e.source_id=s.id
  JOIN source_records r ON r.scope=e.scope AND r.entity_id=e.id
  ORDER BY b.material_id,e.id
+), current_projections AS MATERIALIZED (
+ -- Decode each visible current projection once. Extracting fields from the large
+ -- JSON payload in every consumer repeatedly detoasts bodies, including old revisions.
+ SELECT m.material_id,m.revision,projection.*
+ FROM context_materials m JOIN context_projection_versions p USING(material_id,revision)
+ CROSS JOIN LATERAL jsonb_to_record(p.payload)
+ projection(title text,status text,source_digest text,body text,aliases text,source_references jsonb,ontology jsonb)
+ WHERE NOT m.deleted AND NOT m.restricted
+ AND ($1='personal' OR EXISTS(SELECT 1 FROM bound_materials b WHERE b.material_id=m.material_id))
 ), imported_references AS MATERIALIZED (
  SELECT source.id,source.scope,s.repository,reference.target_path
  FROM entities source JOIN sources s ON s.scope=source.scope AND s.id=source.source_id
@@ -100,7 +109,7 @@ const GRAPH_SQL: &str = concat!(
  AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=s.id)
 ), source_nodes AS MATERIALIZED (
  SELECT e.id,'document' AS kind,
- jsonb_build_object('id',e.id,'scope',e.scope,'kind','document','label',s.path,'title',cp.payload->>'title','repository',s.repository,
+ jsonb_build_object('id',e.id,'scope',e.scope,'kind','document','label',s.path,'title',cp.title,'repository',s.repository,
  'revision',COALESCE(cm.revision,e.revision)::text,'content_digest',COALESCE(cm.content_digest,p.content_digest),'source_revision',p.source_revision,
  'generation',s.generation::text,'status',CASE WHEN cm.material_id IS NULL THEN s.status ELSE 'ok' END,
  'present',CASE WHEN cm.material_id IS NULL THEN p.present ELSE true END,
@@ -117,10 +126,10 @@ const GRAPH_SQL: &str = concat!(
  JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id
  LEFT JOIN context_source_bindings cb ON cb.source_id=s.id
  LEFT JOIN context_materials cm ON cm.material_id=cb.material_id AND NOT cm.deleted AND NOT cm.restricted
- LEFT JOIN context_projection_versions cp ON cp.material_id=cm.material_id AND cp.revision=cm.revision
- CROSS JOIN LATERAL (SELECT CASE WHEN $2<>'' THEN CASE WHEN cm.material_id IS NULL THEN p.content ELSE cp.payload->>'body' END END AS body,
- CASE WHEN $2<>'' THEN lower(CASE WHEN cm.material_id IS NULL THEN p.content ELSE cp.payload->>'body' END) END AS lower_body OFFSET 0) current_body
- CROSS JOIN LATERAL (SELECT CASE WHEN $2<>'' THEN lower(concat(s.path,' ',cm.path,' ',cm.search_text,' ',CASE WHEN cm.material_id IS NULL THEN p.content ELSE concat(cp.payload->>'title',' ',cp.payload->>'body',' ',cp.payload->>'aliases') END,' ',
+ LEFT JOIN current_projections cp ON cp.material_id=cm.material_id AND cp.revision=cm.revision
+ CROSS JOIN LATERAL (SELECT CASE WHEN $2<>'' THEN CASE WHEN cm.material_id IS NULL THEN p.content ELSE cp.body END END AS body,
+ CASE WHEN $2<>'' THEN lower(CASE WHEN cm.material_id IS NULL THEN p.content ELSE cp.body END) END AS lower_body OFFSET 0) current_body
+ CROSS JOIN LATERAL (SELECT CASE WHEN $2<>'' THEN lower(concat(s.path,' ',cm.path,' ',cm.search_text,' ',CASE WHEN cm.material_id IS NULL THEN p.content ELSE concat(cp.title,' ',cp.body,' ',cp.aliases) END,' ',
    (SELECT string_agg(t.name,' ') FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id WHERE et.scope=e.scope AND et.entity_id=e.id))) END AS text OFFSET 0) search_text
  LEFT JOIN LATERAL (
  SELECT hit.at FROM (SELECT term FROM terms ORDER BY ordinality OFFSET 0) ordered_terms
@@ -128,29 +137,29 @@ const GRAPH_SQL: &str = concat!(
  WHERE hit.at>0 LIMIT 1
  ) excerpt_hit ON true
  WHERE e.scope=$1 AND (cb.source_id IS NULL OR (cm.material_id IS NOT NULL AND cm.path LIKE '%.md'
- AND cp.payload->>'status' IN ('searchable','unavailable') AND cp.payload->>'source_digest'=cm.content_digest))
+ AND cp.status IN ('searchable','unavailable') AND cp.source_digest=cm.content_digest))
  UNION ALL
  SELECT 'c_'||m.material_id::text,'document',
  jsonb_build_object('id','c_'||m.material_id::text,'scope',$1,'kind','document',
- 'label',m.path,'title',p.payload->>'title','repository',m.scope,'source_kind','original','context_scope',m.scope,'context_path',m.path,
+ 'label',m.path,'title',p.title,'repository',m.scope,'source_kind','original','context_scope',m.scope,'context_path',m.path,
  'revision',m.revision::text,'content_digest',m.content_digest,'material_id',m.material_id,'purpose_source_revision',m.revision::text,'status','ok','present',true,'current',true,
  'created_at',m.created_at,'content_updated_at',"#,
     original_content_updated_at!("m"),
     r#",
  'excerpt',CASE WHEN excerpt_hit.at IS NOT NULL THEN '…' || substring(content.body FROM greatest(1,excerpt_hit.at-80) FOR 400) || '…' END),
  NOT EXISTS(SELECT 1 FROM terms WHERE strpos(content.search_text,term)=0)
- FROM context_materials m LEFT JOIN context_projection_versions p USING(material_id,revision)
- CROSS JOIN LATERAL (SELECT CASE WHEN $2<>'' THEN p.payload->>'body' END AS body,
- CASE WHEN $2<>'' THEN lower(p.payload->>'body') END AS lower_body,
- CASE WHEN $2<>'' THEN lower(concat(m.path,' ',m.search_text,' ',p.payload->>'title',' ',p.payload->>'body')) END AS search_text OFFSET 0) content
+ FROM context_materials m LEFT JOIN current_projections p USING(material_id,revision)
+ CROSS JOIN LATERAL (SELECT CASE WHEN $2<>'' THEN p.body END AS body,
+ CASE WHEN $2<>'' THEN lower(p.body) END AS lower_body,
+ CASE WHEN $2<>'' THEN lower(concat(m.path,' ',m.search_text,' ',p.title,' ',p.body)) END AS search_text OFFSET 0) content
  LEFT JOIN LATERAL (
  SELECT hit.at FROM (SELECT term FROM terms ORDER BY ordinality OFFSET 0) ordered_terms
  CROSS JOIN LATERAL (SELECT strpos(content.lower_body,term) AS at OFFSET 0) hit
  WHERE hit.at>0 LIMIT 1
  ) excerpt_hit ON true
  WHERE $1='personal' AND NOT m.deleted AND NOT m.restricted
- AND m.path LIKE '%.md' AND p.payload->>'status' IN ('searchable','unavailable')
- AND p.payload->>'source_digest'=m.content_digest
+ AND m.path LIKE '%.md' AND p.status IN ('searchable','unavailable')
+ AND p.source_digest=m.content_digest
  AND NOT EXISTS (SELECT 1 FROM bound_materials b WHERE b.material_id=m.material_id)
  UNION ALL
  SELECT m.id,'memory',jsonb_build_object('id',m.id,'scope',m.scope,'kind','memory',
@@ -212,11 +221,11 @@ const GRAPH_SQL: &str = concat!(
  -- Reject sources outside this graph before expanding JSON. The old target join
  -- expanded the same projection once per target, even for a one-node health read.
  SELECT COALESCE(b.id,'c_'||m.material_id::text) AS source,reference.target_path
- FROM context_materials m JOIN context_projection_versions p USING(material_id,revision)
+ FROM context_materials m JOIN current_projections p USING(material_id,revision)
  LEFT JOIN bound_materials b ON b.material_id=m.material_id
- CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(p.payload->'source_references','[]'::jsonb)) reference(target_path)
+ CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(p.source_references,'[]'::jsonb)) reference(target_path)
  WHERE NOT m.deleted AND NOT m.restricted
- AND p.payload->>'status'='searchable' AND p.payload->>'source_digest'=m.content_digest
+ AND p.status='searchable' AND p.source_digest=m.content_digest
  AND EXISTS(SELECT 1 FROM source_nodes visible WHERE visible.id=COALESCE(b.id,'c_'||m.material_id::text))
 ), links AS MATERIALIZED (
  SELECT left_id AS source,right_id AS target,'related' AS kind,true AS current
@@ -227,8 +236,8 @@ const GRAPH_SQL: &str = concat!(
  UNION ALL SELECT id,value->>'subject_id','subject',true FROM nodes WHERE kind='document' AND value->>'subject_id' IS NOT NULL
  UNION ALL SELECT ea.entity_id,'a_'||ea.area,'area',true FROM entity_areas ea WHERE ea.scope=$1
  UNION ALL SELECT COALESCE(source_bound.id,'c_'||m.material_id::text),COALESCE(target_bound.id,'c_'||target.material_id::text),'related',true
- FROM context_materials m JOIN context_projection_versions p USING(material_id,revision)
- CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(p.payload->'ontology'->'related','[]'::jsonb)) related(source_path)
+ FROM context_materials m JOIN current_projections p USING(material_id,revision)
+ CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(p.ontology->'related','[]'::jsonb)) related(source_path)
  JOIN context_materials target ON target.scope=m.scope AND target.source_path=related.source_path
  LEFT JOIN bound_materials source_bound ON source_bound.material_id=m.material_id
  LEFT JOIN bound_materials target_bound ON target_bound.material_id=target.material_id
@@ -396,7 +405,7 @@ mod tests {
     use sqlx::ConnectOptions;
 
     #[tokio::test]
-    async fn graph_does_not_expand_references_outside_its_scope() {
+    async fn graph_decodes_current_projections_once_within_scope() {
         let url = std::env::var("TEST_DATABASE_URL").expect("explicit isolated PostgreSQL");
         assert!(
             crate::config::database_options(&url)
@@ -433,47 +442,74 @@ mod tests {
         store.apply_import(&[original]).await.unwrap();
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path().canonicalize().unwrap();
-        std::fs::create_dir_all(root.join("profile/notes")).unwrap();
+        std::fs::create_dir_all(root.join("personal/notes")).unwrap();
         for i in 0..24 {
             std::fs::write(
-                root.join(format!("profile/notes/{i}.md")),
+                root.join(format!("personal/notes/{i}.md")),
                 format!("# Reference {i}\n[Next]({}.md)\n", (i + 1) % 24),
             )
             .unwrap();
         }
-        let scopes = ["profile".parse().unwrap()];
+        let scopes = ["personal".parse().unwrap()];
         let expected = inventory(&root, &scopes).unwrap();
         store
             .import_context(&root, &scopes, &expected.inventory_digest)
             .await
             .unwrap();
-        // Both SQL fragments are source constants; fixture values remain bound.
-        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "EXPLAIN (ANALYZE, FORMAT JSON) {GRAPH_SQL}"
-        )))
-        .bind("meenseek")
-        .bind("")
-        .bind(None::<String>)
-        .bind(1_i64)
-        .bind(MAX_GRAPH_LINKS as i64)
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        fn expansions(plan: &Value) -> u64 {
-            let own = if plan["Function Name"] == "jsonb_array_elements_text" {
-                plan["Actual Rows"].as_u64().unwrap() * plan["Actual Loops"].as_u64().unwrap()
+        // An old projection must not add decoding work or reintroduce old links.
+        store
+            .edit_context(
+                &scopes[0],
+                "notes/0.md",
+                1,
+                &digest(b"# Reference 0\n[Next](1.md)\n"),
+                &format!(
+                    "# Current reference\n[Next](1.md)\n{}",
+                    "synthetic body ".repeat(2000)
+                ),
+            )
+            .await
+            .unwrap();
+        fn function_rows(plan: &Value, function: &str) -> u64 {
+            let own = if plan["Function Name"] == function {
+                (plan["Actual Rows"].as_f64().unwrap() * plan["Actual Loops"].as_f64().unwrap())
+                    .round() as u64
             } else {
                 0
             };
-            own + plan["Plans"]
-                .as_array()
-                .map_or(0, |children| children.iter().map(expansions).sum())
+            own + plan["Plans"].as_array().map_or(0, |children| {
+                children
+                    .iter()
+                    .map(|child| function_rows(child, function))
+                    .sum()
+            })
         }
-        assert_eq!(
-            expansions(&plan[0]["Plan"]),
-            0,
-            "unbound native references cannot consume the company graph/health budget"
-        );
+        for (scope, expected_decodes) in [("meenseek", 0), ("personal", 24)] {
+            // Both SQL fragments are source constants; fixture values remain bound.
+            let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) {GRAPH_SQL}"
+            )))
+            .bind(scope)
+            .bind("")
+            .bind(None::<String>)
+            .bind(1_i64)
+            .bind(MAX_GRAPH_LINKS as i64)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            assert_eq!(
+                function_rows(&plan[0]["Plan"], "jsonb_to_record"),
+                expected_decodes,
+                "decode each current in-scope projection once, independent of its history"
+            );
+            if scope == "meenseek" {
+                assert_eq!(
+                    function_rows(&plan[0]["Plan"], "jsonb_array_elements_text"),
+                    0,
+                    "unbound native references cannot consume the company graph/health budget"
+                );
+            }
+        }
         let personal = store
             .graph(GraphQuery {
                 scope: Scope::Personal,
