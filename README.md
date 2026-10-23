@@ -19,6 +19,8 @@ HTTP 서버와 PostgreSQL은 `127.0.0.1`에만 연결한다. 설치된 로컬 �
 
 지식·규칙의 원문과 첨부는 PostgreSQL native store가 소유한다. 같은 material identity 아래 revision과 history를 남기며, 최초 origin과 원문 digest는 수정 뒤에도 보존한다. Native `Create`로 만든 자료를 외부에서 가져온 자료로 표시하지 않는다. 이전 filesystem 사본을 다시 가져와 native 수정을 덮어쓰지 않는다.
 
+과거 원문과 당시 검색 텍스트는 material별 공통 바이트 조각을 공유한다. 각 revision은 순서가 있는 조각 목록을 참조하며, 다른 revision을 거치지 않고 당시의 전체 bytes·SHA를 복원한다. 단일 버전 자료와 새 자료의 첫 버전은 통째로 보관해 조각 메타데이터와 압축 손실을 줄인다. 새 자료의 두 번째 버전부터 조각을 저장해 후속 수정본들과 공유한다. 현재 원문과 검색 projection은 기존 조회 경로를 유지한다. 줄 단위의 작은 수정은 공통 조각을 재사용하지만, 긴 한 줄이나 바이너리에 삽입할 때 같은 절감률을 보장하지 않는다. 저장·복원 계약은 [이력 저장](schema/migrations/020-context-history-sharing.sql), 이전 절차는 [DB 업그레이드](docs/local-operations.md#기존-db-업그레이드)를 따른다.
+
 Git 문서의 원본 소유권은 원래 Git 저장소에 남는다. 허용한 로컬 저장소의 확정 커밋과 정확한 경로에서 앱 조회 사본을 가져온다. Native 자료는 허용한 store·scope·경로의 원문에서 조회 사본을 만든다. 검색·ontology·앱 조회 사본은 모두 파생 projection이며 현재 원문·revision·digest와 결합한다. Projection 재생성은 원문·material ID·revision·이력을 바꾸지 않는다.
 
 Native scope는 `profile`, `personal`, `work/common`, `work/<회사 slug>`다. 앱의 `personal`·`meenseek` 조회 범위와 구별하며, 앱에서 보이는 위치가 원문의 소속을 바꾸지 않는다. 범위를 지정한 읽기와 보존 경계는 [AGENTS.md의 native 원문 조회](docs/local-operations.md#native-원문-보존과-조회)를 따른다.

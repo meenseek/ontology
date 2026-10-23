@@ -35,7 +35,7 @@ async fn expanded_judgment_input_never_calls_memory_or_document_provider() {
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::raw_sql("TRUNCATE document_grouping,document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
+    sqlx::raw_sql("TRUNCATE document_grouping,document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
         .execute(store.pool()).await.unwrap();
     let temp = tempfile::tempdir().unwrap();
     let binary = temp.path().join("codex");

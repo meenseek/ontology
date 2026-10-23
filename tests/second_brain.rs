@@ -1,3 +1,6 @@
+#[path = "support/context_history.rs"]
+mod context_history;
+
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 use ontology::{
     domain::{Error, ImportedRecord, Scope, SourceKind},
@@ -1123,6 +1126,9 @@ async fn capture_search_and_historical_evidence_contract() {
 async fn evidence_migration_preserves_existing_records() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
+    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches")
+        .execute(store.pool()).await.unwrap();
+    context_history::legacy_history(&store).await;
     sqlx::query("TRUNCATE document_subjects,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
     let hash = digest(b"migration-evidence");
     let mut source = ImportedRecord {

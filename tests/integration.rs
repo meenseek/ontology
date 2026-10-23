@@ -1151,7 +1151,7 @@ async fn migration_preserves_baseline_contract() {
 async fn vault_import_contract() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("context reset");
+    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("context reset");
     let temp = tempfile::tempdir().expect("fixture");
     let root = temp.path().canonicalize().expect("root");
     std::fs::create_dir_all(root.join("personal")).expect("scope");
@@ -1203,7 +1203,7 @@ async fn context_http_read_download_scope_and_protection_contract() {
     use tower::ServiceExt;
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
+    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
         .execute(store.pool())
         .await
         .expect("isolated original fixtures");
@@ -1318,7 +1318,7 @@ async fn context_http_read_download_scope_and_protection_contract() {
     assert!(bytes.len() < 1024);
     // Cardinality affects only bounded metadata transfer; a page never prefetches its bodies.
     for size in [0usize, 1, 25] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
+        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
             .execute(store.pool())
             .await
             .expect("reset complete isolated context fixture");

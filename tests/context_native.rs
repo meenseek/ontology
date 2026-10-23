@@ -1,3 +1,6 @@
+#[path = "support/context_history.rs"]
+mod context_history;
+
 #[cfg(test)]
 use harness_fixture::context_fixture;
 
@@ -31,7 +34,7 @@ async fn store() -> Store {
     );
     let store = Store::connect(&url).await.expect("test PG");
     store.initialize().await.expect("007 migration");
-    sqlx::query("TRUNCATE document_grouping,document_subjects,memory_grouping,context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics").execute(store.pool()).await.expect("reset fixture");
+    sqlx::query("TRUNCATE document_grouping,document_subjects,memory_grouping,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics").execute(store.pool()).await.expect("reset fixture");
     store
 }
 fn fixture(count: usize, body: &[u8]) -> (tempfile::TempDir, PathBuf) {
@@ -1285,7 +1288,7 @@ async fn native_provider_rejects_live_ancestors_before_direct_descendant_access(
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for count in [1, 2000] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches")
+        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches")
             .execute(store.pool()).await.expect("owned collision fixture reset");
         let (_fixture, root) = fixture(count, b"# Original");
         import(&store, &root).await;
@@ -1336,7 +1339,7 @@ async fn native_projection_status_and_rebuild_are_atomic_and_batched() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for count in [1, 101] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset");
+        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset");
         let (_fixture, root) = fixture(
             count,
             b"---\nexport: false\naliases: [growth]\n---\n# Native\nGrowth",
@@ -1433,6 +1436,7 @@ async fn native_projection_status_and_rebuild_are_atomic_and_batched() {
 async fn native_migration_007_preserves_006_rows_and_rolls_back_failed_upgrade() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
+    context_history::legacy_history(&store).await;
     let (_fixture, root) = fixture(2, b"# Historical original\nexact bytes");
     import(&store, &root).await;
     // Historical fixture metadata is deliberately not a Core commit/acceptance proof.
@@ -5565,6 +5569,7 @@ async fn native_current_refresh_guard_keeps_history_identity_source_and_transact
 async fn native_migration_012_preserves_all_existing_rows_and_rejects_corrupt_refresh() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
+    context_history::legacy_history(&store).await;
     let (_fixture, root) = fixture(1, b"# Preserve original");
     import(&store, &root).await;
     sqlx::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'; ALTER TABLE memory_grouping DROP COLUMN claim_token; DELETE FROM ontology_migrations WHERE name='014-grouping-claim-ownership.sql'; DROP TABLE document_subjects; DROP TABLE document_subject_history; DROP TABLE subject_history; ALTER TABLE subjects DROP COLUMN definition, DROP COLUMN revision; ALTER TABLE source_records DROP COLUMN reference_paths; DELETE FROM ontology_migrations WHERE name='013-knowledge-taxonomy.sql'; DROP TRIGGER context_projection_immutable ON context_projection_versions; CREATE TRIGGER context_projection_immutable BEFORE UPDATE OR DELETE ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION context_immutable_record(); DROP TRIGGER context_projection_check ON context_projection_versions; CREATE TRIGGER context_projection_check BEFORE INSERT ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION context_projection_validate(); DROP FUNCTION context_projection_refresh_guard(); DELETE FROM ontology_migrations WHERE name='012-context-projection-refresh.sql';").execute(store.pool()).await.expect("owned pre-012 schema");

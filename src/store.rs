@@ -251,6 +251,12 @@ impl Store {
     pub async fn initialize_baseline(&self, baseline: &'static str) -> Result<(), Error> {
         let digest = digest(baseline.as_bytes());
         let mut tx = self.pool.begin().await.map_err(|_| Error::Storage)?;
+        // Schema backfills have a separate finite budget. SET LOCAL restores the
+        // ordinary five-second query limit on commit or rollback.
+        sqlx::query("SET LOCAL statement_timeout = '180s'")
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| Error::Storage)?;
         sqlx::query("SELECT pg_advisory_xact_lock(478310001)")
             .execute(&mut *tx)
             .await
@@ -366,6 +372,10 @@ impl Store {
             (
                 "019-classification-queue-events.sql",
                 include_str!("../schema/migrations/019-classification-queue-events.sql"),
+            ),
+            (
+                "020-context-history-sharing.sql",
+                include_str!("../schema/migrations/020-context-history-sharing.sql"),
             ),
         ];
         if migrations.len() > expected.len() {

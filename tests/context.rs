@@ -173,7 +173,7 @@ async fn store() -> Store {
     );
     let store = Store::connect(&url).await.expect("isolated PostgreSQL");
     store.initialize().await.expect("additive migrations");
-    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
+    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
         .execute(store.pool())
         .await
         .expect("reset synthetic materials only");
@@ -602,7 +602,7 @@ async fn cardinality_limits_and_call_counts_are_explicit() {
     let store = store().await;
     let scopes = [scope("personal")];
     for size in [0usize, 1, 101] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
+        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
             .execute(store.pool())
             .await
             .expect("reset bounded fixture");
@@ -795,7 +795,7 @@ async fn context_discovery_and_selected_bytes_have_bounded_calls() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for size in [0usize, 1, 101] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
+        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
             .execute(store.pool())
             .await
             .expect("isolated fixture reset");
@@ -882,7 +882,7 @@ async fn context_discovery_and_selected_bytes_have_bounded_calls() {
             "three restricted selections each pass the gate without fetching bytes"
         );
     }
-    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_versions, context_manual_edits,context_materials, context_apply_batches")
+    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
         .execute(store.pool())
         .await
         .expect("isolated discovery bound");
@@ -1530,7 +1530,7 @@ async fn current_context_call_budget_is_constant_for_one_and_two_thousand_materi
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for size in [1i64, 2000] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_versions,context_manual_edits,context_materials,context_apply_batches")
+        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches")
             .execute(store.pool())
             .await
             .expect("complete synthetic reset");

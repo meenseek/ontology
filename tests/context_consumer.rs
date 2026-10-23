@@ -1,4 +1,7 @@
 //! Consumer proofs use real PostgreSQL and the retained actual Core fixture boundary.
+#[path = "support/context_history.rs"]
+mod context_history;
+
 use context_core::harness::ContextSource;
 use ontology::{
     context::{ContextScope, inventory},
@@ -32,7 +35,7 @@ async fn store() -> Store {
     );
     let s = Store::connect(&url).await.expect("owned PostgreSQL");
     s.initialize().await.expect("append migrations");
-    sqlx::query("TRUNCATE document_grouping,document_subjects,memory_grouping,context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY").execute(s.pool()).await.expect("owned fixture reset");
+    sqlx::query("TRUNCATE document_grouping,document_subjects,memory_grouping,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY").execute(s.pool()).await.expect("owned fixture reset");
     s
 }
 async fn store_id(s: &Store) -> String {
@@ -304,6 +307,7 @@ async fn context_consumer_identity_and_projection() {
     let _guard = TEST_LOCK.lock().await;
     strict_boundaries();
     let s = store().await;
+    context_history::legacy_history(&s).await;
     let id = store_id(&s).await;
     for n in [1usize, 100] {
         let files: Vec<_> = (0..n)

@@ -39,6 +39,10 @@ cargo run --locked -- init
 
 폐기된 지원 작업공간의 `017-career-workflows.sql`과 migration 등록, 기존 진행 기록은 보존한다. 기능 제거를 이유로 적용된 SQL을 삭제하거나 기존 DB를 다운그레이드하지 않는다.
 
+원문 이력의 공유 저장으로 이전할 때도 위 전체 백업·빈 DB 복원·검증 순서를 따른다. 이전은 기존 이력의 모든 열과 복원 bytes를 대조한 뒤 같은 트랜잭션에서 과거 저장 테이블을 제거한다. 내용, material ID, revision, 출처, 기록 시각과 적용·수동 편집 이력은 보존한다. 미해결 native 적용이 있으면 이전을 거부하므로 먼저 기존 복구 절차로 해결한다. 실패 시 DDL·데이터·migration 기록 전체를 롤백한다. 초기화의 SQL 한도는 180초이고 일반 조회·쓰기의 5초 한도는 유지한다.
+
+이전 후 `context_material_versions`는 같은 열을 제공하는 읽기 view이며, 실제 이력은 `context_material_version_records`, `context_content_blobs`, `context_content_chunks`가 소유한다. 예전 table을 삭제하지 않고 열만 제거하는 방식으로 대체하지 않는다. 운영 적용 전 복원 시험에서 view의 모든 기존 열과 그 밖의 기존 table·row·column을 비교하고, 반복 `init`과 새 형식의 custom dump 복원도 확인한다. 공간은 세 새 table의 heap·TOAST·index 합계를 이전 이력 table의 동일 범위와 비교한다. 현재 원문·projection과 DB 전체 용량은 별도다. 구버전의 `init`·서버는 새 migration을 거부하므로 업그레이드한 실행 파일을 사용하며, 되돌릴 때는 보존된 전체 백업과 그 schema에 맞는 실행 파일로 복구한다.
+
 ### 앱 시작과 종료
 
 ```bash

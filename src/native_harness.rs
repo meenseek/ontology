@@ -5664,7 +5664,7 @@ wait
                 );
                 let store = Store::connect(&url).await.expect("test database");
                 store.initialize().await.expect("test migrations");
-                sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset owned native CLI fixture");
+                sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset owned native CLI fixture");
                 let fixture = context_fixture::build();
                 let root = fixture.path().canonicalize().expect("synthetic fixture root");
                 let scopes = context_fixture::SCOPES

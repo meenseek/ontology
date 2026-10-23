@@ -1,3 +1,6 @@
+#[path = "support/context_history.rs"]
+mod context_history;
+
 use ontology::{
     context::{ContextScope, inventory},
     context_importer::ContextReader,
@@ -177,7 +180,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::raw_sql("TRUNCATE document_grouping_dirty,document_grouping,document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_versions,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
+    sqlx::raw_sql("TRUNCATE document_grouping_dirty,document_grouping,document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
     let temp = tempfile::tempdir().unwrap();
     let binary = temp.path().join("codex");
     let capture = temp.path().join("input");
@@ -207,6 +210,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     let preserved = preserved_sources(&store).await;
     // Exact pre-015 upgrade fixture: preserve originals and decisions, baseline
     // both app scopes even when a company binding has not been created yet.
+    context_history::legacy_history(&store).await;
     sqlx::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'").execute(store.pool()).await.unwrap();
     store.initialize().await.unwrap();
     assert_eq!(preserved_sources(&store).await, preserved);
