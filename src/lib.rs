@@ -16,6 +16,7 @@ pub mod grouping;
 pub mod importer;
 pub mod memory;
 pub mod native_context;
+mod native_diagnostic;
 pub mod native_harness;
 mod native_role;
 pub mod purpose;

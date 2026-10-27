@@ -8158,7 +8158,6 @@ struct RoleControlHead<'a> {
     context_grants: &'a [ContextGrant],
     career_manifest_digest: Option<&'a str>,
     career_claim_lineage: &'a [CareerClaimLineage],
-    #[serde(skip_serializing_if = "Option::is_none")]
     career_review_scope: Option<CareerReviewScope<'a>>,
     career_comparison: Option<crate::career::CareerReviewView>,
     allowed_context_roots: &'a [ContextRoot],

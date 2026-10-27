@@ -1,6 +1,7 @@
 //! One current native snapshot for the declared career inventory, without a source-view copy.
 use crate::{
     domain::Error,
+    native_diagnostic::{Stage, failure, sql_error},
     store::{Store, digest},
 };
 use context_core::{
@@ -84,14 +85,14 @@ pub(crate) fn snapshot(
     }
     request.validate()?;
     configuration.career_source_roots()?;
-    let storage_error = |e: sqlx::Error| HarnessError::InvalidRepository(e.to_string());
+    let storage_error = |stage, error| crate::native_context::source_error(sql_error(stage, error));
     store.count(1);
     handle
         .block_on(
             sqlx::raw_sql("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 .execute(&mut *connection),
         )
-        .map_err(storage_error)?;
+        .map_err(|error| storage_error(Stage::CareerSnapshotBegin, error))?;
     let mut originals = BTreeMap::new();
     let result = (|| {
         let inventory = discover(configuration, Some(store_id), request, |paths| {
@@ -116,7 +117,7 @@ pub(crate) fn snapshot(
     store.count(1);
     handle
         .block_on(sqlx::raw_sql("ROLLBACK").execute(connection))
-        .map_err(storage_error)?;
+        .map_err(|error| storage_error(Stage::CareerSnapshotEnd, error))?;
     result
 }
 
@@ -143,7 +144,7 @@ async fn read_wave(
             CASE WHEN b.bounded AND b.total<=$3 THEN s.content END AS content
         FROM selected s CROSS JOIN bounds b ORDER BY s.source_path COLLATE "C"
     "#).bind(&selected).bind(MAX_CAREER_SOURCE_BYTES as i64).bind(MAX_CAREER_TOTAL_BYTES as i64)
-        .fetch_all(connection).await.map_err(|_| Error::Storage)?;
+        .fetch_all(connection).await.map_err(|error| sql_error(Stage::CareerSelectedWave, error))?;
     let mut originals = Vec::with_capacity(rows.len());
     for row in rows {
         let bytes: Vec<u8> = row
@@ -162,7 +163,7 @@ async fn read_wave(
                 _ => true,
             }
         {
-            return Err(Error::Storage);
+            return Err(failure(Stage::CareerIntegrity, "invalid_data"));
         }
         let path = format!("vault/{}", row.get::<String, _>("source_path"));
         let content = String::from_utf8(bytes).map_err(|_| Error::Invalid)?;
@@ -173,7 +174,7 @@ async fn read_wave(
                 revision: row
                     .get::<i64, _>("revision")
                     .try_into()
-                    .map_err(|_| Error::Storage)?,
+                    .map_err(|_| failure(Stage::CareerRevision, "invalid_data"))?,
                 content_digest,
             },
         };

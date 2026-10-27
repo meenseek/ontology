@@ -2569,7 +2569,10 @@ fn career_review_scope_distinguishes_primary_review_without_changing_other_work(
                 })
                 .unwrap();
             let control: serde_json::Value = serde_json::from_str(head).unwrap();
-            assert!(control.get("career_review_scope").is_none());
+            assert_eq!(
+                control.get("career_review_scope"),
+                Some(&serde_json::Value::Null)
+            );
         }
     }
 }

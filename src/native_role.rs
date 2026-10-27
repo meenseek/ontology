@@ -1495,11 +1495,13 @@ mod observation_tests {
         .unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let sink = RoleObservations::default();
+        // Allow the synthetic launcher to start under parallel-suite load. The
+        // ten-second sleep still exceeds this budget and must be terminated.
         let limits = RoleLifecycleLimits {
-            max_role_execution_millis: 1000,
+            max_role_execution_millis: 5000,
             max_role_grace_millis: 100,
             max_role_close_millis: 500,
-            max_total_role_millis: 1600,
+            max_total_role_millis: 5600,
         };
         let (_, outcome) = run_codex_process_observed(
             &binary,

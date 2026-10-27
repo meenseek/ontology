@@ -2,6 +2,7 @@
 use crate::{
     context::{ContextScope, MAX_FILE_BYTES},
     domain::Error,
+    native_diagnostic::{Stage, failure, sql_error},
     store::{Store, digest},
 };
 use context_core::harness::{
@@ -453,10 +454,10 @@ impl NativeContextSource {
         let mut conn = self
             .connection
             .lock()
-            .map_err(|_| source_error(Error::Storage))?;
+            .map_err(|_| source_error(failure(Stage::SourceMetadata, "lock_poisoned")))?;
         self.store.count(1);
         self.metadata_queries.fetch_add(1, Ordering::Relaxed);
-        let row=self.handle.block_on(sqlx::query("SELECT (SELECT jsonb_build_object('material_id',material_id::text,'revision',revision,'content_digest',content_digest,'deleted',deleted) FROM context_materials WHERE source_path=$1) AS exact,EXISTS(SELECT 1 FROM context_materials WHERE NOT deleted AND ($1='' OR starts_with(source_path,$1||'/'))) AS children,EXISTS(SELECT 1 FROM context_materials WHERE NOT deleted AND source_path=ANY($2)) AS ancestor").bind(&prefix).bind(&ancestors).fetch_one(&mut *conn)).map_err(|_|source_error(Error::Storage))?;
+        let row=self.handle.block_on(sqlx::query("SELECT (SELECT jsonb_build_object('material_id',material_id::text,'revision',revision,'content_digest',content_digest,'deleted',deleted) FROM context_materials WHERE source_path=$1) AS exact,EXISTS(SELECT 1 FROM context_materials WHERE NOT deleted AND ($1='' OR starts_with(source_path,$1||'/'))) AS children,EXISTS(SELECT 1 FROM context_materials WHERE NOT deleted AND source_path=ANY($2)) AS ancestor").bind(&prefix).bind(&ancestors).fetch_one(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceMetadata, error)))?;
         drop(conn);
         if row.get::<bool, _>("ancestor") {
             return Err(source_error(Error::Conflict));
@@ -466,11 +467,11 @@ impl NativeContextSource {
         let state = if let Some(exact) = exact {
             let material_id = exact["material_id"]
                 .as_str()
-                .ok_or_else(|| source_error(Error::Storage))?
+                .ok_or_else(|| source_error(failure(Stage::SourceMetadataDecode, "invalid_data")))?
                 .to_owned();
-            let revision = exact["revision"]
-                .as_u64()
-                .ok_or_else(|| source_error(Error::Storage))?;
+            let revision = exact["revision"].as_u64().ok_or_else(|| {
+                source_error(failure(Stage::SourceMetadataDecode, "invalid_data"))
+            })?;
             if exact["deleted"] == true {
                 StoredSourceState::Deleted {
                     material_id,
@@ -485,7 +486,9 @@ impl NativeContextSource {
                     revision,
                     content_digest: exact["content_digest"]
                         .as_str()
-                        .ok_or_else(|| source_error(Error::Storage))?
+                        .ok_or_else(|| {
+                            source_error(failure(Stage::SourceMetadataDecode, "invalid_data"))
+                        })?
                         .to_owned(),
                 }
             }
@@ -525,7 +528,7 @@ impl NativeContextSource {
         let access = self
             .access
             .lock()
-            .map_err(|_| source_error(Error::Storage))?;
+            .map_err(|_| source_error(failure(Stage::SourceAccess, "lock_poisoned")))?;
         if !matches!(access.gate, SourceGate::SharedHeld | SourceGate::Exclusive) {
             return Err(source_error(Error::ContextPending));
         }
@@ -659,10 +662,10 @@ impl NativeContextSource {
         let mut conn = self
             .connection
             .lock()
-            .map_err(|_| source_error(Error::Storage))?;
+            .map_err(|_| source_error(failure(Stage::SourceVersions, "lock_poisoned")))?;
         self.store.count(1);
         self.metadata_queries.fetch_add(1, Ordering::Relaxed);
-        let rows=self.handle.block_on(sqlx::query("SELECT source_path,material_id::text,revision,content_digest,byte_len,deleted FROM context_materials WHERE source_path=ANY($1) ORDER BY source_path COLLATE \"C\"").bind(&logical).fetch_all(&mut *conn)).map_err(|_|source_error(Error::Storage))?;
+        let rows=self.handle.block_on(sqlx::query("SELECT source_path,material_id::text,revision,content_digest,byte_len,deleted FROM context_materials WHERE source_path=ANY($1) ORDER BY source_path COLLATE \"C\"").bind(&logical).fetch_all(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceVersions, error)))?;
         let states = rows
             .iter()
             .map(|row| Ok((row.get::<String, _>("source_path"), stored_state(row)?)))
@@ -683,8 +686,8 @@ impl NativeContextSource {
     }
 }
 pub(crate) fn stored_state(row: &sqlx::postgres::PgRow) -> HarnessResult<StoredSourceState> {
-    let revision =
-        u64::try_from(row.get::<i64, _>("revision")).map_err(|_| source_error(Error::Storage))?;
+    let revision = u64::try_from(row.get::<i64, _>("revision"))
+        .map_err(|_| source_error(failure(Stage::SourceRevisionDecode, "invalid_data")))?;
     let material_id = row.get("material_id");
     Ok(if row.get("deleted") {
         StoredSourceState::Deleted {
@@ -719,7 +722,7 @@ impl ContextSource for NativeContextSource {
         let mut connection = self
             .connection
             .lock()
-            .map_err(|_| source_error(Error::Storage))?;
+            .map_err(|_| source_error(failure(Stage::CareerInventory, "lock_poisoned")))?;
         crate::career::snapshot(
             &self.store,
             &self.handle,
@@ -774,10 +777,10 @@ impl ContextSource for NativeContextSource {
         let mut conn = self
             .connection
             .lock()
-            .map_err(|_| source_error(Error::Storage))?;
+            .map_err(|_| source_error(failure(Stage::SourceChildren, "lock_poisoned")))?;
         self.store.count(1);
         self.metadata_queries.fetch_add(1, Ordering::Relaxed);
-        let rows:Vec<String>=self.handle.block_on(sqlx::query_scalar("SELECT DISTINCT split_part(CASE WHEN $1='' THEN source_path ELSE substring(source_path FROM length($1)+2) END,'/',1) COLLATE \"C\" AS child FROM context_materials WHERE NOT deleted AND ($1='' OR starts_with(source_path,$1||'/')) ORDER BY child LIMIT $2").bind(prefix).bind((limit+1)as i64).fetch_all(&mut *conn)).map_err(|_|source_error(Error::Storage))?;
+        let rows:Vec<String>=self.handle.block_on(sqlx::query_scalar("SELECT DISTINCT split_part(CASE WHEN $1='' THEN source_path ELSE substring(source_path FROM length($1)+2) END,'/',1) COLLATE \"C\" AS child FROM context_materials WHERE NOT deleted AND ($1='' OR starts_with(source_path,$1||'/')) ORDER BY child LIMIT $2").bind(prefix).bind((limit+1)as i64).fetch_all(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceChildren, error)))?;
         if rows.len() > limit || rows.iter().any(|s| !safe_component(s)) {
             return Err(source_error(Error::Limit));
         }
@@ -813,10 +816,10 @@ impl ContextSource for NativeContextSource {
             let mut conn = self
                 .connection
                 .lock()
-                .map_err(|_| source_error(Error::Storage))?;
+                .map_err(|_| source_error(failure(Stage::SourceBody, "lock_poisoned")))?;
             self.store.count(1);
             self.body_queries.fetch_add(1, Ordering::Relaxed);
-            let row=self.handle.block_on(sqlx::query("SELECT material_id::text,revision,content_digest,byte_len,deleted,CASE WHEN byte_len BETWEEN 0 AND $3 AND octet_length(content)<=$3 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted").bind(scope.as_str()).bind(logical).bind(limit as i64).fetch_optional(&mut *conn)).map_err(|_|source_error(Error::Storage))?.ok_or_else(||source_error(Error::NotFound))?;
+            let row=self.handle.block_on(sqlx::query("SELECT material_id::text,revision,content_digest,byte_len,deleted,CASE WHEN byte_len BETWEEN 0 AND $3 AND octet_length(content)<=$3 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted").bind(scope.as_str()).bind(logical).bind(limit as i64).fetch_optional(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceBody, error)))?.ok_or_else(||source_error(Error::NotFound))?;
             drop(conn);
             let bytes: Vec<u8> = row
                 .get::<Option<Vec<u8>>, _>("content")
@@ -892,13 +895,13 @@ impl Store {
             PgConnection::connect_with(&self.database_options),
         )
         .await
-        .map_err(|_| Error::Storage)?
-        .map_err(|_| Error::Storage)?;
+        .map_err(|_| failure(Stage::ContextConnect, "timeout"))?
+        .map_err(|error| sql_error(Stage::ContextConnect, error))?;
         self.count(1);
         sqlx::raw_sql("SET statement_timeout='5s'; SET lock_timeout='3s'")
             .execute(&mut conn)
             .await
-            .map_err(|_| Error::Storage)?;
+            .map_err(|error| sql_error(Stage::ContextConfigure, error))?;
         self.count(1);
         sqlx::query(if exclusive {
             "SELECT pg_advisory_lock($1)"
@@ -908,12 +911,12 @@ impl Store {
         .bind(CONTEXT_GATE)
         .execute(&mut conn)
         .await
-        .map_err(|_| Error::Storage)?;
+        .map_err(|error| sql_error(Stage::ContextGate, error))?;
         Ok(conn)
     }
     pub(crate) async fn check_context_pending(&self, conn: &mut PgConnection) -> Result<(), Error> {
         self.count(1);
-        let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM context_apply_batches WHERE state IN ('pending','committed'))").fetch_one(&mut *conn).await.map_err(|_|Error::Storage)?;
+        let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM context_apply_batches WHERE state IN ('pending','committed'))").fetch_one(&mut *conn).await.map_err(|error|sql_error(Stage::ContextPending, error))?;
         if pending {
             return Err(Error::ContextPending);
         }
@@ -930,7 +933,7 @@ impl Store {
         let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
             .fetch_one(&mut connection)
             .await
-            .map_err(|_| Error::Storage)?;
+            .map_err(|error| sql_error(Stage::ContextIdentity, error))?;
         let store = self.clone();
         let handle = Handle::current();
         tokio::task::spawn_blocking(move || {
@@ -948,7 +951,7 @@ impl Store {
             }))
         })
         .await
-        .map_err(|_| Error::Storage)?
+        .map_err(|_| failure(Stage::ContextJoin, "join"))?
     }
 }
 

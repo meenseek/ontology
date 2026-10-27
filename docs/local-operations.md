@@ -134,12 +134,20 @@ HTTP 전체 점검 한도는 9초다. 서버의 연결 풀 대기 3초와 SQL �
 1초를 더하며, 응답을 조금씩 보내도 전체 한도를 넘길 수 없다. 정상 조회를 2초에
 끊어 재시도하던 오판을 막되 DB 오류·잘못된 응답은 실패로 유지한다.
 
-승인된 기존 설치에서 native 호출을 할 때는 DB-only 준비 후 별도의 identity를 확인한다.
+승인된 기존 설치의 native 읽기는 `bash scripts/brain.sh context`로 기존 DB에 직접 요청한다.
+Wrapper와 `context`는 Docker 점검·`repair`를 선행하거나 DB·HTTP 서버를 시작하지 않으며,
+schema 초기화·migration도 실행하지 않는다. 먼저 별도 `identity` 요청의 store ID를 대조한 뒤
+호출자가 선택한 정확한 scope/path를 읽는다. 업무와 원문 선택의 승인 범위는 호출자 계약이
+소유하며, 내부 인증에 쓰는 기존 비밀번호를 출력·로그·외부 전송에 노출하지 않는다.
+Wrapper는 기존 `.env`를 읽을 때 그 설정의 stdout·stderr도 숨겨 원문 응답에 섞이지 않게 한다.
+
+연결 실패를 관측했을 때의 DB 준비는 위 읽기와 별도 행동이다.
 `python3 scripts/connection.py repair --target database`는 정상 DB를 그대로 사용하며,
 Docker 엔진이 꺼졌거나 검증된 기존 DB 컨테이너가 멈춘 경우에만 기존 Docker 앱과
 해당 컨테이너를 시작한다. 기존 볼륨·로컬 포트·인증·SQL 이력을 확인한 뒤 JSON과
 종료 코드 0을 반환한다. Docker 준비는 최대 12회, DB 응답은 최대 8회 확인하며
-각 호출의 제한 시간을 유지한다. 준비 후 native `identity`의 store ID도 대조한다.
+각 호출의 제한 시간을 유지한다. 준비가 허용되고 성공했으면 native `identity`의 store ID를
+다시 대조한다. Docker 접근 거절을 DB 중단으로 해석하거나 다른 경로로 우회하지 않는다.
 웹 서버·온톨로지 자동 실행·빌드·자료 갱신은 실행하지 않으며 DB·볼륨을 새로 만들거나
 비밀번호·권한·schema를 바꾸지 않는다. 권한 제한, 기존 자원 누락·불일치와 인증·SQL
 오류는 자동 복구하지 않는다. 실패한 DB 단계만 중단하고 이미 검증된 다른 결과는 보존한다.
@@ -155,6 +163,12 @@ Desktop의 `온톨로지 연결 복구.command`를 열면 macOS 상태 대화상
 Wrong store, missing source, pending apply와 아직 준비되지 않은 projection은 DB outage가
 아니다. 이런 오류를 연결 복구나 이전 자료 재import로 처리하지 않고 해당 source·작업
 상태를 확인한다.
+
+기존 HTTP `/api/context/read`는 현재 native 원문 bytes와 revision·digest를 JSON으로 반환하지만,
+CLI의 raw `read`·store identity 확인을 자동 대체하는 경로는 아니다. 검색 projection은 현재
+원문 revision과 결합해 DB 안에서 준비 상태를 확인하는 파생 자료다. 오프라인 사본의 최신성을
+증명하거나 연결·접근 거절 뒤 정책 원문을 대신하는 계약은 없으며, 이를 읽기 fallback으로
+추가하지 않는다.
 
 ### Mac 로그인 후 온톨로지 자동 실행
 
@@ -644,6 +658,16 @@ revision을 수정하는 수단으로 쓰지 않는다. `inventory`는 DB 없이
 
 ### 검토된 원문 변경
 
+기존 `harness replay`의 출력이 필요 없는 진단에는 `python3 scripts/diagnose_harness.py`
+명령을 사용한다. `--prepared-run`, `--context-view`, `--store-id`, `--workspace-root`와
+호출자의 기존 정책 설정이 필요하며 `--timeout`은 양의 유한 초 단위다(기본 60초).
+이 명령도 기존 replay의 실행 승인과 현재성 검증을 그대로 요구한다. 거절된 실행의
+우회·자동 재시도나 원문 적용을 수행하지 않는다. stdout의 원문 JSON은 버리고 stderr를
+실행 중 읽어, 허용된 단계명·오류 종류·SQLSTATE·OS 코드만 최대 16건 반환한다.
+본문·SQL·경로·credential과 원시 출력 파일은 남기지 않는다. 종료 성공은 CLI 종료 결과이며
+역할 수락이나 원문 저장 완료를 뜻하지 않는다. 합성 회귀는
+`python3 -B -m unittest discover -s tests -p 'test_diagnose_harness.py'`로 실행한다.
+
 기존 `bash scripts/brain.sh harness`는 `ontology harness`를 실행한다. 현재
 명령은 `resolve`, `prepare`, `replay`, `begin`, `advance`, `revise`, `evaluate`,
 `validate`, `apply`, `recover`, `attest-career`, `compose-career`다. 실제 owned source view,
@@ -762,6 +786,11 @@ Gate 해제마다 캐시를 비우며 원문이 변경되면 기존 제출 오�
 각 시도의 역할·경과 시간·직렬화/실제 전달 byte 수·관측 terminal state·실제 Codex usage만
 기록한다. 원문·요청·응답 본문은 기록하지 않는다. 관측되지 않은 usage/state는 `null`이며
 실패·취소에서도 관측된 usage를 보존한다. stderr 저장 후 해당 kind를 선택해 확인한다.
+추가 진단은 마지막 허용 이벤트 종류·시각과 도구 종류·상태·종료 코드, 자식 PID·그룹과
+실제 관측한 종료 코드·signal, launcher와 adapter 경로·크기·수정시각을 보존한다.
+명령·도구 출력·메시지·context ID는 이 진단에 넣지 않는다. 지원 이벤트가 노출하지 않는
+승인 상태와 모델 식별은 확인 불가로 표시한다. CLI의 모델 설정을 바꾸지 않으며 파일
+metadata는 코드 bytes나 실행 뒤의 모든 하위 바이너리를 식별한다는 뜻이 아니다.
 관측은 native 메모리에 역할 종류 수 이내로 모은다. 역할 실행·취소·join과 마지막 durable
 판정을 마친 후 DB 연결과 source view 잠금을 닫고 stdout head와 stderr 관측을 출력한다.
 다른 Harness 명령도 저장·검증·적용·복구를 마친 뒤 잠금을 닫고 결과를 출력한다.

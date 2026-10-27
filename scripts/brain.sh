@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # The existing local environment is trusted shell configuration; stdin remains untouched.
 if [[ -z "${DATABASE_URL:-}" ]]; then
-  if [[ -f .env ]]; then set -a; source .env; set +a; fi
+  if [[ -f .env ]]; then set -a; source .env >/dev/null 2>&1; set +a; fi
   if [[ -z "${DATABASE_URL:-}" ]]; then
     : "${ONTOLOGY_DB_PASSWORD:?Set DATABASE_URL or the existing local ONTOLOGY_DB_PASSWORD}"
     if [[ ! "$ONTOLOGY_DB_PASSWORD" =~ ^[A-Za-z0-9_-]{16,128}$ ]]; then
