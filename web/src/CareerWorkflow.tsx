@@ -9,14 +9,21 @@ type Material = { content: string; metadata: { revision: number; content_digest:
 export const stages: [Stage, string][] = [["reflection", "복기"], ["review", "반영 검토"], ["criteria-apply", "작성 기준 갱신"], ["output-verification", "새 문서 확인"], ["complete", "완료"]];
 const next: Record<Stage, string> = { reflection: "당시 제출 자료와 공고를 확인해 복기를 이어갑니다.", review: "항목별로 반영·보류·기각·기존 기준 해결 여부를 검토합니다.", "criteria-apply": "검토된 변경을 적용하고 실제 작성 기준이 바뀌었는지 확인합니다.", "output-verification": "최신 기준으로 새 문서를 작성하고 반영된 내용을 독립 검토합니다.", complete: "이번 흐름의 검토와 새 문서 확인을 마쳤습니다." };
 export function actionText(flow: Flow): string {
-  if (flow.health === "source-drift") return "원문이 바뀌었습니다. 최신 입력으로 복기를 다시 검토해야 합니다.";
+  if (flow.health === "source-drift") return flow.progress.stage === "complete" ? "완료 후 근거가 바뀌었습니다. 완료 이력을 보존하고 변경된 자료를 다시 검토해야 합니다." : "원문이 바뀌었습니다. 최신 입력으로 복기를 다시 검토해야 합니다.";
   if (flow.health === "native-apply-pending") return "기존 원문 적용의 복구가 필요합니다. 기존 실행 결과를 먼저 확인해야 합니다.";
+  if (flow.health === "apply-confirmation-needed") return "작성 기준 적용의 확인이 남아 있습니다. 연결된 실행의 실제 적용 결과를 먼저 확인해야 합니다.";
+  if (flow.health !== "ready") return "진행 근거를 확인하지 못했습니다. 현재 원문을 다시 확인해야 합니다.";
   if (flow.progress.paused) return "중단된 단계입니다. 재개하면 기존 진행을 이어갑니다.";
   return next[flow.progress.stage];
 }
+export function statusText(flow: Flow): string {
+  const stage = stages.find(([s]) => s === flow.progress.stage)?.[1] || "진행";
+  const health = ({ "source-drift": "근거 변경", "native-apply-pending": "원문 복구 필요", "apply-confirmation-needed": "적용 확인 필요" } as Record<string, string>)[flow.health || ""] || "근거 확인 필요";
+  return `${stage}${flow.health === "ready" ? "" : ` 기록 · ${health}`}${flow.progress.paused ? " · 중단" : ""}`;
+}
 export function StepList({ flow }: { flow: Flow }) {
   const current = stages.findIndex(([stage]) => stage === flow.progress.stage);
-  return <ol className="career-steps" aria-label="지원 결과 처리 단계">{stages.map(([stage, label], index) => <li key={stage} aria-current={stage === flow.progress.stage ? "step" : undefined} className={index < current ? "done" : stage === flow.progress.stage ? "current" : ""}><span>{index < current ? "✓" : index + 1}</span>{stage === "criteria-apply" && ["output-verification", "complete"].includes(flow.progress.stage) && !flow.progress.apply ? "기준 유지 확인" : label}</li>)}</ol>;
+  return <ol className="career-steps" aria-label={flow.health === "ready" ? "지원 결과 처리 단계" : "지원 결과 처리 이력"}>{stages.map(([stage, label], index) => <li key={stage} aria-current={stage === flow.progress.stage && flow.health === "ready" ? "step" : undefined} className={index < current ? "done" : stage === flow.progress.stage ? "current" : ""}><span>{index < current ? "✓" : index + 1}</span>{stage === "complete" && flow.progress.stage === "complete" && flow.health !== "ready" ? "완료 기록 · 근거 확인 필요" : stage === "criteria-apply" && ["output-verification", "complete"].includes(flow.progress.stage) && !flow.progress.apply ? "기준 유지 확인" : label}</li>)}</ol>;
 }
 export function parseFindings(content: string): Finding[] {
   const found = content.split("```career-workflow\n");
@@ -102,7 +109,7 @@ export default function CareerWorkflow() {
       {error && <div role="alert" className="career-alert">{error}<button disabled={loading || busy} onClick={() => void load()}>다시 확인</button></div>}
       {notice && <p role="status" className="career-notice">{notice}</p>}
       {loading ? <p role="status">진행을 확인하고 있습니다…</p> : !flows.length && !error ? <section className="career-empty"><h2>아직 연결된 지원 결과가 없습니다</h2><p>현재 대화에서 회사·직무와 지원 결과를 알려주세요. 실제 제출 자료를 확인한 뒤 복기부터 연결합니다.</p><p>탈락 사유가 공개되지 않았으면 문서에서 확인한 점과 추정을 구분합니다.</p></section> : <div className="career-layout">
-        <nav className="career-cases" aria-label="지원 결과 목록"><h2>최근 지원 결과</h2>{flows.map(item => <button key={item.id} disabled={busy || loading} aria-current={item.id === flow?.id ? "true" : undefined} onClick={() => { if (item.id === selected.current || !Object.keys(choices).length || confirm("검토 의견 초안을 닫고 다른 지원 결과를 확인할까요?")) void load(item.id); }}><strong>{item.application_key}</strong><small>{stages.find(([s]) => s === item.progress.stage)?.[1]}{item.progress.paused ? " · 중단" : ""}</small></button>)}<small>최근 100건까지 표시합니다.</small></nav>
+        <nav className="career-cases" aria-label="지원 결과 목록"><h2>최근 지원 결과</h2>{flows.map(item => <button key={item.id} disabled={busy || loading} aria-current={item.id === flow?.id ? "true" : undefined} onClick={() => { if (item.id === selected.current || !Object.keys(choices).length || confirm("검토 의견 초안을 닫고 다른 지원 결과를 확인할까요?")) void load(item.id); }}><strong>{item.application_key}</strong><small>{statusText(item)}</small></button>)}<small>최근 100건까지 표시합니다.</small></nav>
         {flow && <section className="career-detail" aria-label="선택한 지원 결과"><div className="career-case-heading"><h2>{flow.application_key}</h2>{flow.progress.stage !== "complete" && <button disabled={busy || loading || flow.health === "native-apply-pending" && flow.progress.paused} onClick={() => void mutate(flow.progress.paused ? "resume" : "pause")}>{flow.progress.paused ? "재개" : "중단"}</button>}</div><StepList flow={flow} /><p className="career-next">{actionText(flow)}</p>{reflectionWarning && <p role="status" className="career-notice">{reflectionWarning}</p>}
           {flow.progress.stage !== "complete" && <button disabled={busy} onClick={() => void copy(`지원 결과 흐름 ${flow.id}를 현재 원문과 기존 적용 이력부터 확인해 이어가 주세요. Store identity: ${storeId}. ${actionText(flow)} 새 실행을 중복 시작하지 말고 기존 단계에서 이어가세요.`)}>이어갈 요청 복사</button>}
           {!!flow.progress.criteria?.length && <section><h3>이번에 검토하는 작성 기준</h3><ul>{flow.progress.criteria.map(ref => <li key={ref.logical_path}><RefLink reference={ref} /></li>)}</ul></section>}

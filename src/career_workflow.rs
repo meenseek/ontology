@@ -89,6 +89,11 @@ enum Stage {
     OutputVerification,
     Complete,
 }
+#[derive(Clone, Copy)]
+enum ViewKind {
+    Summary,
+    Detail,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct ApplyBinding {
@@ -398,6 +403,24 @@ async fn health_with(
         },
     }
 }
+async fn workflow_view_with(
+    mut identity: Value,
+    p: &Progress,
+    kind: ViewKind,
+    gate: Result<(), Error>,
+    source: &mut impl SourceReader,
+) -> Result<Value, Error> {
+    identity["health"] = json!(health_with(p, gate, source).await?);
+    match kind {
+        ViewKind::Summary => {
+            identity["progress"] = json!({"stage":p.stage,"paused":p.paused});
+        }
+        ViewKind::Detail => {
+            identity["progress"] = serde_json::to_value(p).map_err(|_| Error::Storage)?;
+        }
+    }
+    Ok(identity)
+}
 async fn review_targets(conn: &mut PgConnection, p: &Progress) -> Result<Vec<String>, Error> {
     let record = record_body(conn, p.review.as_ref().ok_or(Error::Conflict)?).await?;
     let WorkflowRecord::Review { decisions, .. } = parse_record(&record)? else {
@@ -553,13 +576,15 @@ async fn applied(
 }
 
 impl Store {
-    async fn career_health(
+    async fn career_view(
         &self,
         conn: &mut PgConnection,
+        identity: Value,
         p: &Progress,
-    ) -> Result<&'static str, Error> {
+        kind: ViewKind,
+    ) -> Result<Value, Error> {
         let gate = self.context_gate_in(conn, false).await;
-        health_with(p, gate, conn).await
+        workflow_view_with(identity, p, kind, gate, conn).await
     }
     pub async fn list_career_workflows(&self) -> Result<Value, Error> {
         // The progress dashboard remains available while native source reads are recovery-gated.
@@ -618,10 +643,17 @@ impl Store {
             return Err(Error::Baseline);
         }
         if matches!(command, CareerCommand::List { .. }) {
-            let rows=sqlx::query("SELECT id::text,application_key,outcome_key,revision,jsonb_build_object('stage',progress->'stage','paused',progress->'paused') AS progress FROM career_workflows WHERE store_id=$1::uuid ORDER BY updated_at DESC,id LIMIT 100").bind(&store_id).fetch_all(&mut *conn).await.map_err(|_|Error::Storage)?;
-            return Ok(
-                json!({"workflows":rows.iter().map(|r|json!({"id":r.get::<String,_>("id"),"application_key":r.get::<String,_>("application_key"),"outcome_key":r.get::<String,_>("outcome_key"),"revision":r.get::<i64,_>("revision"),"progress":r.get::<Value,_>("progress")})).collect::<Vec<_>>(),"limit":100,"store_id":store_id}),
-            );
+            let rows=sqlx::query("SELECT id::text,application_key,outcome_key,revision,progress FROM career_workflows WHERE store_id=$1::uuid ORDER BY updated_at DESC,id LIMIT 100").bind(&store_id).fetch_all(&mut *conn).await.map_err(|_|Error::Storage)?;
+            let gate = self.context_gate_in(conn, false).await;
+            let mut workflows = Vec::with_capacity(rows.len());
+            for row in rows {
+                let p: Progress =
+                    serde_json::from_value(row.get("progress")).map_err(|_| Error::Storage)?;
+                let identity = json!({"id":row.get::<String,_>("id"),"application_key":row.get::<String,_>("application_key"),"outcome_key":row.get::<String,_>("outcome_key"),"revision":row.get::<i64,_>("revision")});
+                workflows
+                    .push(workflow_view_with(identity, &p, ViewKind::Summary, gate, conn).await?);
+            }
+            return Ok(json!({"workflows":workflows,"limit":100,"store_id":store_id}));
         }
         if let CareerCommand::Start {
             application_key,
@@ -654,9 +686,10 @@ impl Store {
             let existing: Progress =
                 serde_json::from_value(row.get("progress")).map_err(|_| Error::Storage)?;
             start_with(&p, &existing, conn).await?;
-            return Ok(
-                json!({"id":row.get::<String,_>("id"),"revision":row.get::<i64,_>("revision"),"application_key":application_key,"outcome_key":outcome_key,"progress":existing,"health":"ready"}),
-            );
+            let identity = json!({"id":row.get::<String,_>("id"),"revision":row.get::<i64,_>("revision"),"application_key":application_key,"outcome_key":outcome_key});
+            return self
+                .career_view(conn, identity, &existing, ViewKind::Detail)
+                .await;
         }
         let (id, revision) = match &command {
             CareerCommand::Get { id, .. } => (id, None),
@@ -704,12 +737,9 @@ impl Store {
         let application_key: String = row.get("application_key");
         let outcome_key: String = row.get("outcome_key");
         if matches!(command, CareerCommand::Get { .. }) {
-            let health = self.career_health(conn, &p).await?;
-            return Ok(
-                json!({"id":id,"revision":actual,"application_key":application_key,"outcome_key":outcome_key,"progress":p,"health":health}),
-            );
+            let identity = json!({"id":id,"revision":actual,"application_key":application_key,"outcome_key":outcome_key});
+            return self.career_view(conn, identity, &p, ViewKind::Detail).await;
         }
-        let pausing = matches!(command, CareerCommand::Pause { .. });
         if !matches!(command, CareerCommand::Pause { .. }) {
             self.context_gate_in(conn, false).await?;
         }
@@ -1009,14 +1039,8 @@ impl Store {
             return Err(Error::Limit);
         }
         sqlx::query("UPDATE career_workflows SET progress=$2,revision=$3,updated_at=now() WHERE id=$1::uuid").bind(&id).bind(value).bind(next).execute(&mut *conn).await.map_err(|_|Error::Storage)?;
-        let health = if pausing {
-            self.career_health(conn, &p).await?
-        } else {
-            "ready"
-        };
-        Ok(
-            json!({"id":id,"revision":next,"application_key":application_key,"outcome_key":outcome_key,"progress":p,"health":health}),
-        )
+        let identity = json!({"id":id,"revision":next,"application_key":application_key,"outcome_key":outcome_key});
+        self.career_view(conn, identity, &p, ViewKind::Detail).await
     }
 }
 
@@ -1381,5 +1405,73 @@ mod tests {
             health_with(&fixture.progress, Ok(()), &mut Unreadable).await,
             Ok("apply-confirmation-needed")
         );
+    }
+
+    #[tokio::test]
+    async fn mutation_view_matches_get_while_criteria_apply_needs_confirmation() {
+        for paused in [false, true] {
+            let mut fixture = Fixture::complete(true, true);
+            fixture.progress.stage = Stage::CriteriaApply;
+            fixture.progress.paused = paused;
+            fixture.progress.verification = None;
+            fixture.progress.criteria = fixture.progress.initial_criteria.clone();
+            fixture.progress.apply.as_mut().unwrap().apply_id = None;
+            let before = fixture.progress.clone();
+            for gate in [Ok(()), Err(Error::ContextPending)] {
+                let expected = health_with(&fixture.progress, gate, &mut &fixture.originals)
+                    .await
+                    .unwrap();
+                let response = workflow_view_with(
+                    json!({"id":"synthetic", "revision":7}),
+                    &fixture.progress,
+                    ViewKind::Detail,
+                    gate,
+                    &mut &fixture.originals,
+                )
+                .await
+                .unwrap();
+                assert_eq!(response["health"], expected);
+                assert_eq!(response["progress"], serde_json::to_value(&before).unwrap());
+                assert_eq!(response["revision"], 7);
+                assert_eq!(fixture.progress, before);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_view_keeps_completion_history_but_reports_changed_evidence() {
+        for native in [false, true] {
+            for deleted in [false, true] {
+                for leaf in 0..3 {
+                    let mut fixture = Fixture::complete(native, false);
+                    let version = match leaf {
+                        0 => fixture.evidence.clone(),
+                        1 => fixture.outputs[0].1.clone(),
+                        _ => match &fixture.outputs[0].0 {
+                            Some(artifact) => artifact.clone(),
+                            None => continue,
+                        },
+                    };
+                    let before = fixture.progress.clone();
+                    fixture.originals.drift(&version, deleted);
+                    let response = workflow_view_with(
+                        json!({"id":"synthetic", "revision":7}),
+                        &fixture.progress,
+                        ViewKind::Summary,
+                        Ok(()),
+                        &mut &fixture.originals,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(response["health"], "source-drift");
+                    assert_eq!(
+                        response["progress"],
+                        json!({"stage":"complete","paused":false})
+                    );
+                    assert!(response["progress"].get("verification").is_none());
+                    assert_eq!(fixture.progress, before);
+                }
+            }
+        }
     }
 }
