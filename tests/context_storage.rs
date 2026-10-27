@@ -233,16 +233,37 @@ async fn history_upgrade_preserves_all_old_values_rolls_back_and_shares_small_ed
         reads, 1,
         "the public history read must reconstruct its body once"
     );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(getter))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("DROP SEQUENCE history_test_reads")
+        .execute(store.pool())
+        .await
+        .unwrap();
     // Metadata-only history queries must not need content reconstruction at all.
+    // Roll back the failing getter so later test binaries keep the real function,
+    // regardless of which storage test acquired LOCK last.
+    let mut tx = store.pool().begin().await.unwrap();
     sqlx::raw_sql("CREATE OR REPLACE FUNCTION context_read_content(material uuid,sha text) RETURNS bytea LANGUAGE plpgsql STABLE STRICT AS $$ BEGIN RAISE EXCEPTION 'metadata query reconstructed a body'; END $$;")
-        .execute(store.pool()).await.unwrap();
+        .execute(&mut *tx).await.unwrap();
     let listed: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM context_material_versions WHERE revision>0 AND byte_len>=0",
     )
-    .fetch_one(store.pool())
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(listed, 16);
+    assert_eq!(
+        store
+            .read_context_revision(&scope, "note.md", 1)
+            .await
+            .unwrap()["content"]
+            .as_str()
+            .unwrap(),
+        original
+    );
 }
 
 #[tokio::test]
