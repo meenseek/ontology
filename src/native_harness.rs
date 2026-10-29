@@ -1647,7 +1647,15 @@ fn apply_or_recover(
         };
         let engine =
             command.harness_engine(command.source.root(), workspace, &handle.prepared().plan)?;
-        let engine = command.recorded_engine_for_run(engine, workspace, run)?;
+        let engine = match handle
+            .recorded_source_versions()
+            .map_err(|e| harness_command_error(e, true))?
+        {
+            Some(versions) => engine
+                .with_recorded_career_sources(&versions)
+                .map_err(|e| harness_command_error(e, true))?,
+            None => engine,
+        };
         handle.finish(&engine)
     } else {
         let source = session

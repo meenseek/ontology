@@ -4581,6 +4581,16 @@ impl DurableRecovery<'_> {
         &self.status
     }
 
+    /// The recovery handle already authenticates and locks this exact head.
+    /// Selecting its source epoch must not reopen the same durable lock.
+    pub fn recorded_source_versions(&self) -> HarnessResult<Option<SourceVersionSet>> {
+        self.head
+            .preservation
+            .as_ref()
+            .filter(|p| p.historical_snapshot)
+            .map(|p| reviewed_snapshot::review_versions(&self.prepared, &p.holistic, &p.owners))
+            .transpose()
+    }
     pub fn finish(
         mut self,
         engine: &HarnessEngine,

@@ -14152,9 +14152,19 @@ fn recovery_finalizes_a_source_mutation_interrupted_before_finalization() {
     .expect("interrupted mutation head must decode");
     assert_eq!(persisted_head, validated);
 
-    let (finalized, terminal) =
-        HarnessExecutionRecord::recover_durable(&engine, "run-durable-mutation-crash", None)
-            .expect("recovery must replay the core completion and finalize exactly once");
+    let recovery = HarnessExecutionRecord::open_durable_recovery(
+        &workspace.0,
+        "run-durable-mutation-crash",
+        None,
+    )
+    .unwrap();
+    assert!(
+        recovery.recorded_source_versions().unwrap().is_none(),
+        "source epoch selection must use the held authenticated handle, without reopening its lock"
+    );
+    let (finalized, terminal) = recovery
+        .finish(&engine)
+        .expect("recovery must replay the core completion and finalize exactly once");
     assert_eq!(finalized.state, HarnessExecutionState::Finalized);
     assert!(matches!(
         terminal.attempt_state,
