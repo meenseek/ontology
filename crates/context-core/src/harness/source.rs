@@ -181,6 +181,19 @@ pub trait ContextSource: Send + Sync {
             "source provider has no scoped career discovery preflight".into(),
         ))
     }
+    /// Validate only an explicitly granted readonly owner's facts and all routing
+    /// inputs. Providers without this capability retain the strict full check.
+    fn validate_career_owner_review(
+        &self,
+        configuration: &PolicyConfiguration,
+        comparison: &crate::career::CareerComparison,
+        _owner: &DataOwner,
+    ) -> HarnessResult<()> {
+        if self.career_inventory(configuration, comparison)? != comparison.inventory {
+            return Err(invalid_source("career inventory changed"));
+        }
+        Ok(())
+    }
     fn metadata(&self, relative_path: &Path) -> HarnessResult<SourceMetadata>;
     /// Metadata only; native providers batch selected paths without reading source bodies.
     fn source_versions(&self, paths: &[PathBuf]) -> HarnessResult<Vec<SourceVersion>> {
@@ -192,6 +205,24 @@ pub trait ContextSource: Send + Sync {
                     .ok_or_else(|| invalid_source("bound source path has no stored state"))
             })
             .collect()
+    }
+    fn current_source_versions(&self, paths: &[PathBuf]) -> HarnessResult<Vec<SourceVersion>> {
+        self.source_versions(paths)
+    }
+    /// Read an authoritative stored revision for an explicitly preserved snapshot.
+    /// Current deletion/restriction and path ownership must still be enforced.
+    fn historical_metadata(&self, _version: &SourceVersion) -> HarnessResult<SourceMetadata> {
+        Err(invalid_source(
+            "source provider has no recorded-revision capability",
+        ))
+    }
+    fn open_historical_file(&self, _version: &SourceVersion, _limit: u64) -> HarnessResult<File> {
+        Err(invalid_source(
+            "source provider has no recorded-revision capability",
+        ))
+    }
+    fn recorded_snapshot(&self) -> bool {
+        false
     }
     /// Prepare an authorized, exact file write target in the disposable source view before
     /// its locator is bound. Preserve parent directory identities and stored source state.
@@ -651,8 +682,59 @@ impl HarnessEngine {
         plan: &ResolvedHarnessPlan,
         comparison: Option<&crate::career::CareerComparison>,
     ) -> HarnessResult<SourceVersionSet> {
-        self.vault
-            .bind_source_versions(&self.plan_source_paths(plan, comparison)?)
+        self.bind_role_source_versions(plan, comparison, self.plan_source_paths(plan, comparison)?)
+    }
+
+    fn bind_role_source_versions(
+        &self,
+        plan: &ResolvedHarnessPlan,
+        comparison: Option<&crate::career::CareerComparison>,
+        mut paths: BTreeMap<String, Option<String>>,
+    ) -> HarnessResult<SourceVersionSet> {
+        let mut frozen = BTreeMap::new();
+        if self.vault.store_identity.is_some()
+            && plan.action == HarnessAction::DocumentReview
+            && let ([grant], Some(comparison)) = (plan.context_grants.as_slice(), comparison)
+        {
+            // Keep original unread foreign inventory metadata for exact receipt
+            // reproduction. Every actually read policy, router, target and owned
+            // fact remains current. Grantless holistic/write runs never use this.
+            let mut live = self
+                .plan_source_paths(plan, None)?
+                .into_keys()
+                .collect::<BTreeSet<_>>();
+            live.extend(
+                comparison
+                    .owner_sources(&grant.owner)
+                    .into_iter()
+                    .map(|s| s.path),
+            );
+            for binding in comparison.sources() {
+                if !live.contains(&binding.path)
+                    && paths.contains_key(&binding.path)
+                    && let Some(version) = binding.version
+                {
+                    version.validate()?;
+                    if version.logical_path != binding.path
+                        || !matches!(&version.state,
+                        StoredSourceState::Live {content_digest, ..} if content_digest == &binding.content_digest)
+                    {
+                        return Err(invalid_source("foreign inventory metadata is inconsistent"));
+                    }
+                    paths.remove(&binding.path);
+                    frozen.insert(binding.path, version);
+                }
+            }
+        }
+        let mut set = self.vault.bind_source_versions(&paths)?;
+        frozen.extend(
+            set.versions
+                .into_iter()
+                .map(|v| (v.logical_path.clone(), v)),
+        );
+        set.versions = frozen.into_values().collect();
+        set.validate()?;
+        Ok(set)
     }
 
     fn plan_source_paths(
@@ -754,7 +836,14 @@ impl HarnessEngine {
                 )?;
             }
         }
-        let versions = self.vault.bind_source_versions(&paths)?;
+        let versions = self.bind_role_source_versions(
+            &resolved.plan,
+            resolved
+                .career_composition_manifest
+                .as_ref()
+                .and_then(|m| m.comparison.as_ref()),
+            paths,
+        )?;
         versions.require_superset(&resolved.plan.source_versions)?;
         Ok(versions)
     }

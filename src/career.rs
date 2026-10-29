@@ -54,6 +54,7 @@ impl Store {
                 request,
                 comparison.as_ref(),
                 finalization,
+                None,
             );
             result.map_err(|e| {
                 // Keep bounded diagnostic errors available at the native entrypoint.
@@ -77,6 +78,7 @@ pub(crate) fn snapshot(
     request: CareerDiscoveryRequest,
     comparison: Option<&CareerComparison>,
     finalization: bool,
+    review_owner: Option<&context_core::harness::DataOwner>,
 ) -> Result<CareerQueryResult, HarnessError> {
     if finalization && comparison.is_none() {
         return Err(HarnessError::InvalidRequest(
@@ -105,7 +107,11 @@ pub(crate) fn snapshot(
             Ok(wave)
         })?;
         if let Some(comparison) = comparison {
-            comparison.validate_current(&inventory, &originals, finalization)?;
+            if let Some(owner) = review_owner {
+                comparison.validate_owner_current(&inventory, &originals, owner)?;
+            } else {
+                comparison.validate_current(&inventory, &originals, finalization)?;
+            }
         }
         Ok(CareerQueryResult {
             inventory,

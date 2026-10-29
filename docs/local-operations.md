@@ -630,25 +630,52 @@ store·정책·대상·저장 가능 여부를 검증한 뒤 의미 검토를 �
 `--context-view`, `--workspace-root`, `--store-id`와 호출자의 정책 설정은 기존 native
 명령과 같다. owner가 없으면 receipt 목록도 비어 있다. 원고와 해당 owner의 원천·locator·
 판단·배치·정책이 같고 다른 owner의 비교 메타데이터만 바뀌었다면 원래 receipt를 그대로
-재사용한다. 변경된 owner만 다시 검토하며 holistic은 현재 전체 manifest와 exact receipt refs로
+재사용한다. 검토 실행·결과 제출 중에도 grant된 readonly owner의 실제 근거·정책·router·
+대상·후보 구성은 현재 상태와 대조한다. 다른 owner의 사실 revision만 바뀌었다면 미열람
+inventory 메타데이터는 원래 snapshot으로 유지해 기존 실행 결과를 보존한다. 이 owner 검토가
+다른 owner의 사실까지 검증했다는 뜻은 아니다. grantless holistic·저장은 전체 최신 원천과
+검토 기록을 다시 대조하므로 쓰기 CAS는 줄이지 않는다.
+변경된 owner만 다시 검토하며 holistic은 현재 전체 manifest와 exact receipt refs로
 검토한다. `compose-career`는 실제 receipt와 이 refs를 대조한다. receipt를 복제하거나 새
 role 실행으로 꾸미지 않는다. 외부 경력 파일·form은 caller의 직접 독립 검토 정책을 따른다.
 
-검토가 끝난 원고를 Native에 보존할 때는 새 grantless personal CareerArtifact
-DocumentWrite 계획을 resolve·prepare하고 `harness begin-preservation`을 사용한다.
-`--prepared-run`, `--run-id`, `--review-workspace-root`, `--career-manifest`,
-`--holistic-receipt`와 반복 가능한 `--evidence-receipt`를 기존 native 공통 옵션과 함께
-전달한다. review workspace는 실제 검토한 원고·첨부가 있는 별도 경로이고 native workspace는
-context view와 같은 경로다. 이 명령은 현재 accepted 리뷰와 모든 검증 unit의 충족을
-확인하고 원고의 정확한 UTF-8 bytes를 durable run에 묶는다. 새 Writer·Reviewer를 실행하거나
-문장을 재생성하지 않는다. 검토 당시의 advisory 수준도 그대로 남긴다.
+작업을 시작할 때 새 작성·수정인지, 이미 수락된 판본의 보존인지 먼저 구분한다.
+보존에서 이후의 경력 자료나 기준 변경을 새 심사·윤문 시작 조건으로 사용하지 않는다.
+본문을 바꾸거나 현재 문서로 다시 발행하려는 요청은 별도의 작성 흐름이다.
 
-이후 같은 `--run-id`로 기존 `validate`, `apply`를 순서대로 실행하고 Native raw read의
-bytes를 비교한다. 중단 시 `recover`, 완료 후 재시도 시 기존 terminal receipt를 사용한다.
-현재 원천·기준·원고·대상 원본이 달라지면 적용 전에 거절하며 DB commit의 source-version
-검사도 유지한다. 새 run을 만들어 같은 작업을 반복하지 않는다. 실제 타입·한도와 검사는
-[Core 보존 경계](../crates/context-core/src/harness/preservation.rs)와
-[native CLI](../src/native_harness.rs)가 소유한다.
+검토가 끝난 원고는 `harness prepare-preservation`에 기존 실제 수락 증거를 전달한다.
+`--request-envelope`, `--runtime-capabilities`, `--prepared-output`,
+`--review-workspace-root`, `--career-manifest`, `--holistic-receipt`와 반복 가능한
+`--evidence-receipt`를 기존 native 공통 옵션과 함께 지정한다. Caller 결정은 기존 Core
+composer로 결합하며 현재 store·호출자 설정·저장 대상의 상태를 먼저 검증한다.
+새 runtime의 prepared를 생성하므로 오래된 runtime의 prepared를 재사용하지 않는다.
+
+원고 frontmatter가 `export: false`, `artifact_role: historical_snapshot`,
+`artifact_status: body_frozen`, `reuse_policy: reference_only_no_copy_forward`를
+중복 없이 선언하면 당시 검토의 원천 revision을 고정한다. Native는 실제 revision 이력의
+path·material ID·revision·digest를 확인하고 원래 Core 준비본과 수락 기록을 재현한다.
+현재 삭제·접근 제한은 계속 거절하고, 이후 사실 내용의 수정으로 완료본 심사를 다시 열지
+않는다. 기록된 기준에서 수락된 판본을 보존했다는 뜻이며 현재 기준 재심사 통과를 뜻하지 않는다.
+일반 문서의 기존 검토 재사용은 현재 원천·정책 검증을 유지한다.
+
+이어 `harness begin-preservation`에 `--prepared-run`, `--run-id`,
+`--review-workspace-root`, `--career-manifest`, `--holistic-receipt`와 실제 owner
+receipts를 전달한다. review workspace는 실제 검토한 원고·첨부가 있는 별도 경로,
+native workspace는 context view와 같은 경로다. 이 명령은 정확한 UTF-8 bytes와 실제
+기존 수락 기록을 durable run에 묶으며 Writer·Reviewer를 실행하거나 문장을 생성하지 않는다.
+당시 검토의 advisory 수준도 그대로 남긴다. `--codex-binary`는 보존 명령에 허용하지 않는다.
+
+같은 `--run-id`로 `validate`, `apply`를 실행한다. 저장 후 한 번의 Native raw read로
+결과를 확인한다. 중단은 `recover`, 재시도는 기존 terminal receipt로 처리하며 새 run이나
+재검토를 자동 시작하지 않는다. 원고가 바뀌면 보존을 거절한다. 현재 대상의 CAS,
+호출자 설정·store/root·접근권한·원래 검토 기록의 무결성은 유지한다. Native session gate가
+현재 접근권한을 commit까지 보호한다. historical source의 이후 내용 revision은 새 내용의
+의존성이 아니므로 commit CAS의 대상에 넣지 않는다.
+
+실제 타입·한도와 검사는 [Core 보존 경계](../crates/context-core/src/harness/preservation.rs),
+[검토 당시 원천](../crates/context-core/src/harness/reviewed_snapshot.rs)와
+[native CLI](../src/native_harness.rs)가 소유한다. CLI 입력은 32 MiB, 현재 head와 같은 head를
+내포한 terminal attempt를 함께 반환하는 JSON 출력은 유한한 64 MiB 한도를 사용한다.
 
 ### 최초 자료 반입
 
@@ -688,7 +715,7 @@ revision을 수정하는 수단으로 쓰지 않는다. `inventory`는 DB 없이
 기존 `bash scripts/brain.sh harness`는 `ontology harness`를 실행한다. 현재
 명령은 `resolve`, `prepare`, `replay`, `begin`, `advance`, `revise`, `evaluate`,
 `validate`, `apply`, `recover`, `attest-career`, `compose-career`, `career-handoff`,
-`begin-preservation`이다. 실제 owned source view,
+`begin-preservation`, `prepare-preservation`이다. 실제 owned source view,
 설정된 store identity와 작업 workspace를 `--context-view`, `--store-id`,
 `--workspace-root`로 결합한다. `context`와 `harness`는 schema를 자동 초기화하지 않는다.
 

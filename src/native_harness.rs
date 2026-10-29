@@ -116,6 +116,7 @@ impl Command {
             "attest-career" => self.run_attest_career_harness_command(arguments),
             "compose-career" => self.run_compose_career_command(arguments),
             "begin-preservation" => self.run_career_preservation_command(arguments),
+            "prepare-preservation" => self.run_prepare_preservation_command(arguments),
             "career-handoff" => self.run_career_handoff_command(arguments),
             _ => Err(NativeHarnessError::invalid_input(format!(
                 "unsupported harness command `{command}`"
@@ -571,6 +572,8 @@ impl Command {
             &paths["--workspace-root"],
             &prepared.plan,
         )?;
+        let engine =
+            self.recorded_engine_for_run(engine, &paths["--workspace-root"], &run_identifier)?;
         Ok((engine, run_identifier))
     }
 
@@ -610,6 +613,22 @@ impl Command {
         .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))
     }
 
+    fn recorded_engine_for_run(
+        &self,
+        engine: HarnessEngine,
+        workspace: &Path,
+        run: &str,
+    ) -> Result<HarnessEngine> {
+        match HarnessExecutionRecord::recorded_career_source_versions(workspace, run)
+            .map_err(|e| harness_command_error(e, true))?
+        {
+            Some(versions) => engine
+                .with_recorded_career_sources(&versions)
+                .map_err(|e| harness_command_error(e, true)),
+            None => Ok(engine),
+        }
+    }
+
     fn run_career_preservation_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
@@ -632,6 +651,14 @@ impl Command {
             Path::new(required("--workspace-root")?),
             &prepared.plan,
         )?;
+        let engine = engine
+            .career_preservation_engine(
+                &prepared,
+                Path::new(required("--review-workspace-root")?),
+                &holistic,
+                &owners,
+            )
+            .map_err(|e| harness_command_error(e, true))?;
         prepared
             .validate_with_engine(&raw, &engine)
             .map_err(|e| harness_command_error(e, true))?;
@@ -653,6 +680,88 @@ impl Command {
         )
         .map_err(|e| harness_command_error(e, true))?;
         serialize_json(&head, "reviewed career preservation")
+    }
+
+    fn run_prepare_preservation_command(
+        &self,
+        arguments: impl IntoIterator<Item = String>,
+    ) -> Result<String> {
+        let (options, owners) = career_boundary_options(arguments)?;
+        let required = |key: &str| {
+            options
+                .get(key)
+                .ok_or_else(|| NativeHarnessError::invalid_input(format!("missing `{key}`")))
+        };
+        let request: RequestEnvelope = read_harness_json(
+            Path::new(required("--request-envelope")?),
+            "preservation request",
+        )?;
+        let composed = request
+            .compose_decisions(&self.policy_configuration)
+            .map_err(|e| harness_command_error(e, true))?;
+        self.policy_configuration
+            .validate_contract(composed.contract())
+            .map_err(|e| harness_command_error(e, true))?;
+        if composed.contract().action() != context_core::harness::HarnessAction::DocumentWrite
+            || composed.contract().owner() != &context_core::harness::DataOwner::Personal
+            || !composed.contract().intent().is_career_artifact()
+            || !composed.contract().context_grants().is_empty()
+        {
+            return Err(NativeHarnessError::invalid_input(
+                "preservation preparation requires a grantless personal career write",
+            ));
+        }
+        let manifest: CareerCompositionManifest =
+            read_harness_json(Path::new(required("--career-manifest")?), "career manifest")?;
+        let holistic: CareerExecutionReviewReceipt = read_harness_json(
+            Path::new(required("--holistic-receipt")?),
+            "holistic receipt",
+        )?;
+        let capabilities: HarnessRuntimeCapabilities = read_harness_json(
+            Path::new(required("--runtime-capabilities")?),
+            "runtime capabilities",
+        )?;
+        let workspace = Path::new(required("--workspace-root")?);
+        let engine = HarnessEngine::with_source_and_router(
+            Path::new(required("--context-view")?),
+            workspace,
+            self.source.clone(),
+            HarnessRouter::with_execution_profile(2, composed.contract().execution_profile())
+                .map_err(|e| harness_command_error(e, true))?,
+            self.policy_configuration.clone(),
+        )
+        .map_err(|e| harness_command_error(e, true))?;
+        let engine = engine
+            .career_preservation_engine_from_reviews(
+                Path::new(required("--review-workspace-root")?),
+                &holistic,
+                &owners,
+            )
+            .map_err(|e| harness_command_error(e, true))?;
+        let resolved = engine
+            .resolve_composed(composed, Some(&manifest))
+            .map_err(|e| harness_command_error(e, true))?;
+        let plan = HarnessPlan::from_resolved(resolved, workspace, capabilities.lifecycle.clone())
+            .map_err(|e| harness_command_error(e, true))?;
+        plan.validate_capabilities(&capabilities)
+            .map_err(|e| harness_command_error(e, true))?;
+        let raw = serde_json::to_vec_pretty(&plan)
+            .map_err(|e| NativeHarnessError::invalid_input(e.to_string()))?;
+        let prepared = PreparedHarnessRun::prepare(&engine, &raw, plan, capabilities, None, None)
+            .map_err(|e| harness_command_error(e, true))?;
+        let output = Path::new(required("--prepared-output")?);
+        use std::os::unix::fs::OpenOptionsExt;
+        let bytes = serialize_json(&prepared, "prepared preservation")?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(output)
+            .map_err(|e| NativeHarnessError::io("create prepared preservation", output, e))?;
+        file.write_all(bytes.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|e| NativeHarnessError::io("save prepared preservation", output, e))?;
+        Ok(bytes)
     }
 
     fn run_career_handoff_command(
@@ -1122,7 +1231,9 @@ fn serialize_json(value: &impl serde::Serialize, description: &str) -> Result<St
     let output = serde_json::to_string_pretty(value).map_err(|error| {
         NativeHarnessError::invalid_input(format!("failed to serialize {description}: {error}"))
     })?;
-    if output.len() as u64 > MAX_HARNESS_JSON_BYTES {
+    // Apply returns both the current head and the terminal attempt containing
+    // that same head. Keep input bounds unchanged; bound this paired output.
+    if output.len() as u64 > 2 * MAX_HARNESS_JSON_BYTES {
         return Err(NativeHarnessError::invalid_input(
             "Harness output exceeds the finite limit",
         ));
@@ -1171,6 +1282,15 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
             "--career-manifest",
             "--holistic-receipt",
             "--evidence-receipt",
+        ],
+        "prepare-preservation" => &[
+            "--request-envelope",
+            "--runtime-capabilities",
+            "--prepared-output",
+            "--career-manifest",
+            "--holistic-receipt",
+            "--evidence-receipt",
+            "--review-workspace-root",
         ],
         "career-handoff" => &["--career-manifest", "--evidence-receipt"],
         "advance" => &["--run-id", "--event", "--codex-binary"],
@@ -1255,6 +1375,14 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
             "--review-workspace-root",
             "--career-manifest",
             "--holistic-receipt",
+        ],
+        "prepare-preservation" => &[
+            "--request-envelope",
+            "--runtime-capabilities",
+            "--prepared-output",
+            "--career-manifest",
+            "--holistic-receipt",
+            "--review-workspace-root",
         ],
         "career-handoff" => &["--career-manifest"],
         "advance" => &["--run-id", "--event"],
@@ -1425,7 +1553,7 @@ fn preflight_policy_configuration(
                 .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
             check(&prepared.plan.resolved_request)
         }
-        "compose-career" | "career-handoff" => {
+        "compose-career" | "career-handoff" | "prepare-preservation" => {
             for path in options
                 .get("--holistic-receipt")
                 .map(String::as_str)
@@ -1519,6 +1647,7 @@ fn apply_or_recover(
         };
         let engine =
             command.harness_engine(command.source.root(), workspace, &handle.prepared().plan)?;
+        let engine = command.recorded_engine_for_run(engine, workspace, run)?;
         handle.finish(&engine)
     } else {
         let source = session
@@ -1529,6 +1658,7 @@ fn apply_or_recover(
             policy_configuration,
         };
         let engine = command.harness_engine(command.source.root(), workspace, &prepared.plan)?;
+        let engine = command.recorded_engine_for_run(engine, workspace, run)?;
         HarnessExecutionRecord::apply_durable(&engine, run, Some(session))
     }
     .map_err(|e| harness_command_error(e, true))?;

@@ -26,6 +26,7 @@ use crate::{
 };
 
 mod preservation;
+mod reviewed_snapshot;
 pub use preservation::ReviewedCareerPreservation;
 #[cfg(test)]
 pub(crate) use preservation::owner_manifest_equivalent as owner_review_inputs_unchanged;
@@ -4858,14 +4859,24 @@ impl HarnessEngine {
                             .into(),
                     ));
                 }
-                let current = self
-                    .vault
-                    .source
-                    .career_inventory(&self.vault.policy_configuration, comparison)?;
-                if current != comparison.inventory {
-                    return Err(HarnessError::InvalidRequest(
-                        "adapter career inventory does not match the manifest".into(),
-                    ));
+                if request.action == HarnessAction::DocumentReview
+                    && let [grant] = context_grants.as_slice()
+                {
+                    self.vault.source.validate_career_owner_review(
+                        &self.vault.policy_configuration,
+                        comparison,
+                        &grant.owner,
+                    )?;
+                } else {
+                    let current = self
+                        .vault
+                        .source
+                        .career_inventory(&self.vault.policy_configuration, comparison)?;
+                    if current != comparison.inventory {
+                        return Err(HarnessError::InvalidRequest(
+                            "adapter career inventory does not match the manifest".into(),
+                        ));
+                    }
                 }
             }
             match context_grants.as_slice() {
@@ -5929,6 +5940,9 @@ impl HarnessEngine {
         preservation: Option<(&ReviewedCareerPreservation, &PreparedHarnessRun)>,
     ) -> HarnessResult<AppliedHarnessBatch> {
         self.require_native_permit(resolved, native_permit)?;
+        if self.vault.source.recorded_snapshot() && preservation.is_none() {
+            return Err(HarnessError::InvalidSubmission("recorded evidence may only produce an exact historical preservation effect".into()));
+        }
         resolved.plan.require_executable_version()?;
         if !resolved.plan.source_write_allowed {
             return Err(HarnessError::InvalidRequest(

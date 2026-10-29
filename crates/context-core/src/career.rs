@@ -691,6 +691,93 @@ impl CareerComparison {
         }
         Ok(())
     }
+
+    /// A granted owner reviews its own facts. Other owners' source revisions are
+    /// historical discovery metadata, not inputs to that owner's judgment.
+    pub fn validate_owner_current(
+        &self,
+        current: &CareerInventory,
+        originals: &BTreeMap<String, CareerOriginal>,
+        owner: &DataOwner,
+    ) -> HarnessResult<()> {
+        self.validate_structure(true)?;
+        current.require_complete()?;
+        let before = &self.inventory;
+        let identities = |inventory: &CareerInventory| {
+            inventory
+                .candidates
+                .iter()
+                .map(|c| (c.path.clone(), c.owner.clone()))
+                .collect::<Vec<_>>()
+        };
+        let owned = |inventory: &CareerInventory| {
+            inventory
+                .candidates
+                .iter()
+                .filter(|c| &c.owner == owner)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if before.store_id != current.store_id
+            || before.policy_configuration_digest != current.policy_configuration_digest
+            || before.request != current.request
+            || before.router_sources != current.router_sources
+            || before.scope_excluded != current.scope_excluded
+            || identities(before) != identities(current)
+            || owned(before) != owned(current)
+        {
+            return Err(invalid("career owner inputs or discovery scope changed"));
+        }
+        for binding in self.owner_sources(owner) {
+            if originals
+                .get(&binding.path)
+                .map(CareerOriginal::binding)
+                .transpose()?
+                .as_ref()
+                != Some(&binding)
+            {
+                return Err(invalid("career owner original bytes changed"));
+            }
+        }
+        let paths = owned(before)
+            .into_iter()
+            .map(|c| c.path)
+            .collect::<BTreeSet<_>>();
+        for locator in self
+            .decisions
+            .iter()
+            .filter(|d| paths.contains(&d.candidate_path))
+            .flat_map(|d| d.facets.iter().map(|f| &f.original))
+            .chain(
+                self.placements
+                    .iter()
+                    .filter(|p| paths.contains(&p.candidate_path))
+                    .flat_map(|p| &p.source_locators),
+            )
+        {
+            locator.original_span.text(
+                &originals
+                    .get(&locator.path)
+                    .ok_or_else(|| invalid("owner locator original is unavailable"))?
+                    .content,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn owner_sources(&self, owner: &DataOwner) -> Vec<CareerSourceBinding> {
+        let mut sources = BTreeMap::new();
+        for source in self.inventory.router_sources.iter().chain(
+            self.inventory
+                .candidates
+                .iter()
+                .filter(|c| &c.owner == owner)
+                .flat_map(|c| &c.sources),
+        ) {
+            sources.insert(source.path.clone(), source.clone());
+        }
+        sources.into_values().collect()
+    }
 }
 
 fn valid_id(id: &str) -> bool {
@@ -1582,6 +1669,62 @@ mod tests {
         assert_eq!(view.compared_foreign_owners.len(), 2);
         assert_eq!(view.placements, comparison.placements);
         assert_eq!(view.comparison_digest, digest(&comparison).unwrap());
+    }
+
+    #[test]
+    fn owner_currentness_ignores_foreign_fact_revisions_but_keeps_full_write_strict() {
+        let (comparison, mut originals) = compared_fixture();
+        let owner = comparison.inventory.candidates[0].owner.clone();
+        let foreign = comparison
+            .inventory
+            .candidates
+            .iter()
+            .find(|c| c.owner != owner)
+            .unwrap();
+        let changed_path = foreign.sources[0].path.clone();
+        originals
+            .get_mut(&changed_path)
+            .unwrap()
+            .content
+            .push_str("\nIndependent foreign update.\n");
+        let mut current = comparison.inventory.clone();
+        for candidate in &mut current.candidates {
+            for source in &mut candidate.sources {
+                if source.path == changed_path {
+                    *source = originals[&changed_path].binding().unwrap();
+                }
+            }
+        }
+        current.inventory_digest = current.content_digest().unwrap();
+        comparison
+            .validate_owner_current(&current, &originals, &owner)
+            .unwrap();
+        assert!(
+            comparison
+                .validate_current(&current, &originals, true)
+                .is_err()
+        );
+        assert!(
+            comparison
+                .validate_owner_current(&current, &originals, &foreign.owner)
+                .is_err()
+        );
+        let mut changed_scope = current.clone();
+        changed_scope.candidates.pop();
+        changed_scope.inventory_digest = changed_scope.content_digest().unwrap();
+        assert!(
+            comparison
+                .validate_owner_current(&changed_scope, &originals, &owner)
+                .is_err()
+        );
+        let mut changed_policy = current;
+        changed_policy.router_sources[0].content_digest = "0".repeat(64);
+        changed_policy.inventory_digest = changed_policy.content_digest().unwrap();
+        assert!(
+            comparison
+                .validate_owner_current(&changed_policy, &originals, &owner)
+                .is_err()
+        );
     }
 
     #[test]

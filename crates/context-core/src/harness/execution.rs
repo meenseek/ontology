@@ -4798,6 +4798,39 @@ impl DurableRecovery<'_> {
 }
 
 impl HarnessExecutionRecord {
+    /// Pure durable authentication before selecting the recorded source epoch.
+    pub fn recorded_career_source_versions(
+        workspace: &Path,
+        run: &str,
+    ) -> HarnessResult<Option<SourceVersionSet>> {
+        #[cfg(unix)]
+        {
+            let store = DurableRunStore::open_existing(workspace, run)?;
+            let (raw, prepared) = store.load_prepared()?;
+            let head = read_owner_only_json::<Self>(
+                &store.run_directory.join(RUN_HEAD_FILE),
+                "durable Harness head",
+            )?;
+            if head.run_identifier != run {
+                return Err(HarnessError::InvalidSubmission(
+                    "recorded run identifier differs".into(),
+                ));
+            }
+            head.validate(&prepared, &raw)?;
+            head.preservation
+                .as_ref()
+                .filter(|p| p.historical_snapshot)
+                .map(|p| reviewed_snapshot::review_versions(&prepared, &p.holistic, &p.owners))
+                .transpose()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (workspace, run);
+            Err(HarnessError::UnsupportedRuntime(
+                "recorded snapshots require Unix".into(),
+            ))
+        }
+    }
     pub fn load_durable_prepared(
         workspace_root: &Path,
         run_identifier: &str,

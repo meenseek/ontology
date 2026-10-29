@@ -713,6 +713,70 @@ impl ContextSource for NativeContextSource {
     fn source_versions(&self, paths: &[PathBuf]) -> HarnessResult<Vec<SourceVersion>> {
         self.stored_versions(paths)
     }
+    fn historical_metadata(&self, version: &SourceVersion) -> HarnessResult<SourceMetadata> {
+        version.validate()?;
+        let _access = self.read_access()?;
+        let parts = self.relative(Path::new(&version.logical_path))?;
+        let path = parts
+            .strip_prefix(&["vault".to_owned()])
+            .ok_or_else(|| source_error(Error::Invalid))?
+            .join("/");
+        let StoredSourceState::Live {
+            material_id,
+            revision,
+            content_digest,
+        } = &version.state
+        else {
+            return Err(source_error(Error::Invalid));
+        };
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        self.store.count(1);
+        let found = self.handle.block_on(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.source_path=$1 AND m.material_id::text=$2 AND v.revision=$3 AND v.content_digest=$4 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted AND v.byte_len BETWEEN 0 AND $5)"
+        ).bind(path).bind(material_id).bind(i64::try_from(*revision).map_err(|_| source_error(Error::Invalid))?)
+            .bind(content_digest).bind(MAX_FILE_BYTES as i64).fetch_one(&mut *connection))
+            .map_err(|e| source_error(sql_error(Stage::SourceMetadata, e)))?;
+        if !found {
+            return Err(source_error(Error::NotFound));
+        }
+        Ok(SourceMetadata {
+            kind: SourcePathKind::RegularFile,
+            stored_version: Some(version.clone()),
+        })
+    }
+    fn open_historical_file(&self, version: &SourceVersion, limit: u64) -> HarnessResult<File> {
+        self.historical_metadata(version)?;
+        let _access = self.read_access()?;
+        let parts = self.relative(Path::new(&version.logical_path))?;
+        let StoredSourceState::Live {
+            material_id,
+            revision,
+            content_digest,
+        } = &version.state
+        else {
+            return Err(source_error(Error::Invalid));
+        };
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| source_error(Error::Storage))?;
+        self.store.count(1);
+        let bytes: Option<Vec<u8>> = self.handle.block_on(sqlx::query_scalar(
+            "SELECT CASE WHEN v.byte_len BETWEEN 0 AND $5 THEN context_read_content(v.material_id,v.content_digest) END FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.source_path=$1 AND m.material_id::text=$2 AND v.revision=$3 AND v.content_digest=$4 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted"
+        ).bind(parts[1..].join("/")).bind(material_id)
+            .bind(i64::try_from(*revision).map_err(|_| source_error(Error::Invalid))?).bind(content_digest)
+            .bind(limit.min(MAX_FILE_BYTES as u64) as i64).fetch_optional(&mut *connection))
+            .map_err(|e| source_error(sql_error(Stage::SourceBody, e)))?.flatten();
+        drop(connection);
+        let bytes = bytes.ok_or_else(|| source_error(Error::NotFound))?;
+        if bytes.len() as u64 > limit || digest(&bytes) != *content_digest {
+            return Err(source_error(Error::Conflict));
+        }
+        self.view.materialize(&parts, &bytes)
+    }
     fn career_inventory(
         &self,
         configuration: &context_core::harness::PolicyConfiguration,
@@ -732,8 +796,33 @@ impl ContextSource for NativeContextSource {
             comparison.inventory.request.clone(),
             Some(comparison),
             true,
+            None,
         )
         .map(|r| r.inventory)
+    }
+    fn validate_career_owner_review(
+        &self,
+        configuration: &context_core::harness::PolicyConfiguration,
+        comparison: &context_core::career::CareerComparison,
+        owner: &context_core::harness::DataOwner,
+    ) -> HarnessResult<()> {
+        let _access = self.read_access()?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| source_error(failure(Stage::CareerInventory, "lock_poisoned")))?;
+        crate::career::snapshot(
+            &self.store,
+            &self.handle,
+            &mut connection,
+            configuration,
+            self.identity.store_id.clone(),
+            comparison.inventory.request.clone(),
+            Some(comparison),
+            true,
+            Some(owner),
+        )
+        .map(|_| ())
     }
     fn metadata(&self, path: &Path) -> HarnessResult<SourceMetadata> {
         let _access = self.read_access()?;

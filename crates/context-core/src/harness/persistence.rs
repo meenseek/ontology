@@ -170,6 +170,12 @@ impl ContextApplyContract {
             contract_digest: String::new(),
         };
         if let Some(proof) = &head.preservation {
+            if proof.historical_snapshot {
+                // These are recorded evidence revisions, not current-content
+                // dependencies. Source access is checked under the same native
+                // session gate; current target CAS is kept in `targets`.
+                value.non_target_versions.clear();
+            }
             let mut bound = value
                 .non_target_versions
                 .iter()
@@ -187,9 +193,10 @@ impl ContextApplyContract {
                 if native_paths.contains(&version.logical_path) {
                     continue;
                 }
-                if bound
-                    .get(&version.logical_path)
-                    .is_some_and(|old| old != version)
+                if !proof.historical_snapshot
+                    && bound
+                        .get(&version.logical_path)
+                        .is_some_and(|old| old != version)
                 {
                     return Err(invalid(
                         "preservation reviews disagree on a current source version",

@@ -4,6 +4,8 @@ use super::*;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewedCareerPreservation {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) historical_snapshot: bool,
     pub(super) review_workspace_root: PathBuf,
     pub(super) manifest: CareerCompositionManifest,
     pub(super) holistic: Box<CareerExecutionReviewReceipt>,
@@ -38,6 +40,14 @@ impl HarnessEngine {
             vault: self.vault.clone(),
             workspace_root: review_workspace_root.clone(),
         };
+        for reviewed in &holistic.resolved.plan.targets {
+            if let TargetState::Existing { content_digest } = &reviewed.state
+                && prepared.plan.resolved_request.plan.targets.iter().any(|native|
+                    native.workspace_relative_path == reviewed.workspace_relative_path
+                    && matches!(&native.state, TargetState::Existing {content_digest: current} if current == content_digest)) {
+                return Err(invalid("reviewed bytes are already preserved; no new review or write is required"));
+            }
+        }
         let composition =
             review_engine.compose_career_execution_reviews(manifest, &holistic, &owners)?;
         let mut changes = Vec::new();
@@ -79,6 +89,7 @@ impl HarnessEngine {
             });
         }
         let mut proof = ReviewedCareerPreservation {
+            historical_snapshot: self.vault.source.recorded_snapshot(),
             review_workspace_root,
             manifest: manifest.normalized(),
             holistic: Box::new(holistic),
@@ -97,6 +108,21 @@ impl HarnessEngine {
         prepared: &PreparedHarnessRun,
         proof: &ReviewedCareerPreservation,
     ) -> HarnessResult<SourceVersionSet> {
+        if self.vault.source.recorded_snapshot() {
+            // Historical evidence is authenticated at its recorded revision.
+            // Later fact edits do not reopen an already reviewed artifact.
+            // The native session retains current access checks through commit;
+            // target-state CAS remains independent and mandatory.
+            return Ok(SourceVersionSet {
+                store_identity: self.vault.store_identity.clone(),
+                source_root_identity: prepared
+                    .role_run
+                    .source_versions
+                    .source_root_identity
+                    .clone(),
+                versions: Vec::new(),
+            });
+        }
         let paths = std::iter::once(&prepared.role_run.source_versions)
             .chain(std::iter::once(&proof.holistic.prepared.source_versions))
             .chain(proof.owners.iter().map(|r| &r.prepared.source_versions))
@@ -112,7 +138,7 @@ impl HarnessEngine {
                 .source_versions
                 .source_root_identity
                 .clone(),
-            versions: self.vault.source.source_versions(&paths)?,
+            versions: self.vault.source.current_source_versions(&paths)?,
         };
         versions.validate()?;
         Ok(versions)
@@ -124,6 +150,11 @@ impl HarnessEngine {
         proof: &ReviewedCareerPreservation,
     ) -> HarnessResult<()> {
         let native = &prepared.plan.resolved_request;
+        if proof.historical_snapshot != self.vault.source.recorded_snapshot() {
+            return Err(invalid(
+                "preservation review epoch differs from its source provider",
+            ));
+        }
         self.revalidate_resolved(native)?;
         proof.validate_plan(prepared)?;
         let review_engine = Self {
@@ -264,6 +295,11 @@ impl ReviewedCareerPreservation {
                     return Err(invalid("career preservation cannot delete a target"));
                 }
             };
+            if self.historical_snapshot && !reviewed_snapshot::historical_body(content) {
+                return Err(invalid(
+                    "recorded review reuse requires a frozen private historical snapshot",
+                ));
+            }
             if !matches!(&reviewed.state, TargetState::Existing { content_digest, .. } if *content_digest == byte_digest(content.as_bytes()))
             {
                 return Err(invalid(

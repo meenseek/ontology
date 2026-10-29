@@ -540,6 +540,8 @@ struct RecordingSource {
     versions: Mutex<BTreeMap<String, StoredSourceState>>,
     overrides: Mutex<BTreeMap<String, SourceMetadata>>,
     calls: Mutex<SourceCalls>,
+    history: Mutex<BTreeMap<(String, u64), (String, StoredSourceState)>>,
+    history_denied: Mutex<BTreeSet<String>>,
 }
 impl RecordingSource {
     fn new(root: &Path) -> Self {
@@ -553,6 +555,8 @@ impl RecordingSource {
             versions: Mutex::new(BTreeMap::new()),
             overrides: Mutex::new(BTreeMap::new()),
             calls: Mutex::new(SourceCalls::default()),
+            history: Mutex::new(BTreeMap::new()),
+            history_denied: Mutex::new(BTreeSet::new()),
         }
     }
     fn write(&self, path: &str, content: &str, revision: u64) {
@@ -571,6 +575,10 @@ impl RecordingSource {
                     content_digest: byte_digest(content.as_bytes()),
                 },
             );
+        self.history.lock().unwrap().insert(
+            (path.into(), revision),
+            (content.into(), self.versions.lock().unwrap()[path].clone()),
+        );
     }
     fn bump(&self, path: &str) {
         let mut versions = self
@@ -644,22 +652,12 @@ impl RecordingSource {
         Ok(metadata)
     }
 }
-impl ContextSource for RecordingSource {
-    fn view_root(&self) -> &Path {
-        self.filesystem.view_root()
-    }
-    fn store_identity(&self) -> HarnessResult<Option<SourceStoreIdentity>> {
-        Ok(Some(
-            self.identity
-                .lock()
-                .expect("test identity lock is not poisoned")
-                .clone(),
-        ))
-    }
-    fn career_inventory(
+impl RecordingSource {
+    fn career_snapshot(
         &self,
         configuration: &PolicyConfiguration,
         comparison: &crate::career::CareerComparison,
+        owner: Option<&DataOwner>,
     ) -> HarnessResult<crate::career::CareerInventory> {
         let mut originals = BTreeMap::new();
         let inventory = crate::career::discover(
@@ -683,8 +681,93 @@ impl ContextSource for RecordingSource {
                     .collect()
             },
         )?;
-        comparison.validate_current(&inventory, &originals, true)?;
+        if let Some(owner) = owner {
+            comparison.validate_owner_current(&inventory, &originals, owner)?;
+        } else {
+            comparison.validate_current(&inventory, &originals, true)?;
+        }
         Ok(inventory)
+    }
+}
+impl ContextSource for RecordingSource {
+    fn historical_metadata(&self, version: &SourceVersion) -> HarnessResult<SourceMetadata> {
+        let StoredSourceState::Live { revision, .. } = version.state else {
+            return Err(HarnessError::InvalidSubmission("not live".into()));
+        };
+        if !matches!(
+            self.versions.lock().unwrap().get(&version.logical_path),
+            Some(StoredSourceState::Live { .. })
+        ) {
+            return Err(HarnessError::InvalidSubmission(
+                "current source access withdrawn".into(),
+            ));
+        }
+        if self
+            .history_denied
+            .lock()
+            .unwrap()
+            .contains(&version.logical_path)
+        {
+            return Err(HarnessError::InvalidSubmission(
+                "recorded source restricted".into(),
+            ));
+        }
+        let history = self.history.lock().unwrap();
+        let (_, state) = history
+            .get(&(version.logical_path.clone(), revision))
+            .ok_or_else(|| HarnessError::InvalidSubmission("recorded revision absent".into()))?;
+        if state != &version.state {
+            return Err(HarnessError::InvalidSubmission(
+                "recorded identity mismatch".into(),
+            ));
+        }
+        Ok(SourceMetadata {
+            kind: SourcePathKind::RegularFile,
+            stored_version: Some(version.clone()),
+        })
+    }
+    fn open_historical_file(&self, version: &SourceVersion, limit: u64) -> HarnessResult<File> {
+        self.historical_metadata(version)?;
+        let StoredSourceState::Live { revision, .. } = version.state else {
+            unreachable!()
+        };
+        let content = self.history.lock().unwrap()[&(version.logical_path.clone(), revision)]
+            .0
+            .clone();
+        if content.len() as u64 > limit {
+            return Err(HarnessError::InvalidSubmission("history too large".into()));
+        }
+        let cache = self.view_root().join(&version.logical_path);
+        fs::write(cache, content).unwrap();
+        self.filesystem
+            .open_file(Path::new(&version.logical_path), limit)
+    }
+    fn view_root(&self) -> &Path {
+        self.filesystem.view_root()
+    }
+    fn store_identity(&self) -> HarnessResult<Option<SourceStoreIdentity>> {
+        Ok(Some(
+            self.identity
+                .lock()
+                .expect("test identity lock is not poisoned")
+                .clone(),
+        ))
+    }
+    fn career_inventory(
+        &self,
+        configuration: &PolicyConfiguration,
+        comparison: &crate::career::CareerComparison,
+    ) -> HarnessResult<crate::career::CareerInventory> {
+        self.career_snapshot(configuration, comparison, None)
+    }
+    fn validate_career_owner_review(
+        &self,
+        configuration: &PolicyConfiguration,
+        comparison: &crate::career::CareerComparison,
+        owner: &DataOwner,
+    ) -> HarnessResult<()> {
+        self.career_snapshot(configuration, comparison, Some(owner))
+            .map(|_| ())
     }
     fn metadata(&self, path: &Path) -> HarnessResult<SourceMetadata> {
         self.calls
@@ -1674,8 +1757,68 @@ fn source_granted_evidence_keeps_selection_and_binds_non_target_revision() {
         excluded_resolved.plan.verification_requirements,
         resolved.plan.verification_requirements
     );
+    let foreign = "vault/personal/profile.md";
+    fixture
+        .source
+        .write(foreign, "# Changed independent personal original\n", 2);
+    engine
+        .begin_execution(&resolved, &prepared, &[])
+        .expect("foreign facts must not invalidate this readonly owner");
+    let current_prepared = engine.prepare(&resolved, &capabilities(), None).unwrap();
+    assert_eq!(
+        current_prepared, prepared,
+        "actual owner inputs and canonical old receipt remain exact"
+    );
+    assert!(
+        fixture
+            .source
+            .career_inventory(
+                &policy_configuration(),
+                manifest.comparison.as_ref().unwrap()
+            )
+            .is_err(),
+        "holistic/full-current boundary stays strict"
+    );
     fixture.source.bump(evidence);
     assert!(engine.begin_execution(&resolved, &prepared, &[]).is_err());
+    let recorded = engine
+        .with_recorded_career_sources(&prepared.source_versions)
+        .unwrap();
+    recorded
+        .begin_execution(&resolved, &prepared, &[])
+        .expect("recorded review inputs stay reproducible after later fact edits");
+    let mut invalid_history = prepared.source_versions.clone();
+    if let StoredSourceState::Live { content_digest, .. } = &mut invalid_history.versions[0].state {
+        *content_digest = "0".repeat(64);
+    }
+    assert!(
+        engine
+            .with_recorded_career_sources(&invalid_history)
+            .is_err()
+    );
+    fixture
+        .source
+        .history_denied
+        .lock()
+        .unwrap()
+        .insert(evidence.into());
+    assert!(
+        recorded.begin_execution(&resolved, &prepared, &[]).is_err(),
+        "a cached recorded inventory cannot bypass newly restricted access"
+    );
+    fixture
+        .source
+        .history_denied
+        .lock()
+        .unwrap()
+        .remove(evidence);
+    fixture.source.tombstone(evidence, 3);
+    assert!(
+        engine
+            .with_recorded_career_sources(&prepared.source_versions)
+            .is_err(),
+        "historical preservation cannot bypass current deletion or restricted access"
+    );
 }
 
 #[test]
