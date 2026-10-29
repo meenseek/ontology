@@ -17385,6 +17385,31 @@ fn reviewed_career_preservation_reuses_actual_reviews_and_applies_literal_bytes(
         let (again, _) =
             HarnessExecutionRecord::apply_durable(&native_engine, "preserved-exact", None).unwrap();
         assert_eq!(again, finalized, "retry must reuse the terminal effect");
+        let next = native_engine
+            .resolve_with_career_composition(
+                &write,
+                &[],
+                Some(CareerOutputSurface::Resume),
+                &[],
+                Some(&manifest),
+            )
+            .unwrap();
+        let (next_prepared, _) = prepare_current_harness_run(&native_engine, &repository.0, &next);
+        let proof = finalized.preservation.as_ref().unwrap();
+        assert!(
+            native_engine
+                .prepare_reviewed_career_preservation(
+                    &next_prepared,
+                    &workspace.0,
+                    &manifest,
+                    proof.holistic.as_ref().clone(),
+                    proof.owners.clone()
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("already preserved"),
+            "a new run must not create another revision of identical bytes"
+        );
     }
 }
 
