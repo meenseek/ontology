@@ -169,6 +169,36 @@ impl ContextApplyContract {
                 .collect(),
             contract_digest: String::new(),
         };
+        if let Some(proof) = &head.preservation {
+            let mut bound = value
+                .non_target_versions
+                .iter()
+                .map(|v| (v.logical_path.clone(), v.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let versions = &proof.current_source_versions;
+            if versions.store_identity != value.store_identity
+                || versions.source_root_identity != value.source_root_identity
+            {
+                return Err(invalid(
+                    "preservation source versions belong to another store or root",
+                ));
+            }
+            for version in &versions.versions {
+                if native_paths.contains(&version.logical_path) {
+                    continue;
+                }
+                if bound
+                    .get(&version.logical_path)
+                    .is_some_and(|old| old != version)
+                {
+                    return Err(invalid(
+                        "preservation reviews disagree on a current source version",
+                    ));
+                }
+                bound.insert(version.logical_path.clone(), version.clone());
+            }
+            value.non_target_versions = bound.into_values().collect();
+        }
         value.contract_digest = serialized_digest(&value)?;
         Ok(value)
     }

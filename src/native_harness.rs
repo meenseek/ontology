@@ -115,6 +115,8 @@ impl Command {
             "validate" => self.run_validate_harness_command(arguments),
             "attest-career" => self.run_attest_career_harness_command(arguments),
             "compose-career" => self.run_compose_career_command(arguments),
+            "begin-preservation" => self.run_career_preservation_command(arguments),
+            "career-handoff" => self.run_career_handoff_command(arguments),
             _ => Err(NativeHarnessError::invalid_input(format!(
                 "unsupported harness command `{command}`"
             ))),
@@ -608,6 +610,89 @@ impl Command {
         .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))
     }
 
+    fn run_career_preservation_command(
+        &self,
+        arguments: impl IntoIterator<Item = String>,
+    ) -> Result<String> {
+        let (options, owners) = career_boundary_options(arguments)?;
+        let required = |key: &str| {
+            options
+                .get(key)
+                .ok_or_else(|| NativeHarnessError::invalid_input(format!("missing `{key}`")))
+        };
+        let (raw, prepared) = read_prepared_run(Path::new(required("--prepared-run")?))?;
+        let manifest: CareerCompositionManifest =
+            read_harness_json(Path::new(required("--career-manifest")?), "career manifest")?;
+        let holistic: CareerExecutionReviewReceipt = read_harness_json(
+            Path::new(required("--holistic-receipt")?),
+            "holistic receipt",
+        )?;
+        let engine = self.harness_engine(
+            Path::new(required("--context-view")?),
+            Path::new(required("--workspace-root")?),
+            &prepared.plan,
+        )?;
+        prepared
+            .validate_with_engine(&raw, &engine)
+            .map_err(|e| harness_command_error(e, true))?;
+        let proof = engine
+            .prepare_reviewed_career_preservation(
+                &prepared,
+                Path::new(required("--review-workspace-root")?),
+                &manifest,
+                holistic,
+                owners,
+            )
+            .map_err(|e| harness_command_error(e, true))?;
+        let head = HarnessExecutionRecord::begin_preservation_durable(
+            &engine,
+            &raw,
+            &prepared,
+            required("--run-id")?,
+            proof,
+        )
+        .map_err(|e| harness_command_error(e, true))?;
+        serialize_json(&head, "reviewed career preservation")
+    }
+
+    fn run_career_handoff_command(
+        &self,
+        arguments: impl IntoIterator<Item = String>,
+    ) -> Result<String> {
+        let (options, owners) = career_boundary_options(arguments)?;
+        let required = |key: &str| {
+            options
+                .get(key)
+                .ok_or_else(|| NativeHarnessError::invalid_input(format!("missing `{key}`")))
+        };
+        let manifest: CareerCompositionManifest =
+            read_harness_json(Path::new(required("--career-manifest")?), "career manifest")?;
+        let router = if let Some(first) = owners.first() {
+            HarnessRouter::with_execution_profile(
+                first.resolved.plan.max_revisions,
+                first.resolved.plan.execution_profile,
+            )
+            .map_err(|e| harness_command_error(e, true))?
+        } else {
+            HarnessRouter::default()
+        };
+        let engine = HarnessEngine::with_source_and_router(
+            Path::new(required("--context-view")?),
+            Path::new(required("--workspace-root")?),
+            self.source.clone(),
+            router,
+            self.policy_configuration.clone(),
+        )
+        .map_err(|e| harness_command_error(e, true))?;
+        let statement = engine
+            .career_review_handoff(&manifest, &owners)
+            .map_err(|e| harness_command_error(e, true))?;
+        serialize_json(
+            &serde_json::json!({"task_statement":statement,"reused_owner_reviews":owners.len(),"new_review_invocations":0}),
+            "career review handoff",
+        )
+    }
+
     fn run_compose_career_command(
         &self,
         arguments: impl IntoIterator<Item = String>,
@@ -692,6 +777,34 @@ impl Command {
         }
     }
 }
+fn career_boundary_options(
+    arguments: impl IntoIterator<Item = String>,
+) -> Result<(BTreeMap<String, String>, Vec<CareerExecutionReviewReceipt>)> {
+    let mut options = BTreeMap::new();
+    let mut owners = Vec::new();
+    let mut args = arguments.into_iter();
+    while let Some(flag) = args.next() {
+        if flag == "--json" {
+            continue;
+        }
+        let value = required_inline_value(&mut args, &flag)?;
+        if flag == "--evidence-receipt" {
+            if owners.len() >= 64 {
+                return Err(NativeHarnessError::invalid_input("too many owner receipts"));
+            }
+            owners.push(read_harness_json(
+                Path::new(&value),
+                "owner career receipt",
+            )?);
+        } else if options.insert(flag, value).is_some() {
+            return Err(NativeHarnessError::invalid_input(
+                "duplicate career boundary option",
+            ));
+        }
+    }
+    Ok((options, owners))
+}
+
 fn required_harness_paths(
     arguments: impl IntoIterator<Item = String>,
     required: &[&str],
@@ -1051,6 +1164,15 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
         ],
         "replay" => &["--prepared-run"],
         "begin" => &["--prepared-run", "--run-id", "--codex-binary"],
+        "begin-preservation" => &[
+            "--prepared-run",
+            "--run-id",
+            "--review-workspace-root",
+            "--career-manifest",
+            "--holistic-receipt",
+            "--evidence-receipt",
+        ],
+        "career-handoff" => &["--career-manifest", "--evidence-receipt"],
         "advance" => &["--run-id", "--event", "--codex-binary"],
         "revise" => &["--run-id", "--codex-binary"],
         "validate" | "apply" => &["--run-id"],
@@ -1127,6 +1249,14 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
         "prepare" => &["--plan", "--runtime-capabilities", "--prepared-output"],
         "replay" => &["--prepared-run"],
         "begin" => &["--prepared-run", "--run-id"],
+        "begin-preservation" => &[
+            "--prepared-run",
+            "--run-id",
+            "--review-workspace-root",
+            "--career-manifest",
+            "--holistic-receipt",
+        ],
+        "career-handoff" => &["--career-manifest"],
         "advance" => &["--run-id", "--event"],
         "attest-career" => &["--prepared-run", "--execution-record"],
         "compose-career" => &["--career-manifest", "--holistic-receipt"],
@@ -1214,7 +1344,9 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
                     .map_err(|_| crate::domain::Error::Invalid)?
                     .is_none_or(|id| id.store_id != expected_store)
                 {
-                    return Err(crate::domain::Error::Conflict);
+                    return Ok(Err(NativeHarnessError::invalid_input(
+                        "source store identity mismatch",
+                    )));
                 }
                 let command = Command {
                     source,
@@ -1282,7 +1414,7 @@ fn preflight_policy_configuration(
                 .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
             check(&plan.resolved_request)
         }
-        "replay" | "begin" | "attest-career" => {
+        "replay" | "begin" | "begin-preservation" | "attest-career" => {
             let prepared: PreparedHarnessRun = read_harness_json(
                 Path::new(&options["--prepared-run"]),
                 "prepared Harness run",
@@ -1293,13 +1425,18 @@ fn preflight_policy_configuration(
                 .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
             check(&prepared.plan.resolved_request)
         }
-        "compose-career" => {
-            for path in std::iter::once(options["--holistic-receipt"].as_str()).chain(
-                arguments
-                    .windows(2)
-                    .filter(|pair| pair[0] == "--evidence-receipt")
-                    .map(|pair| pair[1].as_str()),
-            ) {
+        "compose-career" | "career-handoff" => {
+            for path in options
+                .get("--holistic-receipt")
+                .map(String::as_str)
+                .into_iter()
+                .chain(
+                    arguments
+                        .windows(2)
+                        .filter(|pair| pair[0] == "--evidence-receipt")
+                        .map(|pair| pair[1].as_str()),
+                )
+            {
                 let receipt: CareerExecutionReviewReceipt =
                     read_harness_json(Path::new(path), "career review receipt")?;
                 check(&receipt.resolved)?;

@@ -490,9 +490,19 @@ pub struct RoleExecutionBinding {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum EvaluatedArtifact {
-    Writer { artifact: WriterArtifact },
-    Specialist { artifact: SpecialistArtifact },
-    Review { summary: String },
+    Writer {
+        artifact: WriterArtifact,
+    },
+    ReviewedCareer {
+        changes: Vec<FileChange>,
+        composition_digest: String,
+    },
+    Specialist {
+        artifact: SpecialistArtifact,
+    },
+    Review {
+        summary: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2931,6 +2941,8 @@ pub struct HarnessExecutionRecord {
     pub sequence: u64,
     pub predecessor_record_digest: Option<String>,
     pub state: HarnessExecutionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preservation: Option<ReviewedCareerPreservation>,
     pub revision_history: Vec<HarnessTaskEvaluation>,
     pub role_execution: RoleExecutionRecord,
     pub ready_role_invocations: Vec<RoleInvocationContract>,
@@ -4432,6 +4444,7 @@ fn cleanup_aborted_attempt(
                 &contract.actual_head().role_execution,
                 &contract.actual_head().revision_history,
                 &actual,
+                contract.actual_head().preservation.as_ref(),
             )?;
         }
         _ => {
@@ -4476,13 +4489,18 @@ fn validate_rollback_candidate(
     record: &RoleExecutionRecord,
     history: &[HarnessTaskEvaluation],
     receipt: &HarnessBatchApplyLifecycleReceipt,
+    preservation: Option<&ReviewedCareerPreservation>,
 ) -> HarnessResult<()> {
-    let evaluation = require_accepted_execution_evaluation(evaluate_execution_record(
-        &prepared.plan.resolved_request.plan,
-        &prepared.role_run,
-        history,
-        record,
-    )?)?;
+    let evaluation = require_accepted_execution_evaluation(if let Some(proof) = preservation {
+        proof.evaluation(prepared, record)?
+    } else {
+        evaluate_execution_record(
+            &prepared.plan.resolved_request.plan,
+            &prepared.role_run,
+            history,
+            record,
+        )?
+    })?;
     let mut changes = evaluated_execution_changes(&evaluation)?;
     changes.sort_by(|a, b| a.path().cmp(b.path()));
     let mut targets = receipt.targets.iter().collect::<Vec<_>>();
@@ -4647,6 +4665,7 @@ impl DurableRecovery<'_> {
                 &self.head.role_execution,
                 &self.head.revision_history,
                 &actual,
+                self.head.preservation.as_ref(),
             )?;
             let aborted =
                 self.attempt
@@ -4693,6 +4712,7 @@ impl DurableRecovery<'_> {
                 &self.head.role_execution,
                 &self.head.revision_history,
                 &actual,
+                self.head.preservation.as_ref(),
             )?;
             let aborted =
                 self.attempt
@@ -4712,12 +4732,8 @@ impl DurableRecovery<'_> {
             )?;
             return Ok((self.head, aborted));
         }
-        let evaluation = require_accepted_execution_evaluation(evaluate_execution_record(
-            &self.prepared.plan.resolved_request.plan,
-            &self.prepared.role_run,
-            &self.head.revision_history,
-            &self.head.role_execution,
-        )?)?;
+        let evaluation =
+            require_accepted_execution_evaluation(self.head.snapshot_evaluation(&self.prepared)?)?;
         let applied = engine.confirm_execution_applied_batch(
             &self.prepared.plan.resolved_request,
             evaluation,
@@ -4796,6 +4812,81 @@ impl HarnessExecutionRecord {
             Err(HarnessError::UnsupportedRuntime(
                 "durable Harness runs require Unix file locking and permissions".to_owned(),
             ))
+        }
+    }
+
+    pub fn begin_preservation_durable(
+        engine: &HarnessEngine,
+        raw: &[u8],
+        prepared: &PreparedHarnessRun,
+        run: &str,
+        proof: ReviewedCareerPreservation,
+    ) -> HarnessResult<Self> {
+        #[cfg(unix)]
+        {
+            engine.revalidate_reviewed_career_preservation(prepared, &proof)?;
+            let mut head = Self::begin(engine, raw, prepared, run.to_owned())?;
+            head.ready_role_invocations.clear();
+            head.ready_tool_invocation = None;
+            head.preservation = Some(proof);
+            let evaluation = head.current_evaluation(engine, prepared)?;
+            head.candidate_digest = evaluation.candidate_digest.clone();
+            head.run_evaluation_receipt_digest = Some(serialized_digest(&(
+                HARNESS_SCHEMA_VERSION,
+                &head.run_identifier,
+                &prepared.prepared_run_digest,
+                &head.tool_evidence_digest,
+                &head.candidate_digest,
+                &head.role_execution.execution_record_digest,
+                &evaluation,
+            ))?);
+            head.evaluation = Some(evaluation);
+            head.state = HarnessExecutionState::Evaluated;
+            head.record_digest = head.calculate_digest()?;
+            head.validate(prepared, raw)?;
+            DurableRunStore::initialize(&engine.workspace_root, run, raw, prepared, &head)?;
+            Ok(head)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (engine, raw, prepared, run, proof);
+            Err(HarnessError::UnsupportedRuntime(
+                "durable Harness runs require Unix file locking and permissions".into(),
+            ))
+        }
+    }
+
+    fn snapshot_evaluation(
+        &self,
+        prepared: &PreparedHarnessRun,
+    ) -> HarnessResult<HarnessTaskEvaluation> {
+        if let Some(proof) = &self.preservation {
+            proof.evaluation(prepared, &self.role_execution)
+        } else {
+            evaluate_execution_record(
+                &prepared.plan.resolved_request.plan,
+                &prepared.role_run,
+                &self.revision_history,
+                &self.role_execution,
+            )
+        }
+    }
+
+    fn current_evaluation(
+        &self,
+        engine: &HarnessEngine,
+        prepared: &PreparedHarnessRun,
+    ) -> HarnessResult<HarnessTaskEvaluation> {
+        if let Some(proof) = &self.preservation {
+            engine.revalidate_reviewed_career_preservation(prepared, proof)?;
+            require_accepted_execution_evaluation(self.snapshot_evaluation(prepared)?)
+        } else {
+            engine.validate_execution(
+                &prepared.plan.resolved_request,
+                &prepared.role_run,
+                &self.revision_history,
+                &self.role_execution,
+            )
         }
     }
 
@@ -5262,12 +5353,14 @@ impl HarnessExecutionRecord {
         )?;
         store.persist_apply_attempt(&prepared, &attempt)?;
         head.preflight_finalize(engine, &raw_prepared_run, &prepared, None)?;
-        let applied = engine.apply_validated_execution_for_attempt(
+        let applied = engine.apply_validated_execution_internal(
             &prepared.plan.resolved_request,
             &prepared.role_run,
             &head.revision_history,
             &head.role_execution,
-            &attempt.attempt_identifier,
+            Some(&attempt.attempt_identifier),
+            None,
+            head.preservation.as_ref().map(|proof| (proof, &prepared)),
         )?;
         Ok((attempt, applied))
     }
@@ -5343,6 +5436,7 @@ impl HarnessExecutionRecord {
             sequence: 0,
             predecessor_record_digest: None,
             state: HarnessExecutionState::Begun,
+            preservation: None,
             revision_history: Vec::new(),
             role_execution: step.record,
             ready_role_invocations: step.ready_role_invocations,
@@ -5529,12 +5623,7 @@ impl HarnessExecutionRecord {
             self.run_evaluation_receipt_digest.as_ref().ok_or_else(|| {
                 HarnessError::InvalidSubmission("current evaluation receipt is missing".to_owned())
             })?;
-        let validated = engine.validate_execution(
-            &prepared.plan.resolved_request,
-            &prepared.role_run,
-            &self.revision_history,
-            &self.role_execution,
-        )?;
+        let validated = self.current_evaluation(engine, prepared)?;
         if self.evaluation.as_ref() != Some(&validated) {
             return Err(HarnessError::InvalidSubmission(
                 "current validation must reproduce the exact prior Harness engine evaluation"
@@ -5648,6 +5737,7 @@ impl HarnessExecutionRecord {
             &self.role_execution,
             Some(&attempt.attempt_identifier),
             Some(contract),
+            self.preservation.as_ref().map(|proof| (proof, prepared)),
         )?;
         self.finalize_applied(
             engine,
@@ -5678,6 +5768,9 @@ impl HarnessExecutionRecord {
             return Err(HarnessError::InvalidSubmission(
                 "current finalization requires a validated source-writing execution".to_owned(),
             ));
+        }
+        if self.preservation.is_some() {
+            self.current_evaluation(engine, prepared)?;
         }
         let native = native_target_paths(prepared)?;
         if engine.workspace_root == engine.vault.root
@@ -5770,13 +5863,21 @@ impl HarnessExecutionRecord {
         applied: &AppliedHarnessBatch,
         recovered: bool,
     ) -> HarnessResult<(Self, HarnessApplyReceipt)> {
-        let durable_applied = engine.inspect_validated_execution_apply(
-            &prepared.plan.resolved_request,
-            &prepared.role_run,
-            &self.revision_history,
-            &self.role_execution,
-            &applied.lifecycle_receipt.journal_relative_path,
-        )?;
+        let durable_applied = if self.preservation.is_some() {
+            engine.inspect_reviewed_career_apply(
+                &prepared.plan.resolved_request,
+                self.snapshot_evaluation(prepared)?,
+                &applied.lifecycle_receipt.journal_relative_path,
+            )?
+        } else {
+            engine.inspect_validated_execution_apply(
+                &prepared.plan.resolved_request,
+                &prepared.role_run,
+                &self.revision_history,
+                &self.role_execution,
+                &applied.lifecycle_receipt.journal_relative_path,
+            )?
+        };
         if durable_applied.resolved_plan_digest != applied.resolved_plan_digest
             || durable_applied.candidate_digest != applied.candidate_digest
             || durable_applied.task_evaluation_receipt_digest
@@ -6002,18 +6103,38 @@ impl HarnessExecutionRecord {
                 lifecycle.closed_at_millis,
             )?;
         }
-        let step = execution_step(
-            &prepared.plan.resolved_request.plan,
-            &prepared.role_run,
-            &self.revision_history,
-            self.role_execution.clone(),
-        )?;
+        let step = if self.preservation.is_none() {
+            Some(execution_step(
+                &prepared.plan.resolved_request.plan,
+                &prepared.role_run,
+                &self.revision_history,
+                self.role_execution.clone(),
+            )?)
+        } else {
+            if !self.ready_role_invocations.is_empty()
+                || self.ready_tool_invocation.is_some()
+                || !self.revision_history.is_empty()
+                || !matches!(
+                    self.state,
+                    HarnessExecutionState::Evaluated
+                        | HarnessExecutionState::Validated
+                        | HarnessExecutionState::Finalized
+                )
+            {
+                return Err(HarnessError::InvalidSubmission(
+                    "reviewed preservation cannot contain new role invocations or revisions".into(),
+                ));
+            }
+            None
+        };
         let closed = self.state == HarnessExecutionState::ClosedBeforeApply;
         if (closed
             && (!self.ready_role_invocations.is_empty() || self.ready_tool_invocation.is_some()))
             || (!closed
-                && (step.ready_role_invocations != self.ready_role_invocations
-                    || step.ready_tool_invocation != self.ready_tool_invocation))
+                && step.as_ref().is_some_and(|step| {
+                    step.ready_role_invocations != self.ready_role_invocations
+                        || step.ready_tool_invocation != self.ready_tool_invocation
+                }))
         {
             return Err(HarnessError::InvalidSubmission(
                 "current ready invocations are not the exact current Harness engine execution step"
@@ -6069,12 +6190,7 @@ impl HarnessExecutionRecord {
                     ));
                 }
             }
-            let expected = evaluate_execution_record(
-                &prepared.plan.resolved_request.plan,
-                &prepared.role_run,
-                &self.revision_history,
-                &self.role_execution,
-            )?;
+            let expected = self.snapshot_evaluation(prepared)?;
             if self.evaluation.as_ref() != Some(&expected)
                 || self.candidate_digest != expected.candidate_digest
             {
@@ -6205,7 +6321,7 @@ impl HarnessExecutionRecord {
     }
 
     fn calculate_digest(&self) -> HarnessResult<String> {
-        serialized_digest(&(
+        let base = serialized_digest(&(
             (
                 self.version,
                 &self.run_identifier,
@@ -6229,7 +6345,11 @@ impl HarnessExecutionRecord {
                 &self.finalization_digest,
                 &self.batch_receipt_digest,
             ),
-        ))
+        ))?;
+        match &self.preservation {
+            Some(proof) => serialized_digest(&(base, proof)),
+            None => Ok(base),
+        }
     }
 }
 
@@ -6427,7 +6547,9 @@ fn validate_accepted_execution_evaluation(evaluation: &HarnessTaskEvaluation) ->
     Ok(())
 }
 
-fn task_evaluation_receipt_digest(evaluation: &HarnessTaskEvaluation) -> HarnessResult<String> {
+pub(super) fn task_evaluation_receipt_digest(
+    evaluation: &HarnessTaskEvaluation,
+) -> HarnessResult<String> {
     serialized_digest(&(
         (
             evaluation.version,
@@ -6839,6 +6961,7 @@ pub(super) fn evaluated_execution_changes(
     evaluation: &HarnessTaskEvaluation,
 ) -> HarnessResult<Vec<FileChange>> {
     let changes = match &evaluation.artifact {
+        Some(EvaluatedArtifact::ReviewedCareer { changes, .. }) => changes.clone(),
         Some(EvaluatedArtifact::Writer {
             artifact: WriterArtifact::Changes { changes },
         }) => changes.clone(),

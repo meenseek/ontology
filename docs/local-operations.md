@@ -620,18 +620,35 @@ DB snapshot에 결합하며 디렉터리 열거, 파생 답변이나 새 원문 
 의미·사실성·윤문 통과를 대신하지 않는다. 입력·반환 타입과 상한은
 [Core 경력 계약](../crates/context-core/src/career.rs), snapshot은 [native adapter](../src/career.rs)가 소유한다.
 
-Native 파생 CareerArtifact는 같은 전체 comparison을 기존 manifest에 결합한다. 각 foreign
-owner의 현재 검토 receipt를 먼저 확인하고 `CareerCompositionManifest::holistic_task_statement`
-로 exact owner·receipt digest refs를 원래 요청 뒤에 붙여 primary holistic review에 전달한다.
-`compose-career`는 실제 receipt를 다시 검증하고 holistic 입력의 exact refs와 대조한다.
-Owner 검토의 control-head는 선택 owner의 사실·계보 범위와 전체 문서의 일관성·가독성·공개 안전성
-책임을 구분한다. 출력 claim이 없는 owner도 원천과 비교 후보의 제외 이유를 실제 검토한다.
-Personal 수상처럼 다른 owner가 소유한 주장은 해당 검토와 primary holistic에서 확인하며,
-이 구분은 필수 unit·수락 조건을 면제하거나 원천 접근 권한을 넓히지 않는다. Control bytes를
-바꾸면 기존 prepared와 receipt를 새 실행에 섞지 않고, 영향을 받는 검토를 새로 발급·실행한다.
-Primary-only의 foreign receipt 집합은 비어 있다. Compose 선행·apply 순서는 상위 실행자가
-수행하며 apply 자체에 composition receipt 검사기를 추가하지 않는다. 외부 경력 파일·form의
-최종화는 caller의 직접 독립 검토 정책을 따른다.
+Native 파생 CareerArtifact는 전체 후보와 comparison을 먼저 확정하고 consumer의
+store·정책·대상·저장 가능 여부를 검증한 뒤 의미 검토를 시작한다. 각 foreign owner는
+자기 원천·주장·선택 및 제외 이유와 전체 문서의 일관성·가독성·공개 안전성을 검토한다.
+출력 claim이 없는 owner도 후보 제외 이유를 검토하며, 필수 unit과 원천 접근 경계는 유지한다.
+
+`harness career-handoff`에 현재 `--career-manifest`와 실제 `--evidence-receipt`들을 전달하면
+현재성·범위·owner별 입력을 재검증하고 holistic review용 `task_statement`를 반환한다.
+`--context-view`, `--workspace-root`, `--store-id`와 호출자의 정책 설정은 기존 native
+명령과 같다. owner가 없으면 receipt 목록도 비어 있다. 원고와 해당 owner의 원천·locator·
+판단·배치·정책이 같고 다른 owner의 비교 메타데이터만 바뀌었다면 원래 receipt를 그대로
+재사용한다. 변경된 owner만 다시 검토하며 holistic은 현재 전체 manifest와 exact receipt refs로
+검토한다. `compose-career`는 실제 receipt와 이 refs를 대조한다. receipt를 복제하거나 새
+role 실행으로 꾸미지 않는다. 외부 경력 파일·form은 caller의 직접 독립 검토 정책을 따른다.
+
+검토가 끝난 원고를 Native에 보존할 때는 새 grantless personal CareerArtifact
+DocumentWrite 계획을 resolve·prepare하고 `harness begin-preservation`을 사용한다.
+`--prepared-run`, `--run-id`, `--review-workspace-root`, `--career-manifest`,
+`--holistic-receipt`와 반복 가능한 `--evidence-receipt`를 기존 native 공통 옵션과 함께
+전달한다. review workspace는 실제 검토한 원고·첨부가 있는 별도 경로이고 native workspace는
+context view와 같은 경로다. 이 명령은 현재 accepted 리뷰와 모든 검증 unit의 충족을
+확인하고 원고의 정확한 UTF-8 bytes를 durable run에 묶는다. 새 Writer·Reviewer를 실행하거나
+문장을 재생성하지 않는다. 검토 당시의 advisory 수준도 그대로 남긴다.
+
+이후 같은 `--run-id`로 기존 `validate`, `apply`를 순서대로 실행하고 Native raw read의
+bytes를 비교한다. 중단 시 `recover`, 완료 후 재시도 시 기존 terminal receipt를 사용한다.
+현재 원천·기준·원고·대상 원본이 달라지면 적용 전에 거절하며 DB commit의 source-version
+검사도 유지한다. 새 run을 만들어 같은 작업을 반복하지 않는다. 실제 타입·한도와 검사는
+[Core 보존 경계](../crates/context-core/src/harness/preservation.rs)와
+[native CLI](../src/native_harness.rs)가 소유한다.
 
 ### 최초 자료 반입
 
@@ -670,7 +687,8 @@ revision을 수정하는 수단으로 쓰지 않는다. `inventory`는 DB 없이
 
 기존 `bash scripts/brain.sh harness`는 `ontology harness`를 실행한다. 현재
 명령은 `resolve`, `prepare`, `replay`, `begin`, `advance`, `revise`, `evaluate`,
-`validate`, `apply`, `recover`, `attest-career`, `compose-career`다. 실제 owned source view,
+`validate`, `apply`, `recover`, `attest-career`, `compose-career`, `career-handoff`,
+`begin-preservation`이다. 실제 owned source view,
 설정된 store identity와 작업 workspace를 `--context-view`, `--store-id`,
 `--workspace-root`로 결합한다. `context`와 `harness`는 schema를 자동 초기화하지 않는다.
 

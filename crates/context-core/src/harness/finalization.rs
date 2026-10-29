@@ -508,13 +508,21 @@ impl HarnessApplyReceipt {
                 "finalized current record is missing its Harness engine evaluation".to_owned(),
             )
         })?;
-        let reproduced = engine.inspect_validated_execution_apply(
-            &prepared.plan.resolved_request,
-            &prepared.role_run,
-            &record.revision_history,
-            &record.role_execution,
-            &self.batch_journal_relative_path,
-        )?;
+        let reproduced = if record.preservation.is_some() {
+            engine.inspect_reviewed_career_apply(
+                &prepared.plan.resolved_request,
+                evaluation.clone(),
+                &self.batch_journal_relative_path,
+            )?
+        } else {
+            engine.inspect_validated_execution_apply(
+                &prepared.plan.resolved_request,
+                &prepared.role_run,
+                &record.revision_history,
+                &record.role_execution,
+                &self.batch_journal_relative_path,
+            )?
+        };
         if reproduced != self.applied_batch {
             return Err(HarnessError::InvalidSubmission(
                 "current embedded apply evidence does not reproduce from the durable Harness engine journal"

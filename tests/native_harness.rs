@@ -546,6 +546,8 @@ async fn native_harness_rejects_removed_and_duplicate_options_without_initializi
         "prepare",
         "replay",
         "begin",
+        "begin-preservation",
+        "career-handoff",
         "advance",
         "revise",
         "evaluate",

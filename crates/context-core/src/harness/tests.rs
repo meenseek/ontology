@@ -17232,3 +17232,254 @@ fn review_artifacts_reject_existing_file_aliases_on_case_insensitive_filesystems
     };
     assert!(engine.bind_review_artifacts(&[path], &[target]).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn reviewed_career_preservation_reuses_actual_reviews_and_applies_literal_bytes() {
+    for interrupted in [false, true] {
+        let repository = synthetic_repository();
+        let workspace = TemporaryWorkspace::create();
+        let path = "vault/personal/writing/preserved.md";
+        let content = "---\ntitle: Preserved example\nscope: personal\nlanguage: en\nexport: false\n---\n\n# Preserved example\n\nA fictional, reviewed career artifact.\n";
+        fs::create_dir_all(workspace.0.join("vault/personal/writing")).unwrap();
+        fs::write(workspace.0.join(path), content).unwrap();
+        let review_engine =
+            HarnessEngine::open(&repository.0, &workspace.0, policy_configuration()).unwrap();
+        let native_engine =
+            HarnessEngine::open(&repository.0, &repository.0, policy_configuration()).unwrap();
+        let owner = DataOwner::Company {
+            company: "cedar".into(),
+        };
+        let source = "vault/work/cedar/experience/case-studies/case-one.md".to_owned();
+        let manifest = selected_career_manifest(
+            vec![path.into()],
+            vec![(owner.clone(), vec![source.clone()])],
+        );
+        let request = career_review_request(vec![path.into()]);
+        let holistic = career_execution_review_receipt(
+            &review_engine,
+            &request,
+            &manifest,
+            None,
+            &[],
+            "preserved-holistic",
+        );
+        let owned = career_execution_review_receipt(
+            &review_engine,
+            &request,
+            &manifest,
+            Some(ContextGrant {
+                owner,
+                purpose: ContextGrantPurpose::CareerWritingEvidence,
+                access: ContextAccess::ReadOnly,
+            }),
+            &[source],
+            "preserved-owner",
+        );
+        let mut write = request;
+        write.action = HarnessAction::DocumentWrite;
+        let resolved = native_engine
+            .resolve_with_career_composition(
+                &write,
+                &[],
+                Some(CareerOutputSurface::Resume),
+                &[],
+                Some(&manifest),
+            )
+            .unwrap();
+        let (prepared, raw) = prepare_current_harness_run(&native_engine, &repository.0, &resolved);
+        let proof = native_engine
+            .prepare_reviewed_career_preservation(
+                &prepared,
+                &workspace.0,
+                &manifest,
+                holistic.clone(),
+                vec![owned.clone()],
+            )
+            .unwrap();
+        let mut tampered = proof.clone();
+        if let FileChange::Create { content, .. } = &mut tampered.changes[0] {
+            content.push_str("unreviewed");
+        }
+        assert!(
+            native_engine
+                .revalidate_reviewed_career_preservation(&prepared, &tampered)
+                .is_err()
+        );
+        for owners in [Vec::new(), vec![owned.clone(), owned.clone()]] {
+            assert!(
+                native_engine
+                    .prepare_reviewed_career_preservation(
+                        &prepared,
+                        &workspace.0,
+                        &manifest,
+                        holistic.clone(),
+                        owners
+                    )
+                    .is_err(),
+                "missing or duplicate owner must fail"
+            );
+        }
+        fs::write(workspace.0.join(path), "changed after review").unwrap();
+        assert!(
+            native_engine
+                .revalidate_reviewed_career_preservation(&prepared, &proof)
+                .is_err()
+        );
+        fs::write(workspace.0.join(path), content).unwrap();
+        let mut rejected = owned;
+        rejected.evaluation.subject_status = SubjectStatus::Rejected;
+        assert!(
+            native_engine
+                .prepare_reviewed_career_preservation(
+                    &prepared,
+                    &workspace.0,
+                    &manifest,
+                    holistic,
+                    vec![rejected]
+                )
+                .is_err()
+        );
+        let head = HarnessExecutionRecord::begin_preservation_durable(
+            &native_engine,
+            &raw,
+            &prepared,
+            "preserved-exact",
+            proof,
+        )
+        .unwrap();
+        assert!(head.role_execution.role_results.is_empty());
+        assert!(head.ready_role_invocations.is_empty());
+        assert!(matches!(
+            head.evaluation.as_ref().unwrap().artifact,
+            Some(EvaluatedArtifact::ReviewedCareer { .. })
+        ));
+        fs::create_dir_all(repository.0.join("vault/personal/writing")).unwrap();
+        fs::write(repository.0.join(path), "concurrent target").unwrap();
+        assert!(
+            HarnessExecutionRecord::validate_durable(&native_engine, "preserved-exact").is_err()
+        );
+        fs::remove_file(repository.0.join(path)).unwrap();
+        HarnessExecutionRecord::validate_durable(&native_engine, "preserved-exact").unwrap();
+        let (finalized, attempt) = if interrupted {
+            HarnessExecutionRecord::apply_source_without_finalization_for_test(
+                &native_engine,
+                "preserved-exact",
+            )
+            .unwrap();
+            HarnessExecutionRecord::recover_durable(&native_engine, "preserved-exact", None)
+                .unwrap()
+        } else {
+            HarnessExecutionRecord::apply_durable(&native_engine, "preserved-exact", None).unwrap()
+        };
+        assert_eq!(finalized.state, HarnessExecutionState::Finalized);
+        assert_eq!(
+            fs::read(repository.0.join(path)).unwrap(),
+            content.as_bytes()
+        );
+        assert!(matches!(
+            attempt.attempt_state,
+            HarnessApplyAttemptState::AppliedFinalized { .. }
+                | HarnessApplyAttemptState::RecoveredFinalized { .. }
+        ));
+        let (again, _) =
+            HarnessExecutionRecord::apply_durable(&native_engine, "preserved-exact", None).unwrap();
+        assert_eq!(again, finalized, "retry must reuse the terminal effect");
+    }
+}
+
+#[test]
+fn owner_receipt_reuse_checks_current_inputs_without_reissuing_a_role_result() {
+    let (_workspace, engine) = external_engine();
+    let owner = DataOwner::Company {
+        company: "cedar".into(),
+    };
+    let other = DataOwner::PersonalProject {
+        project: "sample".into(),
+    };
+    let source = "vault/work/cedar/experience/case-studies/case-one.md".to_owned();
+    let mut manifest = selected_career_manifest(
+        vec!["README.md".into()],
+        vec![
+            (owner.clone(), vec![source.clone()]),
+            (other, vec!["vault/personal/projects/sample.md".into()]),
+        ],
+    );
+    let receipt = career_execution_review_receipt(
+        &engine,
+        &career_review_request(vec!["README.md".into()]),
+        &manifest,
+        Some(ContextGrant {
+            owner: owner.clone(),
+            purpose: ContextGrantPurpose::CareerWritingEvidence,
+            access: ContextAccess::ReadOnly,
+        }),
+        &[source],
+        "owner-reused",
+    );
+    let original = receipt.clone();
+    manifest
+        .claim_lineage
+        .iter_mut()
+        .find(|c| c.evidence_owner != owner)
+        .unwrap()
+        .claim_id = "changed-other-claim".into();
+    engine
+        .attest_owner_for_manifest(&receipt, &manifest)
+        .unwrap();
+    let mut wrong_objective = receipt.clone();
+    wrong_objective.resolved.request.objective = "not the canonical contract objective".into();
+    assert!(
+        engine
+            .attest_owner_for_manifest(&wrong_objective, &manifest)
+            .unwrap_err()
+            .to_string()
+            .contains("canonical")
+    );
+    let mut corrupted = receipt.clone();
+    corrupted.prepared.runtime_capabilities_digest = "0".repeat(64);
+    corrupted.receipt_digest = serialized_digest(&(
+        HARNESS_SCHEMA_VERSION,
+        &corrupted.resolved,
+        &corrupted.prepared,
+        &corrupted.evaluation.execution_record,
+        &corrupted.evaluation,
+        &corrupted.reviewer_result_digest,
+        &corrupted.verification_bindings,
+        &corrupted.artifact_set_digest,
+        &corrupted.evidence_bundle_digest,
+    ))
+    .unwrap();
+    assert!(
+        engine
+            .attest_owner_for_manifest(&corrupted, &manifest)
+            .unwrap_err()
+            .to_string()
+            .contains("canonical")
+    );
+    let mut wrong_store = receipt.clone();
+    wrong_store.prepared.source_versions.store_identity = Some(SourceStoreIdentity {
+        store_id: "other-store".into(),
+    });
+    wrong_store.prepared.source_versions.source_root_identity = Some("other-root".into());
+    assert!(
+        engine
+            .attest_owner_for_manifest(&wrong_store, &manifest)
+            .is_err()
+    );
+    assert_eq!(
+        receipt, original,
+        "reuse preserves the original execution and receipt digest"
+    );
+    manifest
+        .claim_lineage
+        .iter_mut()
+        .find(|c| c.evidence_owner == owner)
+        .unwrap()
+        .claim_id = "changed-owned-claim".into();
+    assert!(
+        engine
+            .attest_owner_for_manifest(&receipt, &manifest)
+            .is_err()
+    );
+}

@@ -25,6 +25,11 @@ use crate::{
     frontmatter::{ParsedFrontmatter, split_markdown_frontmatter},
 };
 
+mod preservation;
+pub use preservation::ReviewedCareerPreservation;
+#[cfg(test)]
+pub(crate) use preservation::owner_manifest_equivalent as owner_review_inputs_unchanged;
+
 /// The only executable Harness record schema.
 ///
 /// Every other value is rejected. Transient runs are rebuilt from canonical inputs.
@@ -521,7 +526,15 @@ impl CareerCompositionManifest {
                 ));
             };
             if receipt.version != HARNESS_SCHEMA_VERSION
-                || receipt.resolved.career_composition_manifest.as_ref() != Some(&manifest)
+                || !receipt
+                    .resolved
+                    .career_composition_manifest
+                    .as_ref()
+                    .map(|old| {
+                        preservation::owner_manifest_equivalent(old, &manifest, &grant.owner)
+                    })
+                    .transpose()?
+                    .unwrap_or(false)
                 || artifact_digest
                     .as_ref()
                     .is_some_and(|digest| digest != &receipt.artifact_set_digest)
@@ -5050,6 +5063,18 @@ impl HarnessEngine {
         context_bundle: Option<&HarnessContextBundle>,
     ) -> HarnessResult<PreparedRoleRun> {
         self.revalidate_resolved(resolved)?;
+        self.prepare_revalidated(resolved, capabilities, context_bundle)
+    }
+
+    // The caller must validate the complete resolved contract. Owner review reuse
+    // rebuilds the old contract after validating its unchanged inputs against a
+    // freshly resolved current manifest; all ordinary callers use `prepare`.
+    fn prepare_revalidated(
+        &self,
+        resolved: &ResolvedHarnessRequest,
+        capabilities: &RoleRuntimeCapabilities,
+        context_bundle: Option<&HarnessContextBundle>,
+    ) -> HarnessResult<PreparedRoleRun> {
         validate_role_runtime_capabilities(&resolved.plan, capabilities)?;
         let context_bundle = self.validate_prepared_context(resolved, context_bundle)?;
         let context_bundle_digest = context_bundle
@@ -5870,6 +5895,7 @@ impl HarnessEngine {
             record,
             None,
             None,
+            None,
         )
     }
 
@@ -5888,6 +5914,7 @@ impl HarnessEngine {
             record,
             Some(attempt_identifier),
             None,
+            None,
         )
     }
 
@@ -5899,6 +5926,7 @@ impl HarnessEngine {
         record: &RoleExecutionRecord,
         attempt_identifier: Option<&str>,
         native_permit: Option<&ContextApplyContract>,
+        preservation: Option<(&ReviewedCareerPreservation, &PreparedHarnessRun)>,
     ) -> HarnessResult<AppliedHarnessBatch> {
         self.require_native_permit(resolved, native_permit)?;
         resolved.plan.require_executable_version()?;
@@ -5907,7 +5935,20 @@ impl HarnessEngine {
                 "the resolved action does not permit source changes".to_owned(),
             ));
         }
-        let evaluation = self.validate_execution(resolved, prepared, revision_history, record)?;
+        let evaluation = if let Some((proof, complete)) = preservation {
+            if &complete.plan.resolved_request != resolved
+                || &complete.role_run != prepared
+                || !revision_history.is_empty()
+            {
+                return Err(HarnessError::InvalidSubmission(
+                    "preservation apply differs from its native preparation".into(),
+                ));
+            }
+            self.revalidate_reviewed_career_preservation(complete, proof)?;
+            execution::require_accepted_execution_evaluation(proof.evaluation(complete, record)?)?
+        } else {
+            self.validate_execution(resolved, prepared, revision_history, record)?
+        };
         let candidate_digest = evaluation.candidate_digest.clone().ok_or_else(|| {
             HarnessError::InvalidSubmission(
                 "validated write execution omitted its candidate digest".to_owned(),
@@ -6018,6 +6059,22 @@ impl HarnessEngine {
             journal_relative_path,
             true,
         )
+    }
+
+    fn inspect_reviewed_career_apply(
+        &self,
+        resolved: &ResolvedHarnessRequest,
+        evaluation: HarnessTaskEvaluation,
+        journal: &str,
+    ) -> HarnessResult<AppliedHarnessBatch> {
+        let evaluation = execution::require_accepted_execution_evaluation(evaluation)?;
+        let lifecycle = self.recover_apply_batch_internal(journal, true, false)?;
+        if lifecycle.journal_relative_path != journal {
+            return Err(HarnessError::InvalidSubmission(
+                "preservation recovery journal differs".into(),
+            ));
+        }
+        self.confirm_execution_applied_batch(resolved, evaluation, lifecycle, false)
     }
 
     fn require_native_permit(
@@ -6560,16 +6617,7 @@ impl HarnessEngine {
         let mut current_evidence = evidence_reviews
             .iter()
             .map(|receipt| {
-                let current = self.attest_career_execution_review_unlocked(
-                    &receipt.resolved,
-                    &receipt.prepared,
-                    &receipt.evaluation.execution_record,
-                )?;
-                if &current != receipt {
-                    return Err(HarnessError::InvalidSubmission(
-                        "owner career execution receipt is invalid or stale".to_owned(),
-                    ));
-                }
+                self.attest_owner_for_manifest(receipt, &manifest)?;
                 let [grant] = receipt.resolved.context_grants.as_slice() else {
                     return Err(HarnessError::InvalidSubmission(
                         "each owner career review receipt must bind exactly one evidence owner"
@@ -7704,8 +7752,14 @@ fn validate_career_receipt_set(
 ) -> HarnessResult<Vec<TargetBinding>> {
     let expected_manifest = Some(manifest.clone());
     if holistic_review.resolved.career_composition_manifest != expected_manifest
-        || evidence_reviews.iter().any(|(_, receipt)| {
-            receipt.resolved.career_composition_manifest.as_ref() != Some(manifest)
+        || evidence_reviews.iter().any(|(owner, receipt)| {
+            receipt
+                .resolved
+                .career_composition_manifest
+                .as_ref()
+                .is_none_or(|old| {
+                    !preservation::owner_manifest_equivalent(old, manifest, owner).unwrap_or(false)
+                })
         })
     {
         return Err(HarnessError::InvalidSubmission(
@@ -7761,8 +7815,14 @@ fn validate_career_execution_receipt_set(
 ) -> HarnessResult<Vec<TargetBinding>> {
     let expected_manifest = Some(manifest.clone());
     if holistic_review.resolved.career_composition_manifest != expected_manifest
-        || evidence_reviews.iter().any(|(_, receipt)| {
-            receipt.resolved.career_composition_manifest.as_ref() != Some(manifest)
+        || evidence_reviews.iter().any(|(owner, receipt)| {
+            receipt
+                .resolved
+                .career_composition_manifest
+                .as_ref()
+                .is_none_or(|old| {
+                    !preservation::owner_manifest_equivalent(old, manifest, owner).unwrap_or(false)
+                })
         })
     {
         return Err(HarnessError::InvalidSubmission(

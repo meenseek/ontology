@@ -1585,6 +1585,90 @@ mod tests {
     }
 
     #[test]
+    fn owner_review_reuse_ignores_foreign_metadata_but_keeps_owned_inputs() {
+        use crate::harness::{
+            CareerCompositionManifest, CareerCoverageMode, HARNESS_SCHEMA_VERSION,
+            owner_review_inputs_unchanged,
+        };
+        let (comparison, _) = compared_fixture();
+        let owner = DataOwner::PersonalProject {
+            project: "sample".into(),
+        };
+        let manifest = CareerCompositionManifest {
+            version: HARNESS_SCHEMA_VERSION,
+            career_output_surface: CareerOutputSurface::ApplicationEssay,
+            artifact_targets: vec!["answer.md".into()],
+            coverage: CareerCoverageMode::Selected,
+            complete_coverage_confirmation_reported: false,
+            evidence_owners: comparison.foreign_owners().into_iter().collect(),
+            canonical_evidence_owners: vec![],
+            excluded_evidence_owners: vec![],
+            claim_lineage: vec![],
+            comparison: Some(comparison.clone()),
+        };
+        let own_path = comparison
+            .inventory
+            .candidates
+            .iter()
+            .find(|c| c.owner == owner)
+            .unwrap()
+            .path
+            .clone();
+        let mut foreign = manifest.clone();
+        foreign
+            .comparison
+            .as_mut()
+            .unwrap()
+            .decisions
+            .iter_mut()
+            .find(|d| d.candidate_path != own_path)
+            .unwrap()
+            .reason = "A corrected foreign exclusion reason".into();
+        assert_ne!(
+            comparison.review_view(&owner).unwrap(),
+            foreign
+                .comparison
+                .as_ref()
+                .unwrap()
+                .review_view(&owner)
+                .unwrap()
+        );
+        assert!(owner_review_inputs_unchanged(&manifest, &foreign, &owner).unwrap());
+        let mut changed = foreign.clone();
+        changed
+            .comparison
+            .as_mut()
+            .unwrap()
+            .decisions
+            .iter_mut()
+            .find(|d| d.candidate_path == own_path)
+            .unwrap()
+            .reason = "Different owned reasoning".into();
+        assert!(!owner_review_inputs_unchanged(&manifest, &changed, &owner).unwrap());
+        let mut changed = foreign.clone();
+        changed.comparison.as_mut().unwrap().placements[0].source_locators[0]
+            .original_span
+            .end += 1;
+        assert!(!owner_review_inputs_unchanged(&manifest, &changed, &owner).unwrap());
+        let mut changed = foreign.clone();
+        changed
+            .comparison
+            .as_mut()
+            .unwrap()
+            .inventory
+            .candidates
+            .iter_mut()
+            .find(|c| c.owner == owner)
+            .unwrap()
+            .sources[0]
+            .content_digest = "f".repeat(64);
+        assert!(!owner_review_inputs_unchanged(&manifest, &changed, &owner).unwrap());
+        let mut changed = foreign;
+        changed.comparison.as_mut().unwrap().requirements[0].material = false;
+        assert!(!owner_review_inputs_unchanged(&manifest, &changed, &owner).unwrap());
+    }
+
+    #[test]
     fn compound_questions_need_each_selected_requirement_placed_and_keep_format_context() {
         let (mut comparison, originals) = compared_fixture();
         comparison.inventory.request.original_request =
