@@ -30,7 +30,9 @@ function texture(kind: "ring" | "selection" | "change") {
   const canvas = document.createElement("canvas"); canvas.width = canvas.height = 128;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("별 모양을 그릴 수 없습니다.");
-  context.strokeStyle = "white"; context.lineWidth = kind === "selection" ? 1 : kind === "ring" ? 4 : 3;
+  // Taxonomy markers render at 10 CSS px: keep their stroke at 1.25px,
+  // rather than shrinking the old 4px texture stroke below one screen pixel.
+  context.strokeStyle = "white"; context.lineWidth = kind === "selection" ? 1 : kind === "ring" ? 16 : 3;
   if (kind === "change") context.setLineDash([12, 10]);
   context.beginPath(); context.arc(64, 64, 56, 0, Math.PI * 2); context.stroke();
   return new CanvasTexture(canvas);

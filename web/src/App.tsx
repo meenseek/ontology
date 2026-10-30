@@ -137,6 +137,7 @@ export default function App() {
   const documentContext = useRef<HTMLDetailsElement>(null);
   const explorerElement = useRef<HTMLElement>(null), explorerClose = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null), filterButton = useRef<HTMLButtonElement>(null);
+  const focusReturn = useRef<{ kind: "panel" | "explorer"; target: HTMLElement | null } | null>(null);
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 900px)").matches);
   const workspaceElement = useRef<HTMLElement>(null);
   const [mapWidth, setMapWidth] = useState(Infinity);
@@ -362,7 +363,7 @@ export default function App() {
     if (busy || !confirmDiscard()) return false;
     const restoreFocus = !!panel && !!panelElement.current?.contains(document.activeElement);
     setPanel(null); setManaging(false); setMemoryItem(null); syncRoute({ ...routeRef.current, focus: null });
-    if (restoreFocus) requestAnimationFrame(() => (opener.current?.isConnected ? opener.current : manageButton.current)?.focus());
+    if (restoreFocus) focusReturn.current = { kind: "panel", target: opener.current };
     return true;
   }
   function toggleManagement() {
@@ -380,8 +381,17 @@ export default function App() {
   function closeExplorer() {
     const restoreFocus = explore && !!explorerElement.current?.contains(document.activeElement);
     setExplore(false);
-    if (restoreFocus) requestAnimationFrame(() => filterButton.current?.focus());
+    if (restoreFocus) focusReturn.current = { kind: "explorer", target: filterButton.current };
   }
+  useLayoutEffect(() => {
+    const pending = focusReturn.current;
+    if (!pending || busy || (pending.kind === "panel" ? panel : explore)) return;
+    focusReturn.current = null;
+    // The closing DOM and its inert attributes must be committed before focus returns.
+    const target = pending.target?.isConnected ? pending.target : manageButton.current;
+    target?.focus();
+    if (document.activeElement !== target) manageButton.current?.focus();
+  }, [panel, explore, busy]);
   useEffect(() => { if (explore && (narrow && !panel || overlayExplorer)) explorerClose.current?.focus(); }, [explore, narrow, panel, overlayExplorer]);
   useEffect(() => { if (panel) closeButton.current?.focus(); }, [!!panel, !!session, narrow]);
   useEffect(() => {
@@ -434,7 +444,7 @@ export default function App() {
       </form>
       <button ref={manageButton} className="manage-button" disabled={!session || busy} onClick={startRecord}>기록 남기기</button>
     </header>
-    <main ref={workspaceElement} className={`map-workspace ${panel ? "panel-open" : ""} ${explore && !overlayExplorer ? "explorer-open" : ""} ${explore && overlayExplorer ? "explorer-modal" : ""}`}>
+    <main ref={workspaceElement} className={`map-workspace ${!fallback ? "map-view" : ""} ${panel ? "panel-open" : ""} ${explore && !overlayExplorer ? "explorer-open" : ""} ${explore && overlayExplorer ? "explorer-modal" : ""}`}>
       {explore && <aside ref={explorerElement} className="map-sidebar" role={narrow || overlayExplorer ? "dialog" : undefined} aria-modal={narrow || overlayExplorer || undefined} aria-label="지식 탐색" inert={!!panel && narrow}>
         <div className="sidebar-heading"><h2>탐색 조건</h2><button ref={explorerClose} className="quiet" aria-label="탐색 조건 닫기" onClick={closeExplorer}>닫기</button></div>
         <div className="filter-row">
@@ -484,8 +494,8 @@ export default function App() {
           event.preventDefault(); event.stopPropagation();
           event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();
         }}><summary>관계·상태 읽기</summary><div className="legend-guide" style={{ maxHeight: legendHeight }} role="region" aria-label="관계와 상태 설명" tabIndex={0}>
-          <section><h3>보기와 실제 연결</h3><p>목적 보기에서는 저장된 목적 소속으로 묶고, 같은 목적 안의 실제 관련 자료, 원문 링크, 출처 근거를 선으로 그립니다. 분류 소속선은 해당 별을 선택하거나 가리킬 때 확인하며, 켜 둔 폴더 연결은 계속 표시합니다. 목적 이름이 붙은 별은 같은 목적의 문서와 기록 19개 이상을 접어 표시하며, 참조 관계가 바뀌어도 같은 소속을 유지합니다. 관계 보기에서는 조회된 전체 관련 자료, 원문 링크, 출처 근거를 탐색합니다.</p></section>
-          <section><h3>연결선 읽기</h3><p>제목 옆 점선은 제목이 가리키는 별을 안내하고, 다른 이름을 피할 때 꺾입니다. 평소에는 짧은 실제 연결로 윤곽을 드러내고 한 별에 몰린 나머지 선과 화살표는 낮은 강조로 남깁니다. 선의 강약은 의미의 중요도나 관계 유무를 뜻하지 않습니다. 별을 가리키거나 선택하거나 끌면 그 별의 연결을 모두 강조하며 보기 설정의 <span className="legend-term">‘연결선 모두 보기’</span>로 전체 선을 계속 볼 수 있습니다. 분류 소속선은 두 보기 모두 해당 별을 선택하거나 가리키거나 끌 때 확인합니다. 원문으로 들어오거나 나가는 링크는 두 보기 모두 자료 상세에서 읽을 수 있습니다.</p></section>
+          <section><h3>보기와 실제 연결</h3><p>목적 보기에서는 저장된 목적 소속으로 묶고, 같은 목적 안의 실제 관련 자료, 원문 링크, 출처 근거를 선으로 그립니다. 목적 이름이 붙은 별은 같은 목적의 문서와 기록 19개 이상을 접어 표시하며, 참조 관계가 바뀌어도 같은 소속을 유지합니다. 관계 보기에서는 조회된 전체 관련 자료, 원문 링크, 출처 근거를 탐색합니다.</p></section>
+          <section><h3>연결선 읽기</h3><p>제목 옆 점선은 제목이 가리키는 별을 안내하고, 다른 이름을 피할 때 꺾입니다. 평소에는 짧은 실제 연결로 윤곽을 드러내고 한 별에 몰린 나머지 선과 화살표는 낮은 강조로 남깁니다. 선의 강약은 의미의 중요도나 관계 유무를 뜻하지 않습니다. 별을 가리키거나 선택하거나 끌면 그 별의 연결을 모두 강조하며 보기 설정의 <span className="legend-term">‘연결선 모두 보기’</span>로 전체 선을 계속 볼 수 있습니다. 분류 소속선은 두 보기 모두 해당 별을 선택하거나 가리키거나 끌 때 확인하며, 켜 둔 폴더 연결은 계속 표시합니다. 원문으로 들어오거나 나가는 링크는 두 보기 모두 자료 상세에서 읽을 수 있습니다.</p></section>
           <section><h3>묶음과 크기</h3><p>‘관계 묶음’은 한 별에 현재 연결된 이웃이 19개 이상인 묶음입니다. ‘근접 묶음’은 멀리서 볼 때 화면상 가까운 관계 없는 문서와 기록 6개 이상을 잠시 합쳐 보인 것입니다. 근접 묶음은 내용의 유사성이나 관계를 뜻하지 않으며, 확대하거나 누르면 개별 별이 보입니다. 묶음 크기는 항목 수가 10개, 30개, 50개, 100개 이상인 구간에 따라 커집니다. 접힌 지도는 보이는 별과 묶음의 실제 크기에 맞춰 간격을 줄이며, 펼치면 구성원을 다시 봅니다.</p></section>
           <section><h3>선택과 변경, 색상</h3><p>가는 원은 선택, 바깥 점선 원은 이전 조회 이후의 기록이나 관계 변경입니다. 흐린 점이 보이면 제안, 철회, 유효기간과 출처 확인 상태를 살펴보세요. 목적 보기에서는 같은 목적의 별과 필터 색 점이 색을 공유합니다. 관계 보기에서는 같은 분류 표식 하나에 속한 별이 표식과 색을 공유하고, 여러 분류에 속한 별과 소속이 없는 별은 개별 색을 씁니다. 문서와 기록 종류는 목록이나 자료 상세에서 확인합니다.</p></section>
           <section><h3>폴더와 경로</h3><p>{Object.values(linkName).map((name, index) => <span key={name}>{index > 0 && ", "}<span className="legend-term">{name}</span></span>)} 관계를 선으로 표시하며 선택하면 연결된 선을 강조합니다. <span className="legend-term">부모·소속</span>은 조회된 경로에서 계산하며 관계 군집을 바꾸지 않습니다. ‘폴더 묶음’은 같은 폴더 바로 아래에서 다른 관계가 없는 원문 19개 이상을 접어 표시합니다. 다른 관계가 있는 원문과 하위 폴더는 계속 보이며, 묶음을 누르면 개별 부모 연결을 확인합니다. 폴더를 누르면 하위 자료를 봅니다. 접힌 묶음의 폴더 연결은 개별 항목을 펼쳐 확인할 수 있습니다.</p></section>
@@ -499,7 +509,7 @@ export default function App() {
         {panel === "manage" ? <><Memory visible={visible} managing key={`${route.scope}:manage:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={null} onDirtyChange={updateMemoryDirty} onBusy={updateBusy} onCommit={changed} onNavigate={choose} onSubjectsChange={() => setRefresh(v => v + 1)} /><SyncPanel key={panelEpoch} visible={visible} /></> : !selected && !memorySeed ? <p className="empty">선택한 자료를 불러오는 중…</p> : <>
           {selected?.changed && <p className="notice">이전 조회 이후 기록이나 관계가 변경되었습니다.</p>}
           {selected?.kind === "document" ? isNativeOriginal(selected) ? <OriginalDetail key={`${selected.id}:${panelEpoch}`} scope={selected.context_scope!} path={selected.context_path!} request={request} related={listNodes(relatedOriginals)} references={listNodes(references.filter(item => item.outgoing).map(item => item.node))} onNavigate={choose} csrf={session.csrf} onBusy={updateBusy} onChange={() => setRefresh(v => v + 1)} onDirtyChange={updateDirty} /> : <Documents visible={visible} managing={managing} key={`${route.scope}:${selected.id}:${panelEpoch}`} scope={route.scope} id={selected.id} csrf={session.csrf} allAreas={session.areas} request={request} onBusy={updateBusy} onChange={() => setRefresh(v => v + 1)} onNavigate={choose} contextScope={selected.context_scope} contextPath={selected.context_path} onDirtyChange={updateDirty} /> : selected?.kind === "memory" || memorySeed ? <Memory latestNode={selected} visible={visible} managing={managing} initialItem={memorySeed} key={`${route.scope}:${memoryId}:${panelEpoch}`} scope={route.scope} csrf={session.csrf} request={request} selectedId={memoryId} onDirtyChange={updateMemoryDirty} onBusy={updateBusy} onCommit={changed} onRecordRefresh={memoryRefreshed} onNavigate={choose} onSubjectsChange={() => setRefresh(v => v + 1)} /> : selected && <><div className="marker-overview"><h2>{selected.label}</h2><button onClick={() => fitView(selected.cluster)}>이 묶음 보기</button></div>{selected.kind === "subject" && <SubjectPurpose key={`${route.scope}:${selected.id}:${panelEpoch}:definition`} node={selected} scope={route.scope} csrf={session.csrf} request={request} visible={visible} disabled={busy} onBusy={updatePurposeBusy} onDirtyChange={updatePurposeDirty} onChange={() => setRefresh(v => v + 1)} />}{selected.kind === "subject" && <SubjectDelete key={selected.id} scope={route.scope} id={selected.id} label={selected.label} csrf={session.csrf} disabled={busy} onBusy={updateBusy} onDeleted={subjectDeleted} />}{data && <MarkerConnections model={data.model} selected={selected} disabled={busy} onSelect={choose} />}</>}
-          {selected?.kind === "document" && <details key={`${selected.id}:${panelEpoch}:context`} ref={documentContext} className="section document-context"><summary>목적 소속 · {selected.subject_name ?? "미분류"}{references.length > 0 && <> · 원문 링크 {references.length}개</>}</summary>
+          {selected?.kind === "document" && <details key={`${selected.id}:${panelEpoch}:context`} ref={documentContext} className="section document-context"><summary><span className="summary-terms"><span>목적 소속: {selected.subject_name ?? "미분류"}</span>{references.length > 0 && <span className="summary-count">원문 링크 {references.length}개</span>}</span></summary>
             <DocumentPurpose key={`${route.scope}:${selected.id}:${panelEpoch}:purpose`} node={selected} scope={route.scope} csrf={session.csrf} request={request} visible={visible} disabled={busy} onBusy={updatePurposeBusy} onDirtyChange={updatePurposeDirty} onChange={() => setRefresh(v => v + 1)} />
             {references.length > 0 && <details className="section source-references"><summary>원문 링크 · {references.length}개</summary><p className="hint">현재 조회된 자료 사이의 본문 링크입니다. 같은 목적이나 주장의 근거를 뜻하지 않습니다.</p><div className="compact-list">{references.map(({ node, outgoing }) => <button key={`${outgoing}:${node.id}`} disabled={busy} onClick={() => choose(node.id)}><span>{outgoing ? "원문 링크 →" : "← 이 원문을 참조한 자료"}</span><strong>{nodePresentation(node).title}</strong>{nodePresentation(node).subtitle && <small>{nodePresentation(node).subtitle}</small>}</button>)}</div></details>}
           </details>}
