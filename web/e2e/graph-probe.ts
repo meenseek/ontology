@@ -1,7 +1,21 @@
-/** Ignore sub-millionth rounding noise, while preserving every frame field and
- * all visible motion. Exact JSON equality can oscillate after OrbitControls pan. */
-export function settledFrameKey(frame: string): string {
-  return JSON.stringify(JSON.parse(frame), (_key, value) => typeof value === "number" ? Math.round(value * 1e6) / 1e6 : value);
+// Matrix projection can put an exact 36px plane at35.99999999999999px.
+// Keep raw observations intact; only comparisons admit sub-millionth error.
+const PROJECTION_EPSILON = 1e-6;
+export function projectedAtLeast(actual: number, minimum: number): boolean {
+  return Number.isFinite(actual) && Number.isFinite(minimum) && actual >= minimum - PROJECTION_EPSILON;
+}
+export function settledFramesMatch(previous: string, current: string): boolean {
+  if (!previous) return false;
+  const same = (a: unknown, b: unknown): boolean => {
+    if (typeof a === "number" && typeof b === "number") return Math.abs(a - b) <= PROJECTION_EPSILON;
+    if (a === b) return true;
+    if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
+    const keys = Object.keys(a), other = Object.keys(b);
+    return keys.length === other.length && keys.every((key, i) => key === other[i] &&
+      same((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
+  };
+  // Pairwise tolerance has no decimal rounding-bin boundary to oscillate across.
+  return same(JSON.parse(previous), JSON.parse(current));
 }
 
 // BEGIN rendered graph observer — also exercised against the installed bundle.

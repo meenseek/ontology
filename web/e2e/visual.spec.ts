@@ -1,7 +1,7 @@
 import { expect, test } from "playwright/test";
 import { luminance, screenshotPixels, edgeLightPixels, ringRidge, sameRegionPixels } from "./png";
 
-import { installGraphProbe, settledFrameKey } from "./graph-probe";
+import { installGraphProbe, projectedAtLeast, settledFramesMatch } from "./graph-probe";
 
 async function settled(page: import("playwright/test").Page) {
   let previous = "", sequence = "", stable = 0;
@@ -10,9 +10,8 @@ async function settled(page: import("playwright/test").Page) {
     if (!value.frame || value.frameSequence === sequence) return stable;
     sequence = value.frameSequence!;
     const motion = JSON.parse(value.motion ?? "[]").at(-1);
-    const frame = settledFrameKey(value.frame);
-    stable = frame === previous && motion && !motion.layout && !motion.dragging && !motion.settling ? stable + 1 : 0;
-    previous = frame;
+    stable = settledFramesMatch(previous, value.frame) && motion && !motion.layout && !motion.dragging && !motion.settling ? stable + 1 : 0;
+    previous = value.frame;
     return stable;
   }, { timeout: 25_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
 }
@@ -258,14 +257,18 @@ for (const viewport of [{ width: 1440, height: 900, dpr: 1 }, { width: 920, heig
       expect(markers.length).toBeGreaterThan(0);
       for (const marker of markers) expect(marker.stroke).toBeGreaterThanOrEqual(1.2);
       await expect(page.locator(".graph-core-close")).toHaveText(/근접 묶음 \d+개 접기/);
-      const id = await page.evaluate(() => {
+      const targets = await page.evaluate(() => {
         const f = window.__graphQA.frame()!, c = document.querySelector(".graph-viewport canvas")!.getBoundingClientRect();
-        return [...document.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].map(e => e.dataset.nodeId!).find(id => {
+        return [...document.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].flatMap(e => {
+          const id = e.dataset.nodeId!;
           const s = f.stars.find(s => s.id === id);
-          return id.startsWith("preview-single-") && s && s.hitRadius >= 18 && document.elementFromPoint(c.x + s.x, c.y + s.y)?.tagName === "CANVAS";
+          return id.startsWith("preview-single-") && s ? [{ id, diameter: s.hitRadius * 2,
+            onCanvas: document.elementFromPoint(c.x + s.x, c.y + s.y)?.tagName === "CANVAS" }] : [];
         });
       });
-      expect(id).toBeTruthy();
+      const target = targets.find(t => projectedAtLeast(t.diameter, 36) && t.onCanvas);
+      expect(target, `actual rendered pick candidates: ${JSON.stringify(targets)}`).toBeTruthy();
+      const id = target!.id;
       await page.getByText("관계·상태 읽기", { exact: true }).click();
       await expect(page.locator(".legend-guide")).not.toContainText("작은 원이 구성원을");
       await expect(page.locator(".legend-guide")).toContainText("가는 원은 선택");
@@ -313,7 +316,7 @@ for (const viewport of [{ width: 1440, height: 900, dpr: 1 }, { width: 920, heig
         await relationships(page);
         await panNode(page, "preview-0-0", edge, edge === "top" ? 2 : 12);
         const p = await nodePoint(page, "preview-0-0");
-        expect(p.star.hitRadius * 2).toBeGreaterThanOrEqual(36);
+        expect(projectedAtLeast(p.star.hitRadius * 2, 36), `actual hit diameter ${p.star.hitRadius * 2}px`).toBe(true);
         await page.mouse.move(p.x, p.y);
         await expect(page.locator('.graph-tooltip[data-node-id="preview-0-0"]')).toContainText("사용자의 맥락을 이해하는 방법");
         const shot = screenshotPixels(await page.screenshot());

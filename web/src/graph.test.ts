@@ -2861,13 +2861,26 @@ test("leaderless titles belong to the nearest star surface, including unlabeled 
 });
 
 test("rendered-frame stability ignores floating point noise but retains motion and state", async () => {
-  const { settledFrameKey } = await import("../e2e/graph-probe");
+  const { settledFramesMatch } = await import("../e2e/graph-probe");
   const frame = { stars: [{ id: "a", px: 123.45, py: 400, opacity: 1 }], camera: { x: 210.475147773748 } };
-  const key = (value: unknown) => settledFrameKey(JSON.stringify(value));
-  assert.equal(key(frame), key({ ...frame, camera: { x: 210.47514777374803 } }));
-  assert.notEqual(key(frame), key({ ...frame, stars: [{ ...frame.stars[0], px: 123.451 }] }), "even a thousandth of a CSS pixel remains motion");
-  assert.notEqual(key(frame), key({ ...frame, stars: [{ ...frame.stars[0], opacity: .999 }] }));
-  assert.notEqual(key(frame), key({ ...frame, stars: [{ ...frame.stars[0], id: "b" }] }));
+  const same = (a: unknown, b: unknown) => settledFramesMatch(JSON.stringify(a), JSON.stringify(b));
+  assert.ok(same(frame, { ...frame, camera: { x: 210.47514777374803 } }));
+  assert.ok(same({ camera: { x: .0000004999999 } }, { camera: { x: .0000005000001 } }), "rounding noise at a decimal bin boundary is also stationary");
+  assert.ok(!same(frame, { ...frame, stars: [{ ...frame.stars[0], px: 123.451 }] }), "even a thousandth of a CSS pixel remains motion");
+  assert.ok(!same(frame, { ...frame, stars: [{ ...frame.stars[0], opacity: .999 }] }));
+  assert.ok(!same(frame, { ...frame, stars: [{ ...frame.stars[0], id: "b" }] }));
+  assert.ok(!same(frame, { ...frame, added: true }));
+  assert.ok(!same([1, 2], { 0: 1, 1: 2 }));
+});
+
+test("projected minimum hit size admits arithmetic noise without admitting smaller targets", async () => {
+  const { projectedAtLeast } = await import("../e2e/graph-probe");
+  assert.ok(projectedAtLeast(35.99999999999999, 36));
+  assert.ok(projectedAtLeast(36, 36));
+  assert.ok(!projectedAtLeast(35.999, 36));
+  assert.ok(!projectedAtLeast(35, 36));
+  assert.ok(!projectedAtLeast(NaN, 36));
+  assert.ok(!projectedAtLeast(Infinity, 36));
 });
 
 test("opposed owners keep both nearby titles without an unguided shared column", () => {

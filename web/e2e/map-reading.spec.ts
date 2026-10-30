@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "playwright/test";
-import { installGraphProbe, settledFrameKey } from "./graph-probe";
+import { installGraphProbe, settledFramesMatch } from "./graph-probe";
 
 async function settled(page: Page) {
   await page.evaluate(() => document.fonts.ready);
@@ -9,9 +9,8 @@ async function settled(page: Page) {
     if (!value.frame || sequence === value.frameSequence) return stable;
     sequence = value.frameSequence!;
     const motion = JSON.parse(value.motion ?? "[]").at(-1);
-    const frame = settledFrameKey(value.frame);
-    stable = frame === previous && motion && !motion.layout && !motion.dragging && !motion.settling ? stable + 1 : 0;
-    previous = frame;
+    stable = settledFramesMatch(previous, value.frame) && motion && !motion.layout && !motion.dragging && !motion.settling ? stable + 1 : 0;
+    previous = value.frame;
     return stable;
   }, { timeout: 25_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
 }
