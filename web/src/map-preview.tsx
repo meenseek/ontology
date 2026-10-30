@@ -155,7 +155,7 @@ if (check !== null) void (async () => {
   };
   const labels = () => [...document.querySelectorAll<HTMLElement>(".node-label:not([hidden])")];
   const backdrop = (protectedNames: boolean) => {
-    assert(document.querySelector<HTMLElement>(".graph-canvas")!.dataset.labelBackdrop === (protectedNames ? "protected" : "clear"), "탐색 상태의 제목 배경이 다릅니다.");
+    assert(document.querySelector<HTMLElement>(".graph-viewport")!.dataset.labelBackdrop === (protectedNames ? "protected" : "clear"), "탐색 상태의 제목 배경이 다릅니다.");
     for (const label of labels().filter(label => label.classList.contains("compact") && !label.matches(".hovered, .focused, :hover, :focus-visible"))) {
       const style = getComputedStyle(label), painted = style.backgroundColor !== "rgba(0, 0, 0, 0)" || style.backgroundImage !== "none";
       assert(painted === protectedNames, "평상시 전체보기와 읽기 화면의 제목 배경이 구분되지 않습니다.");
@@ -168,7 +168,7 @@ if (check !== null) void (async () => {
       assert(Math.hypot(star.px - other.px, star.py - other.py) >= star.radius + other.radius + COLLISION_GAP - .01, `${star.id}/${other.id}: 최종 화면에서 별 간격 부족`);
   };
   const inspect = (group: number, expected = 12) => {
-    const f = frame(), stars = members(group), origin = document.querySelector(".graph-canvas")!.getBoundingClientRect();
+    const f = frame(), stars = members(group), origin = document.querySelector(".graph-viewport")!.getBoundingClientRect();
     const controls = [...document.querySelectorAll<HTMLElement>(".graph-core-actions, .graph-minimap")].map(element => element.getBoundingClientRect());
     assert(stars.length === expected, `보기에는 구성원 ${expected}개가 남아야 합니다.`);
     separated(stars);
@@ -187,7 +187,7 @@ if (check !== null) void (async () => {
       height: Math.round(Math.max(...stars.map(star => star.py)) - Math.min(...stars.map(star => star.py))) };
   };
   const guidePaths = (label: HTMLElement): LabelLeader[] => {
-    const origin = document.querySelector(".graph-canvas")!.getBoundingClientRect(), box = label.getBoundingClientRect();
+    const origin = document.querySelector(".graph-viewport")!.getBoundingClientRect(), box = label.getBoundingClientRect();
     const x = box.left - origin.left, y = box.top - origin.top;
     const segment = (x1: number, y1: number, x2: number, y2: number) => ({ x1, y1, x2, y2, length: Math.hypot(x2 - x1, y2 - y1) });
     if (label.classList.contains("routed-label")) {
@@ -200,7 +200,7 @@ if (check !== null) void (async () => {
     return [segment(x1, y1, x1 + length * Math.cos(angle), y1 + length * Math.sin(angle))];
   };
   const starClearance = () => {
-    const f = frame(), origin = document.querySelector(".graph-canvas")!.getBoundingClientRect();
+    const f = frame(), origin = document.querySelector(".graph-viewport")!.getBoundingClientRect();
     for (const label of labels().filter(label => !guidePaths(label).length)) {
       const box = label.getBoundingClientRect(), stars = f.stars.filter(star => !star.retiring && star.opacity >= .2);
       const own = stars.find(star => star.id === label.dataset.nodeId);
@@ -280,7 +280,7 @@ if (check !== null) void (async () => {
         }
       };
       const bodiesClear = () => {
-        const origin = document.querySelector(".graph-canvas")!.getBoundingClientRect();
+        const origin = document.querySelector(".graph-viewport")!.getBoundingClientRect();
         const obstacles = [...document.querySelectorAll<HTMLElement>(".graph-minimap,.graph-quick-help,.graph-group-navigation.with-keys,.graph-core-actions")]
           .filter(element => element.offsetWidth && element.offsetHeight).map(element => element.getBoundingClientRect());
         for (const star of frame().stars.filter(star => !star.retiring && star.opacity > .99)) {
@@ -322,7 +322,7 @@ if (check !== null) void (async () => {
       notice.dataset.result = JSON.stringify({ passed: true, results }); return;
     }
     if (check === "activation" || check === "activation-extra" || check === "interface") {
-      const canvas = document.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!;
+      const canvas = document.querySelector<HTMLCanvasElement>(".graph-viewport canvas")!;
       const capture = canvas.setPointerCapture, releaseCapture = canvas.releasePointerCapture;
       // Synthetic pointers are not registered with the browser capture service.
       // Only this test ID bypasses that service; production handlers and ray picking run unchanged.
@@ -411,7 +411,7 @@ if (check !== null) void (async () => {
     for (const sheet of document.styleSheets) inspectRules(sheet.cssRules);
     assert(hoverRules.length > 0, "hover 조건 검사가 실제 스타일을 읽지 못했습니다.");
     results.push({ pointerConditionalHoverRules: hoverRules.length, physicalTouch: "unverified" });
-    const origin = document.querySelector(".graph-canvas")!.getBoundingClientRect();
+    const origin = document.querySelector(".graph-viewport")!.getBoundingClientRect();
     const overviewCrossings = labels().flatMap(label => {
       const box = label.getBoundingClientRect();
       return frame().relations.filter(line => leaderHitsBox(line, { left: box.left - origin.left, top: box.top - origin.top, right: box.right - origin.left, bottom: box.bottom - origin.top }, 0));
@@ -440,7 +440,7 @@ if (check !== null) void (async () => {
     keyboardTarget.blur(); await settled(); backdrop(false);
     results.push({ overviewBackdrop: "clear", allConnectionsBackdrop: "protected", keyboardFocusBackdrop: "protected" });
     const baseline = JSON.stringify(names());
-    const canvas = document.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, rect = canvas.getBoundingClientRect();
+    const canvas = document.querySelector<HTMLCanvasElement>(".graph-viewport canvas")!, rect = canvas.getBoundingClientRect();
     const hoverTargets = frame().stars.filter(star => star.id.startsWith("preview-single-") && !star.retiring &&
       star.px > 8 && star.px < rect.width - 8 && star.py > 80 && star.py < rect.height - 40).slice(0, 2);
     assert(hoverTargets.length === 2, "가리키기를 검사할 실제 별 두 개가 필요합니다.");
@@ -495,7 +495,7 @@ if (check !== null) void (async () => {
     }
     // Filter entry is the same non-hover state on each pass, including on a
     // desktop browser resized to mobile. Touch clears the retained mouse hit.
-    const surface = document.querySelector<HTMLElement>(".graph-canvas")!;
+    const surface = document.querySelector<HTMLElement>(".graph-viewport")!;
     surface.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", pointerId: 99, button: 0 }));
     window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "touch", pointerId: 99, button: 0 }));
     let reference = "", referenceLabels = "";

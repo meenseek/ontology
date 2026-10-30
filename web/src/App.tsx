@@ -125,7 +125,7 @@ export default function App() {
   }, []);
   const [notice, setNotice] = useState(""), [listMode, setListMode] = useState(false), [webglFailed, setWebglFailed] = useState(false);
   const legendElement = useRef<HTMLDetailsElement>(null);
-  const [legendOpen, setLegendOpen] = useState(false), [legendHeight, setLegendHeight] = useState<number>();
+  const [legendOpen, setLegendOpen] = useState(false), [legendFrame, setLegendFrame] = useState<{ height: number; bottom: number }>();
   const [listSort, setListSort] = useState<ListSort>("updated");
   const [visible, setVisible] = useState(document.visibilityState !== "hidden");
   const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -184,7 +184,7 @@ export default function App() {
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
     const children = new MutationObserver(measure);
     function measure() {
-      const next = workspace!.querySelector<HTMLElement>(".graph-canvas, .graph-list, .map-empty, .galaxy > .loading");
+      const next = workspace!.querySelector<HTMLElement>(".graph-viewport, .graph-list, .map-empty, .galaxy > .loading");
       if (!next) return;
       if (next !== canvas) {
         if (canvas) observer?.unobserve(canvas);
@@ -200,7 +200,12 @@ export default function App() {
       const top = Math.max(canvas.getBoundingClientRect().top, ...controls
         .filter(item => !item.classList.contains("graph-group-navigation") || item.classList.contains("with-keys"))
         .map(item => item.getBoundingClientRect().bottom)) + 14;
-      setLegendHeight(Math.max(0, Math.min(520, guide!.getBoundingClientRect().bottom - top)));
+      const bounds = canvas.getBoundingClientRect();
+      // The quick guidance footer belongs to the outer frame, so anchor the
+      // disclosure to the measured plot instead of the legend's former edge.
+      const bottom = legend!.closest(".map-legend")!.getBoundingClientRect().bottom - bounds.bottom + 14;
+      const height = Math.max(0, Math.min(520, bounds.bottom - 14 - top));
+      setLegendFrame(previous => previous?.height === height && previous.bottom === bottom ? previous : { height, bottom });
     }
     children.observe(galaxy, { childList: true }); measure();
     observer?.observe(workspace); if (legend.parentElement) observer?.observe(legend.parentElement);
@@ -493,11 +498,11 @@ export default function App() {
           if (event.key !== "Escape" || !event.currentTarget.open) return;
           event.preventDefault(); event.stopPropagation();
           event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();
-        }}><summary>관계·상태 읽기</summary><div className="legend-guide" style={{ maxHeight: legendHeight }} role="region" aria-label="관계와 상태 설명" tabIndex={0}>
+        }}><summary>관계·상태 읽기</summary><div className="legend-guide" style={{ maxHeight: legendFrame?.height, bottom: legendFrame?.bottom }} role="region" aria-label="관계와 상태 설명" tabIndex={0}>
           <section><h3>보기와 실제 연결</h3><p>목적 보기에서는 저장된 목적 소속으로 묶고, 같은 목적 안의 실제 관련 자료, 원문 링크, 출처 근거를 선으로 그립니다. 목적 이름이 붙은 별은 같은 목적의 문서와 기록 19개 이상을 접어 표시하며, 참조 관계가 바뀌어도 같은 소속을 유지합니다. 관계 보기에서는 조회된 전체 관련 자료, 원문 링크, 출처 근거를 탐색합니다.</p></section>
           <section><h3>연결선 읽기</h3><p>제목 옆 점선은 제목이 가리키는 별을 안내하고, 다른 이름을 피할 때 꺾입니다. 평소에는 짧은 실제 연결로 윤곽을 드러내고 한 별에 몰린 나머지 선과 화살표는 낮은 강조로 남깁니다. 선의 강약은 의미의 중요도나 관계 유무를 뜻하지 않습니다. 별을 가리키거나 선택하거나 끌면 그 별의 연결을 모두 강조하며 보기 설정의 <span className="legend-term">‘연결선 모두 보기’</span>로 전체 선을 계속 볼 수 있습니다. 분류 소속선은 두 보기 모두 해당 별을 선택하거나 가리키거나 끌 때 확인하며, 켜 둔 폴더 연결은 계속 표시합니다. 원문으로 들어오거나 나가는 링크는 두 보기 모두 자료 상세에서 읽을 수 있습니다.</p></section>
           <section><h3>묶음과 크기</h3><p>‘관계 묶음’은 한 별에 현재 연결된 이웃이 19개 이상인 묶음입니다. ‘근접 묶음’은 멀리서 볼 때 화면상 가까운 관계 없는 문서와 기록 6개 이상을 잠시 합쳐 보인 것입니다. 근접 묶음은 내용의 유사성이나 관계를 뜻하지 않으며, 확대하거나 누르면 개별 별이 보입니다. 묶음 크기는 항목 수가 10개, 30개, 50개, 100개 이상인 구간에 따라 커집니다. 접힌 지도는 보이는 별과 묶음의 실제 크기에 맞춰 간격을 줄이며, 펼치면 구성원을 다시 봅니다.</p></section>
-          <section><h3>선택과 변경, 색상</h3><p>가는 원은 선택, 바깥 점선 원은 이전 조회 이후의 기록이나 관계 변경입니다. 흐린 점이 보이면 제안, 철회, 유효기간과 출처 확인 상태를 살펴보세요. 목적 보기에서는 같은 목적의 별과 필터 색 점이 색을 공유합니다. 관계 보기에서는 같은 분류 표식 하나에 속한 별이 표식과 색을 공유하고, 여러 분류에 속한 별과 소속이 없는 별은 개별 색을 씁니다. 문서와 기록 종류는 목록이나 자료 상세에서 확인합니다.</p></section>
+          <section><h3>선택과 변경, 색상</h3><p>근접 묶음을 펼치면 작은 원이 구성원을 표시합니다. 별 바깥의 가는 원은 선택, 점선 원은 이전 조회 이후의 기록이나 관계 변경입니다. 흐린 점이 보이면 제안, 철회, 유효기간과 출처 확인 상태를 살펴보세요. 목적 보기에서는 같은 목적의 별과 필터 색 점이 색을 공유합니다. 관계 보기에서는 같은 분류 표식 하나에 속한 별이 표식과 색을 공유하고, 여러 분류에 속한 별과 소속이 없는 별은 개별 색을 씁니다. 문서와 기록 종류는 목록이나 자료 상세에서 확인합니다.</p></section>
           <section><h3>폴더와 경로</h3><p>{Object.values(linkName).map((name, index) => <span key={name}>{index > 0 && ", "}<span className="legend-term">{name}</span></span>)} 관계를 선으로 표시하며 선택하면 연결된 선을 강조합니다. <span className="legend-term">부모·소속</span>은 조회된 경로에서 계산하며 관계 군집을 바꾸지 않습니다. ‘폴더 묶음’은 같은 폴더 바로 아래에서 다른 관계가 없는 원문 19개 이상을 접어 표시합니다. 다른 관계가 있는 원문과 하위 폴더는 계속 보이며, 묶음을 누르면 개별 부모 연결을 확인합니다. 폴더를 누르면 하위 자료를 봅니다. 접힌 묶음의 폴더 연결은 개별 항목을 펼쳐 확인할 수 있습니다.</p></section>
           <section><h3>해석할 때 주의할 점</h3><p>과거 출처 근거는 갈색의 가는 선이며 군집에서 제외합니다. 단독 항목은 연결된 자료 곁에 배치될 수 있습니다. ‘저장’은 사실 검증을 뜻하지 않습니다. 출처 확인 시각만 바뀌면 변경으로 표시하지 않습니다.</p></section>
         </div></details></div>

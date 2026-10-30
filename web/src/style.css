@@ -139,8 +139,10 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .active-filters { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 8px; }
 .active-filters button { padding: 3px 0; text-decoration: underline; }
 .no-relations { margin: 8px 0 0; }
-.graph-canvas { position: relative; flex: 1; min-height: 230px; min-width: 0; }
-.graph-canvas > div:first-child { position: absolute; inset: 0; }
+.graph-canvas { position: relative; flex: 1; min-height: 230px; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.graph-viewport { position: relative; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.graph-guidance { flex: 0 0 auto; padding: 4px 14px 10px; }
+.graph-viewport > div:first-child { position: absolute; inset: 0; }
 .graph-canvas .scene-container { position: relative; }
 .graph-canvas canvas { display: block; touch-action: none; }
 .node-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
@@ -148,11 +150,11 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .node-label { line-height: 1.4; padding: 2px 4px; border-radius: var(--radius-label); background: var(--surface-map-label); }
 .node-label.compact > span, .node-label.compact > small { display: none; }
 .node-label.compact:not(.hovered):not(:focus-visible) { background: var(--surface-map-label); }
-.graph-canvas[data-label-backdrop="clear"] .node-label.compact:not(.hovered):not(.focused):not(:focus-visible) { background: transparent; }
+.graph-viewport[data-label-backdrop="clear"] .node-label.compact:not(.hovered):not(.focused):not(:focus-visible) { background: transparent; }
 .view-options label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .node-label.offset-label::before { content: ""; position: absolute; left: var(--leader-x); top: var(--leader-y); width: var(--leader-length); height: 0; border-top: 1px dashed var(--map-leader); transform: rotate(var(--leader-angle)); transform-origin: 0 0; pointer-events: none; }
 .node-label.offset-label:where(.hovered, :focus-visible)::before { border-top-color: var(--map-leader-active); }
-@media (hover: hover) and (pointer: fine) { .node-label.offset-label:hover::before { border-top-color: var(--map-leader-active); } .graph-canvas[data-label-backdrop="clear"] .node-label.compact:hover { background: var(--surface-map-label); } }
+@media (hover: hover) and (pointer: fine) { .node-label.offset-label:hover::before { border-top-color: var(--map-leader-active); } .graph-viewport[data-label-backdrop="clear"] .node-label.compact:hover { background: var(--surface-map-label); } }
 .node-label.offset-label::after { content: ""; position: absolute; left: var(--leader-x); top: var(--leader-y); width: 3px; height: 3px; border-radius: 50%; background: var(--map-leader); transform: translate(-50%, -50%); pointer-events: none; }
 .node-label.routed-label::before, .node-label.routed-label::after { content: none; }
 .label-leader { position: absolute; inset: 0 auto auto 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; fill: none; stroke: currentColor; stroke-width: 1px; stroke-dasharray: 3 3; color: var(--map-leader); }
@@ -504,18 +506,21 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
 
 /* Wrap using the space left after filters and detail, rather than viewport width. */
 .graph-chrome { position: absolute; left: 14px; right: 14px; bottom: 14px; display: flex; flex-direction: row-reverse; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; z-index: 2; pointer-events: none; }
-.graph-chrome .graph-quick-help { position: static; flex: 1 1 340px; min-width: 0; max-width: none; }
-.graph-chrome .graph-quick-help span > span { display: inline; margin: 0; }
+.graph-guidance .graph-quick-help { position: static; min-width: 0; max-width: none; }
+.graph-guidance .graph-quick-help span > span { display: inline; margin: 0; }
 .graph-chrome .graph-minimap { position: static; flex-shrink: 0; max-width: 100%; pointer-events: auto; }
-@media (min-width: 901px) { .explorer-open .graph-chrome { left: calc(var(--explorer-width) + 14px); } }
+@media (min-width: 901px) {
+  .explorer-open .graph-chrome { left: calc(var(--explorer-width) + 14px); }
+  .explorer-open .graph-guidance { padding-left: calc(var(--explorer-width) + 14px); }
+}
 
 .graph-tooltip { bottom: var(--graph-help-floor, 42px); max-width: min(420px, calc(100% - 218px)); }
 @media (min-width: 901px) {
   .explorer-open .graph-core-actions, .explorer-open .graph-core-close { max-width: calc(100% - var(--explorer-width) - 28px); }
   .explorer-open .graph-tooltip { left: calc(var(--explorer-width) + 18px); max-width: min(420px, calc(100% - var(--explorer-width) - 218px)); }
 }
-.graph-canvas[data-chrome-stacked="true"] .graph-tooltip { bottom: var(--graph-chrome-floor, 100px); max-width: calc(100% - 36px); }
-@media (min-width: 901px) { .explorer-open .graph-canvas[data-chrome-stacked="true"] .graph-tooltip { max-width: calc(100% - var(--explorer-width) - 36px); } }
+.graph-viewport[data-chrome-stacked="true"] .graph-tooltip { bottom: var(--graph-chrome-floor, 100px); max-width: calc(100% - 36px); }
+@media (min-width: 901px) { .explorer-open .graph-viewport[data-chrome-stacked="true"] .graph-tooltip { max-width: calc(100% - var(--explorer-width) - 36px); } }
 
 .marker-overview { margin-bottom: 18px; }
 .marker-overview h2 { margin: 7px 0 12px; font-size: 24px; line-height: 1.45; letter-spacing: -.4px; }
@@ -530,9 +535,9 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
   .explorer-modal .map-sidebar { position: fixed; inset: 0 auto 0 0; width: min(480px, 100%); max-height: none; z-index: 6; padding: 20px 18px; border: 0; box-shadow: var(--shadow-map-overlay); }
   .explorer-modal .map-sidebar .sidebar-heading button { min-height: 44px; min-width: 60px; }
 }
-.graph-canvas[data-compact-chrome="true"] .graph-core-actions { display: grid; grid-template-columns: minmax(0, 1fr); width: calc(100% - 28px); justify-content: stretch; }
-.graph-canvas[data-compact-chrome="true"] .graph-core-heading > span { flex: 1; }
-.graph-canvas[data-compact-chrome="true"] .graph-core-title > span { display: block; }
-.graph-canvas[data-compact-chrome="true"] .graph-core-title .graph-core-separator { display: none; }
-.graph-canvas[data-compact-chrome="true"] .graph-core-actions button { min-height: 44px; min-width: 44px; flex-shrink: 0; }
-.graph-canvas[data-compact-chrome="true"] .graph-core-navigation { justify-content: flex-end; }
+.graph-viewport[data-compact-chrome="true"] .graph-core-actions { display: grid; grid-template-columns: minmax(0, 1fr); width: calc(100% - 28px); justify-content: stretch; }
+.graph-viewport[data-compact-chrome="true"] .graph-core-heading > span { flex: 1; }
+.graph-viewport[data-compact-chrome="true"] .graph-core-title > span { display: block; }
+.graph-viewport[data-compact-chrome="true"] .graph-core-title .graph-core-separator { display: none; }
+.graph-viewport[data-compact-chrome="true"] .graph-core-actions button { min-height: 44px; min-width: 44px; flex-shrink: 0; }
+.graph-viewport[data-compact-chrome="true"] .graph-core-navigation { justify-content: flex-end; }

@@ -1647,7 +1647,7 @@ async function checkRenderedMotion() {
     rotation.click();
     await until(() => camera!.position.distanceTo(before) > .01, "slow 3D camera rotation remains available with pointer rotation disabled");
     // Exercise the root hold guard; native pan is checked separately with real pointer capture.
-    host.querySelector<HTMLElement>(".graph-canvas")!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse", pointerId: 9, button: 0, buttons: 1, clientX: rect.left + 5, clientY: rect.top + 5 }));
+    host.querySelector<HTMLElement>(".graph-viewport")!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse", pointerId: 9, button: 0, buttons: 1, clientX: rect.left + 5, clientY: rect.top + 5 }));
     await until(() => !autoRotation, "the root pointer hold guard pauses automatic rotation");
     window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "mouse", pointerId: 9, button: 0, buttons: 0, clientX: rect.left + 5, clientY: rect.top + 5 }));
     await until(() => autoRotation, "release resumes the requested rotation without leaving a stale pointer");
@@ -1860,7 +1860,7 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
   };
   const frameIsReadable = (group: number) => {
     if (!positions || positions.layoutMoving) return false;
-    const box = host.querySelector(".graph-canvas")!.getBoundingClientRect();
+    const box = host.querySelector(".graph-viewport")!.getBoundingClientRect();
     const actual = [...samples].filter(([id]) => id.startsWith(`residual-${group}-`));
     const obstacles = [...host.querySelectorAll<HTMLElement>(".graph-minimap, .graph-quick-help, .graph-core-actions, .map-sidebar")]
       .filter(element => element.offsetWidth && element.offsetHeight).map(element => element.getBoundingClientRect());
@@ -1884,7 +1884,7 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
     this.traverse(object => {
       const id = object.userData.nodeId;
       if (typeof id !== "string" || typeof object.userData.opacity !== "function" || object.userData.opacity() < .99 || object.userData.retiring?.()) return;
-      const at = object.getWorldPosition(new Vector3()), camera = args[2], bounds = host.querySelector(".graph-canvas")!.getBoundingClientRect();
+      const at = object.getWorldPosition(new Vector3()), camera = args[2], bounds = host.querySelector(".graph-viewport")!.getBoundingClientRect();
       const depth = -at.clone().applyMatrix4(camera.matrixWorldInverse).z;
       const glyph = object.getObjectByName("summary-glyph");
       const radius = glyph ? glyph.scale.x * camera.projectionMatrix.elements[5] * bounds.height / 4 : nodeVisualRadius(nodeScreenSize(nodes.find(node => node.id === id)?.kind ?? "document", depth, bounds.height, camera.projectionMatrix.elements[5]), false, false);
@@ -1908,7 +1908,7 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
   root.render(<App />);
   if (groupsAndHelpOnly) {
     await until(() => !!host.querySelector(".map-legend summary"), "help is available before graph response");
-    assert(!host.querySelector(".graph-canvas"), "the early-help scenario starts without a canvas");
+    assert(!host.querySelector(".graph-viewport"), "the early-help scenario starts without a canvas");
     details("관계·상태 읽기").summary.click(); releaseOverview();
   }
   await until(() => !!positions && !!host.querySelector(".graph-minimap") && !positions.layoutMoving, "purpose overview is rendered");
@@ -1917,7 +1917,7 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
     const legend = details("관계·상태 읽기");
     await until(() => {
       const guide = host.querySelector<HTMLElement>(".legend-guide")!, names = host.querySelector<HTMLElement>(".graph-group-navigation.with-keys");
-      return guide.getBoundingClientRect().height > 100 && guide.getBoundingClientRect().top >= (names?.getBoundingClientRect().bottom ?? host.querySelector(".graph-canvas")!.getBoundingClientRect().top) + 13;
+      return guide.getBoundingClientRect().height > 100 && guide.getBoundingClientRect().top >= (names?.getBoundingClientRect().bottom ?? host.querySelector(".graph-viewport")!.getBoundingClientRect().top) + 13;
     }, "help opened before Graph readiness measures the mounted canvas and names");
     legend.summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await settle();
     const inspectHelp = async () => {
@@ -1925,7 +1925,7 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
       await until(() => legend.element.open && !!host.querySelector<HTMLElement>(".legend-guide")?.style.maxHeight, "legend measures actual map height");
       const guide = host.querySelector<HTMLElement>(".legend-guide")!, box = guide.getBoundingClientRect();
       const names = host.querySelector<HTMLElement>(".graph-group-navigation.with-keys");
-      const canvas = host.querySelector(".graph-canvas")!.getBoundingClientRect();
+      const canvas = host.querySelector(".graph-viewport")!.getBoundingClientRect();
       assert(box.top >= (names?.getBoundingClientRect().bottom ?? canvas.top) + 13, "help stays below the actual name strip or canvas top");
       assert(box.bottom <= canvas.bottom && box.height > 100, "help fits the actual map with a readable scroll area");
       assert([...host.querySelectorAll(".graph-core-actions, .graph-core-close")].every(control => box.top >= control.getBoundingClientRect().bottom + 13), "help keeps every expanded-group control unobstructed");
@@ -1949,10 +1949,10 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
     legend.summary.click(); await settle();
     button("묶음 접기").click(); await new Promise(resolve => setTimeout(resolve, 800));
     const guide = host.querySelector<HTMLElement>(".legend-guide")!, names = host.querySelector<HTMLElement>(".graph-group-navigation.with-keys");
-    assert(guide.getBoundingClientRect().top >= (names?.getBoundingClientRect().bottom ?? host.querySelector(".graph-canvas")!.getBoundingClientRect().top) + 13 && guide.getBoundingClientRect().height > 100, "folding with help open updates the actual name-strip boundary");
+    assert(guide.getBoundingClientRect().top >= (names?.getBoundingClientRect().bottom ?? host.querySelector(".graph-viewport")!.getBoundingClientRect().top) + 13 && guide.getBoundingClientRect().height > 100, "folding with help open updates the actual name-strip boundary");
     host.querySelector<HTMLButtonElement>(`.graph-group-target[data-node-id="${subjects[0]}"]`)!.click();
     await new Promise(resolve => setTimeout(resolve, 800));
-    assert(guide.getBoundingClientRect().height > 100 && guide.getBoundingClientRect().top >= host.querySelector(".graph-canvas")!.getBoundingClientRect().top + 13, "opening with help open keeps a usable reading area");
+    assert(guide.getBoundingClientRect().height > 100 && guide.getBoundingClientRect().top >= host.querySelector(".graph-viewport")!.getBoundingClientRect().top + 13, "opening with help open keeps a usable reading area");
     assert(guide.getBoundingClientRect().top >= host.querySelector(".graph-core-actions")!.getBoundingClientRect().bottom + 13, "opening with help already open never covers paging controls");
     legend.summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await settle(); await inspectHelp();
@@ -1961,7 +1961,7 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
   }
   if (mouseOnly) {
     await until(() => samples.has(subjects[0]) && !positions!.layoutMoving, "the actual summary is projected");
-    const canvas = host.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, rect = canvas.getBoundingClientRect();
+    const canvas = host.querySelector<HTMLCanvasElement>(".graph-viewport canvas")!, rect = canvas.getBoundingClientRect();
     const at = samples.get(subjects[0])!;
     const eventAt = { clientX: rect.left + (at.x + 1) * rect.width / 2, clientY: rect.top + (1 - at.y) * rect.height / 2 };
     canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", ...eventAt }));
@@ -2018,9 +2018,9 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
       if (host.querySelector(".map-sidebar")?.getAttribute("aria-modal") !== "true") {
         const sidebar = host.querySelector(".map-sidebar")!.getBoundingClientRect();
         assert(host.querySelector(".graph-core-actions")!.getBoundingClientRect().left >= sidebar.right, "the open filter leaves every page control readable");
-        const mapBounds = host.querySelector(".graph-canvas")!.getBoundingClientRect();
+        const mapBounds = host.querySelector(".graph-viewport")!.getBoundingClientRect();
         assert([...host.querySelectorAll(".graph-core-actions button")].every(button => button.getBoundingClientRect().right <= mapBounds.right - 10), "every wrapped page button stays inside the usable map");
-        const canvas = host.querySelector<HTMLCanvasElement>(".graph-canvas canvas")!, box = canvas.getBoundingClientRect();
+        const canvas = host.querySelector<HTMLCanvasElement>(".graph-viewport canvas")!, box = canvas.getBoundingClientRect();
         const sample = [...samples].filter(([id]) => id.startsWith(`residual-${group}-`)).sort((a, b) => a[1].z - b[1].z)[0][1];
         canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", clientX: box.left + (sample.x + 1) * box.width / 2, clientY: box.top + (1 - sample.y) * box.height / 2 }));
         await until(() => !!host.querySelector(".graph-tooltip"), "pointed member guidance is rendered");

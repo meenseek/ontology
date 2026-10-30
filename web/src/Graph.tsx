@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph3D from "react-force-graph-3d";
 import type { ForceGraphMethods } from "react-force-graph-3d";
 import { AdditiveBlending, CanvasTexture, Color, Group, LineBasicMaterial, Mesh, MOUSE, PlaneGeometry, Raycaster, ShaderMaterial, Sprite, SpriteMaterial, TOUCH, Vector2, Vector3 } from "three";
-import type { Camera, Object3D, PerspectiveCamera } from "three";
+import type { Camera, Object3D, PerspectiveCamera, WebGLRenderer } from "three";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { active, constellationView, diagramLinks, expandedCoreCameraFrame, kindName, knowledge, linkColor, linkKey, linkName, overviewLinkKeys, stateName } from "./graph";
 import { nucleusLabelIds, nucleusLevel, nucleusView } from "./nuclei";
@@ -26,13 +26,13 @@ type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; l
 const readingOpacity = (members: ReadonlySet<string> | undefined, id: string, hovered: string | null) => members && !members.has(id) && id !== hovered ? .12 : 1;
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
 const coreLabel = (node: PositionedNode | undefined, count: number, view?: GraphView) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : view === "purpose" ? `${node?.subject_name ?? node?.label ?? "목적 묶음"} · ${count}개` : `관계 묶음${node ? ` · ${nodePresentation(node, true).title}` : ""} · ${count}개`;
-function texture(kind: "ring" | "selection" | "change") {
+function texture(kind: "marker" | "member" | "selection" | "change") {
   const canvas = document.createElement("canvas"); canvas.width = canvas.height = 128;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("별 모양을 그릴 수 없습니다.");
-  // Taxonomy markers render at 10 CSS px: keep their stroke at 1.25px,
-  // rather than shrinking the old 4px texture stroke below one screen pixel.
-  context.strokeStyle = "white"; context.lineWidth = kind === "selection" ? 1 : kind === "ring" ? 16 : 3;
+  // The 10px taxonomy body needs a 1.25px stroke. A spatial member's
+  // separate 18px indicator keeps its original, quieter 0.5625px stroke.
+  context.strokeStyle = "white"; context.lineWidth = kind === "marker" ? 16 : kind === "member" ? 4 : kind === "selection" ? 1 : 3;
   if (kind === "change") context.setLineDash([12, 10]);
   context.beginPath(); context.arc(64, 64, 56, 0, Math.PI * 2); context.stroke();
   return new CanvasTexture(canvas);
@@ -499,24 +499,24 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: visualLinks.map(l => ({ ...l })) }), [displayNodes, visualLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
-  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), light: cosmicLightMaterial(), ring: texture("ring"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>(), lines: new Map<string, LineBasicMaterial>(), summaries: new Map<string, ReturnType<typeof summaryGlyphTexture> & { signature: string; material: SpriteMaterial }>(), clouds: new Map<string, { color: Color; count: number; fade: CloudFade }>() }), []);
+  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), light: cosmicLightMaterial(), marker: texture("marker"), member: texture("member"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>(), lines: new Map<string, LineBasicMaterial>(), summaries: new Map<string, ReturnType<typeof summaryGlyphTexture> & { signature: string; material: SpriteMaterial }>(), clouds: new Map<string, { color: Color; count: number; fade: CloudFade }>() }), []);
   useEffect(() => {
     const element = container.current;
     if (!element) return;
-    const chrome = element.querySelector<HTMLElement>(".graph-chrome"), help = element.querySelector<HTMLElement>(".graph-quick-help");
+    const chrome = element.querySelector<HTMLElement>(".graph-chrome");
     const tooltipFloor = () => {
-      setCompactChrome((chrome?.clientWidth ?? element.clientWidth) <= 520);
-      element.style.setProperty("--graph-help-floor", `${(help?.offsetHeight ?? 14) + 28}px`);
+      const compact = (chrome?.clientWidth ?? element.clientWidth) <= 520;
+      setCompactChrome(compact);
+      element.style.setProperty("--graph-help-floor", "28px");
       element.style.setProperty("--graph-chrome-floor", `${(chrome?.offsetHeight ?? 14) + 28}px`);
-      const minimap = element.querySelector(".graph-minimap")?.getBoundingClientRect(), guidance = help?.getBoundingClientRect();
-      element.dataset.chromeStacked = String(!!minimap && !!guidance && guidance.top >= minimap.bottom - 1);
+      element.dataset.chromeStacked = String(compact && !!element.querySelector(".graph-minimap"));
     };
     const observer = new ResizeObserver(entries => {
       const rect = entries.find(entry => entry.target === element)?.contentRect;
       if (rect) setSize({ width: Math.max(1, Math.floor(rect.width)), height: Math.max(1, Math.floor(rect.height)) });
       tooltipFloor();
     });
-    observer.observe(element); if (chrome) observer.observe(chrome); if (help) observer.observe(help);
+    observer.observe(element); if (chrome) observer.observe(chrome);
     tooltipFloor(); return () => observer.disconnect();
   }, []);
   useEffect(() => {
@@ -527,7 +527,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     return () => { live = false; document.fonts.removeEventListener("loadingdone", update); };
   }, []);
   useEffect(() => () => {
-    resources.geometry.dispose(); resources.star.dispose(); resources.light.dispose(); resources.ring.dispose(); resources.selection.dispose(); resources.change.dispose();
+    resources.geometry.dispose(); resources.star.dispose(); resources.light.dispose(); resources.marker.dispose(); resources.member.dispose(); resources.selection.dispose(); resources.change.dispose();
     for (const material of resources.materials.values()) material.dispose();
     resources.materials.clear();
     for (const material of resources.lines.values()) material.dispose();
@@ -758,13 +758,6 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     moveCamera({ x: lookAt.x + offset.x, y: lookAt.y + offset.y, z: lookAt.z + offset.z }, lookAt, 0);
   }, [ready, cameraKey, viewKey, nodes, semanticNodes, links, selected, filteredGroup, activeExpandedCore, cores, disclosure, reduced, size, positions, fit, snapshot.nodes.length, snapshot.view, spatialReveal, selectedPurposeCore, moveCamera]);
   useEffect(() => {
-    // Fixed node coordinates do not wait for a physics engine stop. Apply the
-    // camera after this view's layout effect, and ignore outgoing frame requests.
-    let second = 0;
-    const first = requestAnimationFrame(() => { second = requestAnimationFrame(positionCamera); });
-    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
-  }, [positionCamera, draggingId]);
-  useEffect(() => {
     const canvas = graph.current?.renderer().domElement;
     const owner = canvas?.ownerDocument;
     // ForceGraph emits a document-only touch release with no pointer ID. OrbitControls
@@ -854,7 +847,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   };
   useEffect(() => {
     const layer = labelLayer.current;
-    if (!ready || !layer || !visible) return;
+    if (!ready || !graph.current || !layer || !visible) return;
     const elements = [...layer.children] as HTMLElement[];
     const measuring = elements.find(element => element !== document.activeElement);
     if (!measuring) return;
@@ -906,7 +899,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     if (measuredId && labels.has(measuredId)) fill(measuring, measuredId);
     else { delete measuring.dataset.nodeId; measuring.className = "node-label"; measuring.removeAttribute("role"); measuring.removeAttribute("aria-label"); measuring.setAttribute("aria-hidden", "true"); measuring.tabIndex = -1; }
     measuring.hidden = measuredHidden; measuring.style.visibility = "";
-    let frame = 0, lastProjection = "", lastPositions = -1, refreshLabels = true;
+    let lastProjection = "", lastPositions = -1, refreshLabels = true;
     let previousLabels = new Map<string, ReturnType<typeof visibleLabels>[number]>();
     const chrome = () => {
       const origin = layer.getBoundingClientRect();
@@ -927,6 +920,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     const projected = new Vector3();
     const draw = () => {
       const instance = graph.current;
+      // Layout preparation has committed and ForceGraph has ticked its objects.
+      // Establish this view before its first GPU frame, rather than two RAFs later.
+      positionCamera();
       const pose = cameraMotion.current.advance(performance.now());
       if (pose) writeCamera(pose);
       if (!cameraMotion.current.moving && !pendingReturn.current) restoringCoreReturn.current = null;
@@ -1055,118 +1051,154 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
             }
           }
         }
-        const obstacles = chrome();
-        const key = `${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}|${focusedSummary}|${dragged.current}|${positions.revision}|${JSON.stringify(obstacles)}`;
-        if (key !== lastProjection) {
-          lastProjection = key;
-          const candidates = displayNodes.map(node => {
-            projected.set(node.x, node.y, node.z).applyMatrix4(camera.matrixWorldInverse);
-            const namedGroup = node.kind === "subject" || node.kind === "folder";
-            const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id) || namedGroup;
-            const pixels = nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]);
-            const radius = nodeVisualRadius(pixels, node.id === selected, node.changed, summaryCounts.get(node.id));
-            projected.applyMatrix4(camera.projectionMatrix);
-            return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : namedGroup ? 1 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, body: pixels / 2, ...dimensions.get(node.id)![node.id === selected || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
+
+      }
+    };
+    const scene = graph.current!.scene(), renderedSize = new Vector2();
+    let live = true;
+    const projectLabels = (renderer: WebGLRenderer, camera: Camera) => {
+      if (!live) return;
+      renderer.getSize(renderedSize);
+      const size = { width: renderedSize.x, height: renderedSize.y };
+      const focusedElement = document.activeElement instanceof HTMLElement && document.activeElement.matches(".graph-group-target") && container.current?.contains(document.activeElement) ? document.activeElement : null;
+      const focusedSummary = focusedElement?.dataset.nodeId ?? null;
+      // These are the objects and matrices just drawn, rather than model
+      // coordinates which may already be advancing toward the next layout tick.
+      const renderedNodes: { node: PositionedNode; x: number; y: number; z: number }[] = [];
+      // A replacement data array may not have __threeObj bindings yet, while
+      // the scene still draws its retained Groups. Join the drawn scene by id.
+      scene.traverseVisible(object => {
+        const node = labels.get(object.userData.nodeId)?.node;
+        if (!node) return;
+        const matrix = object.matrixWorld.elements;
+        renderedNodes.push({ node, x: matrix[12], y: matrix[13], z: matrix[14] });
+      });
+      const obstacles = chrome();
+      const actual = renderedNodes.map(value => `${value.node.id}:${value.x},${value.y},${value.z}`).join("|");
+      const key = `${actual}|${size.width}:${size.height}|${camera.matrixWorld.elements.join(",")}|${camera.projectionMatrix.elements.join(",")}|${hoveredId.current}|${focusedSummary}|${dragged.current}|${positions.revision}|${JSON.stringify(obstacles)}`;
+      if (key !== lastProjection) {
+        lastProjection = key;
+        const candidates = renderedNodes.map(({ node, x, y, z }) => {
+          projected.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
+          const namedGroup = node.kind === "subject" || node.kind === "folder";
+          const summary = collapsedCounts.has(node.id) || spatialCounts.has(node.id) || namedGroup;
+          const pixels = nodeScreenSize(node.kind, -projected.z, size.height, camera.projectionMatrix.elements[5]);
+          const radius = nodeVisualRadius(pixels, node.id === selected, node.changed, summaryCounts.get(node.id));
+          projected.applyMatrix4(camera.projectionMatrix);
+          return { id: node.id, kind: node.kind, active: active(node), summary, importance: collapsedCounts.has(node.id) ? 2 : namedGroup ? 1 : 0, x: (projected.x + 1) * size.width / 2, y: (1 - projected.y) * size.height / 2, depth: projected.z, radius, body: pixels / 2, ...dimensions.get(node.id)![node.id === selected || node.id === focusedSummary || node.id === dragged.current ? "detail" : "compact"] };
+        });
+        // Mobile name keys follow the actual projected body; they never move a star.
+        const markerBoxes: typeof obstacles = [];
+        for (const marker of [...(groupMarkerLayer.current?.children ?? [])] as HTMLElement[]) {
+          const star = candidates.find(node => node.id === marker.dataset.nodeId);
+          marker.hidden = !star || star.depth < -1 || star.depth > 1 || star.x + star.radius < 0 || star.x - star.radius > size.width || star.y + star.radius < 0 || star.y - star.radius > size.height;
+          if (!star || marker.hidden) continue;
+          const placeAt = (x: number, y: number) => ({ x, y, left: x - 12, top: y - 12, right: x + 12, bottom: y + 12 });
+          const places = [[1, -1], [1, 1], [-1, -1], [-1, 1]].map(([dx, dy]) => {
+            const x = Math.max(12, Math.min(size.width - 12, star.x + star.radius * .6 * dx));
+            const y = Math.max(12, Math.min(size.height - 12, star.y + star.radius * .6 * dy));
+            return placeAt(x, y);
           });
-          // Mobile name keys follow the actual projected body; they never move a star.
-          const markerBoxes: typeof obstacles = [];
-          for (const marker of [...(groupMarkerLayer.current?.children ?? [])] as HTMLElement[]) {
-            const star = candidates.find(node => node.id === marker.dataset.nodeId);
-            marker.hidden = !star || star.depth < -1 || star.depth > 1 || star.x + star.radius < 0 || star.x - star.radius > size.width || star.y + star.radius < 0 || star.y - star.radius > size.height;
-            if (!star || marker.hidden) continue;
-            const placeAt = (x: number, y: number) => ({ x, y, left: x - 12, top: y - 12, right: x + 12, bottom: y + 12 });
-            const places = [[1, -1], [1, 1], [-1, -1], [-1, 1]].map(([dx, dy]) => {
-              const x = Math.max(12, Math.min(size.width - 12, star.x + star.radius * .6 * dx));
-              const y = Math.max(12, Math.min(size.height - 12, star.y + star.radius * .6 * dy));
-              return placeAt(x, y);
-            });
-            const blockers = [...obstacles, ...markerBoxes];
-            const clear = (box: ReturnType<typeof placeAt>) => box.left >= 0 && box.right <= size.width && box.top >= 0 && box.bottom <= size.height &&
-              Math.hypot(box.x - star.x, box.y - star.y) <= Math.max(100, star.radius + 24) &&
-              blockers.every(other => box.right <= other.left || box.left >= other.right || box.bottom <= other.top || box.top >= other.bottom);
-            // A body can sit partly behind chrome after returning to the overview.
-            // Keep its key close, just outside the blocking edge, before deferring it.
-            const place = places.find(clear) ?? blockers.flatMap(other => [
-              placeAt(places[0].x, other.bottom + 12), placeAt(places[0].x, other.top - 12),
-              placeAt(other.right + 12, places[0].y), placeAt(other.left - 12, places[0].y),
-            ]).sort((a, b) => Math.hypot(a.x - star.x, a.y - star.y) - Math.hypot(b.x - star.x, b.y - star.y)).find(clear);
-            marker.hidden = !place;
-            if (!place) continue;
-            marker.style.left = `${place.x}px`; marker.style.top = `${place.y}px`;
-            markerBoxes.push(place);
-            marker.classList.toggle("active", star.id === hoveredId.current || star.id === focusedSummary);
-          }
-          const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
-          const opened = spatialReveal?.members.size ? spatialReveal.members : activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : undefined;
-          const labelCandidates = candidates.filter(node => !obstacles.some(box => node.x + node.radius > box.left && node.x - node.radius < box.right && node.y + node.radius > box.top && node.y - node.radius < box.bottom) && (!opened || opened.has(node.id) || node.id === activeExpandedCore || node.id === hoveredId.current || node.id === focusedSummary || node.id === selected || node.id === dragged.current) &&
-            (!spatialCounts.has(node.id) || (!activeExpandedCore && spatialLabels.has(node.id)) || node.id === hoveredId.current || node.id === focusedSummary) &&
-            (!pinnedNames.has(node.id) || node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current));
-          const priorityId = focusedSummary ?? dragged.current ?? selected;
-          // An opened group or revealed nearby stars show their own titles; other star titles wait.
-          const starTitles = opened ? { limit: 0, exempt: opened, reach: readingMembers ? showAllCore ? 38 : 84 : undefined } : { limit: MAX_RESTING_STAR_LABELS };
-          const environment = { stars: readingMembers ? candidates.filter(node => readingMembers.has(node.id) || node.id === activeExpandedCore) : candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : undefined };
-          let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
-          // Expanded metadata must not make an already usable keyboard target disappear.
-          const compactFallback = new Set(labelCandidates.filter(node => node.id === priorityId && !visible.some(box => box.id === node.id)).map(node => node.id));
-          if (compactFallback.size) visible = visibleLabels(labelCandidates.map(node => compactFallback.has(node.id) ? { ...node, ...dimensions.get(node.id)!.compact } : node), size.width, size.height, priorityId, hoveredId.current, environment);
-          previousLabels = new Map(visible.map(box => [box.id, box]));
-          const remaining = new Map(visible.map(box => [box.id, box]));
-          const assigned = new Map<HTMLElement, (typeof visible)[number]>();
-          for (const element of elements) {
-            const box = remaining.get(element.dataset.nodeId ?? "");
-            if (box) { assigned.set(element, box); remaining.delete(box.id); }
-          }
-          // Keyboard targets live outside this recycled visual-label pool.
-          for (const box of remaining.values()) {
-            const slot = elements.find(element => !assigned.has(element));
-            if (slot) assigned.set(slot, box);
-          }
-          for (const element of elements) {
-            const box = assigned.get(element);
-            // Pointing keeps the title anchored; its metadata lives in the guidance.
-            const detailed = !!box && !compactFallback.has(box.id) && (box.id === selected || box.id === focusedSummary || box.id === dragged.current);
-            if (box && (refreshLabels || element.dataset.nodeId !== box.id || element.classList.contains("compact") === detailed)) fill(element, box.id, detailed);
-            element.hidden = !box;
-            element.classList.toggle("hovered", !!box && box.id === hoveredId.current);
-            element.classList.toggle("focused", !!box && box.id === focusedSummary);
-            if (!box) continue;
-            element.style.left = `${box.left}px`; element.style.top = `${box.top}px`;
-            const star = candidates.find(node => node.id === box.id)!;
-            const leader = labelLeader(star, box);
-            const route = box.guide;
-            element.classList.toggle("offset-label", !!leader || !!route?.length);
-            element.classList.toggle("routed-label", !!route?.length);
-            const svg = element.children[3] as SVGSVGElement;
-            svg.style.display = route?.length ? "" : "none";
-            if (route?.length) {
-              svg.children[0].setAttribute("points", [[route[0].x1, route[0].y1], ...route.map(line => [line.x2, line.y2])].map(([x, y]) => `${x - box.left},${y - box.top}`).join(" "));
-              svg.children[1].setAttribute("cx", String(route[0].x1 - box.left)); svg.children[1].setAttribute("cy", String(route[0].y1 - box.top));
-            }
-            element.style.setProperty("--leader-x", `${(leader?.x1 ?? star.x) - box.left}px`);
-            element.style.setProperty("--leader-y", `${(leader?.y1 ?? star.y) - box.top}px`);
-            element.style.setProperty("--leader-length", `${leader?.length ?? 0}px`);
-            element.style.setProperty("--leader-angle", `${leader ? Math.atan2(leader.y2 - leader.y1, leader.x2 - leader.x1) : 0}rad`);
-          }
-          refreshLabels = false;
+          const blockers = [...obstacles, ...markerBoxes];
+          const clear = (box: ReturnType<typeof placeAt>) => box.left >= 0 && box.right <= size.width && box.top >= 0 && box.bottom <= size.height &&
+            Math.hypot(box.x - star.x, box.y - star.y) <= Math.max(100, star.radius + 24) &&
+            blockers.every(other => box.right <= other.left || box.left >= other.right || box.bottom <= other.top || box.top >= other.bottom);
+          // A body can sit partly behind chrome after returning to the overview.
+          // Keep its key close, just outside the blocking edge, before deferring it.
+          const place = places.find(clear) ?? blockers.flatMap(other => [
+            placeAt(places[0].x, other.bottom + 12), placeAt(places[0].x, other.top - 12),
+            placeAt(other.right + 12, places[0].y), placeAt(other.left - 12, places[0].y),
+          ]).sort((a, b) => Math.hypot(a.x - star.x, a.y - star.y) - Math.hypot(b.x - star.x, b.y - star.y)).find(clear);
+          marker.hidden = !place;
+          if (!place) continue;
+          marker.style.left = `${place.x}px`; marker.style.top = `${place.y}px`;
+          markerBoxes.push(place);
+          marker.classList.toggle("active", star.id === hoveredId.current || star.id === focusedSummary);
+        }
+        const spatialLabels = nucleusLabelIds(candidates, spatialCounts, size.width, size.height);
+        const opened = spatialReveal?.members.size ? spatialReveal.members : activeExpandedCore ? cores.find(core => core.hub === activeExpandedCore)?.members : undefined;
+        const labelCandidates = candidates.filter(node => !obstacles.some(box => node.x + node.radius > box.left && node.x - node.radius < box.right && node.y + node.radius > box.top && node.y - node.radius < box.bottom) && (!opened || opened.has(node.id) || node.id === activeExpandedCore || node.id === hoveredId.current || node.id === focusedSummary || node.id === selected || node.id === dragged.current) &&
+          (!spatialCounts.has(node.id) || (!activeExpandedCore && spatialLabels.has(node.id)) || node.id === hoveredId.current || node.id === focusedSummary) &&
+          (!pinnedNames.has(node.id) || node.id === selected || node.id === hoveredId.current || node.id === focusedSummary || node.id === dragged.current));
+        const priorityId = focusedSummary ?? dragged.current ?? selected;
+        // An opened group or revealed nearby stars show their own titles; other star titles wait.
+        const starTitles = opened ? { limit: 0, exempt: opened, reach: readingMembers ? showAllCore ? 38 : 84 : undefined } : { limit: MAX_RESTING_STAR_LABELS };
+        const environment = { stars: readingMembers ? candidates.filter(node => readingMembers.has(node.id) || node.id === activeExpandedCore) : candidates, obstacles: [...obstacles, ...markerBoxes], previous: previousLabels, starTitles, restingSummaryGap: size.width <= 700 ? 40 : undefined };
+        let visible = visibleLabels(labelCandidates, size.width, size.height, priorityId, hoveredId.current, environment);
+        // Expanded metadata must not make an already usable keyboard target disappear.
+        const compactFallback = new Set(labelCandidates.filter(node => node.id === priorityId && !visible.some(box => box.id === node.id)).map(node => node.id));
+        if (compactFallback.size) visible = visibleLabels(labelCandidates.map(node => compactFallback.has(node.id) ? { ...node, ...dimensions.get(node.id)!.compact } : node), size.width, size.height, priorityId, hoveredId.current, environment);
+        previousLabels = new Map(visible.map(box => [box.id, box]));
+        const remaining = new Map(visible.map(box => [box.id, box]));
+        const assigned = new Map<HTMLElement, (typeof visible)[number]>();
+        for (const element of elements) {
+          const box = remaining.get(element.dataset.nodeId ?? "");
+          if (box) { assigned.set(element, box); remaining.delete(box.id); }
+        }
+        // Keyboard targets live outside this recycled visual-label pool.
+        for (const box of remaining.values()) {
+          const slot = elements.find(element => !assigned.has(element));
+          if (slot) assigned.set(slot, box);
         }
         for (const element of elements) {
-          const id = element.dataset.nodeId;
-          if (id) {
-            const opacity = revealOpacity(revealRef.current, id, performance.now());
-            element.style.opacity = String(opacity);
-            element.style.pointerEvents = revealRef.current.retiring.has(id) ? "none" : "";
-            if (revealRef.current.retiring.has(id)) { element.tabIndex = -1; element.setAttribute("aria-hidden", "true"); }
+          const box = assigned.get(element);
+          // Pointing keeps the title anchored; its metadata lives in the guidance.
+          const detailed = !!box && !compactFallback.has(box.id) && (box.id === selected || box.id === focusedSummary || box.id === dragged.current);
+          if (box && (refreshLabels || element.dataset.nodeId !== box.id || element.classList.contains("compact") === detailed)) fill(element, box.id, detailed);
+          element.hidden = !box;
+          element.classList.toggle("hovered", !!box && box.id === hoveredId.current);
+          element.classList.toggle("focused", !!box && box.id === focusedSummary);
+          if (!box) continue;
+          element.style.left = `${box.left}px`; element.style.top = `${box.top}px`;
+          const star = candidates.find(node => node.id === box.id)!;
+          const leader = labelLeader(star, box);
+          const route = box.guide;
+          element.classList.toggle("offset-label", !!leader || !!route?.length);
+          element.classList.toggle("routed-label", !!route?.length);
+          const svg = element.children[3] as SVGSVGElement;
+          svg.style.display = route?.length ? "" : "none";
+          if (route?.length) {
+            svg.children[0].setAttribute("points", [[route[0].x1, route[0].y1], ...route.map(line => [line.x2, line.y2])].map(([x, y]) => `${x - box.left},${y - box.top}`).join(" "));
+            svg.children[1].setAttribute("cx", String(route[0].x1 - box.left)); svg.children[1].setAttribute("cy", String(route[0].y1 - box.top));
           }
+          element.style.setProperty("--leader-x", `${(leader?.x1 ?? star.x) - box.left}px`);
+          element.style.setProperty("--leader-y", `${(leader?.y1 ?? star.y) - box.top}px`);
+          element.style.setProperty("--leader-length", `${leader?.length ?? 0}px`);
+          element.style.setProperty("--leader-angle", `${leader ? Math.atan2(leader.y2 - leader.y1, leader.x2 - leader.x1) : 0}rad`);
+        }
+        refreshLabels = false;
+      }
+      for (const element of elements) {
+        const id = element.dataset.nodeId;
+        if (id) {
+          const opacity = revealOpacity(revealRef.current, id, performance.now());
+          element.style.opacity = String(opacity);
+          element.style.pointerEvents = revealRef.current.retiring.has(id) ? "none" : "";
+          if (revealRef.current.retiring.has(id)) { element.tabIndex = -1; element.setAttribute("aria-hidden", "true"); }
         }
       }
-      frame = requestAnimationFrame(draw);
     };
-    draw(); return () => cancelAnimationFrame(frame);
+    const before = scene.onBeforeRender, after = scene.onAfterRender;
+    const advance: typeof before = function (this: typeof scene, ...args) {
+      if (live) draw();
+      before.apply(this, args);
+    };
+    const project: typeof after = function (this: typeof scene, ...args) {
+      if (live) projectLabels(args[0], args[2]);
+      after.apply(this, args);
+    };
+    // One render clock owns state progression and its matching DOM projection.
+    scene.onBeforeRender = advance; scene.onAfterRender = project;
+    return () => {
+      live = false;
+      if (scene.onBeforeRender === advance) scene.onBeforeRender = before;
+      if (scene.onAfterRender === project) scene.onAfterRender = after;
+    };
   }, [ready, labelFontRevision, minimapRevision, nodes, displayNodes, displayLinks, outlineLinks, allConnections, collapsedCounts, cores, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal, groupTitle, pinnedNames, readingMembers, showAllCore]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;
-    const material = (kind: "ring" | "selection" | "change" | "hit", color: string, opacity: number) => {
+    const material = (kind: "marker" | "member" | "selection" | "change" | "hit", color: string, opacity: number) => {
       const key = `${kind}:${color}:${opacity}:${kind === "hit" ? "shared" : node.id}`;
       let value = resources.materials.get(key);
       if (!value) {
@@ -1241,7 +1273,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       group.add(body);
     } else group.add(isKnowledge
       ? screenStar(resources.geometry, resources.star, node, motionClock.current, () => motionReduced.current, cursor, dragged, summary ? 22 : 0, haloScale, contactMotion, fade)
-      : screenSprite(material("ring", color, active(node) ? 1 : .35), node, "body", isSelected, 0, undefined,
+      : screenSprite(material("marker", color, active(node) ? 1 : .35), node, "body", isSelected, 0, undefined,
         () => (1 + ((haloScale?.() ?? 1) - 1) * 2) * (1 + (contactMotion()?.pulse ?? 0) * .05), undefined, undefined, fade));
     const oldGlyph = !summary && resources.summaries.get(node.id);
     if (oldGlyph && cloud && cloud.fade.value > 0 && !reduced) {
@@ -1257,7 +1289,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       };
       group.add(body);
     }
-    if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("ring", ui.primary, .7), node, "body", false, 0, 18));
+    if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("member", ui.primary, .7), node, "body", false, 0, 18));
     const summaryMetrics = summaryPixels ? nodeScreenMetrics(summaryPixels, isSelected, node.changed) : null;
     if (isSelected) group.add(screenSprite(material("selection", ui.primary, .52), node, "selection", isSelected, 0, summaryMetrics?.selection, undefined, undefined, undefined, fade));
     if (node.changed) group.add(screenSprite(material("change", ui.warning, .9), node, "change", isSelected, 0, summaryMetrics?.change, undefined, undefined, undefined, fade));
@@ -1310,7 +1342,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       spatialCloseTimer.current = null;
     }, reduced ? 0 : REVEAL_DURATION + 16);
   };
-  return <div className="graph-canvas" data-compact-chrome={compactChrome} ref={container} tabIndex={-1}
+  return <div className="graph-canvas"><div className="graph-viewport" data-compact-chrome={compactChrome} ref={container} tabIndex={-1}
     data-label-backdrop={hasDisplayFilters || selected || activeExpandedCore || spatialReveal?.members.size || allConnections ? "protected" : "clear"}
     onKeyDownCapture={event => {
       if (disabled || !(event.target as HTMLElement).closest(".graph-minimap") ||
@@ -1504,8 +1536,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     <div className="graph-chrome">
     {ready && <MiniMap compact={compactChrome} nodes={currentDisplayNodes} getCamera={getCamera} onMove={panMiniMap} onZoom={zoomMiniMap} onFit={onFit} rotating={rotate} onToggleRotation={onToggleRotation}
       rotationUnavailable={reduced ? "움직임 줄이기 설정에서는 회전을 멈춥니다." : selected ? "자료 선택을 해제하면 회전할 수 있습니다." : undefined} disabled={disabled || positions.dragging} visible={visible} onResize={resizeMinimap} />}
-    <GraphInstructions quick />
     </div>
     {hover && (!selected || hoveredId.current !== selected) && <div className="graph-tooltip" data-node-id={hoveredId.current ?? undefined} role="status"><strong>{hover.title}</strong><span>{hover.detail}</span></div>}
+    </div>
+    <div className="graph-guidance"><GraphInstructions quick /></div>
   </div>;
 }
