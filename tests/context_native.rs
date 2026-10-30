@@ -3108,6 +3108,182 @@ async fn native_shared_sessions_read_concurrently_with_separate_views() {
 }
 
 #[tokio::test]
+async fn native_callback_completion_releases_owned_gates_on_success_and_failure() {
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let (_fixture, root) = fixture(1, b"# Callback original");
+    import(&store, &root).await;
+    let identity: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let mut revision = 1;
+    let mut body = "# Callback original".to_owned();
+    fn outcome(case: u8) -> Result<(), Error> {
+        match case {
+            0 => Ok(()),
+            1 => Err(Error::Invalid),
+            2 => panic!("synthetic callback panic"),
+            _ => panic!("invalid setup must not invoke the callback"),
+        }
+    }
+    for exclusive in [false, true] {
+        for case in 0..if exclusive { 5 } else { 4 } {
+            let view = harness_fixture::view();
+            let mut path = view.path().canonicalize().unwrap();
+            if case == 3 {
+                path.push("missing-view");
+            }
+            let result = if exclusive {
+                let expected = if case == 4 {
+                    "wrong-store".to_owned()
+                } else {
+                    identity.clone()
+                };
+                store
+                    .with_native_commit(path, expected, move |_| outcome(case))
+                    .await
+            } else {
+                store
+                    .with_native_context(path, move |source| {
+                        source
+                            .open_file(Path::new("vault/personal/0000.md"), 65536)
+                            .unwrap();
+                        outcome(case)
+                    })
+                    .await
+            };
+            match case {
+                0 => assert!(result.is_ok()),
+                1 | 3 => assert!(matches!(result, Err(Error::Invalid))),
+                2 => assert!(result.is_err()),
+                4 => assert!(matches!(result, Err(Error::Conflict))),
+                _ => unreachable!(),
+            }
+            let next = format!("# After callback {exclusive}/{case}");
+            store
+                .edit_context(
+                    &scope(),
+                    "0000.md",
+                    revision,
+                    &ontology::store::digest(body.as_bytes()),
+                    &next,
+                )
+                .await
+                .expect("completed callback acknowledges its gate release before the next write");
+            revision += 1;
+            body = next;
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_escaped_sources_keep_their_lifetime_and_unlock_ack_works_before_disconnect() {
+    use sqlx::Connection;
+    let _guard = TEST_LOCK.lock().await;
+    let store = store().await;
+    let (_fixture, root) = fixture(1, b"# Escaped original");
+    import(&store, &root).await;
+    let identity: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    for exclusive in [false, true] {
+        let view = harness_fixture::view();
+        let path = view.path().canonicalize().unwrap();
+        let source = if exclusive {
+            store
+                .with_native_commit(path, identity.clone(), |session| {
+                    Ok(session.fresh_source().unwrap())
+                })
+                .await
+                .unwrap()
+        } else {
+            store.with_native_context(path, Ok).await.unwrap()
+        };
+        let retained = source.clone();
+        tokio::task::spawn_blocking(move || {
+            retained
+                .open_file(Path::new("vault/personal/0000.md"), 65536)
+                .map(|_| ())
+        })
+        .await
+        .unwrap()
+        .expect("escaped source remains usable after its callback");
+        assert!(matches!(
+            store
+                .edit_context(
+                    &scope(),
+                    "0000.md",
+                    1,
+                    &ontology::store::digest(b"# Escaped original"),
+                    "# Must remain blocked"
+                )
+                .await,
+            Err(Error::ContextPending)
+        ));
+        drop(source);
+        // Escaped ownership retains its existing lifetime. Await the server's
+        // release after the final owner drops; do not sleep or retry a write.
+        let mut gate = store.pool().begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout='3s'")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(478310003)")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        gate.rollback().await.unwrap();
+    }
+    // Calibrate acknowledged release independently of socket teardown: this
+    // backend remains connected while the real writer becomes available.
+    let url = std::env::var("TEST_DATABASE_URL").unwrap();
+    let mut connection = sqlx::PgConnection::connect(&url).await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock_shared(478310003)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .edit_context(
+                &scope(),
+                "0000.md",
+                1,
+                &ontology::store::digest(b"# Escaped original"),
+                "# Still blocked"
+            )
+            .await,
+        Err(Error::ContextPending)
+    ));
+    sqlx::query("SELECT pg_advisory_unlock_all()")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+        pid
+    );
+    store
+        .edit_context(
+            &scope(),
+            "0000.md",
+            1,
+            &ontology::store::digest(b"# Escaped original"),
+            "# Acknowledged before disconnect",
+        )
+        .await
+        .expect("the same live backend has acknowledged release");
+}
+
+#[tokio::test]
 async fn native_cli_blocked_stdout_releases_database_and_view_locks() {
     native_blocked_output_case(false).await;
 }

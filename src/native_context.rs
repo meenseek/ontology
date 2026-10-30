@@ -970,12 +970,43 @@ impl ContextSource for NativeContextSource {
     }
 }
 impl Store {
+    // A TCP disconnect is not an acknowledgement that PostgreSQL has released
+    // its session locks. Keep the owner until the callback has joined, then
+    // acknowledge release only when no source/session escaped the callback.
+    async fn finish_native_connection<T>(
+        &self,
+        connection: Arc<Mutex<PgConnection>>,
+        result: Result<T, Error>,
+    ) -> Result<T, Error> {
+        let Ok(connection) = Arc::try_unwrap(connection) else {
+            return result;
+        };
+        // A poisoned connection is consumed only for teardown, never reused as
+        // a source. This dedicated connection owns only native session locks.
+        let mut connection = connection
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.count(1);
+        let released = sqlx::query("SELECT pg_advisory_unlock_all()")
+            .execute(&mut connection)
+            .await
+            .map_err(|error| sql_error(Stage::ContextGate, error));
+        if result.is_ok() {
+            released?;
+        }
+        result
+    }
+
     pub(crate) async fn dedicated_context_connection(
         &self,
         exclusive: bool,
     ) -> Result<PgConnection, Error> {
         let mut conn = self.open_context_connection(exclusive).await?;
-        self.check_context_pending(&mut conn).await?;
+        if let Err(error) = self.check_context_pending(&mut conn).await {
+            return self
+                .finish_native_connection(Arc::new(Mutex::new(conn)), Err(error))
+                .await;
+        }
         Ok(conn)
     }
     async fn open_context_connection(&self, exclusive: bool) -> Result<PgConnection, Error> {
@@ -1019,17 +1050,27 @@ impl Store {
     {
         let mut connection = self.dedicated_context_connection(false).await?;
         self.count(1);
-        let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        let store_id = sqlx::query_scalar::<_, String>("SELECT store_id::text FROM context_store")
             .fetch_one(&mut connection)
             .await
-            .map_err(|error| sql_error(Stage::ContextIdentity, error))?;
+            .map_err(|error| sql_error(Stage::ContextIdentity, error));
+        let store_id = match store_id {
+            Ok(value) => value,
+            Err(error) => {
+                return self
+                    .finish_native_connection(Arc::new(Mutex::new(connection)), Err(error))
+                    .await;
+            }
+        };
+        let connection = Arc::new(Mutex::new(connection));
+        let source_connection = connection.clone();
         let store = self.clone();
         let handle = Handle::current();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let view = View::open(&view, &store_id).map_err(|_| Error::Invalid)?;
             operation(Arc::new(NativeContextSource {
                 store,
-                connection: Arc::new(Mutex::new(connection)),
+                connection: source_connection,
                 handle,
                 view: Arc::new(view),
                 preserved_targets: Default::default(),
@@ -1040,7 +1081,9 @@ impl Store {
             }))
         })
         .await
-        .map_err(|_| failure(Stage::ContextJoin, "join"))?
+        .map_err(|_| failure(Stage::ContextJoin, "join"))
+        .and_then(std::convert::identity);
+        self.finish_native_connection(connection, result).await
     }
 }
 
@@ -1129,21 +1172,33 @@ impl Store {
     {
         let mut connection = self.open_context_connection(true).await?;
         self.count(1);
-        let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
+        let store_id = sqlx::query_scalar::<_, String>("SELECT store_id::text FROM context_store")
             .fetch_one(&mut connection)
             .await
-            .map_err(|_| Error::Storage)?;
+            .map_err(|_| Error::Storage);
+        let store_id = match store_id {
+            Ok(value) => value,
+            Err(error) => {
+                return self
+                    .finish_native_connection(Arc::new(Mutex::new(connection)), Err(error))
+                    .await;
+            }
+        };
+        let connection = Arc::new(Mutex::new(connection));
         if store_id != expected_store {
-            return Err(Error::Conflict);
+            return self
+                .finish_native_connection(connection, Err(Error::Conflict))
+                .await;
         }
+        let source_connection = connection.clone();
         let store = self.clone();
         let handle = Handle::current();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let view = Arc::new(View::open(&view, &store_id).map_err(|_| Error::Invalid)?);
             operation(&mut NativeContextSession {
                 sql_observations: Default::default(),
                 store,
-                connection: Arc::new(Mutex::new(connection)),
+                connection: source_connection,
                 handle,
                 view,
                 identity: SourceStoreIdentity { store_id },
@@ -1152,7 +1207,9 @@ impl Store {
             })
         })
         .await
-        .map_err(|_| Error::Storage)?
+        .map_err(|_| Error::Storage)
+        .and_then(std::convert::identity);
+        self.finish_native_connection(connection, result).await
     }
 }
 
