@@ -1,5 +1,5 @@
 import { expect, test } from "playwright/test";
-import { luminance, screenshotPixels, edgeLightPixels, ringRidge } from "./png";
+import { luminance, screenshotPixels, edgeLightPixels, ringRidge, sameRegionPixels } from "./png";
 
 import { installGraphProbe } from "./graph-probe";
 
@@ -16,30 +16,49 @@ async function settled(page: import("playwright/test").Page) {
   }, { timeout: 25_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
 }
 
-// Key badges are DOM data paint with their own shadow, outside the WebGL light
-// contract. Isolate that one layer, then prove the actual screen is restored.
+// Measure WebGL light without DOM names, keys or controls contaminating either
+// edge or positive samples. Visibility preserves layout; the exact UI is restored.
 async function lightScreenshot(page: import("playwright/test").Page) {
-  const original = await page.screenshot(), layer = page.locator(".graph-group-markers");
-  const state = await layer.evaluate(element => {
-    const e = element as HTMLElement;
-    return { value: e.style.getPropertyValue("visibility"), priority: e.style.getPropertyPriority("visibility"),
-      visible: [...e.querySelectorAll<HTMLElement>(".graph-group-marker:not([hidden])")].some(marker =>
-        marker.offsetWidth > 0 && getComputedStyle(marker).visibility === "visible") };
+  const before = await page.evaluate(() => ({ focus: document.activeElement?.outerHTML.slice(0, 600), frame: window.__graphQA.frame(),
+    styles: [...document.querySelector(".graph-viewport")!.children].map(e => ({ class: e.className, style: e.getAttribute("style") })) }));
+  const region = await page.locator(".graph-viewport").evaluate(element => ({ rect: element.getBoundingClientRect().toJSON(), dpr: devicePixelRatio }));
+  const original = await page.screenshot(), originalPixels = screenshotPixels(original);
+  const layers = await page.locator(".graph-viewport").evaluateHandle(element => {
+    const canvas = element.querySelector("canvas");
+    const scene = [...element.children].find(child => child.contains(canvas));
+    if (!canvas || !scene) throw new Error("Missing actual WebGL wrapper");
+    return [...element.children].filter(child => child !== scene).map(child => {
+      const element = child as HTMLElement;
+      return { element, hadStyle: element.hasAttribute("style"), value: element.style.getPropertyValue("visibility"), priority: element.style.getPropertyPriority("visibility") };
+    });
   });
-  if (!state.visible) return original;
   let isolated: Buffer;
   try {
-    await layer.evaluate(element => (element as HTMLElement).style.setProperty("visibility", "hidden", "important"));
+    expect(await layers.evaluate(list => list.length), "actual DOM overlay layers exist").toBeGreaterThan(0);
+    await layers.evaluate(list => list.forEach(({ element }) => element.style.setProperty("visibility", "hidden", "important")));
     isolated = await page.screenshot();
+    expect(await layers.evaluate(list => list.every(({ element }) => element.isConnected && getComputedStyle(element).visibility === "hidden")), "only the actual connected DOM overlays are isolated").toBe(true);
   } finally {
-    await layer.evaluate((element, state) => {
-      const style = (element as HTMLElement).style;
-      if (state.value) style.setProperty("visibility", state.value, state.priority);
-      else style.removeProperty("visibility");
-    }, state);
+    try {
+      await layers.evaluate(list => list.forEach(({ element, value, priority, hadStyle }) => {
+        if (value) element.style.setProperty("visibility", value, priority);
+        else element.style.removeProperty("visibility");
+        if (!hadStyle && !element.style.length) element.removeAttribute("style");
+      }));
+    } finally { await layers.dispose(); }
   }
-  expect(isolated!.equals(original), "visible badge ink is a real positive control").toBe(false);
-  expect((await page.screenshot()).equals(original), "restoring the badge preserves every actual screen pixel").toBe(true);
+  expect(sameRegionPixels(screenshotPixels(isolated!), originalPixels, region.rect, region.dpr), "visible DOM ink inside the plot is a real positive control").toBe(false);
+  const restored = await page.screenshot();
+  const restoredExactly = sameRegionPixels(screenshotPixels(restored), originalPixels, region.rect, region.dpr);
+  if (!restoredExactly) {
+    const after = await page.evaluate(() => ({ focus: document.activeElement?.outerHTML.slice(0, 600), frame: window.__graphQA.frame(),
+      styles: [...document.querySelector(".graph-viewport")!.children].map(e => ({ class: e.className, style: e.getAttribute("style") })) }));
+    await test.info().attach("light-normal", { body: original, contentType: "image/png" });
+    await test.info().attach("light-isolated", { body: isolated!, contentType: "image/png" });
+    await test.info().attach("light-restored", { body: restored, contentType: "image/png" });
+    await test.info().attach("light-state", { body: JSON.stringify({ before, after, region }), contentType: "application/json" });
+  }
+  expect(restoredExactly, "restoring the overlays preserves every decoded pixel in the actual clipped plot").toBe(true);
   return isolated!;
 }
 
@@ -284,6 +303,7 @@ for (const viewport of [{ width: 1440, height: 900, dpr: 1 }, { width: 920, heig
         await panNode(page, "preview-purpose-0", edge, -60);
         const geometry = await page.evaluate(() => ({ canvas: document.querySelector(".graph-viewport canvas")!.getBoundingClientRect().toJSON(), frame: window.__graphQA.frame()! }));
         const measured = edgeLightPixels(screenshotPixels(await lightScreenshot(page)), viewport.dpr, geometry.canvas, geometry.frame, edge);
+        console.info("WebGL light sample", JSON.stringify({ viewport, edge, ...measured }));
         expect(measured.samples, `${edge}: non-semantic edge samples`).toBeGreaterThanOrEqual(100);
         expect(measured.innerPeak, `${edge}: light remains visible inside`).toBeGreaterThanOrEqual(8);
         expect(measured.max, `${edge}: actual decorative cutoff`).toBeLessThanOrEqual(3);

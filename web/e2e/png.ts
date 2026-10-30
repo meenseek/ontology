@@ -35,6 +35,7 @@ export function screenshotPixels(bytes: Buffer) {
     }
   }
   return {
+    width, height, channels, pixels,
     rgb(x: number, y: number) {
       x = Math.floor(x); y = Math.floor(y);
       if (x < 0 || y < 0 || x >= width || y >= height) throw new Error("Pixel outside screenshot");
@@ -85,4 +86,25 @@ export function ringRidge(shot: ReturnType<typeof screenshotPixels>, x: number, 
     ridges.push(Math.max(...[-.75, -.25, .25, .75].flatMap(dr => sample(radius + dr).map((v, j) => v - (a[j] + b[j]) / 2))));
   }
   return { peak: Math.max(...ridges), visible: ridges.filter(v => v >= 2).length };
+}
+
+// Compare visible pixels in the actual clipped paint region, independent of PNG
+// compression and unrelated native controls outside the modified viewport.
+export function sameRegionPixels(a: ReturnType<typeof screenshotPixels>, b: ReturnType<typeof screenshotPixels>,
+  rect: { left: number; top: number; right: number; bottom: number }, dpr: number) {
+  if (a.width !== b.width || a.height !== b.height) return false;
+  const left = Math.max(0, Math.floor(rect.left * dpr)), right = Math.min(a.width, Math.ceil(rect.right * dpr));
+  const top = Math.max(0, Math.floor(rect.top * dpr)), bottom = Math.min(a.height, Math.ceil(rect.bottom * dpr));
+  if (right <= left || bottom <= top) throw new Error("Empty paint comparison region");
+  for (let y = top; y < bottom; y++) {
+    if (a.channels === b.channels) {
+      const start = (y * a.width + left) * a.channels, end = (y * a.width + right) * a.channels;
+      if (!a.pixels.subarray(start, end).equals(b.pixels.subarray(start, end))) return false;
+    } else for (let x = left; x < right; x++) {
+      const at = (y * a.width + x) * a.channels, bt = (y * b.width + x) * b.channels;
+      for (let c = 0; c < 4; c++) if ((c === 3 && a.channels === 3 ? 255 : a.pixels[at + c]) !==
+        (c === 3 && b.channels === 3 ? 255 : b.pixels[bt + c])) return false;
+    }
+  }
+  return true;
 }
