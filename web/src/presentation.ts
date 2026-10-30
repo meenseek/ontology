@@ -191,6 +191,17 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     return placed.every(other => {
       if (overlaps(box, other)) return false;
       const otherLines = guide(other);
+      // Two individually nearest titles can still read as one name column
+      // between opposite owners. Try another existing position before accepting
+      // that gestalt; a visible guide already makes the association explicit.
+      const otherStar = byId.get(other.id)!;
+      if (!lines.length && !otherLines.length && !star.summary && !otherStar.summary) {
+        const overlap = Math.min(box.right, other.right) - Math.max(box.left, other.left);
+        const gap = Math.max(box.top, other.top) - Math.min(box.bottom, other.bottom);
+        const inward = (star.x < box.left && otherStar.x > other.right) || (otherStar.x < other.left && star.x > box.right);
+        if (inward && overlap >= Math.min(box.right - box.left, other.right - other.left) / 2 &&
+          gap <= Math.max(box.bottom - box.top, other.bottom - other.top)) return false;
+      }
       return lines.every(line => !leaderHitsBox(line, other)) && otherLines.every(line => !leaderHitsBox(line, box)) &&
         lines.every(line => otherLines.every(otherLine => !leadersCross(line, otherLine)));
     });

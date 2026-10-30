@@ -89,7 +89,7 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .map-search input:focus { outline: none; border: 2px solid var(--focus-ring); padding: 9px; }
 .map-search button { flex: 0 0 auto; }
 .manage-button, .library-button { white-space: nowrap; }
-.map-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); position: relative; background: var(--surface-page); }
+.map-workspace { --map-gutter: 26px; flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); position: relative; background: var(--surface-page); }
 .map-workspace.map-view { background: radial-gradient(ellipse at 50% 45%, var(--surface-map) 0, var(--surface-map-depth) 58%, var(--surface-map-edge) 100%); }
 .map-workspace.explorer-open { grid-template-columns: minmax(0, 1fr); }
 .map-workspace.panel-open { grid-template-columns: minmax(0, 1fr) clamp(440px, 54vw, 760px); }
@@ -116,7 +116,7 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .cluster-counts > span { white-space: nowrap; }
 .cluster i { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .galaxy { min-width: 0; overflow: hidden; position: relative; display: flex; flex-direction: column; }
-.map-toolbar { padding: 14px 26px 8px; display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 18px; z-index: 3; }
+.map-toolbar { padding: 14px var(--map-gutter) 8px; display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 18px; z-index: 3; }
 .map-title { min-width: 0; flex: 1 1 260px; }
 .count-breakdown { color: var(--text-muted); font-size: 12px; margin: 4px 0 0; }
 .map-title .count-breakdown > span { white-space: nowrap; }
@@ -135,13 +135,13 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .view-options[open] > summary { background: var(--surface-active); border-color: var(--border-active); color: var(--text-strong); }
 .view-options > div { position: absolute; right: 0; top: calc(100% + 6px); width: 220px; display: grid; gap: 8px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface-raised); z-index: 4; }
 .view-options button { text-align: left; font-size: 12px; }
-.map-status { padding: 0 26px; z-index: 2; font-size: 12px; }
+.map-status { padding: 0 var(--map-gutter); z-index: 2; font-size: 12px; }
 .active-filters { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 8px; }
 .active-filters button { padding: 3px 0; text-decoration: underline; }
 .no-relations { margin: 8px 0 0; }
 .graph-canvas { position: relative; flex: 1; min-height: 230px; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .graph-viewport { position: relative; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
-.graph-guidance { flex: 0 0 auto; padding: 4px 26px 10px; }
+.graph-guidance { flex: 0 0 auto; padding: 4px var(--map-gutter) 10px; }
 .graph-viewport > div:first-child { position: absolute; inset: 0; }
 .graph-canvas .scene-container { position: relative; }
 .graph-canvas canvas { display: block; touch-action: none; }
@@ -194,7 +194,7 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .graph-quick-help { position: absolute; left: 14px; bottom: 14px; max-width: calc(100% - 200px); pointer-events: none; color: var(--text-secondary); text-shadow: var(--shadow-map-text); }
 .graph-quick-help .pointer-instructions, .graph-quick-help .touch-instructions { line-height: 1.8; }
 .graph-quick-help span > span { display: inline-block; margin-inline-end: 10px; white-space: nowrap; }
-.map-legend { position: relative; padding: 8px 26px; border-top: 1px solid var(--border-subtle); display: flex; flex-wrap: wrap; align-items: center; gap: 7px 18px; color: var(--text-muted); font-size: 11px; background: var(--surface-header); z-index: 2; }
+.map-legend { position: relative; padding: 8px var(--map-gutter); border-top: 1px solid var(--border-subtle); display: flex; flex-wrap: wrap; align-items: center; gap: 7px 18px; color: var(--text-muted); font-size: 11px; background: var(--surface-header); z-index: 2; }
 .map-legend > span { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .legend-star { width: 10px; height: 10px; display: inline-block; background: radial-gradient(circle, var(--text) 0 13%, color-mix(in srgb, var(--text) 44%, transparent) 25%, transparent 70%); }
 .map-legend details { margin-left: auto; }
@@ -329,12 +329,12 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
 .evidence-source > button { text-align: left; overflow-wrap: anywhere; }
 .paused { padding: 40px; color: var(--text-secondary); }
 @media (max-width: 1200px) {
+  .map-workspace { --map-gutter: 20px; }
   .wordmark span { display: none; }
   .app-header { gap: 16px; padding-inline: 20px; }
   .map-workspace.panel-open { grid-template-columns: minmax(0, 1fr) 400px; }
   .map-workspace.panel-open.explorer-open { grid-template-columns: minmax(0, 1fr) 400px; }
-  .map-toolbar { padding: 18px 20px 9px; flex-wrap: wrap; gap: 10px; }
-  .map-status { padding: 0 20px; }
+  .map-toolbar { padding: 18px var(--map-gutter) 9px; flex-wrap: wrap; gap: 10px; }
   .map-actions { justify-content: flex-start; }
 }
 /* Share actual rows with the overlay so result context stays visible, without resizing the canvas. */
@@ -373,7 +373,7 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
   .app-header { grid-template-columns: auto auto minmax(100px, 1fr) auto; gap: 10px; padding-inline: 16px; }
 }
 @media (max-width: 700px) {
-  .graph-guidance { padding-inline: 16px; }
+  .map-workspace { --map-gutter: 16px; }
   .app { min-height: 620px; }
   .app-header { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 9px; padding: 6px 16px; min-height: 0; }
   .wordmark { grid-column: 1; grid-row: 1; font-size: 17px; white-space: normal; overflow-wrap: anywhere; }
@@ -393,7 +393,7 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
   .cluster-list { padding-top: 12px; }
   .cluster-list > .hint { margin: 6px 0; }
   .galaxy { flex: 1; min-height: 370px; }
-  .map-toolbar { display: grid; padding: 10px 16px 8px; gap: 7px; }
+  .map-toolbar { display: grid; padding: 10px var(--map-gutter) 8px; gap: 7px; }
   .map-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 12px; }
   .map-toolbar h1 { font-size: 16px; }
   .map-title .count-breakdown { margin: 0; font-size: 10px; }
@@ -402,8 +402,7 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
   .view-options { position: static; width: auto; }
   .view-options > summary { width: max-content; }
   .view-options > div { left: 0; right: auto; max-width: 100%; }
-  .map-status { padding-inline: 18px; }
-  .map-legend { padding: 8px 16px; gap: 6px 12px; }
+  .map-legend { gap: 6px 12px; }
   .map-legend > .map-legend-hint { display: none; }
   .map-legend details { margin-left: 0; }
   .graph-list { padding: 12px 18px; }
@@ -507,12 +506,12 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
 
 /* Wrap using the space left after filters and detail, rather than viewport width. */
 .graph-chrome { position: absolute; left: 14px; right: 14px; bottom: 14px; display: flex; flex-direction: row-reverse; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; z-index: 2; pointer-events: none; }
-.graph-guidance .graph-quick-help { position: static; min-width: 0; max-width: none; }
+.graph-guidance .graph-quick-help { position: static; min-width: 0; max-width: none; text-wrap: balance; }
 .graph-guidance .graph-quick-help span > span { display: inline; margin: 0; }
 .graph-chrome .graph-minimap { position: static; flex-shrink: 0; max-width: 100%; pointer-events: auto; }
 @media (min-width: 901px) {
   .explorer-open .graph-chrome { left: calc(var(--explorer-width) + 14px); }
-  .explorer-open .graph-guidance { padding-left: calc(var(--explorer-width) + 26px); }
+  .explorer-open .graph-guidance { padding-left: calc(var(--explorer-width) + var(--map-gutter)); }
 }
 
 .graph-tooltip { bottom: var(--graph-help-floor, 42px); max-width: min(420px, calc(100% - 218px)); }

@@ -1,3 +1,9 @@
+/** Ignore sub-millionth rounding noise, while preserving every frame field and
+ * all visible motion. Exact JSON equality can oscillate after OrbitControls pan. */
+export function settledFrameKey(frame: string): string {
+  return JSON.stringify(JSON.parse(frame), (_key, value) => typeof value === "number" ? Math.round(value * 1e6) / 1e6 : value);
+}
+
 // BEGIN rendered graph observer — also exercised against the installed bundle.
 export function installGraphProbe() {
   type Frame = { serial: number; camera: number[]; segments: { x1: number; y1: number; x2: number; y2: number }[]; stars: { id: string; x: number; y: number; opacity: number; radius: number; hitRadius: number; sprites: { pixels: number; stroke: number; opacity: number; color: string }[] }[] };

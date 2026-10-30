@@ -1979,7 +1979,7 @@ async function checkResidualMap(mouseOnly = false, groupsAndHelpOnly = false) {
     return { width: innerWidth, height: innerHeight, hoverMilliseconds: 550, hover: "scripted pointer movement with actual renderer state", activation: "trusted browser mouse release", page: "1/19", apiCalls };
   }
   const quick = host.querySelector(".graph-quick-help .pointer-instructions")!.textContent;
-  assert(quick?.includes("묶음을 누르면 펼쳐집니다."), "quick guidance uses complete gesture sentences");
+  assert(/빈 곳.*끌어 이동.*스크롤.*확대·축소.*묶음.*눌러 펼치세요\./.test(quick ?? ""), "quick guidance explains all pointer gestures");
   button("목록 보기").click(); await openExplorer();
   if (innerWidth > 900) {
     const sidebar = host.querySelector(".map-sidebar")!.getBoundingClientRect();

@@ -1,7 +1,7 @@
 import { expect, test } from "playwright/test";
 import { luminance, screenshotPixels, edgeLightPixels, ringRidge, sameRegionPixels } from "./png";
 
-import { installGraphProbe } from "./graph-probe";
+import { installGraphProbe, settledFrameKey } from "./graph-probe";
 
 async function settled(page: import("playwright/test").Page) {
   let previous = "", sequence = "", stable = 0;
@@ -10,8 +10,9 @@ async function settled(page: import("playwright/test").Page) {
     if (!value.frame || value.frameSequence === sequence) return stable;
     sequence = value.frameSequence!;
     const motion = JSON.parse(value.motion ?? "[]").at(-1);
-    stable = value.frame === previous && motion && !motion.layout && !motion.dragging && !motion.settling ? stable + 1 : 0;
-    previous = value.frame;
+    const frame = settledFrameKey(value.frame);
+    stable = frame === previous && motion && !motion.layout && !motion.dragging && !motion.settling ? stable + 1 : 0;
+    previous = frame;
     return stable;
   }, { timeout: 25_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
 }

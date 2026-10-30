@@ -2860,6 +2860,39 @@ test("leaderless titles belong to the nearest star surface, including unlabeled 
   }
 });
 
+test("rendered-frame stability ignores floating point noise but retains motion and state", async () => {
+  const { settledFrameKey } = await import("../e2e/graph-probe");
+  const frame = { stars: [{ id: "a", px: 123.45, py: 400, opacity: 1 }], camera: { x: 210.475147773748 } };
+  const key = (value: unknown) => settledFrameKey(JSON.stringify(value));
+  assert.equal(key(frame), key({ ...frame, camera: { x: 210.47514777374803 } }));
+  assert.notEqual(key(frame), key({ ...frame, stars: [{ ...frame.stars[0], px: 123.451 }] }), "even a thousandth of a CSS pixel remains motion");
+  assert.notEqual(key(frame), key({ ...frame, stars: [{ ...frame.stars[0], opacity: .999 }] }));
+  assert.notEqual(key(frame), key({ ...frame, stars: [{ ...frame.stars[0], id: "b" }] }));
+});
+
+test("opposed owners keep both nearby titles without an unguided shared column", () => {
+  // The selected 1440px synthetic scene: the minimap blocks the right title's
+  // preferred side. Each old title was nearest its own star, yet they read as
+  // one stacked name between the stars. Mirror and reorder the replay too.
+  for (const mirror of [false, true]) for (const reverse of [false, true]) {
+    const nodes: ProjectedLabel[] = [
+      { id: "right", kind: "document", active: true, x: 341.45, y: 535.18, depth: 0, radius: 33.83, width: 154, height: 21 },
+      { id: "left", kind: "document", active: true, x: 78.27, y: 568.62, depth: 0, radius: 44.03, width: 154, height: 21 },
+    ].map(node => ({ ...node, x: mirror ? 680 - node.x : node.x }));
+    const obstacles = [mirror ? { left: 0, right: 182, top: 510, bottom: 683 } : { left: 498, right: 680, top: 510, bottom: 683 }];
+    const original = JSON.stringify(nodes), boxes = visibleLabels(reverse ? [...nodes].reverse() : nodes, 680, 697, null, null, { stars: nodes, obstacles });
+    assert.equal(boxes.length, 2, "ownership cannot be improved by dropping either title");
+    const [a, b] = boxes, ownerA = nodes.find(n => n.id === a.id)!, ownerB = nodes.find(n => n.id === b.id)!;
+    const guided = a.guide?.length || b.guide?.length || labelLeader(ownerA, a) || labelLeader(ownerB, b);
+    const overlap = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    const verticalGap = Math.max(a.top, b.top) - Math.min(a.bottom, b.bottom);
+    const inward = (ownerA.x < a.left && ownerB.x > b.right) || (ownerB.x < b.left && ownerA.x > a.right);
+    assert.ok(guided || !inward || overlap < 77 || verticalGap > 21, "a shared tight column needs an explicit owner cue");
+    assert.equal(JSON.stringify(nodes), original, "title placement never moves stars");
+    assert.deepEqual(visibleLabels(nodes, 680, 697, null, null, { stars: nodes, obstacles }), boxes);
+  }
+});
+
 test("hover at the label budget preserves group names and yields only an ordinary title", () => {
   const members: ProjectedLabel[] = Array.from({ length: 23 }, (_, i) => ({ id: `member-${i}`, kind: "document", active: true,
     x: 100 + i % 5 * 240, y: 100 + Math.floor(i / 5) * 140, depth: 0, radius: 6, width: 80, height: 21 }));
