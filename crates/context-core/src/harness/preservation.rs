@@ -4,7 +4,6 @@ use super::*;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewedCareerPreservation {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) historical_snapshot: bool,
     pub(super) review_workspace_root: PathBuf,
     pub(super) manifest: CareerCompositionManifest,

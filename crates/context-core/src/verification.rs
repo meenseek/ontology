@@ -19,10 +19,12 @@ const CURRENT_HARNESS_RUNTIME_FILES: &[&str] = &[
     "crates/context-core/src/harness/finalization.rs",
     "crates/context-core/src/harness/persistence.rs",
     "crates/context-core/src/harness/policy.rs",
+    "crates/context-core/src/harness/preservation.rs",
     "crates/context-core/src/harness/repository.rs",
     "crates/context-core/src/harness/request.rs",
     "crates/context-core/src/harness/requirements.rs",
     "crates/context-core/src/harness/review_artifact.rs",
+    "crates/context-core/src/harness/reviewed_snapshot.rs",
     "crates/context-core/src/harness/source.rs",
     "crates/context-core/src/harness/source_tests.rs",
     "crates/context-core/src/harness/tests.rs",
@@ -282,10 +284,12 @@ fn assert_native_module_wiring(path: &str, syntax: &syn::File, failures: &mut Fa
             "finalization",
             "persistence",
             "policy",
+            "preservation",
             "repository",
             "request",
             "requirements",
             "review_artifact",
+            "reviewed_snapshot",
             "source",
             "source_tests",
             "tests",
@@ -1056,6 +1060,18 @@ mod tests {
     )]
     fn native_harness_architecture_rejects_mutated_repository() {
         let mutations = [
+            (
+                "crates/context-core/src/harness/preservation.rs",
+                "\n#[serde(default)] struct PermissiveProof { value: bool }\n",
+                "",
+                "",
+            ),
+            (
+                "crates/context-core/src/harness/reviewed_snapshot.rs",
+                "\nfn bypass_snapshot(bytes: &[u8]) { let _: HarnessPlan = serde_json::from_slice(bytes).unwrap(); }\n",
+                "",
+                "",
+            ),
             (
                 "src/native_harness.rs",
                 "",

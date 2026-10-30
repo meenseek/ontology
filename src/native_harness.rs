@@ -115,9 +115,6 @@ impl Command {
             "validate" => self.run_validate_harness_command(arguments),
             "attest-career" => self.run_attest_career_harness_command(arguments),
             "compose-career" => self.run_compose_career_command(arguments),
-            "begin-preservation" => self.run_career_preservation_command(arguments),
-            "prepare-preservation" => self.run_prepare_preservation_command(arguments),
-            "career-handoff" => self.run_career_handoff_command(arguments),
             _ => Err(NativeHarnessError::invalid_input(format!(
                 "unsupported harness command `{command}`"
             ))),
@@ -194,6 +191,11 @@ impl Command {
         &self,
         arguments: impl IntoIterator<Item = String>,
     ) -> Result<String> {
+        let (preserve_reviewed, arguments) =
+            command_mode_arguments(arguments, "--preserve-reviewed")?;
+        if preserve_reviewed {
+            return self.run_prepare_preservation_command(arguments);
+        }
         let mut context_view = None;
         let mut workspace_root = None;
         let mut plan_path = None;
@@ -307,6 +309,11 @@ impl Command {
         arguments: impl IntoIterator<Item = String>,
         observations: &RoleObservations,
     ) -> Result<String> {
+        let (preserve_reviewed, arguments) =
+            command_mode_arguments(arguments, "--preserve-reviewed")?;
+        if preserve_reviewed {
+            return self.run_career_preservation_command(arguments);
+        }
         let mut context_view = None;
         let mut workspace_root = None;
         let mut prepared_path = None;
@@ -806,6 +813,10 @@ impl Command {
         &self,
         arguments: impl IntoIterator<Item = String>,
     ) -> Result<String> {
+        let (review_handoff, arguments) = command_mode_arguments(arguments, "--review-handoff")?;
+        if review_handoff {
+            return self.run_career_handoff_command(arguments);
+        }
         let mut context_view = None;
         let mut workspace_root = None;
         let mut manifest_path = None;
@@ -886,6 +897,26 @@ impl Command {
         }
     }
 }
+fn command_mode_arguments(
+    arguments: impl IntoIterator<Item = String>,
+    switch: &str,
+) -> Result<(bool, Vec<String>)> {
+    let mut selected = false;
+    let mut rest = Vec::new();
+    for argument in arguments {
+        if argument == switch {
+            if std::mem::replace(&mut selected, true) {
+                return Err(NativeHarnessError::invalid_input(format!(
+                    "duplicate Harness option `{switch}`"
+                )));
+            }
+        } else {
+            rest.push(argument);
+        }
+    }
+    Ok((selected, rest))
+}
+
 fn career_boundary_options(
     arguments: impl IntoIterator<Item = String>,
 ) -> Result<(BTreeMap<String, String>, Vec<CareerExecutionReviewReceipt>)> {
@@ -1260,6 +1291,10 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
     let (verb, rest) = arguments
         .split_first()
         .ok_or_else(|| NativeHarnessError::invalid_input("missing harness command"))?;
+    let preserve_reviewed = rest
+        .iter()
+        .any(|argument| argument == "--preserve-reviewed");
+    let review_handoff = rest.iter().any(|argument| argument == "--review-handoff");
     let allowed: &[&str] = match verb.as_str() {
         "resolve" => &[
             "--request-envelope",
@@ -1267,43 +1302,64 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
             "--runtime-capabilities",
             "--career-manifest",
         ],
-        "prepare" => &[
-            "--plan",
-            "--runtime-capabilities",
-            "--tool-plan",
-            "--prepared-output",
-        ],
+        "prepare" => {
+            if preserve_reviewed {
+                &[
+                    "--preserve-reviewed",
+                    "--request-envelope",
+                    "--runtime-capabilities",
+                    "--prepared-output",
+                    "--career-manifest",
+                    "--holistic-receipt",
+                    "--evidence-receipt",
+                    "--review-workspace-root",
+                ]
+            } else {
+                &[
+                    "--plan",
+                    "--runtime-capabilities",
+                    "--tool-plan",
+                    "--prepared-output",
+                ]
+            }
+        }
         "replay" => &["--prepared-run"],
-        "begin" => &["--prepared-run", "--run-id", "--codex-binary"],
-        "begin-preservation" => &[
-            "--prepared-run",
-            "--run-id",
-            "--review-workspace-root",
-            "--career-manifest",
-            "--holistic-receipt",
-            "--evidence-receipt",
-        ],
-        "prepare-preservation" => &[
-            "--request-envelope",
-            "--runtime-capabilities",
-            "--prepared-output",
-            "--career-manifest",
-            "--holistic-receipt",
-            "--evidence-receipt",
-            "--review-workspace-root",
-        ],
-        "career-handoff" => &["--career-manifest", "--evidence-receipt"],
+        "begin" => {
+            if preserve_reviewed {
+                &[
+                    "--preserve-reviewed",
+                    "--prepared-run",
+                    "--run-id",
+                    "--review-workspace-root",
+                    "--career-manifest",
+                    "--holistic-receipt",
+                    "--evidence-receipt",
+                ]
+            } else {
+                &["--prepared-run", "--run-id", "--codex-binary"]
+            }
+        }
         "advance" => &["--run-id", "--event", "--codex-binary"],
         "revise" => &["--run-id", "--codex-binary"],
         "validate" | "apply" => &["--run-id"],
         "recover" => &["--run-id", "--close-before-apply", "--reason"],
         "evaluate" => &["--run-id", "--tool-evidence"],
         "attest-career" => &["--prepared-run", "--execution-record"],
-        "compose-career" => &[
-            "--career-manifest",
-            "--holistic-receipt",
-            "--evidence-receipt",
-        ],
+        "compose-career" => {
+            if review_handoff {
+                &[
+                    "--review-handoff",
+                    "--career-manifest",
+                    "--evidence-receipt",
+                ]
+            } else {
+                &[
+                    "--career-manifest",
+                    "--holistic-receipt",
+                    "--evidence-receipt",
+                ]
+            }
+        }
         _ => {
             return Err(NativeHarnessError::invalid_input(format!(
                 "unsupported harness command `{verb}`"
@@ -1322,6 +1378,16 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
         }
         if verb == "recover" && flag == "--close-before-apply" {
             options.insert(flag.clone(), String::new());
+            continue;
+        }
+        if matches!(flag.as_str(), "--preserve-reviewed" | "--review-handoff") {
+            if !allowed.contains(&flag.as_str()) {
+                return Err(NativeHarnessError::invalid_input(format!(
+                    "unexpected Harness option `{flag}`"
+                )));
+            }
+            options.insert(flag.clone(), String::new());
+            forwarded.push(flag.clone());
             continue;
         }
         if flag == "--json" || (verb == "resolve" && flag == "--compose-decisions") {
@@ -1366,28 +1432,43 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
     }
     let required: &[&str] = match verb.as_str() {
         "resolve" => &["--request-envelope", "--runtime-capabilities"],
-        "prepare" => &["--plan", "--runtime-capabilities", "--prepared-output"],
+        "prepare" => {
+            if preserve_reviewed {
+                &[
+                    "--request-envelope",
+                    "--runtime-capabilities",
+                    "--prepared-output",
+                    "--career-manifest",
+                    "--holistic-receipt",
+                    "--review-workspace-root",
+                ]
+            } else {
+                &["--plan", "--runtime-capabilities", "--prepared-output"]
+            }
+        }
         "replay" => &["--prepared-run"],
-        "begin" => &["--prepared-run", "--run-id"],
-        "begin-preservation" => &[
-            "--prepared-run",
-            "--run-id",
-            "--review-workspace-root",
-            "--career-manifest",
-            "--holistic-receipt",
-        ],
-        "prepare-preservation" => &[
-            "--request-envelope",
-            "--runtime-capabilities",
-            "--prepared-output",
-            "--career-manifest",
-            "--holistic-receipt",
-            "--review-workspace-root",
-        ],
-        "career-handoff" => &["--career-manifest"],
+        "begin" => {
+            if preserve_reviewed {
+                &[
+                    "--prepared-run",
+                    "--run-id",
+                    "--review-workspace-root",
+                    "--career-manifest",
+                    "--holistic-receipt",
+                ]
+            } else {
+                &["--prepared-run", "--run-id"]
+            }
+        }
         "advance" => &["--run-id", "--event"],
         "attest-career" => &["--prepared-run", "--execution-record"],
-        "compose-career" => &["--career-manifest", "--holistic-receipt"],
+        "compose-career" => {
+            if review_handoff {
+                &["--career-manifest"]
+            } else {
+                &["--career-manifest", "--holistic-receipt"]
+            }
+        }
         _ => &["--run-id"],
     };
     for flag in required {
@@ -1535,14 +1616,14 @@ fn preflight_policy_configuration(
             .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))
     };
     match verb {
-        "prepare" => {
+        "prepare" if !options.contains_key("--preserve-reviewed") => {
             let plan: HarnessPlan =
                 read_harness_json(Path::new(&options["--plan"]), "Harness plan")?;
             plan.validate()
                 .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
             check(&plan.resolved_request)
         }
-        "replay" | "begin" | "begin-preservation" | "attest-career" => {
+        "replay" | "begin" | "attest-career" => {
             let prepared: PreparedHarnessRun = read_harness_json(
                 Path::new(&options["--prepared-run"]),
                 "prepared Harness run",
@@ -1553,7 +1634,7 @@ fn preflight_policy_configuration(
                 .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
             check(&prepared.plan.resolved_request)
         }
-        "compose-career" | "career-handoff" | "prepare-preservation" => {
+        "compose-career" | "prepare" => {
             for path in options
                 .get("--holistic-receipt")
                 .map(String::as_str)

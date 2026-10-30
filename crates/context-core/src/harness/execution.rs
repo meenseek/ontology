@@ -2941,7 +2941,6 @@ pub struct HarnessExecutionRecord {
     pub sequence: u64,
     pub predecessor_record_digest: Option<String>,
     pub state: HarnessExecutionState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preservation: Option<ReviewedCareerPreservation>,
     pub revision_history: Vec<HarnessTaskEvaluation>,
     pub role_execution: RoleExecutionRecord,

@@ -17358,6 +17358,56 @@ fn reviewed_career_preservation_reuses_actual_reviews_and_applies_literal_bytes(
             proof,
         )
         .unwrap();
+        let wire = serde_json::to_value(&head).unwrap();
+        assert_eq!(wire["preservation"]["historical_snapshot"], false);
+        decode_current_json::<HarnessExecutionRecord>(
+            &serde_json::to_vec(&wire).unwrap(),
+            "preserved head",
+        )
+        .unwrap();
+        for nested in [false, true] {
+            let mut omitted = wire.clone();
+            if nested {
+                omitted["preservation"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("historical_snapshot");
+            } else {
+                omitted.as_object_mut().unwrap().remove("preservation");
+            }
+            assert!(
+                decode_current_json::<HarnessExecutionRecord>(
+                    &serde_json::to_vec(&omitted).unwrap(),
+                    "incomplete preserved head"
+                )
+                .is_err(),
+                "current head and proof fields must not be silently supplied"
+            );
+        }
+        let mut unknown = wire.clone();
+        unknown["preservation"]["unrecognized"] = serde_json::json!(true);
+        assert!(
+            decode_current_json::<HarnessExecutionRecord>(
+                &serde_json::to_vec(&unknown).unwrap(),
+                "unknown proof field"
+            )
+            .is_err()
+        );
+        let mut absent_proof = head.clone();
+        absent_proof.preservation = None;
+        let no_proof_wire = serde_json::to_value(&absent_proof).unwrap();
+        assert!(
+            no_proof_wire
+                .as_object()
+                .unwrap()
+                .contains_key("preservation")
+        );
+        assert!(no_proof_wire["preservation"].is_null());
+        decode_current_json::<HarnessExecutionRecord>(
+            &serde_json::to_vec(&no_proof_wire).unwrap(),
+            "explicit absent proof",
+        )
+        .unwrap();
         assert!(head.role_execution.role_results.is_empty());
         assert!(head.ready_role_invocations.is_empty());
         assert!(matches!(

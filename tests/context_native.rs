@@ -4528,6 +4528,15 @@ async fn native_revision_imported_update_and_commit_cardinality_recovery() {
 
 #[tokio::test]
 async fn native_revision_career_binary_attests_and_composes_without_mutation() {
+    assert_native_career_cli_pipeline(false).await;
+}
+
+#[tokio::test]
+async fn native_cli_reviewed_preservation_modes_keep_literal_bytes_and_reuse_reviews() {
+    assert_native_career_cli_pipeline(true).await;
+}
+
+async fn assert_native_career_cli_pipeline(preserve: bool) {
     use context_core::harness::*;
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
@@ -4536,8 +4545,18 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
     let root = view.path().canonicalize().expect("owned context view");
     let workspace = tempfile::tempdir().expect("owned career workspace");
     let workspace = workspace.path().canonicalize().expect("career workspace");
-    let body = b"# Synthetic career artifact\nA bounded fixture claim.\n";
-    fs::write(workspace.join("README.md"), body).expect("synthetic frozen artifact");
+    let target = if preserve {
+        "vault/personal/writing/preserved-cli.md"
+    } else {
+        "README.md"
+    };
+    let body: &[u8] = if preserve {
+        b"---\ntitle: Preserved CLI fixture\nscope: personal\nlanguage: en\nexport: false\n---\n\n# Synthetic career artifact\nA bounded fixture claim.\n"
+    } else {
+        b"# Synthetic career artifact\nA bounded fixture claim.\n"
+    };
+    fs::create_dir_all(workspace.join(target).parent().unwrap()).expect("review target parents");
+    fs::write(workspace.join(target), body).expect("synthetic frozen artifact");
     let owner = DataOwner::PersonalProject {
         project: "sample".into(),
     };
@@ -4550,7 +4569,7 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
                 source.as_ref(),
                 statement,
                 "synthetic-claim",
-                "README.md",
+                target,
             ))
         })
         .await
@@ -4559,7 +4578,7 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
         comparison: Some(comparison),
         version: HARNESS_SCHEMA_VERSION,
         career_output_surface: CareerOutputSurface::Resume,
-        artifact_targets: vec!["README.md".into()],
+        artifact_targets: vec![target.into()],
         coverage: CareerCoverageMode::Selected,
         complete_coverage_confirmation_reported: false,
         evidence_owners: vec![owner.clone()],
@@ -4576,8 +4595,7 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
     let mut receipts = Vec::new();
     let mut contexts = std::collections::BTreeSet::new();
     for evidence in [true, false] {
-        let mut request =
-            harness_fixture::envelope(&policy, vec!["README.md".into()], vec![], false);
+        let mut request = harness_fixture::envelope(&policy, vec![target.into()], vec![], false);
         let DraftTaskRequest::Write(mut write) = request.draft else {
             panic!("fixture draft")
         };
@@ -4743,10 +4761,10 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
                     .expect("frozen artifact set")
             )
         );
-        let target = &receipt.resolved.plan.targets[0];
-        assert_eq!(target.workspace_relative_path, "README.md");
+        let reviewed_target = &receipt.resolved.plan.targets[0];
+        assert_eq!(reviewed_target.workspace_relative_path, target);
         assert_eq!(
-            target.state,
+            reviewed_target.state,
             TargetState::Existing {
                 content_digest: ontology::store::digest(body)
             }
@@ -4761,7 +4779,7 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
         receipts.push(receipt);
         assert_eq!(native_rows_fingerprint(&store).await, before);
         assert_eq!(
-            fs::read(workspace.join("README.md")).expect("unchanged artifact"),
+            fs::read(workspace.join(target)).expect("unchanged artifact"),
             body
         );
     }
@@ -4822,7 +4840,7 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
     );
     assert_eq!(native_rows_fingerprint(&store).await, before);
     assert_eq!(
-        fs::read(workspace.join("README.md")).expect("unchanged career artifact"),
+        fs::read(workspace.join(target)).expect("unchanged career artifact"),
         body
     );
     let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM context_apply_batches")
@@ -4830,7 +4848,217 @@ async fn native_revision_career_binary_attests_and_composes_without_mutation() {
         .await
         .expect("nonmutating effect count");
     assert_eq!(effects, 0);
+
+    if preserve {
+        let handoff = harness_fixture::command(
+            &store,
+            &root,
+            &workspace,
+            "compose-career",
+            &[
+                "--review-handoff".into(),
+                "--career-manifest".into(),
+                manifest_path.display().to_string(),
+                "--evidence-receipt".into(),
+                artifacts.path().join("owner.json").display().to_string(),
+            ],
+        )
+        .await;
+        assert!(
+            handoff.status.success(),
+            "handoff: {}",
+            String::from_utf8_lossy(&handoff.stderr)
+        );
+        let handoff: Value = serde_json::from_slice(&handoff.stdout).unwrap();
+        assert_eq!(
+            handoff["task_statement"],
+            manifest.holistic_task_statement(&receipts[..1]).unwrap()
+        );
+        assert_eq!(handoff["reused_owner_reviews"], 1);
+        assert_eq!(handoff["new_review_invocations"], 0);
+        assert_eq!(native_rows_fingerprint(&store).await, before);
+
+        let mut request = harness_fixture::envelope(&policy, vec![target.into()], vec![], false);
+        request
+            .decision_trace
+            .records
+            .retain(|record| match record {
+                DecisionRecord::PolicyDefault { identifier, .. }
+                | DecisionRecord::UserStatement { identifier, .. } => {
+                    !["decision-0000000000000002", "decision-0000000000000003"]
+                        .contains(&identifier.as_str())
+                }
+                _ => true,
+            });
+        request.source = RequestSource::UserLanguage {
+            statements: vec![UserStatement {
+                identifier: "statement-0000000000000001".into(),
+                text: statement.into(),
+            }],
+        };
+        let DraftTaskRequest::Write(ref mut write) = request.draft else {
+            panic!("write fixture")
+        };
+        write.common.intent = harness_fixture::value(
+            HarnessIntent::CareerArtifact {
+                surface: CareerOutputSurface::Resume,
+            },
+            2,
+            &mut request.decision_trace.records,
+        );
+        write.common.task_statement =
+            harness_fixture::value(statement.to_owned(), 3, &mut request.decision_trace.records);
+        write.common.evidence_source_paths = Some(harness_fixture::value(
+            vec!["vault/personal/profile.md".into()],
+            9,
+            &mut request.decision_trace.records,
+        ));
+        let request_path = artifacts.path().join("preservation-request.json");
+        let capabilities_path = artifacts.path().join("capabilities.json");
+        let prepared_path = artifacts.path().join("native-prepared.json");
+        fs::write(&request_path, serde_json::to_vec(&request).unwrap()).unwrap();
+        fs::write(
+            &capabilities_path,
+            serde_json::to_vec(&harness_fixture::capabilities()).unwrap(),
+        )
+        .unwrap();
+        let review_args = vec![
+            "--preserve-reviewed".into(),
+            "--career-manifest".into(),
+            manifest_path.display().to_string(),
+            "--holistic-receipt".into(),
+            artifacts.path().join("holistic.json").display().to_string(),
+            "--evidence-receipt".into(),
+            artifacts.path().join("owner.json").display().to_string(),
+            "--review-workspace-root".into(),
+            workspace.display().to_string(),
+        ];
+        let mut prepare_args = review_args.clone();
+        prepare_args.extend([
+            "--request-envelope".into(),
+            request_path.display().to_string(),
+            "--runtime-capabilities".into(),
+            capabilities_path.display().to_string(),
+            "--prepared-output".into(),
+            prepared_path.display().to_string(),
+        ]);
+        let output = harness_fixture::command(&store, &root, &root, "prepare", &prepare_args).await;
+        assert!(
+            output.status.success(),
+            "preservation prepare: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let prepared: PreparedHarnessRun =
+            decode_current_json(&output.stdout, "CLI preservation prepared").unwrap();
+        assert_eq!(
+            fs::metadata(&prepared_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let mut framed_prepared = fs::read(&prepared_path).unwrap();
+        framed_prepared.push(b'\n');
+        assert_eq!(framed_prepared, output.stdout);
+        assert!(prepared.plan.source_write_allowed);
+        let run = "native-reviewed-preservation";
+        let mut begin_args = review_args;
+        begin_args.extend([
+            "--prepared-run".into(),
+            prepared_path.display().to_string(),
+            "--run-id".into(),
+            run.into(),
+        ]);
+        fs::write(workspace.join(target), b"tampered reviewed bytes").unwrap();
+        let rejected = harness_fixture::command(&store, &root, &root, "begin", &begin_args).await;
+        assert!(!rejected.status.success());
+        assert!(rejected.stdout.is_empty());
+        assert!(
+            !root
+                .join(".llm-context-vault-harness/runs")
+                .join(run)
+                .join("head.json")
+                .exists()
+        );
+        assert_eq!(native_rows_fingerprint(&store).await, before);
+        fs::write(workspace.join(target), body).unwrap();
+        let begun = harness_fixture::command(&store, &root, &root, "begin", &begin_args).await;
+        assert!(
+            begun.status.success(),
+            "preservation begin: {}",
+            String::from_utf8_lossy(&begun.stderr)
+        );
+        let head: HarnessExecutionRecord =
+            decode_current_json(&begun.stdout, "CLI preservation head").unwrap();
+        assert_eq!(head.state, HarnessExecutionState::Evaluated);
+        assert!(head.role_execution.role_results.is_empty());
+        assert!(head.ready_role_invocations.is_empty());
+        let wire: Value = serde_json::from_slice(&begun.stdout).unwrap();
+        assert_eq!(wire["preservation"]["historical_snapshot"], false);
+        let validated = harness_fixture::command(
+            &store,
+            &root,
+            &root,
+            "validate",
+            &["--run-id".into(), run.into()],
+        )
+        .await;
+        assert!(
+            validated.status.success(),
+            "preservation validate: {}",
+            String::from_utf8_lossy(&validated.stderr)
+        );
+        let mut terminal = None;
+        for verb in ["apply", "apply", "recover"] {
+            let output = harness_fixture::command(
+                &store,
+                &root,
+                &root,
+                verb,
+                &["--run-id".into(), run.into()],
+            )
+            .await;
+            assert!(
+                output.status.success(),
+                "preservation {verb}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let finalized: HarnessExecutionRecord = decode_current_json(
+                &serde_json::to_vec(&result["head"]).unwrap(),
+                "final CLI preservation head",
+            )
+            .unwrap();
+            assert_eq!(finalized.state, HarnessExecutionState::Finalized);
+            assert!(finalized.role_execution.role_results.is_empty());
+            if let Some(ref previous) = terminal {
+                assert_eq!(
+                    &finalized, previous,
+                    "same-run retry/recover reuses terminal head"
+                );
+            }
+            terminal = Some(finalized);
+            assert_eq!(
+                store
+                    .read_context(&scope(), "writing/preserved-cli.md", false)
+                    .await
+                    .unwrap()
+                    .as_bytes(),
+                body
+            );
+            let revision: i64 = sqlx::query_scalar("SELECT revision FROM context_materials WHERE scope='personal' AND path='writing/preserved-cli.md'")
+                .fetch_one(store.pool()).await.unwrap();
+            assert_eq!(
+                revision, 1,
+                "retry/recover must not create another revision"
+            );
+            let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM context_apply_batches")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(effects, 1, "exactly one native effect");
+        }
+        assert_eq!(fs::read(workspace.join(target)).unwrap(), body);
+    }
 }
+
 fn private_staging_directory(path: &Path) {
     use std::os::unix::fs::DirBuilderExt;
     fs::DirBuilder::new()

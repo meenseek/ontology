@@ -629,7 +629,7 @@ store·정책·대상·저장 가능 여부를 검증한 뒤 의미 검토를 �
 자기 원천·주장·선택 및 제외 이유와 전체 문서의 일관성·가독성·공개 안전성을 검토한다.
 출력 claim이 없는 owner도 후보 제외 이유를 검토하며, 필수 unit과 원천 접근 경계는 유지한다.
 
-`harness career-handoff`에 현재 `--career-manifest`와 실제 `--evidence-receipt`들을 전달하면
+`harness compose-career --review-handoff`에 현재 `--career-manifest`와 실제 `--evidence-receipt`들을 전달하면
 현재성·범위·owner별 입력을 재검증하고 holistic review용 `task_statement`를 반환한다.
 `--context-view`, `--workspace-root`, `--store-id`와 호출자의 정책 설정은 기존 native
 명령과 같다. owner가 없으면 receipt 목록도 비어 있다. 원고와 해당 owner의 원천·locator·
@@ -647,7 +647,7 @@ role 실행으로 꾸미지 않는다. 외부 경력 파일·form은 caller의 �
 보존에서 이후의 경력 자료나 기준 변경을 새 심사·윤문 시작 조건으로 사용하지 않는다.
 본문을 바꾸거나 현재 문서로 다시 발행하려는 요청은 별도의 작성 흐름이다.
 
-검토가 끝난 원고는 `harness prepare-preservation`에 기존 실제 수락 증거를 전달한다.
+검토가 끝난 원고는 `harness prepare --preserve-reviewed`에 기존 실제 수락 증거를 전달한다.
 `--request-envelope`, `--runtime-capabilities`, `--prepared-output`,
 `--review-workspace-root`, `--career-manifest`, `--holistic-receipt`와 반복 가능한
 `--evidence-receipt`를 기존 native 공통 옵션과 함께 지정한다. Caller 결정은 기존 Core
@@ -662,12 +662,16 @@ path·material ID·revision·digest를 확인하고 원래 Core 준비본과 수
 않는다. 기록된 기준에서 수락된 판본을 보존했다는 뜻이며 현재 기준 재심사 통과를 뜻하지 않는다.
 일반 문서의 기존 검토 재사용은 현재 원천·정책 검증을 유지한다.
 
-이어 `harness begin-preservation`에 `--prepared-run`, `--run-id`,
+이어 `harness begin --preserve-reviewed`에 `--prepared-run`, `--run-id`,
 `--review-workspace-root`, `--career-manifest`, `--holistic-receipt`와 실제 owner
 receipts를 전달한다. review workspace는 실제 검토한 원고·첨부가 있는 별도 경로,
 native workspace는 context view와 같은 경로다. 이 명령은 정확한 UTF-8 bytes와 실제
 기존 수락 기록을 durable run에 묶으며 Writer·Reviewer를 실행하거나 문장을 생성하지 않는다.
 당시 검토의 advisory 수준도 그대로 남긴다. `--codex-binary`는 보존 명령에 허용하지 않는다.
+
+현재 실행 JSON은 보존 증거가 없으면 `preservation: null`, 일반 판본의 증거는
+`historical_snapshot: false`를 명시한다. 필드 생략이나 알 수 없는 필드는 거절하며
+이전 실행 형식을 자동 보정하지 않는다.
 
 같은 `--run-id`로 `validate`, `apply`를 실행한다. 저장 후 한 번의 Native raw read로
 결과를 확인한다. 중단은 `recover`, 재시도는 기존 terminal receipt로 처리하며 새 run이나
@@ -718,8 +722,10 @@ revision을 수정하는 수단으로 쓰지 않는다. `inventory`는 DB 없이
 
 기존 `bash scripts/brain.sh harness`는 `ontology harness`를 실행한다. 현재
 명령은 `resolve`, `prepare`, `replay`, `begin`, `advance`, `revise`, `evaluate`,
-`validate`, `apply`, `recover`, `attest-career`, `compose-career`, `career-handoff`,
-`begin-preservation`, `prepare-preservation`이다. 실제 owned source view,
+`validate`, `apply`, `recover`, `attest-career`, `compose-career`의 열두 가지다.
+검토 인계는 `compose-career --review-handoff`, 수락된 원고의 준비·시작은
+`prepare --preserve-reviewed`와 `begin --preserve-reviewed`로 선택한다.
+일반 모드의 입력과 보존 모드의 입력은 섞지 않는다. 보존 시작에는 `--codex-binary`를 허용하지 않는다. 실제 owned source view,
 설정된 store identity와 작업 workspace를 `--context-view`, `--store-id`,
 `--workspace-root`로 결합한다. `context`와 `harness`는 schema를 자동 초기화하지 않는다.
 

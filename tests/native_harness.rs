@@ -546,9 +546,6 @@ async fn native_harness_rejects_removed_and_duplicate_options_without_initializi
         "prepare",
         "replay",
         "begin",
-        "begin-preservation",
-        "prepare-preservation",
-        "career-handoff",
         "advance",
         "revise",
         "evaluate",
@@ -585,6 +582,110 @@ async fn native_harness_rejects_removed_and_duplicate_options_without_initializi
         .expect("duplicate parser");
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("duplicate"));
+}
+
+#[tokio::test]
+async fn native_preservation_modes_reject_cross_mode_and_removed_commands_before_access() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["begin-preservation"], "unsupported harness command"),
+        (&["prepare-preservation"], "unsupported harness command"),
+        (&["career-handoff"], "unsupported harness command"),
+        (
+            &["prepare", "--preserve-reviewed", "--plan", "/never-opened"],
+            "unexpected Harness path argument",
+        ),
+        (
+            &["prepare", "--request-envelope", "/never-opened"],
+            "unexpected Harness path argument",
+        ),
+        (
+            &[
+                "begin",
+                "--preserve-reviewed",
+                "--codex-binary",
+                "/never-executed",
+            ],
+            "unexpected Harness path argument",
+        ),
+        (
+            &[
+                "compose-career",
+                "--review-handoff",
+                "--holistic-receipt",
+                "/never-opened",
+            ],
+            "unexpected Harness path argument",
+        ),
+        (
+            &["apply", "--preserve-reviewed"],
+            "unexpected Harness option",
+        ),
+        (
+            &["resolve", "--review-handoff"],
+            "unexpected Harness option",
+        ),
+        (
+            &["begin", "--preserve-reviewed", "--review-handoff"],
+            "unexpected Harness option",
+        ),
+        (
+            &["prepare", "--preserve-reviewed", "--preserve-reviewed"],
+            "duplicate Harness option",
+        ),
+        (
+            &["compose-career", "--review-handoff", "--review-handoff"],
+            "duplicate Harness option",
+        ),
+    ];
+    for (arguments, expected) in cases {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
+            .env_clear()
+            .arg("harness")
+            .args(*arguments)
+            .output()
+            .await
+            .expect("actual CLI rejects before configuration or database access");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error: Value = serde_json::from_slice(&output.stderr).expect("structured error");
+        assert!(
+            error["error"].as_str().unwrap().contains(expected),
+            "{arguments:?}: {error}"
+        );
+    }
+    for (verb, switch, expected) in [
+        ("prepare", "--preserve-reviewed", "--request-envelope"),
+        ("begin", "--preserve-reviewed", "--prepared-run"),
+        ("compose-career", "--review-handoff", "--career-manifest"),
+    ] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
+            .env_clear()
+            .args([
+                "harness",
+                verb,
+                switch,
+                "--context-view",
+                "/never-view",
+                "--workspace-root",
+                "/never-workspace",
+                "--policy-config",
+                "/never-policy",
+                "--store-id",
+                "00000000-0000-4000-8000-000000000001",
+            ])
+            .output()
+            .await
+            .expect("mode requires its actual inputs before opening files");
+        assert!(!output.status.success());
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("missing `{expected}`")),
+            "{verb}: {error}"
+        );
+    }
 }
 
 pub async fn cli_prepared(
