@@ -4508,6 +4508,13 @@ fn contains_company_route_signal(searchable: &str, signal: &str) -> bool {
         })
 }
 
+#[derive(Default)]
+struct ExecutionApplyContext<'a> {
+    attempt_identifier: Option<&'a str>,
+    native_permit: Option<&'a ContextApplyContract>,
+    preservation: Option<(&'a ReviewedCareerPreservation, &'a PreparedHarnessRun)>,
+}
+
 #[derive(Clone, Debug)]
 pub struct HarnessEngine {
     router: HarnessRouter,
@@ -5904,9 +5911,7 @@ impl HarnessEngine {
             prepared,
             revision_history,
             record,
-            None,
-            None,
-            None,
+            ExecutionApplyContext::default(),
         )
     }
 
@@ -5923,9 +5928,10 @@ impl HarnessEngine {
             prepared,
             revision_history,
             record,
-            Some(attempt_identifier),
-            None,
-            None,
+            ExecutionApplyContext {
+                attempt_identifier: Some(attempt_identifier),
+                ..Default::default()
+            },
         )
     }
 
@@ -5935,10 +5941,13 @@ impl HarnessEngine {
         prepared: &PreparedRoleRun,
         revision_history: &[HarnessTaskEvaluation],
         record: &RoleExecutionRecord,
-        attempt_identifier: Option<&str>,
-        native_permit: Option<&ContextApplyContract>,
-        preservation: Option<(&ReviewedCareerPreservation, &PreparedHarnessRun)>,
+        context: ExecutionApplyContext<'_>,
     ) -> HarnessResult<AppliedHarnessBatch> {
+        let ExecutionApplyContext {
+            attempt_identifier,
+            native_permit,
+            preservation,
+        } = context;
         self.require_native_permit(resolved, native_permit)?;
         if self.vault.source.recorded_snapshot() && preservation.is_none() {
             return Err(HarnessError::InvalidSubmission(

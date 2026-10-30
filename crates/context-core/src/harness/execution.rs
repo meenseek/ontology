@@ -5401,9 +5401,11 @@ impl HarnessExecutionRecord {
             &prepared.role_run,
             &head.revision_history,
             &head.role_execution,
-            Some(&attempt.attempt_identifier),
-            None,
-            head.preservation.as_ref().map(|proof| (proof, &prepared)),
+            ExecutionApplyContext {
+                attempt_identifier: Some(&attempt.attempt_identifier),
+                preservation: head.preservation.as_ref().map(|proof| (proof, &prepared)),
+                ..Default::default()
+            },
         )?;
         Ok((attempt, applied))
     }
@@ -5778,9 +5780,11 @@ impl HarnessExecutionRecord {
             &prepared.role_run,
             &self.revision_history,
             &self.role_execution,
-            Some(&attempt.attempt_identifier),
-            Some(contract),
-            self.preservation.as_ref().map(|proof| (proof, prepared)),
+            ExecutionApplyContext {
+                attempt_identifier: Some(&attempt.attempt_identifier),
+                native_permit: Some(contract),
+                preservation: self.preservation.as_ref().map(|proof| (proof, prepared)),
+            },
         )?;
         self.finalize_applied(
             engine,
