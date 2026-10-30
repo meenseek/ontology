@@ -21,7 +21,7 @@ export default defineConfig({
     launchOptions: { args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"] },
   },
   webServer: {
-    command: "pnpm exec vite --host 127.0.0.1 --port 47839 --strictPort",
+    command: "pnpm build && pnpm exec vite --host 127.0.0.1 --port 47839 --strictPort",
     url: "http://127.0.0.1:47839/map-preview.html",
     reuseExistingServer: false,
     timeout: 30_000,
