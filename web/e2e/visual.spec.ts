@@ -16,6 +16,33 @@ async function settled(page: import("playwright/test").Page) {
   }, { timeout: 25_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
 }
 
+// Key badges are DOM data paint with their own shadow, outside the WebGL light
+// contract. Isolate that one layer, then prove the actual screen is restored.
+async function lightScreenshot(page: import("playwright/test").Page) {
+  const original = await page.screenshot(), layer = page.locator(".graph-group-markers");
+  const state = await layer.evaluate(element => {
+    const e = element as HTMLElement;
+    return { value: e.style.getPropertyValue("visibility"), priority: e.style.getPropertyPriority("visibility"),
+      visible: [...e.querySelectorAll<HTMLElement>(".graph-group-marker:not([hidden])")].some(marker =>
+        marker.offsetWidth > 0 && getComputedStyle(marker).visibility === "visible") };
+  });
+  if (!state.visible) return original;
+  let isolated: Buffer;
+  try {
+    await layer.evaluate(element => (element as HTMLElement).style.setProperty("visibility", "hidden", "important"));
+    isolated = await page.screenshot();
+  } finally {
+    await layer.evaluate((element, state) => {
+      const style = (element as HTMLElement).style;
+      if (state.value) style.setProperty("visibility", state.value, state.priority);
+      else style.removeProperty("visibility");
+    }, state);
+  }
+  expect(isolated!.equals(original), "visible badge ink is a real positive control").toBe(false);
+  expect((await page.screenshot()).equals(original), "restoring the badge preserves every actual screen pixel").toBe(true);
+  return isolated!;
+}
+
 async function relationships(page: import("playwright/test").Page) {
   await page.goto("/map-preview.html");
   await page.locator(".fixture-notice").evaluate(e => (e as HTMLElement).hidden = true);
@@ -256,7 +283,7 @@ for (const viewport of [{ width: 1440, height: 900, dpr: 1 }, { width: 920, heig
       for (const edge of ["bottom", "top"] as const) {
         await panNode(page, "preview-purpose-0", edge, -60);
         const geometry = await page.evaluate(() => ({ canvas: document.querySelector(".graph-viewport canvas")!.getBoundingClientRect().toJSON(), frame: window.__graphQA.frame()! }));
-        const measured = edgeLightPixels(screenshotPixels(await page.screenshot()), viewport.dpr, geometry.canvas, geometry.frame, edge);
+        const measured = edgeLightPixels(screenshotPixels(await lightScreenshot(page)), viewport.dpr, geometry.canvas, geometry.frame, edge);
         expect(measured.samples, `${edge}: non-semantic edge samples`).toBeGreaterThanOrEqual(100);
         expect(measured.innerPeak, `${edge}: light remains visible inside`).toBeGreaterThanOrEqual(8);
         expect(measured.max, `${edge}: actual decorative cutoff`).toBeLessThanOrEqual(3);
