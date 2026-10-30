@@ -5941,7 +5941,9 @@ impl HarnessEngine {
     ) -> HarnessResult<AppliedHarnessBatch> {
         self.require_native_permit(resolved, native_permit)?;
         if self.vault.source.recorded_snapshot() && preservation.is_none() {
-            return Err(HarnessError::InvalidSubmission("recorded evidence may only produce an exact historical preservation effect".into()));
+            return Err(HarnessError::InvalidSubmission(
+                "recorded evidence may only produce an exact historical preservation effect".into(),
+            ));
         }
         resolved.plan.require_executable_version()?;
         if !resolved.plan.source_write_allowed {
