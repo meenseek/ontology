@@ -26,13 +26,12 @@ type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; l
 const readingOpacity = (members: ReadonlySet<string> | undefined, id: string, hovered: string | null) => members && !members.has(id) && id !== hovered ? .12 : 1;
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
 const coreLabel = (node: PositionedNode | undefined, count: number, view?: GraphView) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : view === "purpose" ? `${node?.subject_name ?? node?.label ?? "목적 묶음"} · ${count}개` : `관계 묶음${node ? ` · ${nodePresentation(node, true).title}` : ""} · ${count}개`;
-function texture(kind: "marker" | "member" | "selection" | "change") {
+function texture(kind: "marker" | "selection" | "change") {
   const canvas = document.createElement("canvas"); canvas.width = canvas.height = 128;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("별 모양을 그릴 수 없습니다.");
-  // The 10px taxonomy body needs a 1.25px stroke. A spatial member's
-  // separate 18px indicator keeps its original, quieter 0.5625px stroke.
-  context.strokeStyle = "white"; context.lineWidth = kind === "marker" ? 16 : kind === "member" ? 4 : kind === "selection" ? 1 : 3;
+  // The 10px taxonomy body needs a 1.25px stroke, independent of state rings.
+  context.strokeStyle = "white"; context.lineWidth = kind === "marker" ? 16 : kind === "selection" ? 1 : 3;
   if (kind === "change") context.setLineDash([12, 10]);
   context.beginPath(); context.arc(64, 64, 56, 0, Math.PI * 2); context.stroke();
   return new CanvasTexture(canvas);
@@ -48,6 +47,23 @@ const screenVertexShader = `
       }
     `;
 
+// Feather decorative light in drawing-buffer pixels, never bodies, state rings,
+// DOM titles or the separate hit planes. A zero viewport leaves standalone draws unchanged.
+const lightEdgeShader = `
+      uniform vec2 uLightViewport;
+      uniform float uLightFeather;
+      float lightEdgeFade() {
+        if (uLightFeather <= 0.0) return 1.0;
+        vec2 edge = min(gl_FragCoord.xy, uLightViewport - gl_FragCoord.xy);
+        return smoothstep(0.0, uLightFeather, min(edge.x, edge.y));
+      }
+`;
+export function updateLightViewport(material: ShaderMaterial, renderer: WebGLRenderer) {
+  const viewport = material.uniforms.uLightViewport.value as Vector2;
+  renderer.getDrawingBufferSize(viewport);
+  material.uniforms.uLightFeather.value = Math.min(24 * renderer.getPixelRatio(), Math.min(viewport.x, viewport.y) / 4);
+}
+
 /** One program and quad serve every star; only its spherical sampling field rotates. */
 // After shader/motion edits, run the actual GPU checks in web/star-check.html.
 export function starMaterial() {
@@ -55,12 +71,14 @@ export function starMaterial() {
     transparent: true, depthWrite: false, depthTest: false, toneMapped: false,
     uniforms: {
       uColor: { value: new Color() }, uOpacity: { value: 1 }, uPhase: { value: 0 },
+      uLightViewport: { value: new Vector2() }, uLightFeather: { value: 0 },
       uRotation: { value: 0 }, uTilt: { value: 0 }, uDetail: { value: 0 }, uShimmer: { value: 1 }, uPixels: { value: 26 }, uShape: { value: 0 },
       uNear: { value: 0 }, uDepth: { value: 1 }, uWobble: { value: new Vector2() },
     },
     vertexShader: screenVertexShader,
     fragmentShader: `
       varying vec2 vUv;
+      ${lightEdgeShader}
       uniform vec3 uColor;
       uniform float uOpacity, uPhase, uRotation, uTilt, uDetail, uShimmer, uPixels, uNear, uShape, uDepth;
       uniform vec2 uWobble;
@@ -122,7 +140,11 @@ export function starMaterial() {
         // A brighter crest stays inside the same footprint and settles at close range.
         halo *= 1.0 + 0.70 * pulse * (1.0 - uDetail) + 1.1 * uNear;
         // A resolved surface retains the same glint family as a distant star.
-        halo = (halo + (primary + secondary) * mix(1.0, 0.55, uDetail)) * fade * uShimmer;
+        // Unresolved stars share core and corona pixels. Protect the complete
+        // antialiased body footprint, then feather only its external light.
+        float outerLight = smoothstep(1.0 + edge, 1.0 + 2.0 * edge, r);
+        halo = (halo + (primary + secondary) * mix(1.0, 0.55, uDetail)) * fade * uShimmer
+          * mix(1.0, lightEdgeFade(), outerLight);
         float alpha = clamp(disc + halo * (1.0 - disc), 0.0, 1.0);
         // A hot white core, a colored inner corona, then a soft tinted falloff.
         // Everything stays inside the existing quad; depth never changes picking or layout.
@@ -139,10 +161,12 @@ export function cosmicLightMaterial() {
   return new ShaderMaterial({
     transparent: true, blending: AdditiveBlending, depthWrite: false, depthTest: false, toneMapped: false,
     uniforms: { uColor: { value: new Color() }, uOpacity: { value: 1 }, uPhase: { value: 0 },
+      uLightViewport: { value: new Vector2() }, uLightFeather: { value: 0 },
       uTime: { value: 0 }, uDepth: { value: 1 }, uCloud: { value: 0 } },
     vertexShader: screenVertexShader,
     fragmentShader: `
       varying vec2 vUv;
+      ${lightEdgeShader}
       uniform vec3 uColor;
       uniform float uOpacity, uPhase, uTime, uDepth, uCloud;
       float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -181,7 +205,7 @@ export function cosmicLightMaterial() {
         // A little white light keeps warm clouds luminous without increasing their opacity.
         color = mix(color, vec3(1.0), 0.18 * uCloud);
         float strength = mix(0.025, 0.19, depth) * mix(1.0, 2.0, uCloud);
-        gl_FragColor = vec4(color, field * edge * strength * uOpacity);
+        gl_FragColor = vec4(color, field * edge * strength * uOpacity * lightEdgeFade());
         #include <colorspace_fragment>
       }
     `,
@@ -207,6 +231,7 @@ function screenCosmicLight(geometry: PlaneGeometry, material: ShaderMaterial, no
   mesh.raycast = () => {};
   mesh.onBeforeRender = (renderer, _scene, camera) => {
     renderer.getSize(viewport);
+    updateLightViewport(material, renderer);
     mesh.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
     const perspective = starPerspectiveSize(-position.z, viewport.y, camera.projectionMatrix.elements[5]);
     const depth = stellarDepth(perspective);
@@ -237,6 +262,7 @@ function screenStar(geometry: PlaneGeometry, material: ShaderMaterial, node: Pos
   mesh.raycast = () => {};
   mesh.onBeforeRender = (renderer, _scene, camera) => {
     renderer.getSize(viewport);
+    updateLightViewport(material, renderer);
     mesh.getWorldPosition(position).applyMatrix4(camera.matrixWorldInverse);
     const pixels = Math.max(minimumPixels, nodeScreenSize(node.kind, -position.z, viewport.y, camera.projectionMatrix.elements[5]));
     mesh.scale.setScalar(spriteScale(pixels, viewport.y, camera.projectionMatrix.elements[5]));
@@ -499,7 +525,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: visualLinks.map(l => ({ ...l })) }), [displayNodes, visualLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
-  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), light: cosmicLightMaterial(), marker: texture("marker"), member: texture("member"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>(), lines: new Map<string, LineBasicMaterial>(), summaries: new Map<string, ReturnType<typeof summaryGlyphTexture> & { signature: string; material: SpriteMaterial }>(), clouds: new Map<string, { color: Color; count: number; fade: CloudFade }>() }), []);
+  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), light: cosmicLightMaterial(), marker: texture("marker"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>(), lines: new Map<string, LineBasicMaterial>(), summaries: new Map<string, ReturnType<typeof summaryGlyphTexture> & { signature: string; material: SpriteMaterial }>(), clouds: new Map<string, { color: Color; count: number; fade: CloudFade }>() }), []);
   useEffect(() => {
     const element = container.current;
     if (!element) return;
@@ -527,7 +553,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     return () => { live = false; document.fonts.removeEventListener("loadingdone", update); };
   }, []);
   useEffect(() => () => {
-    resources.geometry.dispose(); resources.star.dispose(); resources.light.dispose(); resources.marker.dispose(); resources.member.dispose(); resources.selection.dispose(); resources.change.dispose();
+    resources.geometry.dispose(); resources.star.dispose(); resources.light.dispose(); resources.marker.dispose(); resources.selection.dispose(); resources.change.dispose();
     for (const material of resources.materials.values()) material.dispose();
     resources.materials.clear();
     for (const material of resources.lines.values()) material.dispose();
@@ -618,11 +644,9 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
           const bounds = container.current!.getBoundingClientRect();
           const actions = container.current!.querySelector(".graph-core-actions")?.getBoundingClientRect();
           const minimap = container.current!.querySelector(".graph-minimap")?.getBoundingClientRect();
-          const help = container.current!.querySelector(".graph-quick-help")?.getBoundingClientRect();
           const sidebar = explorerOpen && window.innerWidth > 900 ? container.current!.closest(".map-workspace")?.querySelector(".map-sidebar")?.getBoundingClientRect() : undefined;
           const insets = coreReadingInsets(size, actions ? { bottom: actions.bottom - bounds.top } : undefined,
             minimap ? { left: minimap.left - bounds.left, top: minimap.top - bounds.top } : undefined);
-          if (help) insets.bottom = Math.max(insets.bottom, size.height - help.top + bounds.top + 24);
           if (sidebar) {
             insets.left = Math.max(24, sidebar.right - bounds.left + 24); insets.right = 24;
             // A sidebar uses the horizontal space previously reserved beside the
@@ -1198,7 +1222,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;
-    const material = (kind: "marker" | "member" | "selection" | "change" | "hit", color: string, opacity: number) => {
+    const material = (kind: "marker" | "selection" | "change" | "hit", color: string, opacity: number) => {
       const key = `${kind}:${color}:${opacity}:${kind === "hit" ? "shared" : node.id}`;
       let value = resources.materials.get(key);
       if (!value) {
@@ -1289,7 +1313,6 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       };
       group.add(body);
     }
-    if (spatialReveal?.members.has(node.id)) group.add(screenSprite(material("member", ui.primary, .7), node, "body", false, 0, 18));
     const summaryMetrics = summaryPixels ? nodeScreenMetrics(summaryPixels, isSelected, node.changed) : null;
     if (isSelected) group.add(screenSprite(material("selection", ui.primary, .52), node, "selection", isSelected, 0, summaryMetrics?.selection, undefined, undefined, undefined, fade));
     if (node.changed) group.add(screenSprite(material("change", ui.warning, .9), node, "change", isSelected, 0, summaryMetrics?.change, undefined, undefined, undefined, fade));

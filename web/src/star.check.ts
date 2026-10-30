@@ -1,5 +1,5 @@
 import { Color, Mesh, PerspectiveCamera, PlaneGeometry, Scene, WebGLRenderer } from "three";
-import { cosmicLightMaterial, starMaterial } from "./Graph.tsx";
+import { cosmicLightMaterial, starMaterial, updateLightViewport } from "./Graph.tsx";
 import { advanceStarClock, spriteScale, starMotion, starPhase, starShape } from "./presentation";
 
 // Development-only GPU regression: import the shipped shader, never a CPU copy of its math.
@@ -201,6 +201,79 @@ try {
       }
     }
   }
+  // Exercise the production viewport policy on actual GPU pixels. Disable only
+  // its bounds for the control draw; shader, body, camera and compositing match.
+  for (dpr of [1, 2]) for (const [w, h] of [[160, 160], [96, 40]]) {
+    renderer.setPixelRatio(dpr); renderer.setSize(w, h);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+    const projection = camera.projectionMatrix.elements[5], worldPerPixel = 20 / (projection * h);
+    for (const edge of ["top", "bottom", "left", "right"]) {
+      const cx = edge === "left" ? 2 : edge === "right" ? w - 2 : w / 2;
+      const cy = edge === "bottom" ? 2 : edge === "top" ? h - 2 : h / 2;
+      mesh.position.set((cx - w / 2) * worldPerPixel, (cy - h / 2) * worldPerPixel, 0);
+      lightMesh.position.copy(mesh.position);
+      mesh.scale.setScalar(spriteScale(56, h, projection));
+      lightMesh.scale.setScalar(spriteScale(120, h, projection));
+      const read = () => {
+        const gl = renderer.getContext(), data = new Uint8Array(w * h * dpr * dpr * 4);
+        gl.readPixels(0, 0, w * dpr, h * dpr, gl.RGBA, gl.UNSIGNED_BYTE, data);
+        return data;
+      };
+      const rgb = (data: Uint8Array, x: number, y: number) => {
+        const at = (Math.floor(y * dpr) * w * dpr + Math.floor(x * dpr)) * 4;
+        return [...data.slice(at, at + 3)];
+      };
+      const drawEdge = (enabled: boolean) => {
+        for (const shader of [material, light]) {
+          if (enabled) updateLightViewport(shader, renderer);
+          else { shader.uniforms.uLightViewport.value.set(0, 0); shader.uniforms.uLightFeather.value = 0; }
+        }
+        renderer.render(scene, camera); return read();
+      };
+      const label = `viewport ${w}x${h} / ${edge} / DPR ${dpr}`;
+      mesh.visible = true; lightMesh.visible = false;
+      material.uniforms.uPixels.value = 56;
+      material.uniforms.uDetail.value = 0; material.uniforms.uOpacity.value = 1;
+      material.uniforms.uDepth.value = 1; material.uniforms.uWobble.value.set(0, 0);
+      const bodyControl = drawEdge(false), body = drawEdge(true);
+      const core = rgb(body, cx, cy), controlCore = rgb(bodyControl, cx, cy);
+      const coreError = Math.max(...core.map((v, i) => Math.abs(v - controlCore[i])));
+      record(`${label}: body remains luminous`, Math.min(...core) > 100, Math.min(...core), ">100 output RGB levels inside the visible disc");
+      record(`${label}: body is not masked`, coreError === 0, coreError, "identical core pixels with viewport policy enabled/disabled");
+      for (const small of [4, 8]) {
+        mesh.scale.setScalar(spriteScale(small, h, projection)); material.uniforms.uPixels.value = small;
+        const a = rgb(drawEdge(false), cx, cy), b = rgb(drawEdge(true), cx, cy);
+        const delta = Math.max(...b.map((v, i) => Math.abs(v - a[i])));
+        record(`${label}: ${small}px body positive control`, Math.min(...a) > 50, Math.min(...a), ">50 output RGB levels for an unresolved body");
+        record(`${label}: ${small}px antialiased body is not masked`, delta === 0, delta, "identical visible core pixels, including partial disc coverage");
+      }
+      mesh.scale.setScalar(spriteScale(56, h, projection)); material.uniforms.uPixels.value = 56;
+      // Sample outside the disc but inside the same star quad at the buffer
+      // boundary. Cosmic light cannot substitute for this independent halo path.
+      const starX = edge === "left" ? .5 / dpr : edge === "right" ? w - .5 / dpr : cx + 18;
+      const starY = edge === "bottom" ? .5 / dpr : edge === "top" ? h - .5 / dpr : cy + 18;
+      mesh.visible = false; renderer.render(scene, camera); const starSky = read();
+      const starBg = rgb(starSky, starX, starY), starBefore = rgb(bodyControl, starX, starY), starAfter = rgb(body, starX, starY);
+      const haloBefore = Math.max(...starBefore.map((v, i) => Math.abs(v - starBg[i])));
+      const haloAfter = Math.max(...starAfter.map((v, i) => Math.abs(v - starBg[i])));
+      record(`${label}: star halo positive control`, haloBefore >= 8, haloBefore, ">=8 output RGB levels outside the disc before feathering");
+      record(`${label}: star halo meets the sky`, haloAfter <= 3, haloAfter, "<=3 output RGB levels at the actual buffer edge");
+      mesh.visible = false; lightMesh.visible = true;
+      light.uniforms.uDepth.value = 1; light.uniforms.uCloud.value = 1; light.uniforms.uOpacity.value = 1;
+      const control = drawEdge(false), feathered = drawEdge(true);
+      lightMesh.visible = false; renderer.render(scene, camera); const sky = read();
+      const x = edge === "left" ? .5 / dpr : edge === "right" ? w - .5 / dpr : cx;
+      const y = edge === "bottom" ? .5 / dpr : edge === "top" ? h - .5 / dpr : cy;
+      const bg = rgb(sky, x, y), a = rgb(control, x, y), b = rgb(feathered, x, y);
+      const before = Math.max(...a.map((v, i) => Math.abs(v - bg[i]))), after = Math.max(...b.map((v, i) => Math.abs(v - bg[i])));
+      record(`${label}: visible light positive control`, before >= 8, before, ">=8 output RGB levels before feathering");
+      record(`${label}: light meets the sky`, after <= 3, after, "<=3 output RGB levels at the actual buffer edge");
+    }
+  }
+  camera.aspect = 1; camera.updateProjectionMatrix();
+  mesh.position.set(0, 0, 0); lightMesh.position.set(0, 0, 0);
+  material.uniforms.uLightViewport.value.set(0, 0); material.uniforms.uLightFeather.value = 0;
+
   scene.remove(lightMesh); mesh.visible = true; light.dispose();
   output.dataset.passed = String(results.every(r => r.passed));
   output.textContent = `${results.every(r => r.passed) ? "PASS" : "FAIL"} · ${results.filter(r => r.passed).length}/${results.length}\n${JSON.stringify(results, null, 2)}`;

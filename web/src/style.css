@@ -141,7 +141,7 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .no-relations { margin: 8px 0 0; }
 .graph-canvas { position: relative; flex: 1; min-height: 230px; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .graph-viewport { position: relative; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
-.graph-guidance { flex: 0 0 auto; padding: 4px 14px 10px; }
+.graph-guidance { flex: 0 0 auto; padding: 4px 26px 10px; }
 .graph-viewport > div:first-child { position: absolute; inset: 0; }
 .graph-canvas .scene-container { position: relative; }
 .graph-canvas canvas { display: block; touch-action: none; }
@@ -373,6 +373,7 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
   .app-header { grid-template-columns: auto auto minmax(100px, 1fr) auto; gap: 10px; padding-inline: 16px; }
 }
 @media (max-width: 700px) {
+  .graph-guidance { padding-inline: 16px; }
   .app { min-height: 620px; }
   .app-header { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 9px; padding: 6px 16px; min-height: 0; }
   .wordmark { grid-column: 1; grid-row: 1; font-size: 17px; white-space: normal; overflow-wrap: anywhere; }
@@ -511,7 +512,7 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
 .graph-chrome .graph-minimap { position: static; flex-shrink: 0; max-width: 100%; pointer-events: auto; }
 @media (min-width: 901px) {
   .explorer-open .graph-chrome { left: calc(var(--explorer-width) + 14px); }
-  .explorer-open .graph-guidance { padding-left: calc(var(--explorer-width) + 14px); }
+  .explorer-open .graph-guidance { padding-left: calc(var(--explorer-width) + 26px); }
 }
 
 .graph-tooltip { bottom: var(--graph-help-floor, 42px); max-width: min(420px, calc(100% - 218px)); }

@@ -1,84 +1,7 @@
 import { expect, test } from "playwright/test";
-import { luminance, screenshotPixels } from "./png";
+import { luminance, screenshotPixels, edgeLightPixels, ringRidge } from "./png";
 
-// BEGIN rendered graph observer — also exercised against the installed bundle.
-function installGraphProbe() {
-  type Frame = { serial: number; camera: number[]; stars: { id: string; x: number; y: number; opacity: number; sprites: { pixels: number; stroke: number; opacity: number; color: string }[] }[] };
-  let frame: Frame | undefined, serial = 0, running = false;
-  let report = { frames: 0, movingFrames: 0, minLabels: Infinity, samples: 0, maxError: 0 };
-  // Three's public devtools observation exposes the actual scene without replacing
-  // its renderer, textures or application modules. This works in built assets too.
-  const devtools = new EventTarget();
-  (window as Window & { __THREE_DEVTOOLS__?: EventTarget }).__THREE_DEVTOOLS__ = devtools;
-  devtools.addEventListener("observe", event => {
-    const scene = (event as CustomEvent).detail as import("three").Scene;
-    if (!scene.isScene) return;
-    const previous = scene.onAfterRender;
-    scene.onAfterRender = function (...args) {
-      previous.apply(this, args);
-      const [renderer, , camera] = args, rect = renderer.domElement.getBoundingClientRect();
-      const stars: Frame["stars"] = [];
-      scene.traverse(object => {
-        if (!object.userData.nodeId || !object.visible) return;
-        // Read the matrices just rendered; getWorldPosition would update them.
-        const m = object.matrixWorld.elements, view = camera.matrixWorldInverse.elements, p = camera.projectionMatrix.elements;
-        const x = m[12], y = m[13], z = m[14];
-        const vx = view[0] * x + view[4] * y + view[8] * z + view[12];
-        const vy = view[1] * x + view[5] * y + view[9] * z + view[13];
-        const vz = view[2] * x + view[6] * y + view[10] * z + view[14];
-        const w = p[3] * vx + p[7] * vy + p[11] * vz + p[15];
-        if (w <= 0) return;
-        const sprites: Frame["stars"][number]["sprites"] = [];
-        for (const child of object.children) {
-          const sprite = child as import("three").Sprite, material = sprite.material, image = material?.map?.image;
-          if (!sprite.isSprite || !(image instanceof HTMLCanvasElement) || image.width !== 128) continue;
-          const alpha = image.getContext("2d")!.getImageData(0, 64, image.width, 1).data;
-          let ink = 0;
-          for (let i = 3; i < alpha.length; i += 4) ink += alpha[i] / 255;
-          const pixels = sprite.scale.x * p[5] * rect.height / 2;
-          sprites.push({ pixels, stroke: ink / 2 * pixels / image.width, opacity: material.opacity, color: material.color.getHexString() });
-        }
-        stars.push({ id: object.userData.nodeId, x: ((p[0] * vx + p[4] * vy + p[8] * vz + p[12]) / w + 1) * rect.width / 2,
-          y: (1 - (p[1] * vx + p[5] * vy + p[9] * vz + p[13]) / w) * rect.height / 2,
-          opacity: object.userData.opacity?.() ?? 1, sprites });
-      });
-      frame = { serial: ++serial, camera: camera.matrixWorld.toArray(), stars };
-    };
-  });
-  const start = () => {
-    running = true;
-    report = { frames: 0, movingFrames: 0, minLabels: Infinity, samples: 0, maxError: 0 };
-    let lastSerial = -1, previousCamera: number[] | undefined;
-    const sample = () => {
-      if (!running) return;
-      const canvas = document.querySelector(".graph-viewport canvas");
-      if (frame && canvas && frame.serial !== lastSerial) {
-        lastSerial = frame.serial;
-        report.frames++;
-        if (previousCamera && frame.camera.some((n, i) => Math.abs(n - previousCamera![i]) > .00001)) report.movingFrames++;
-        previousCamera = frame.camera;
-        const rect = canvas.getBoundingClientRect(), stars = new Map(frame.stars.map(star => [star.id, star]));
-        const labels = [...document.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].filter(label => +label.style.opacity > .99);
-        report.minLabels = Math.min(report.minLabels, labels.length);
-        for (const label of labels) {
-          const star = stars.get(label.dataset.nodeId!);
-          if (!star || star.opacity < .99 || star.x < 0 || star.y < 0 || star.x > rect.width || star.y > rect.height ||
-            parseFloat(label.style.getPropertyValue("--leader-length")) > 0 || label.classList.contains("routed-label")) continue;
-          const box = label.getBoundingClientRect();
-          const x = box.left - rect.left + parseFloat(label.style.getPropertyValue("--leader-x"));
-          const y = box.top - rect.top + parseFloat(label.style.getPropertyValue("--leader-y"));
-          report.samples++;
-          report.maxError = Math.max(report.maxError, Math.hypot(x - star.x, y - star.y));
-        }
-      }
-      requestAnimationFrame(sample);
-    };
-    requestAnimationFrame(sample);
-  };
-  window.__graphQA = { frame: () => frame, start, stop: () => { running = false; return report; } };
-}
-declare global { interface Window { __graphQA: { frame: () => { serial: number; camera: number[]; stars: { id: string; x: number; y: number; opacity: number; sprites: { pixels: number; stroke: number; opacity: number; color: string }[] }[] } | undefined; start: () => void; stop: () => { frames: number; movingFrames: number; minLabels: number; samples: number; maxError: number } } } }
-// END rendered graph observer
+import { installGraphProbe } from "./graph-probe";
 
 async function settled(page: import("playwright/test").Page) {
   let previous = "", sequence = "", stable = 0;
@@ -92,6 +15,66 @@ async function settled(page: import("playwright/test").Page) {
     return stable;
   }, { timeout: 25_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
 }
+
+async function relationships(page: import("playwright/test").Page) {
+  await page.goto("/map-preview.html");
+  await page.locator(".fixture-notice").evaluate(e => (e as HTMLElement).hidden = true);
+  await settled(page);
+  await page.getByText("보기 설정", { exact: true }).click();
+  await page.getByRole("combobox", { name: "묶음 기준", exact: true }).selectOption("relationships");
+  await page.getByText("보기 설정", { exact: true }).click();
+  await settled(page);
+}
+
+async function panNode(page: import("playwright/test").Page, id: string, edge: "top" | "bottom", margin: number) {
+  for (let i = 0; i < 4; i++) {
+    const move = await page.evaluate(({ id, edge, margin }) => {
+      const c = document.querySelector(".graph-viewport canvas")!.getBoundingClientRect(), f = window.__graphQA.frame()!;
+      const star = f.stars.find(s => s.id === id)!;
+      const dx = c.width * .35 - star.x, dy = (edge === "top" ? margin : c.height - margin) - star.y;
+      if (Math.hypot(dx, dy) < .7) return null;
+      const starts = [.03, .18, .35, .5, .65, .82, .97].flatMap(x => [.05, .15, .3, .5, .7, .85, .95].map(y => ({ x: c.left + c.width * x, y: c.top + c.height * y })));
+      const start = starts.find(p => document.elementFromPoint(p.x, p.y)?.tagName === "CANVAS" && f.stars.every(s => Math.hypot(p.x - c.left - s.x, p.y - c.top - s.y) > Math.max(24, s.hitRadius * Math.SQRT2 + 4)));
+      if (!start) throw new Error("No empty canvas point for actual pan");
+      return { ...start, dx, dy };
+    }, { id, edge, margin });
+    if (!move) return;
+    await page.mouse.move(move.x, move.y); await page.mouse.down();
+    await page.mouse.move(move.x + move.dx, move.y + move.dy, { steps: 12 }); await page.mouse.up();
+    await page.mouse.move(0, 0); await settled(page);
+  }
+  const error = await page.evaluate(({ id, edge, margin }) => {
+    const c = document.querySelector(".graph-viewport canvas")!.getBoundingClientRect(), s = window.__graphQA.frame()!.stars.find(s => s.id === id)!;
+    return Math.hypot(s.x - c.width * .35, s.y - (edge === "top" ? margin : c.height - margin));
+  }, { id, edge, margin });
+  expect(error, "actual pan reached the edge scene").toBeLessThan(1);
+}
+
+async function nodePoint(page: import("playwright/test").Page, id: string) {
+  return page.evaluate(id => {
+    const canvas = document.querySelector(".graph-viewport canvas")!.getBoundingClientRect(), star = window.__graphQA.frame()!.stars.find(s => s.id === id)!;
+    return { x: canvas.x + star.x, y: canvas.y + star.y, star, canvas: canvas.toJSON() as { left: number; top: number; bottom: number; width: number; height: number } };
+  }, id);
+}
+
+async function clickDocument(page: import("playwright/test").Page, id: string) {
+  const p = await nodePoint(page, id);
+  await page.evaluate(() => {
+    const calls: string[] = [], previous = history.pushState.bind(history);
+    history.pushState = (...args) => { calls.push(String(args[2])); return previous(...args); };
+    (window as Window & { __testActivations?: string[] }).__testActivations = calls;
+  });
+  await page.mouse.click(p.x, p.y);
+  await expect(page.locator(".management-panel")).toBeVisible();
+  expect(await page.evaluate(() => new URLSearchParams(location.search).get("focus"))).toBe(id);
+  expect(await page.evaluate(() => (window as Window & { __testActivations?: string[] }).__testActivations!.length)).toBe(1);
+  await settled(page);
+}
+
+test("GPU light edges preserve actual star cores across DPR and resize", async ({ page }) => {
+  await page.goto("/star-check.html");
+  await expect(page.locator("#results")).toHaveAttribute("data-passed", "true", { timeout: 80_000 });
+});
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(installGraphProbe);
@@ -201,7 +184,7 @@ for (const viewport of [{ width: 1440, height: 900, dpr: 1 }, { width: 920, heig
   test.describe(`rendered contracts ${viewport.width}px`, () => {
     test.use({ viewport: { width: viewport.width, height: viewport.height }, deviceScaleFactor: viewport.dpr });
 
-    test("spatial member rings stay thin without weakening taxonomy markers", async ({ page }) => {
+    test("spatial members have no duplicate ring and retain titles, picking and state rings", async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
       await page.goto("/map-preview.html");
       await page.locator(".fixture-notice").evaluate(element => element.setAttribute("hidden", ""));
@@ -224,15 +207,77 @@ for (const viewport of [{ width: 1440, height: 900, dpr: 1 }, { width: 920, heig
       const sprites = await page.evaluate(() => window.__graphQA.frame()!.stars.flatMap(star => star.sprites));
       const members = sprites.filter(sprite => Math.abs(sprite.pixels - 18) < .05);
       const markers = sprites.filter(sprite => Math.abs(sprite.pixels - 10) < .05 && sprite.opacity > .5);
-      expect(members.length).toBeGreaterThanOrEqual(6);
+      expect(members).toHaveLength(0);
       expect(markers.length).toBeGreaterThan(0);
-      for (const member of members) {
-        expect(member.stroke).toBeGreaterThanOrEqual(.4);
-        expect(member.stroke).toBeLessThanOrEqual(.75);
-        expect(member.opacity).toBeGreaterThan(.5);
-      }
-      expect(new Set(members.map(member => member.color)).size).toBe(1);
       for (const marker of markers) expect(marker.stroke).toBeGreaterThanOrEqual(1.2);
+      await expect(page.locator(".graph-core-close")).toHaveText(/근접 묶음 \d+개 접기/);
+      const id = await page.evaluate(() => {
+        const f = window.__graphQA.frame()!, c = document.querySelector(".graph-viewport canvas")!.getBoundingClientRect();
+        return [...document.querySelectorAll<HTMLElement>(".node-label:not([hidden])")].map(e => e.dataset.nodeId!).find(id => {
+          const s = f.stars.find(s => s.id === id);
+          return id.startsWith("preview-single-") && s && s.hitRadius >= 18 && document.elementFromPoint(c.x + s.x, c.y + s.y)?.tagName === "CANVAS";
+        });
+      });
+      expect(id).toBeTruthy();
+      await page.getByText("관계·상태 읽기", { exact: true }).click();
+      await expect(page.locator(".legend-guide")).not.toContainText("작은 원이 구성원을");
+      await expect(page.locator(".legend-guide")).toContainText("가는 원은 선택");
+      await page.getByText("관계·상태 읽기", { exact: true }).press("Escape");
+      await clickDocument(page, id!);
+      if (viewport.width > 900) {
+        await page.evaluate(id => {
+          const previous = window.fetch;
+          window.fetch = async (...args) => {
+            const response = await previous(...args), url = new URL(String(args[0]), location.href);
+            if (url.pathname !== "/api/graph") return response;
+            const data = await response.json();
+            data.nodes = data.nodes.map((n: { id: string }) => n.id === id ? { ...n, revision: "edge-check-r2" } : n);
+            return new Response(JSON.stringify(data), { headers: { "content-type": "application/json" } });
+          };
+        }, id!);
+        await page.getByText("보기 설정", { exact: true }).click();
+        await page.getByRole("button", { name: "새로고침", exact: true }).click();
+        await page.getByText("보기 설정", { exact: true }).click(); await settled(page);
+        const p = await nodePoint(page, id!), shot = screenshotPixels(await page.screenshot());
+        const rings = p.star.sprites.filter(s => s.pixels > 20 && s.opacity > .4);
+        expect(rings).toHaveLength(2);
+        for (const ring of rings) {
+          const ridge = ringRidge(shot, p.x, p.y, ring.pixels, viewport.dpr);
+          expect(ridge.peak).toBeGreaterThanOrEqual(8);
+          expect(ridge.visible).toBeGreaterThanOrEqual(8);
+        }
+      }
+    });
+
+    test("decorative light meets both edges while visible and partial stars remain named and clickable", async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+      await relationships(page);
+      for (const edge of ["bottom", "top"] as const) {
+        await panNode(page, "preview-purpose-0", edge, -60);
+        const geometry = await page.evaluate(() => ({ canvas: document.querySelector(".graph-viewport canvas")!.getBoundingClientRect().toJSON(), frame: window.__graphQA.frame()! }));
+        const measured = edgeLightPixels(screenshotPixels(await page.screenshot()), viewport.dpr, geometry.canvas, geometry.frame, edge);
+        expect(measured.samples, `${edge}: non-semantic edge samples`).toBeGreaterThanOrEqual(100);
+        expect(measured.innerPeak, `${edge}: light remains visible inside`).toBeGreaterThanOrEqual(8);
+        expect(measured.max, `${edge}: actual decorative cutoff`).toBeLessThanOrEqual(3);
+      }
+      for (const edge of ["bottom", "top"] as const) {
+        await relationships(page);
+        await panNode(page, "preview-0-0", edge, edge === "top" ? 2 : 12);
+        const p = await nodePoint(page, "preview-0-0");
+        expect(p.star.hitRadius * 2).toBeGreaterThanOrEqual(36);
+        await page.mouse.move(p.x, p.y);
+        await expect(page.locator('.graph-tooltip[data-node-id="preview-0-0"]')).toContainText("사용자의 맥락을 이해하는 방법");
+        const shot = screenshotPixels(await page.screenshot());
+        expect(Math.min(...shot.rgb(p.x * viewport.dpr, p.y * viewport.dpr)), `${edge}: visible star core`).toBeGreaterThan(100);
+        await clickDocument(page, "preview-0-0");
+        if (edge === "bottom" && viewport.width > 900) {
+          const current = await nodePoint(page, "preview-0-0");
+          await panNode(page, "preview-0-0", "bottom", Math.max(12, current.star.radius + 2));
+          await expect(page.locator('.node-label[data-node-id="preview-0-0"]:not([hidden])')).toContainText("사용자의 맥락을 이해하는 방법");
+        }
+      }
+      expect(errors).toEqual([]);
     });
 
     test("guidance stays outside the renderer after selection, pan and minimap expansion", async ({ page }) => {
