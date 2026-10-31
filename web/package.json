@@ -5,10 +5,12 @@
   "type": "module",
   "packageManager": "pnpm@11.8.0",
   "scripts": {
-    "build": "tsc --noEmit && vite build",
-    "check": "tsc --noEmit",
-    "test:e2e": "playwright test",
-    "test": "node --import tsx --test src/pointer-gesture.test.ts src/graph.test.ts src/view-layout.test.ts src/document-preview.test.tsx src/context.test.tsx src/grouping-events.test.ts src/memory-lifecycle.test.mjs"
+    "build": "pnpm run check && vite build",
+    "check": "tsc --noEmit && pnpm run check:visual",
+    "test:e2e": "playwright test '\\.spec\\.ts$'",
+    "test": "node --import tsx --test src/pointer-gesture.test.ts src/graph.test.ts src/view-layout.test.ts src/document-preview.test.tsx src/context.test.tsx src/grouping-events.test.ts src/memory-lifecycle.test.mjs e2e/visual-diff.test.ts",
+    "visual:review": "node e2e/visual-review.ts",
+    "check:visual": "tsc --ignoreConfig --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM --types node --jsx react-jsx --skipLibCheck --allowImportingTsExtensions e2e/visual-review.ts e2e/visual-diff.ts e2e/visual-diff.test.ts"
   },
   "dependencies": {
     "graphology": "0.26",
