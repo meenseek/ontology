@@ -39,11 +39,15 @@ async function reading(page: Page) {
     const plotBox = plot.getBoundingClientRect(), helpBox = help.getBoundingClientRect(), box = guidance.getBoundingClientRect();
     const side = document.querySelector(".explorer-open .map-sidebar")?.getBoundingClientRect();
     const offset = side && innerWidth > 900 ? side.right - plotBox.left : 0;
-    const starts = [inset(q(".map-toolbar")), inset(q(".map-status")), helpBox.left - offset, inset(q(".map-legend"))];
+    // Pinned purpose cards sit directly below the filter row, so they join the
+    // shared column whenever they are painted.
+    const strip = document.querySelector<HTMLElement>(".graph-group-navigation.with-keys"), card = strip?.querySelector(".graph-group-target.core-name")?.getBoundingClientRect();
+    const starts = [inset(q(".map-toolbar")), inset(q(".map-status")), helpBox.left - offset, inset(q(".map-legend")), ...(card ? [card.left + strip!.scrollLeft - offset] : [])];
     const css = getComputedStyle(guidance), lineHeight = parseFloat(getComputedStyle(active).lineHeight);
     return { text: active.textContent!, lines, lineHeight, fontSize: parseFloat(getComputedStyle(active).fontSize),
       guideHeight: box.height, lineBudget: lineHeight * lines.length + parseFloat(css.paddingTop) + parseFloat(css.paddingBottom),
-      insetError: Math.max(...starts) - Math.min(...starts), plotHeight: plotBox.height,
+      starts, insetError: Math.max(...starts) - Math.min(...starts), plotHeight: plotBox.height,
+      cardStrip: !!card,
       outside: box.top >= plotBox.bottom - .5, remainingSpaceError: Math.abs(plotBox.bottom - box.top),
       visible: lines.every(l => l.left >= helpBox.left - 1 && l.right <= helpBox.right + 1 && l.top >= box.top && l.bottom <= box.bottom),
       canvasError: Math.max(...(["left", "top", "width", "height"] as const).map(k => Math.abs(q(".graph-viewport canvas").getBoundingClientRect()[k] - plotBox[k]))) };
@@ -112,6 +116,69 @@ test("map chrome shares its inset at responsive boundaries, including the open e
     expect(value.visible).toBe(true);
     await page.locator(".map-sidebar .sidebar-heading button").click(); await settled(page);
   }
+});
+
+// Pinned purpose cards appear whenever the map column is at most 700px wide.
+// The row scrolls, so it runs to the map edge. Scrolling to the end stops the
+// last card on the shared inset, and a focused card cut by that inset is moved
+// inside it; the browser may align it to the inset or centre it. The previous
+// scroll position is restored for later measurements.
+async function cardRow(page: Page) {
+  return page.evaluate(() => {
+    const strip = document.querySelector<HTMLElement>(".graph-group-navigation.with-keys"), plot = document.querySelector(".graph-viewport")!.getBoundingClientRect();
+    const toolbar = document.querySelector<HTMLElement>(".map-toolbar")!, inner = toolbar.getBoundingClientRect().right - parseFloat(getComputedStyle(toolbar).paddingRight);
+    if (!strip) return null;
+    const cards = [...strip.querySelectorAll<HTMLElement>(".graph-group-target.core-name")], previous = strip.scrollLeft;
+    strip.scrollLeft = 0;
+    const cut = cards.find(card => card.getBoundingClientRect().right > inner + 1);
+    cut?.focus();
+    const focused = cut?.getBoundingClientRect(), focusOverflow = focused ? Math.max(0, focused.right - inner, strip.getBoundingClientRect().left - focused.left) : null;
+    cut?.blur();
+    strip.scrollLeft = strip.scrollWidth;
+    const observed = { overflows: strip.scrollWidth > strip.clientWidth, edgeError: Math.abs(strip.getBoundingClientRect().right - plot.right),
+      lastEndError: Math.abs(cards.at(-1)!.getBoundingClientRect().right - inner), focusOverflow };
+    strip.scrollLeft = previous;
+    return observed;
+  });
+}
+
+// Each case is its own test so a failing boundary is named in the report.
+async function expectCardRow(page: Page, label: string) {
+  const value = await reading(page), edge = await cardRow(page);
+  await test.info().attach("card-inset", { body: JSON.stringify({ label, cardStrip: value.cardStrip, starts: value.starts, edge }), contentType: "application/json" });
+  expect(value.cardStrip, `${label}: pinned purpose cards are shown`).toBe(true);
+  expect(value.insetError, `${label}: cards start with toolbar/status/guidance/legend`).toBeLessThanOrEqual(1);
+  expect(edge!.overflows, `${label}: the case exercises a scrolling card row`).toBe(true);
+  expect(edge!.edgeError, `${label}: the scrolling row reaches the map edge`).toBeLessThanOrEqual(1);
+  expect(edge!.lastEndError, `${label}: the last card stops on the shared inset`).toBeLessThanOrEqual(1);
+  expect(edge!.focusOverflow, `${label}: a focused cut card moves inside the shared inset`).toBeLessThanOrEqual(1);
+}
+
+test.describe("pinned purpose cards", () => {
+  test.use({ hasTouch: true, isMobile: true, deviceScaleFactor: 2 });
+  for (const width of [390, 360, 414, 700]) test(`${width}px cards start on the shared map inset and scroll to it`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto("/map-preview.html");
+    await page.locator(".fixture-notice").evaluate(e => (e as HTMLElement).hidden = true);
+    await settled(page);
+    await expectCardRow(page, `${width}px`);
+  });
+});
+
+// The record panel narrows a desktop map below 700px, where the inset is 26px
+// or 20px rather than the phone value. At 1440px the explorer still docks
+// beside the narrowed map, so the cards follow its offset.
+for (const [width, explorer] of [[1440, false], [1000, false], [1440, true]] as const) test(`${width}px record panel${explorer ? " and explorer" : ""} keeps pinned cards on the shared map inset`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  await page.goto("/map-preview.html");
+  await page.locator(".fixture-notice").evaluate(e => (e as HTMLElement).hidden = true);
+  await settled(page);
+  await page.getByRole("button", { name: "기록 남기기", exact: true }).click(); await settled(page);
+  if (explorer) {
+    await page.getByRole("button", { name: "필터·묶음", exact: true }).click(); await settled(page);
+    await expect(page.locator(".map-workspace.explorer-open"), "the explorer docks beside the map rather than covering it").toHaveCount(1);
+  }
+  await expectCardRow(page, `${width}px record panel${explorer ? " and explorer" : ""}`);
 });
 
 test("selected closeup retains both opposed titles with clear ownership and real picking", async ({ page }) => {

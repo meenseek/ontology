@@ -349,7 +349,7 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
   .explorer-open .graph-list, .explorer-open .map-empty { margin-inline-start: var(--explorer-width); }
   .management-panel { grid-column: 2; grid-row: 1 / -1; }
   .explorer-open .graph-group-target:focus:not(.core-name) { left: calc(var(--explorer-width) + 16px); top: 120px; bottom: auto; max-width: min(320px, calc(100% - var(--explorer-width) - 32px)); max-height: calc(100% - 136px); overflow-y: auto; z-index: 3; }
-  .explorer-open .graph-group-navigation.with-keys { left: calc(var(--explorer-width) + 12px); }
+  .explorer-open .graph-group-navigation.with-keys { left: calc(var(--explorer-width) + var(--map-gutter)); }
   .explorer-open .graph-group-navigation.with-keys .graph-group-target:not(.core-name):focus { position: static; flex: 0 0 172px; left: auto; top: auto; bottom: auto; width: 172px; max-width: calc(100% - 4px); height: 50px; min-height: 50px; max-height: 50px; padding: 4px 8px; overflow: hidden; white-space: normal; }
 
 }
@@ -490,7 +490,9 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
 .graph-group-navigation { position: absolute; inset: 0; padding: 10px 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 10px; align-content: start; pointer-events: none; }
 .graph-group-target { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; pointer-events: none; }
 .graph-group-target:focus { position: absolute; left: 16px; bottom: 80px; width: max-content; max-width: min(320px, calc(100% - 200px)); height: auto; padding: 8px 10px; clip-path: none; overflow: visible; white-space: normal; word-break: keep-all; overflow-wrap: anywhere; pointer-events: auto; outline: 2px solid var(--focus-ring); outline-offset: 2px; background: var(--surface-map-overlay); }
-.graph-group-navigation.with-keys { inset: 10px 12px auto; height: 60px; display: flex; align-items: flex-start; gap: 8px; padding: 0 0 8px; overflow-x: auto; overflow-y: hidden; pointer-events: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; z-index: 2; }
+/* Cards start on the shared inset. The row runs to the map edge, where a cut card can show that it scrolls; the spacer stops the last card on the inset and focus keeps cards inside it. */
+.graph-group-navigation.with-keys { inset: 10px 0 auto var(--map-gutter); height: 60px; display: flex; align-items: flex-start; gap: 8px; padding: 0 0 8px; overflow-x: auto; overflow-y: hidden; scroll-padding-inline-end: var(--map-gutter); pointer-events: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; z-index: 2; }
+.graph-group-navigation.with-keys::after { content: ""; flex: 0 0 calc(var(--map-gutter) - 8px); align-self: stretch; }
 .graph-group-target.core-name { position: static; flex: 0 0 172px; display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 7px; width: 172px; height: 50px; min-height: 50px; padding: 4px 8px; clip-path: none; overflow: hidden; white-space: normal; pointer-events: auto; text-align: left; font-size: 12px; line-height: 14px; font-weight: 500; color: var(--text-strong); background: var(--surface-map-overlay); border: 1px solid var(--border); border-radius: var(--radius-control); text-shadow: 0 1px 4px var(--surface-page); max-width: calc(100% - 4px); }
 .graph-group-target.core-name .group-name-copy { min-width: 0; word-break: keep-all; overflow-wrap: anywhere; }
 .graph-group-target.core-name .group-name-copy > span:first-child { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
