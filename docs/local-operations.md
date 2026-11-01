@@ -797,6 +797,11 @@ Core는 경로·형식·크기·SHA-256을 plan과 역할 입력에 결합하고
 Native Codex 실행기는 source read gate를 놓기 전에 Core가 검증한 bytes를 고정한다.
 역할마다 전용 private cwd에 같은 상대 경로와 권한 `0600`으로 파일을 만들고, PNG/JPEG는
 `codex exec --image`로 첨부한다. PDF는 그 cwd에서 읽기 전용 파일 도구로 검사한다.
+이 cwd는 시스템 임시 위치에 새로 만든 권한 `0700` 디렉터리이며 출력 schema와 검증된
+첨부만 둔다. 원래 workspace의 `AGENTS.md`는 복사하지 않는다. `project_doc_max_bytes=0`
+override는 적용하지 않는다. `AGENTS.md`를 추가한 실험이 실제 역할 cwd에서의 개선을
+입증하지 못했기 때문이다. stdin bytes의 일치는 CLI가 별도로 결합하는 전역 지침까지
+포함한 전체 모델 입력의 동일성을 증명하지 않는다.
 기존 JSON segments는 그대로 stdin에 전달한다. 검토 결과는 `bound-review-artifact` 근거로
 경로·digest·page 등 locator를 인용할 수 있으며, 평가 대상 자체에 대한 근거도 계속 필요하다.
 모든 역할의 임시 cwd와 첨부는 기존 프로세스 종료 절차에서 함께 정리한다. 이전 runtime의
