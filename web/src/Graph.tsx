@@ -22,6 +22,7 @@ import { PointerGesture } from "./pointer-gesture";
 import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./reveal-transition";
 
 type RenderLink = Omit<GraphLink, "source" | "target">;
+type PositionedLink = RenderLink & { source: PositionedNode; target: PositionedNode };
 type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; filteredGroup?: string | null; hasDisplayFilters?: boolean; explorerOpen?: boolean; rotate: boolean; allConnections?: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onToggleRotation?: () => void; onFailure: () => void };
 const readingOpacity = (members: ReadonlySet<string> | undefined, id: string, hovered: string | null) => members && !members.has(id) && id !== hovered ? .12 : 1;
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
@@ -522,10 +523,46 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   if (groupRequest === appliedGroupRequest && expandedCore && !activeExpandedCore) {
     setExpandedCore(null); coreReturn.current = null; pendingReturn.current = null; restoringCoreReturn.current = null;
   }
-  const data = useMemo(() => ({ nodes: displayNodes.map(n => ({ ...n })), links: visualLinks.map(l => ({ ...l })) }), [displayNodes, visualLinks]);
+  const retainedLinks = useRef(new Map<string, PositionedLink[]>());
+  const data = useMemo(() => {
+    const nodes = displayNodes.map(node => ({ ...node })), byId = new Map(nodes.map(node => [node.id, node]));
+    const next = new Map<string, PositionedLink[]>();
+    const links = visualLinks.map(link => {
+      const key = JSON.stringify([link.source, link.target, link.kind, link.current]);
+      const occurrences = next.get(key) ?? [];
+      const current = { ...link, source: byId.get(link.source)!, target: byId.get(link.target)! };
+      const retained = retainedLinks.current.get(key)?.[occurrences.length] ?? current;
+      // Keep every occurrence and its line/arrow geometry. Resolve endpoints
+      // now so a live retained edge never temporarily points at string IDs.
+      Object.assign(retained, current); occurrences.push(retained); next.set(key, occurrences); return retained;
+    });
+    retainedLinks.current = next;
+    return { nodes, links };
+  }, [displayNodes, visualLinks]);
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
-  const resources = useMemo(() => ({ geometry: new PlaneGeometry(1, 1), star: starMaterial(), light: cosmicLightMaterial(), marker: texture("marker"), selection: texture("selection"), change: texture("change"), materials: new Map<string, SpriteMaterial>(), lines: new Map<string, LineBasicMaterial>(), summaries: new Map<string, ReturnType<typeof summaryGlyphTexture> & { signature: string; material: SpriteMaterial }>(), clouds: new Map<string, { color: Color; count: number; fade: CloudFade }>() }), []);
+  const resources = useMemo(() => {
+    // ForceGraph disposes every removed object's resources, including borrowed
+    // materials/textures shared by other stars. Their lifetime belongs here.
+    const retained = new Map<{ dispose(): void }, () => void>();
+    const retain = <T extends { dispose(): void }>(resource: T): T => {
+      if (!retained.has(resource)) {
+        retained.set(resource, resource.dispose.bind(resource));
+        resource.dispose = () => {};
+      }
+      return resource;
+    };
+    const release = (resource: { dispose(): void }) => {
+      const dispose = retained.get(resource);
+      retained.delete(resource); dispose?.();
+    };
+    return { retain, release, dispose: () => { for (const resource of retained.keys()) release(resource); },
+      geometry: retain(new PlaneGeometry(1, 1)), star: retain(starMaterial()), light: retain(cosmicLightMaterial()),
+      marker: retain(texture("marker")), selection: retain(texture("selection")), change: retain(texture("change")),
+      materials: new Map<string, SpriteMaterial>(), lines: new Map<string, LineBasicMaterial>(),
+      summaries: new Map<string, ReturnType<typeof summaryGlyphTexture> & { signature: string; material: SpriteMaterial }>(),
+      clouds: new Map<string, { color: Color; count: number; fade: CloudFade }>() };
+  }, []);
   useEffect(() => {
     const element = container.current;
     if (!element) return;
@@ -553,12 +590,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     return () => { live = false; document.fonts.removeEventListener("loadingdone", update); };
   }, []);
   useEffect(() => () => {
-    resources.geometry.dispose(); resources.star.dispose(); resources.light.dispose(); resources.marker.dispose(); resources.selection.dispose(); resources.change.dispose();
-    for (const material of resources.materials.values()) material.dispose();
-    resources.materials.clear();
-    for (const material of resources.lines.values()) material.dispose();
-    resources.lines.clear();
-    for (const summary of resources.summaries.values()) { summary.material.dispose(); summary.texture.dispose(); }
+    resources.dispose();
+    resources.materials.clear(); resources.lines.clear();
     resources.summaries.clear(); resources.clouds.clear();
   }, [resources]);
   useEffect(() => {
@@ -566,7 +599,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     // summary textures on the following frame, after their sprites are gone.
     const frame = requestAnimationFrame(() => {
       for (const [id, glyph] of resources.summaries) if (!glyphMembers.has(id) && !reveal.entering.size && !reveal.retiring.size) {
-        glyph.material.dispose(); glyph.texture.dispose(); resources.summaries.delete(id);
+        resources.release(glyph.material); resources.release(glyph.texture); resources.summaries.delete(id);
       }
       const eligible = new Set(snapshot.nodes.map(node => node.id));
       for (const id of resources.clouds.keys()) if (!eligible.has(id)) resources.clouds.delete(id);
@@ -1226,7 +1259,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       const key = `${kind}:${color}:${opacity}:${kind === "hit" ? "shared" : node.id}`;
       let value = resources.materials.get(key);
       if (!value) {
-        value = new SpriteMaterial({ map: kind === "hit" ? null : resources[kind], color, transparent: true, opacity, depthWrite: false, depthTest: true, sizeAttenuation: false });
+        value = resources.retain(new SpriteMaterial({ map: kind === "hit" ? null : resources[kind], color, transparent: true, opacity, depthWrite: false, depthTest: true, sizeAttenuation: false }));
         resources.materials.set(key, value);
       }
       return value;
@@ -1277,16 +1310,16 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       let glyph = resources.summaries.get(node.id);
       if (!glyph) {
         const image = summaryGlyphTexture(node.id, samples);
-        glyph = { signature, ...image, material: new SpriteMaterial({ map: image.texture, color: "#ffffff", transparent: true, opacity: 1, depthWrite: false, depthTest: true, sizeAttenuation: false }) };
+        glyph = { signature, ...image, texture: resources.retain(image.texture), material: resources.retain(new SpriteMaterial({ map: image.texture, color: "#ffffff", transparent: true, opacity: 1, depthWrite: false, depthTest: true, sizeAttenuation: false })) };
         resources.summaries.set(node.id, glyph);
       } else if (glyph.signature !== signature) {
         const previous = glyph.texture;
         const image = summaryGlyphTexture(node.id, samples);
-        glyph.texture = image.texture; glyph.updateMotion = image.updateMotion;
+        glyph.texture = resources.retain(image.texture); glyph.updateMotion = image.updateMotion;
         glyph.material.map = glyph.texture;
         glyph.material.needsUpdate = true;
         glyph.signature = signature;
-        previous.dispose();
+        resources.release(previous);
       }
       const body = screenSprite(glyph.material, node, "body", false, 0, summaryPixels,
         haloScale && (() => 1 + (haloScale() - 1) * .35),
@@ -1434,7 +1467,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       linkMaterial={link => {
         const from = String(endpoint(link.source)), to = String(endpoint(link.target)), key = JSON.stringify([from, to, link.kind, link.current]);
         let material = resources.lines.get(key);
-        if (!material) { material = new LineBasicMaterial({ transparent: true, depthWrite: false, opacity: .65 }); resources.lines.set(key, material); }
+        if (!material) { material = resources.retain(new LineBasicMaterial({ transparent: true, depthWrite: false, opacity: .65 })); resources.lines.set(key, material); }
         const focus = draggingId ?? selected;
         material.color.set(focus && from !== focus && to !== focus ? ui.border : link.current ? linkColor[link.kind] : ui.historical);
         return material;

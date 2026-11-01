@@ -3286,3 +3286,19 @@ test("resting summary coverage survives a crowded short tablet overview", () => 
   const boxes = visibleLabels(candidates, 920, 585, null, null, { stars, obstacles: [{"bottom":571.5703125,"left":738,"right":906,"top":385.5703125},{"bottom":571.5703125,"left":14,"right":724,"top":551.7734375}], starTitles: { limit: 0 } });
   assert.deepEqual(new Set(boxes.map(box => box.id)), new Set(candidates.map(node => node.id)));
 });
+
+test("label geometry caches never retain another projection or obstacle state", () => {
+  const nodes = [
+    { id: "first", kind: "document", active: true, x: 90, y: 180, depth: 0, radius: 8, width: 140, height: 22 },
+    { id: "second", kind: "document", active: true, x: 285, y: 300, depth: 0, radius: 8, width: 140, height: 22 },
+  ];
+  const original = structuredClone(nodes), obstacles: LabelBox[] = [];
+  const layout = () => visibleLabels(nodes, 390, 600, "first", null, { stars: nodes, obstacles, starTitles: { limit: 0, exempt: new Set(nodes.map(n => n.id)) } });
+  const before = layout(); assert.equal(before.length, 2);
+  nodes[0].x = 190; nodes[0].width = 220; nodes[0].height = 44;
+  assert.notDeepEqual(layout(), before, "reusing the same input objects still reads their current projection and dimensions");
+  Object.assign(nodes[0], original[0]); assert.deepEqual(layout(), before);
+  obstacles.push({ id: "chrome", left: before[0].left, top: before[0].top, right: before[0].right, bottom: before[0].bottom });
+  assert.notDeepEqual(layout(), before, "the current control footprint invalidates old positions");
+  obstacles.length = 0; assert.deepEqual(layout(), before);
+});

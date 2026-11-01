@@ -159,7 +159,12 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     if (!leaderCache.has(box)) leaderCache.set(box, labelLeader(byId.get(box.id)!, box));
     return leaderCache.get(box)!;
   };
-  const guide = (box: LabelBox) => box.guide ?? (leader(box) ? [leader(box)!] : []);
+  const guideCache = new Map<LabelBox, LabelLeader[]>();
+  const guide = (box: LabelBox) => {
+    let lines = guideCache.get(box);
+    if (!lines) { lines = box.guide ?? (leader(box) ? [leader(box)!] : []); guideCache.set(box, lines); }
+    return lines;
+  };
   const passesStar = (line: LabelLeader, id: string) => {
     const reach = largestStar + 4;
     for (let x = Math.floor((Math.min(line.x1, line.x2) - reach) / 64); x <= Math.floor((Math.max(line.x1, line.x2) + reach) / 64); x++)
@@ -172,7 +177,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
         }
     return false;
   };
-  const fitsTogether = (box: LabelBox, placed: readonly LabelBox[]) => {
+  const clearAssociation = (box: LabelBox) => {
     const lines = guide(box), star = byId.get(box.id)!;
     // Without a guide, proximity is the only visible ownership cue. Clearance
     // alone allowed another (even unlabeled) star to claim the title visually.
@@ -188,22 +193,44 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
       const coversSource = star.x >= other.left && star.x <= other.right && star.y >= other.top && star.y <= other.bottom;
       return !coversSource && lines.some(line => leaderHitsBox(line, other));
     })) return false;
+    return true;
+  };
+  // Every beam state shares the same immutable candidate projection. Its own
+  // star/chrome association need only be checked once, independently of peers.
+  const associationCache = new Map<LabelBox, boolean>();
+  const reusableBoxes = new Set<LabelBox>();
+  const pairCache = new Map<LabelBox, Map<LabelBox, boolean>>();
+  const compatible = (box: LabelBox, other: LabelBox) => {
+    if (overlaps(box, other)) return false;
+    const lines = guide(box), star = byId.get(box.id)!;
+    const otherLines = guide(other);
+    // Two individually nearest titles can still read as one name column
+    // between opposite owners. Try another existing position before accepting
+    // that gestalt; a visible guide already makes the association explicit.
+    const otherStar = byId.get(other.id)!;
+    if (!lines.length && !otherLines.length && !star.summary && !otherStar.summary) {
+      const overlap = Math.min(box.right, other.right) - Math.max(box.left, other.left);
+      const gap = Math.max(box.top, other.top) - Math.min(box.bottom, other.bottom);
+      const inward = (star.x < box.left && otherStar.x > other.right) || (otherStar.x < other.left && star.x > box.right);
+      if (inward && overlap >= Math.min(box.right - box.left, other.right - other.left) / 2 &&
+        gap <= Math.max(box.bottom - box.top, other.bottom - other.top)) return false;
+    }
+    return lines.every(line => !leaderHitsBox(line, other)) && otherLines.every(line => !leaderHitsBox(line, box)) &&
+      lines.every(line => otherLines.every(otherLine => !leadersCross(line, otherLine)));
+  };
+  const fitsTogether = (box: LabelBox, placed: readonly LabelBox[]) => {
+    let clear = associationCache.get(box);
+    if (clear === undefined) { clear = clearAssociation(box); associationCache.set(box, clear); }
+    if (!clear) return false;
+    if (!placed.length) return true;
+    // Beam alternatives revisit these ordered pairs. One-off fallback pockets
+    // bypass the pair cache rather than retaining thousands of unused entries.
+    let peers = pairCache.get(box);
+    if (!peers && reusableBoxes.has(box)) { peers = new Map(); pairCache.set(box, peers); }
     return placed.every(other => {
-      if (overlaps(box, other)) return false;
-      const otherLines = guide(other);
-      // Two individually nearest titles can still read as one name column
-      // between opposite owners. Try another existing position before accepting
-      // that gestalt; a visible guide already makes the association explicit.
-      const otherStar = byId.get(other.id)!;
-      if (!lines.length && !otherLines.length && !star.summary && !otherStar.summary) {
-        const overlap = Math.min(box.right, other.right) - Math.max(box.left, other.left);
-        const gap = Math.max(box.top, other.top) - Math.min(box.bottom, other.bottom);
-        const inward = (star.x < box.left && otherStar.x > other.right) || (otherStar.x < other.left && star.x > box.right);
-        if (inward && overlap >= Math.min(box.right - box.left, other.right - other.left) / 2 &&
-          gap <= Math.max(box.bottom - box.top, other.bottom - other.top)) return false;
-      }
-      return lines.every(line => !leaderHitsBox(line, other)) && otherLines.every(line => !leaderHitsBox(line, box)) &&
-        lines.every(line => otherLines.every(otherLine => !leadersCross(line, otherLine)));
+      const known = peers?.get(other);
+      if (known !== undefined) return known;
+      const clear = compatible(box, other); peers?.set(other, clear); return clear;
     });
   };
   // Bound geometric work, not elapsed time: identical projections keep identical names.
@@ -248,7 +275,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   const options = new Map<string, LabelBox[]>();
   const optionsFor = (node: ProjectedLabel) => {
     let available = options.get(node.id);
-    if (!available) { available = positionsFor(node).filter(box => clear(box) && fromStar(node, box) <= restingReach(node) && fitsTogether(box, [])); options.set(node.id, available); }
+    if (!available) { available = positionsFor(node).filter(box => clear(box) && fromStar(node, box) <= restingReach(node) && fitsTogether(box, [])); available.forEach(box => reusableBoxes.add(box)); options.set(node.id, available); }
     return available;
   };
   if (environment.stars) {
