@@ -184,6 +184,7 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .graph-core-heading, .graph-core-navigation { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .graph-core-heading > span { min-width: 0; word-break: keep-all; overflow-wrap: anywhere; }
 .graph-core-heading > button { flex-shrink: 0; white-space: nowrap; }
+.graph-core-title { line-height: 1.5; }
 .graph-core-title .graph-core-count { display: inline-block; white-space: nowrap; }
 .graph-core-actions .graph-core-separator { padding: 0; white-space: pre; }
 .graph-core-navigation { flex-shrink: 1; flex-wrap: wrap; }
@@ -403,7 +404,8 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
   .view-options { position: static; width: auto; }
   .view-options > summary { width: max-content; }
   .view-options > div { left: 0; right: auto; max-width: 100%; }
-  .map-legend { gap: 6px 12px; }
+  .map-legend { gap: 6px 8px; }
+  .map-legend > span { gap: 6px; }
   .map-legend > .map-legend-hint { display: none; }
   .map-legend details { margin-left: 0; }
   .graph-list { padding: 12px 18px; }
@@ -414,6 +416,7 @@ dt { color: var(--text-muted); } dd { margin: 0; color: var(--text-secondary); o
   .management-panel input, .management-panel textarea, .management-panel select { font-size: 16px; }
   .date-fields { grid-template-columns: 1fr; gap: 0; }
   .node-label { max-width: 160px; font-size: 11px; }
+  .node-label.compact:not(.group-name) { padding: 1px 3px; }
   .graph-viewport[data-label-backdrop="protected"] .node-label.compact:not(.group-name):not(.hovered):not(:focus-visible) { background: var(--surface-map-label-quiet); }
   .node-label.compact:not(.group-name) strong { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 }

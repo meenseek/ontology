@@ -21,7 +21,7 @@ async function settled(page: Page) {
   }, { timeout: 30_000, intervals: [100] }).toBeGreaterThanOrEqual(5);
 }
 
-async function openMap(page: Page, longTitles = false) {
+async function openMap(page: Page, longTitles = false, fontFamily?: string) {
   const fixture = createMapFixture(false), errors: string[] = [];
   if (longTitles) {
     fixture.nodes.find(node => node.id === "preview-1-0")!.title = "사용자의 맥락을 이해하는 방법 — 첫 번째 기록";
@@ -40,6 +40,9 @@ async function openMap(page: Page, longTitles = false) {
     if (!response.ok) errors.push(`Unexpected synthetic request: ${url.pathname}`);
     return route.fulfill({ status: response.status, contentType: "application/json", body: await response.text() });
   });
+  if (fontFamily) await page.addInitScript(font => {
+    document.addEventListener("DOMContentLoaded", () => { document.documentElement.style.fontFamily = font; }, { once: true });
+  }, fontFamily);
   await page.goto("/");
   await expect(page.locator(".graph-viewport canvas[data-engine]")).toBeVisible();
   await settled(page);
@@ -150,15 +153,15 @@ for (const width of [360, 390, 414]) test(`mobile hierarchy ${width}px keeps sea
   expect(errors).toEqual([]);
 });
 
-test("mobile shared-prefix titles retain their different endings", async ({ page }) => {
+for (const fontFamily of [undefined, 'Arial, "AppleGothic", sans-serif']) test(`mobile shared-prefix titles retain their different endings${fontFamily ? " with wider fallback text" : ""}`, async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  const errors = await openMap(page, true);
+  const errors = await openMap(page, true, fontFamily);
   await expand(page);
   const observed = await titles(page, ["preview-1-0", "preview-1-12"]);
   expect(observed.every(title => title.visible && title.unclipped)).toBe(true);
   expect(observed[0].text).toContain("첫 번째 기록");
   expect(observed[1].text).toContain("두 번째 기록");
-  observations["shared-prefix"] = observed;
+  observations[fontFamily ? "shared-prefix-wide-font" : "shared-prefix"] = observed;
   expect(errors).toEqual([]);
 });
 
