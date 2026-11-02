@@ -35,6 +35,21 @@ export type ProjectedLabel = { id: string; kind: string; active: boolean; summar
   body?: number };
 export type LabelBox = { id: string; left: number; top: number; right: number; bottom: number; guide?: LabelLeader[] };
 export type LabelLeader = { x1: number; y1: number; x2: number; y2: number; length: number };
+/** Cache only endpoint-based tests; each caller owns its fixed geometry context. */
+function cachedSegmentTest(test: (line: LabelLeader) => boolean) {
+  const segments = new Map<number, Map<number, Map<number, Map<number, boolean>>>>();
+  return (line: LabelLeader) => {
+    let byY1 = segments.get(line.x1);
+    if (!byY1) { byY1 = new Map(); segments.set(line.x1, byY1); }
+    let byX2 = byY1.get(line.y1);
+    if (!byX2) { byX2 = new Map(); byY1.set(line.y1, byX2); }
+    let byY2 = byX2.get(line.x2);
+    if (!byY2) { byY2 = new Map(); byX2.set(line.x2, byY2); }
+    const known = byY2.get(line.y2);
+    if (known !== undefined) return known;
+    const result = test(line); byY2.set(line.y2, result); return result;
+  };
+}
 /** The same visible segment is used by placement and drawing, outside the body's halo. */
 export function labelLeader(star: Pick<ProjectedLabel, "x" | "y" | "radius">, box: LabelBox): LabelLeader | null {
   const x = Math.max(box.left, Math.min(box.right, star.x)), y = Math.max(box.top, Math.min(box.bottom, star.y));
@@ -45,12 +60,13 @@ export function labelLeader(star: Pick<ProjectedLabel, "x" | "y" | "radius">, bo
 }
 export function leaderHitsBox(line: LabelLeader, box: Omit<LabelBox, "id">, gap = 2): boolean {
   let start = 0, end = 1;
-  for (const [at, delta, min, max] of [[line.x1, line.x2 - line.x1, box.left - gap, box.right + gap], [line.y1, line.y2 - line.y1, box.top - gap, box.bottom + gap]]) {
-    if (Math.abs(delta) < 1e-8) { if (at < min || at > max) return false; }
-    else { const a = (min - at) / delta, b = (max - at) / delta; start = Math.max(start, Math.min(a, b)); end = Math.min(end, Math.max(a, b)); }
-    if (start > end) return false;
-  }
-  return true;
+  const dx = line.x2 - line.x1, dy = line.y2 - line.y1;
+  if (Math.abs(dx) < 1e-8) { if (line.x1 < box.left - gap || line.x1 > box.right + gap) return false; }
+  else { const a = (box.left - gap - line.x1) / dx, b = (box.right + gap - line.x1) / dx; start = Math.max(start, Math.min(a, b)); end = Math.min(end, Math.max(a, b)); }
+  if (start > end) return false;
+  if (Math.abs(dy) < 1e-8) { if (line.y1 < box.top - gap || line.y1 > box.bottom + gap) return false; }
+  else { const a = (box.top - gap - line.y1) / dy, b = (box.bottom + gap - line.y1) / dy; start = Math.max(start, Math.min(a, b)); end = Math.min(end, Math.max(a, b)); }
+  return !(start > end);
 }
 export function leadersCross(a: LabelLeader, b: LabelLeader): boolean {
   const cross = (x: number, y: number, u: number, v: number) => x * v - y * u;
@@ -133,7 +149,7 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     return boxes;
   };
   const inBounds = (box: LabelBox) => box.left >= edgeGap && box.top >= edgeGap && box.right <= width - edgeGap && box.bottom <= height - edgeGap;
-  const overlaps = (a: LabelBox, b: LabelBox) => a.left < b.right + 8 && a.right + 8 > b.left && a.top < b.bottom + 6 && a.bottom + 6 > b.top;
+  const overlaps = (a: LabelBox, b: Omit<LabelBox, "id">) => a.left < b.right + 8 && a.right + 8 > b.left && a.top < b.bottom + 6 && a.bottom + 6 > b.top;
   type Star = NonNullable<LabelEnvironment["stars"]>[number];
   const starCells = new Map<number, Map<number, Star[]>>(), emptyCell: Star[] = [];
   const starsAt = (x: number, y: number) => starCells.get(x)?.get(y) ?? emptyCell;
@@ -150,12 +166,15 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     const reach = largestStar + 4;
     for (let x = Math.floor((box.left - reach) / 64); x <= Math.floor((box.right + reach) / 64); x++)
       for (let y = Math.floor((box.top - reach) / 64); y <= Math.floor((box.bottom + reach) / 64); y++)
-        if (starsAt(x, y).some(star => star.id !== box.id &&
-          Math.hypot(star.x - Math.max(box.left, Math.min(box.right, star.x)), star.y - Math.max(box.top, Math.min(box.bottom, star.y))) < star.radius + 4)) return true;
+        if (starsAt(x, y).some(star => {
+          if (star.id === box.id) return false;
+          const dx = star.x - Math.max(box.left, Math.min(box.right, star.x)), dy = star.y - Math.max(box.top, Math.min(box.bottom, star.y)), radius = star.radius + 4;
+          return Math.abs(dx) <= radius && Math.abs(dy) <= radius && Math.hypot(dx, dy) < radius;
+        })) return true;
     return false;
   };
   const clear = (box: LabelBox) => inBounds(box) &&
-    !(environment.obstacles ?? []).some(other => overlaps(box, { ...other, id: "chrome" })) &&
+    !(environment.obstacles ?? []).some(other => overlaps(box, other)) &&
     !hitsStar(box);
   const byId = new Map(visible.map(node => [node.id, node]));
   const leaderCache = new Map<LabelBox, LabelLeader | null>();
@@ -178,24 +197,25 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
         for (const star of starsAt(x, y)) {
           if (star.id === id) continue;
           const t = Math.max(0, Math.min(1, ((star.x - line.x1) * dx + (star.y - line.y1) * dy) / denominator));
-          if (Math.hypot(star.x - line.x1 - t * dx, star.y - line.y1 - t * dy) < star.radius + 3) return true;
+          const sx = star.x - line.x1 - t * dx, sy = star.y - line.y1 - t * dy, radius = star.radius + 3;
+          if (Math.abs(sx) <= radius && Math.abs(sy) <= radius && Math.hypot(sx, sy) < radius) return true;
         }
     return false;
   };
   // Elbow alternatives share segments, even when their complete routes differ.
   // Keep exact endpoints and the owning star in this projection-only cache.
-  const blockedSegments = new Map<string, Map<string, boolean>>();
+  const blockedSegments = new Map<string, ReturnType<typeof cachedSegmentTest>>();
   const segmentBlocked = (line: LabelLeader, id: string) => {
     let segments = blockedSegments.get(id);
-    if (!segments) { segments = new Map(); blockedSegments.set(id, segments); }
-    const key = `${line.x1},${line.y1},${line.x2},${line.y2}`, known = segments.get(key);
-    if (known !== undefined) return known;
-    const star = byId.get(id)!;
-    const blocked = passesStar(line, id) || (environment.obstacles ?? []).some(other => {
-      const coversSource = star.x >= other.left && star.x <= other.right && star.y >= other.top && star.y <= other.bottom;
-      return !coversSource && leaderHitsBox(line, other);
-    });
-    segments.set(key, blocked); return blocked;
+    if (!segments) {
+      const star = byId.get(id)!;
+      segments = cachedSegmentTest(line => passesStar(line, id) || (environment.obstacles ?? []).some(other => {
+        const coversSource = star.x >= other.left && star.x <= other.right && star.y >= other.top && star.y <= other.bottom;
+        return !coversSource && leaderHitsBox(line, other);
+      }));
+      blockedSegments.set(id, segments);
+    }
+    return segments(line);
   };
   const clearAssociation = (box: LabelBox) => {
     const lines = guide(box), star = byId.get(box.id)!;
@@ -251,37 +271,129 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   // Bound geometric work, not elapsed time: identical projections keep identical names.
   // Crowded disclosures may defer a title; keyboard selection and the list remain available.
   let remainingRoutePaths = MAX_VISIBLE_LABELS * 3000;
+  type PrefixClearance = { horizontal: Map<number, LabelLeader | boolean>; vertical: Map<number, LabelLeader | boolean>; clearSegment: (line: LabelLeader) => boolean; clearTarget: (box: LabelBox) => boolean; baseXs: readonly number[]; baseYs: readonly number[]; baseXSet: ReadonlySet<number>; baseYSet: ReadonlySet<number> };
   // Only a disclosed title that has no straight association may turn around a name.
   // Small, bounded elbow candidates preserve its title without inventing a graph edge.
-  const routed = (node: ProjectedLabel, box: LabelBox, placed: readonly LabelBox[]): LabelBox | undefined => {
-    if (remainingRoutePaths <= 0 || placed.some(other => overlaps(box, other) || guide(other).some(line => leaderHitsBox(line, box)))) return;
+  const routed = (node: ProjectedLabel, box: LabelBox, prefixClearance: PrefixClearance): LabelBox | undefined => {
+    // arrange() already excluded overlapping peers before reaching this path.
+    if (remainingRoutePaths <= 0 || !prefixClearance.clearTarget(box)) return;
+    const firstLine: LabelLeader = { x1: 0, y1: 0, x2: 0, y2: 0, length: 0 };
+    const secondLine = { ...firstLine }, thirdLine = { ...firstLine };
+    const twoLines = [firstLine, secondLine], threeLines = [firstLine, secondLine, thirdLine];
     const clamp = (at: number, min: number, max: number) => Math.max(min, Math.min(max, at));
     const ports = [{ x: box.left - 3, y: clamp(node.y, box.top + 3, box.bottom - 3) },
       { x: box.right + 3, y: clamp(node.y, box.top + 3, box.bottom - 3) },
       { x: clamp(node.x, box.left + 3, box.right - 3), y: box.top - 3 },
       { x: clamp(node.x, box.left + 3, box.right - 3), y: box.bottom + 3 }];
     let best: LabelBox | undefined, shortest = Infinity;
-    const barriers = [...placed, box, ...(environment.stars ?? []).filter(star => star.id !== node.id && star.depth >= -1 && star.depth <= 1 && star.radius > 0 &&
-      star.x + star.radius >= Math.min(node.x, box.left) - 24 && star.x - star.radius <= Math.max(node.x, box.right) + 24 &&
-      star.y + star.radius >= Math.min(node.y, box.top) - 24 && star.y - star.radius <= Math.max(node.y, box.bottom) + 24)
-      .map(star => ({ left: star.x - star.radius, right: star.x + star.radius, top: star.y - star.radius, bottom: star.y + star.radius }))];
-    const xs = [...new Set(barriers.flatMap(other => [other.left - 5, other.right + 5]))];
-    const ys = [...new Set(barriers.flatMap(other => [other.top - 5, other.bottom + 5]))];
+    // Peer barriers are fixed for this search. Copy their ordered prefix,
+    // then append only new target/star axes in the original Set order.
+    const xs = [...prefixClearance.baseXs], ys = [...prefixClearance.baseYs];
+    const extraXs = new Set<number>(), extraYs = new Set<number>();
+    const addX = (value: number) => {
+      if (!prefixClearance.baseXSet.has(value) && !extraXs.has(value)) {
+        extraXs.add(value); xs.push(value === 0 ? 0 : value);
+      }
+    };
+    const addY = (value: number) => {
+      if (!prefixClearance.baseYSet.has(value) && !extraYs.has(value)) {
+        extraYs.add(value); ys.push(value === 0 ? 0 : value);
+      }
+    };
+    const barrier = (left: number, right: number, top: number, bottom: number) => {
+      addX(left - 5); addX(right + 5); addY(top - 5); addY(bottom + 5);
+    };
+    barrier(box.left, box.right, box.top, box.bottom);
+    const left = Math.min(node.x, box.left) - 24, right = Math.max(node.x, box.right) + 24;
+    const top = Math.min(node.y, box.top) - 24, bottom = Math.max(node.y, box.bottom) + 24;
+    for (const star of environment.stars ?? []) {
+      if (star.id !== node.id && star.depth >= -1 && star.depth <= 1 && star.radius > 0 &&
+        star.x + star.radius >= left && star.x - star.radius <= right &&
+        star.y + star.radius >= top && star.y - star.radius <= bottom)
+        barrier(star.x - star.radius, star.x + star.radius, star.y - star.radius, star.y + star.radius);
+    }
+    // Most elbow alternatives lose on bounds or length. Reuse numeric point
+    // storage and create a guide only when that alternative can still win.
+    const pointX = [node.x, 0, 0, 0], pointY = [node.y, 0, 0, 0];
+    const distance = (dx: number, dy: number) => dx === 0 ? Math.abs(dy) : dy === 0 ? Math.abs(dx) : Math.hypot(dx, dy);
+    const reach = Math.min(240, Math.max(width, height), restingReach(node));
+    const clearPrefix = (x: number, y: number) => {
+      const cache = y === node.y ? prefixClearance.horizontal : prefixClearance.vertical, key = y === node.y ? x : y;
+      const known = cache.get(key);
+      if (known !== undefined) return known;
+      const length = distance(x - node.x, y - node.y);
+      // An omitted first bend has no fixed first segment to reject here.
+      if (length <= .001) return true;
+      let clear = length > node.radius + 3 && node.x >= 2 && node.x <= width - 2 && node.y >= 2 && node.y <= height - 2 &&
+        x >= 2 && x <= width - 2 && y >= 2 && y <= height - 2;
+      if (clear) {
+        firstLine.x1 = node.x + (x - node.x) / length * (node.radius + 3);
+        firstLine.y1 = node.y + (y - node.y) / length * (node.radius + 3);
+        firstLine.x2 = x; firstLine.y2 = y;
+        firstLine.length = distance(x - firstLine.x1, y - firstLine.y1);
+        clear = prefixClearance.clearSegment(firstLine);
+      }
+      // Retain the exact trim and length already computed for this axis.
+      // Scratch segments and accepted guides always get their own values.
+      const value = clear ? { ...firstLine } : false;
+      cache.set(key, value); return value;
+    };
+    const horizontal: (LabelLeader | boolean | undefined)[] = [], vertical: (LabelLeader | boolean | undefined)[] = [];
     for (const port of ports) {
-      const paths = [[{ x: node.x, y: port.y }], [{ x: port.x, y: node.y }],
-        ...xs.map(x => [{ x, y: node.y }, { x, y: port.y }]), ...ys.map(y => [{ x: node.x, y }, { x: port.x, y }])];
-      for (const bends of paths) {
+      const consider = (prefix: LabelLeader | true, bx: number, by: number, cx?: number, cy?: number) => {
+        pointX[0] = node.x; pointY[0] = node.y;
+        let count = 1;
+        if (distance(bx - node.x, by - node.y) > .001) { pointX[count] = bx; pointY[count++] = by; }
+        if (cx !== undefined && distance(cx - bx, cy! - by) > .001) { pointX[count] = cx; pointY[count++] = cy!; }
+        // Compare original neighbours, including an omitted near-duplicate bend.
+        if (distance(port.x - (cx ?? bx), port.y - (cy ?? by)) > .001) { pointX[count] = port.x; pointY[count++] = port.y; }
+        if (count < 3) return;
+        for (let i = 0; i < count; i++)
+          if (pointX[i] < 2 || pointX[i] > width - 2 || pointY[i] < 2 || pointY[i] > height - 2) return;
+        if (prefix === true) {
+          // An omitted first bend has no cached first segment.
+          const firstDistance = distance(pointX[1] - node.x, pointY[1] - node.y);
+          if (firstDistance <= node.radius + 3) return;
+          pointX[0] = node.x + (pointX[1] - node.x) / firstDistance * (node.radius + 3);
+          pointY[0] = node.y + (pointY[1] - node.y) / firstDistance * (node.radius + 3);
+        } else {
+          pointX[0] = prefix.x1; pointY[0] = prefix.y1;
+        }
+        let length = prefix === true ? 0 : prefix.length;
+        for (let i = prefix === true ? 1 : 2; i < count; i++) length += distance(pointX[i] - pointX[i - 1], pointY[i] - pointY[i - 1]);
+        if (length > reach || length >= shortest) return;
+        const segments = count === 3 ? twoLines : threeLines;
+        for (let i = 1; i < count; i++) {
+          const line = segments[i - 1];
+          line.x1 = pointX[i - 1]; line.y1 = pointY[i - 1]; line.x2 = pointX[i]; line.y2 = pointY[i];
+          line.length = i === 1 && prefix !== true ? prefix.length : distance(line.x2 - line.x1, line.y2 - line.y1);
+        }
+        // Entry already checked box overlap and peer guides against this box.
+        // A nonempty route needs only its own clearance and its new segments.
+        if (segments.some(line => leaderHitsBox(line, box, 0)) || segments.some(line => !prefixClearance.clearSegment(line))) return;
+        // Only an accepted answer escapes; the next trial reuses the scratch lines.
+        best = { ...box, guide: segments.map(line => ({ ...line })) }; shortest = length;
+        return;
+      };
+      if (remainingRoutePaths-- <= 0) return best;
+      const verticalPrefix = clearPrefix(node.x, port.y);
+      if (verticalPrefix) consider(verticalPrefix, node.x, port.y);
+      if (remainingRoutePaths-- <= 0) return best;
+      const horizontalPrefix = clearPrefix(port.x, node.y);
+      if (horizontalPrefix) consider(horizontalPrefix, port.x, node.y);
+      // The first segment is independent of the destination port. Check it
+      // once per axis value, but consume every original trial in its order.
+      for (let index = 0; index < xs.length; index++) {
         if (remainingRoutePaths-- <= 0) return best;
-        const points = [{ x: node.x, y: node.y }, ...bends, port].filter((point, index, all) => !index || Math.hypot(point.x - all[index - 1].x, point.y - all[index - 1].y) > .001);
-        if (points.length < 3 || points.some(point => point.x < 2 || point.x > width - 2 || point.y < 2 || point.y > height - 2)) continue;
-        const first = points[1], distance = Math.hypot(first.x - node.x, first.y - node.y);
-        if (distance <= node.radius + 3) continue;
-        points[0] = { x: node.x + (first.x - node.x) / distance * (node.radius + 3), y: node.y + (first.y - node.y) / distance * (node.radius + 3) };
-        const segments = points.slice(1).map((point, index) => ({ x1: points[index].x, y1: points[index].y, x2: point.x, y2: point.y, length: Math.hypot(point.x - points[index].x, point.y - points[index].y) }));
-        const length = segments.reduce((sum, line) => sum + line.length, 0);
-        const candidate = { ...box, guide: segments };
-        if (length > Math.min(240, Math.max(width, height), restingReach(node)) || length >= shortest || segments.some(line => leaderHitsBox(line, box, 0)) || !fitsTogether(candidate, placed)) continue;
-        best = candidate; shortest = length;
+        const x = xs[index];
+        const clear = horizontal[index] ?? (horizontal[index] = clearPrefix(x, node.y));
+        if (clear) consider(clear, x, node.y, x, port.y);
+      }
+      for (let index = 0; index < ys.length; index++) {
+        if (remainingRoutePaths-- <= 0) return best;
+        const y = ys[index];
+        const clear = vertical[index] ?? (vertical[index] = clearPrefix(node.x, y));
+        if (clear) consider(clear, node.x, y, port.x, y);
       }
     }
     return best;
@@ -301,22 +413,83 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   // The fallback keeps the label off its own body, then takes the nearest grid spot within reach.
   // Peer arrangements change, but a star's fallback grid and distance order do not.
   // The object key also keeps distinct candidate geometries with the same id separate.
-  const fallbackPositions = new Map<ProjectedLabel, LabelBox[]>();
+  const fallbackPositions = new Map<ProjectedLabel, { boxes: LabelBox[]; viable: number[]; next: Generator<LabelBox> }>();
   const nearestFree = (node: ProjectedLabel, placed: readonly LabelBox[], allowTurn = false): LabelBox | undefined => {
     if (allowTurn && remainingRoutePaths <= 0) return;
-    const usable = (box: LabelBox) => fromStar(node, box) >= node.radius + 4 && clear(box) && !placed.some(other => overlaps(box, other));
-    const arrange = (box: LabelBox) => usable(box) ? fitsTogether(box, placed) ? box : allowTurn ? routed(node, box, placed) : undefined : undefined;
-    let spots = fallbackPositions.get(node);
-    if (!spots) {
-      const reach = Math.min(node.summary && environment.restingSummaryGap === undefined ? Math.hypot(width, height) : 240, Math.max(width, height), restingReach(node)), grid: LabelBox[] = [];
-      for (let top = Math.max(edgeGap, Math.floor((node.y - reach - node.height) / 12) * 12); top <= Math.min(height - edgeGap - node.height, node.y + reach); top += 12)
-        for (let left = Math.max(edgeGap, Math.floor((node.x - reach - node.width) / 12) * 12); left <= Math.min(width - edgeGap - node.width, node.x + reach); left += 12)
-          grid.push({ id: node.id, left, top, right: left + node.width, bottom: top + node.height });
-      spots = grid.map(box => ({ box, distance: fromStar(node, box) })).filter(spot => spot.distance <= reach).sort((a, b) => a.distance - b.distance).map(spot => spot.box);
-      fallbackPositions.set(node, spots);
+    // These peers stay fixed while testing target boxes. A later search gets
+    // fresh prefix maps even when it reuses the same mutable placed array.
+    let prefixClearance: PrefixClearance | undefined;
+    if (allowTurn) {
+      const peerLines = placed.flatMap(other => guide(other));
+      const baseXSet = new Set<number>(), baseYSet = new Set<number>();
+      for (const other of placed) {
+        baseXSet.add(other.left - 5); baseXSet.add(other.right + 5);
+        baseYSet.add(other.top - 5); baseYSet.add(other.bottom + 5);
+      }
+      prefixClearance = { horizontal: new Map(), vertical: new Map(),
+        baseXs: [...baseXSet], baseYs: [...baseYSet], baseXSet, baseYSet,
+        clearTarget: box => !peerLines.some(line => leaderHitsBox(line, box)),
+        clearSegment: cachedSegmentTest(line => {
+        // Only endpoint-based conflicts are shared. Target-box and route
+        // structure checks remain with each candidate in routed().
+        return !segmentBlocked(line, node.id) && !placed.some(other => leaderHitsBox(line, other)) &&
+          !peerLines.some(other => leadersCross(line, other));
+      }) };
     }
-    for (const box of spots) {
+    // This search visits fixed-size fallback boxes. Every column on the same
+    // grid row shares the same vertical peers; a later search starts fresh.
+    const rowPeers = new Map<number, readonly LabelBox[]>();
+    const usable = (box: LabelBox) => {
+      let peers = rowPeers.get(box.top);
+      if (!peers) {
+        peers = placed.filter(other => box.top < other.bottom + 6 && box.bottom + 6 > other.top);
+        rowPeers.set(box.top, peers);
+      }
+      return !peers.some(other => box.left < other.right + 8 && box.right + 8 > other.left);
+    };
+    const arrange = (box: LabelBox) => usable(box) ? fitsTogether(box, placed) ? box : allowTurn ? routed(node, box, prefixClearance!) : undefined : undefined;
+    let fallback = fallbackPositions.get(node);
+    if (!fallback) {
+      const reach = Math.min(node.summary && environment.restingSummaryGap === undefined ? Math.hypot(width, height) : 240, Math.max(width, height), restingReach(node));
+      const minimum = node.radius + 4;
+      // Distance bands retain the full grid's lattice, global distance order
+      // and row-major ties, without building far-away pockets we never visit.
+      const next = function* (): Generator<LabelBox> {
+        if (!Number.isFinite(reach) || reach < minimum) return;
+        const topStart = Math.max(edgeGap, Math.floor((node.y - reach - node.height) / 12) * 12);
+        const leftStart = Math.max(edgeGap, Math.floor((node.x - reach - node.width) / 12) * 12);
+        const topEnd = Math.min(height - edgeGap - node.height, node.y + reach);
+        const leftEnd = Math.min(width - edgeGap - node.width, node.x + reach);
+        let previous = -1, band = Math.min(reach, Math.max(32, minimum + 12));
+        for (;;) {
+          const spots: { box: LabelBox; distance: number }[] = [];
+          // Include an extra lattice cell around each crop; exact distance
+          // decides membership even at fractional bounds or inverted boxes.
+          const top = topStart + Math.max(0, Math.floor((node.y - band - Math.max(0, node.height) - topStart) / 12)) * 12;
+          const left = leftStart + Math.max(0, Math.floor((node.x - band - Math.max(0, node.width) - leftStart) / 12)) * 12;
+          for (let y = top; y <= Math.min(topEnd, node.y + band + Math.max(0, -node.height) + 12); y += 12)
+            for (let x = left; x <= Math.min(leftEnd, node.x + band + Math.max(0, -node.width) + 12); x += 12) {
+              const box = { id: node.id, left: x, top: y, right: x + node.width, bottom: y + node.height }, distance = fromStar(node, box);
+              if (distance >= minimum && distance > previous && distance <= band) spots.push({ box, distance });
+            }
+          spots.sort((a, b) => a.distance - b.distance);
+          for (const spot of spots) yield spot.box;
+          if (band >= reach) return;
+          previous = band; band = Math.min(reach, band * 2);
+        }
+      };
+      fallback = { boxes: [], viable: [], next: next() }; fallbackPositions.set(node, fallback);
+    }
+    for (let index = 0; ; index++) {
       if (allowTurn && remainingRoutePaths <= 0) break;
+      let box = fallback.boxes[index];
+      if (!box) {
+        const next = fallback.next.next();
+        if (next.done) break;
+        box = next.value; fallback.boxes.push(box);
+      }
+      if (!fallback.viable[index]) fallback.viable[index] = clear(box) ? 2 : 1;
+      if (fallback.viable[index] !== 2) continue;
       const arranged = arrange(box); if (arranged) return arranged;
     }
   };

@@ -3009,6 +3009,28 @@ test("opened titles keep readable associations instead of reusing crossed leader
     "safe resting titles retain their positions on the next frame");
 });
 
+test("guide intersections include touching edges and keep the finite segment and padding", () => {
+  const box = { left: 10, top: 10, right: 30, bottom: 20 };
+  const cases = [
+    { points: [0, 15, 40, 15], exact: true, padded: true },
+    { points: [20, 0, 20, 40], exact: true, padded: true },
+    { points: [0, 0, 40, 40], exact: true, padded: true },
+    { points: [0, 8, 40, 8], exact: false, padded: true },
+    { points: [8, 0, 8, 40], exact: false, padded: true },
+    { points: [0, 15, 9, 15], exact: false, padded: true },
+    { points: [0, 0, 5, 5], exact: false, padded: false },
+    { points: [30, 20, 40, 30], exact: true, padded: true },
+  ];
+  for (const { points: [x1, y1, x2, y2], exact, padded } of cases) {
+    const line = { x1, y1, x2, y2, length: Math.hypot(x2 - x1, y2 - y1) };
+    const reverse = { ...line, x1: x2, y1: y2, x2: x1, y2: y1 };
+    for (const segment of [line, reverse]) {
+      assert.equal(leaderHitsBox(segment, box, 0), exact);
+      assert.equal(leaderHitsBox(segment, box, 2), padded);
+    }
+  }
+});
+
 test("a crowded mobile page can turn a guide while preserving all twelve long titles", () => {
   const points = [[202, 314], [203, 263], [131, 295], [286, 280], [294, 231], [255, 324], [180, 214], [157, 365], [105, 250], [237, 370], [236, 178], [93, 352]];
   const nodes: ProjectedLabel[] = points.map(([x, y], index) => ({ id: `page-${index}`, kind: "document", active: true, x, y, depth: 0, radius: 6, width: 145, height: 21 }));

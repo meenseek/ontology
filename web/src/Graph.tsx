@@ -24,6 +24,9 @@ import { REVEAL_DURATION, retargetReveal, revealOpacity, revealState } from "./r
 type RenderLink = Omit<GraphLink, "source" | "target">;
 type PositionedLink = RenderLink & { source: PositionedNode; target: PositionedNode };
 type Props = { positions: Positions; snapshot: Model; nodes: PositionedNode[]; links: GraphLink[]; selected: string | null; filteredGroup?: string | null; hasDisplayFilters?: boolean; explorerOpen?: boolean; rotate: boolean; allConnections?: boolean; reduced: boolean; visible: boolean; fit: number; disabled: boolean; onSelect: (id: string) => void; onClearSelection: () => boolean; onFit?: () => void; onToggleRotation?: () => void; onFailure: () => void };
+type LabelSize = { width: number; height: number };
+type MeasuredLabelSize = { ceil: LabelSize; rounded: LabelSize };
+type MeasuredLabel = { compact: MeasuredLabelSize; detail: MeasuredLabelSize };
 const readingOpacity = (members: ReadonlySet<string> | undefined, id: string, hovered: string | null) => members && !members.has(id) && id !== hovered ? .12 : 1;
 type SpatialReveal = { members: ReadonlySet<string>; level: number; camera: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } };
 const coreLabel = (node: PositionedNode | undefined, count: number, view?: GraphView) => node?.kind === "folder" ? `폴더 묶음 · ${count - 1}개` : view === "purpose" ? `${node?.subject_name ?? node?.label ?? "목적 묶음"} · ${count}개` : `관계 묶음${node ? ` · ${nodePresentation(node, true).title}` : ""} · ${count}개`;
@@ -431,6 +434,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   const [minimapRevision, setMinimapRevision] = useState(0);
   const resizeMinimap = useCallback(() => setMinimapRevision(value => value + 1), []);
   const [labelFontRevision, setLabelFontRevision] = useState(0);
+  const measuredLabels = useRef({ source: snapshot.nodes, context: "", values: new Map<string, MeasuredLabel>() });
   const [hover, setHover] = useState<{ title: string; detail: string } | null>(null);
   const hoverPointer = useRef(true);
   const rendererHover = useRef<{ id: string | null; content: typeof hover }>({ id: null, content: null });
@@ -912,13 +916,18 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       node, ...nodePresentation(node, true),
       status: `${kindName[node.kind]}${!active(node) ? ` · ${stateName(node)}` : ""}${node.changed ? " · 변경" : ""}`,
     }]));
-    const fill = (element: HTMLElement, id: string, detailed = false) => {
+    const content = (id: string) => {
       const label = labels.get(id)!;
       const summary = collapsedCounts.has(id) || spatialCounts.has(id);
       const groupName = summary || label.node.kind === "subject" || label.node.kind === "folder";
+      return { summary, title: groupTitle(label.node), subtitle: summary ? "끌어서 함께 이동하고, 눌러 펼칩니다." : label.subtitle,
+        status: summary ? "" : label.status,
+        className: `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive group-summary" : ""}${groupName ? " group-name" : ""}` };
+    };
+    const fill = (element: HTMLElement, id: string, detailed = false) => {
+      const { summary, title, subtitle: subtitleText, status, className } = content(id);
       element.dataset.nodeId = id;
-      element.className = `node-label ${active(label.node) ? "" : "inactive"}${summary ? " interactive group-summary" : ""}${groupName ? " group-name" : ""}${detailed ? "" : " compact"}`;
-      const title = groupTitle(label.node);
+      element.className = className + (detailed ? "" : " compact");
       element.children[0].textContent = title;
       const count = summary && title.match(/ · \d+개$/);
       if (count) {
@@ -927,8 +936,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         element.children[0].append(value);
       }
       const subtitle = element.children[1] as HTMLElement;
-      subtitle.textContent = summary ? "끌어서 함께 이동하고, 눌러 펼칩니다." : label.subtitle; subtitle.hidden = !subtitle.textContent;
-      element.children[2].textContent = summary ? "" : label.status;
+      subtitle.textContent = subtitleText; subtitle.hidden = !subtitle.textContent;
+      element.children[2].textContent = status;
       if (summary) {
         element.setAttribute("role", "button"); element.setAttribute("aria-label", `${element.children[0].textContent}, 별을 끌어 함께 이동하거나 눌러 펼치기`);
         element.setAttribute("aria-hidden", "true"); element.tabIndex = -1;
@@ -937,25 +946,58 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
         element.setAttribute("aria-hidden", "true"); element.tabIndex = -1;
       }
     };
-    // Measure each literal label once per model/viewport change using an existing slot.
-    // Animation frames only project points and reposition the same bounded DOM pool.
-    const dimensions = new Map<string, { compact: { width: number; height: number }; detail: { width: number; height: number } }>();
-    const measure = () => {
-      const box = measuring.getBoundingClientRect();
-      // offsetWidth/Height round down some fractional glyph extents at the gutter.
-      return size.width <= 700 ? { width: Math.ceil(box.width), height: Math.ceil(box.height) } : { width: measuring.offsetWidth, height: measuring.offsetHeight };
+    // Cache literal dimensions; batch cache misses so each read does not
+    // force another compact/detail layout. Painted slots remain untouched.
+    const dimensions = new Map<string, { compact: LabelSize; detail: LabelSize }>();
+    const context = `${window.innerWidth}:${window.innerHeight}:${window.devicePixelRatio}:${labelFontRevision}`;
+    if (measuredLabels.current.source !== snapshot.nodes || measuredLabels.current.context !== context)
+      measuredLabels.current = { source: snapshot.nodes, context, values: new Map() };
+    const measurements = measuredLabels.current.values;
+    const capacity = Math.max(MAX_VISIBLE_LABELS * 4, snapshot.nodes.length * 4);
+    const measure = (element: HTMLElement): MeasuredLabelSize => {
+      const box = element.getBoundingClientRect();
+      // Keep both original rounding rules; canvas width selects the result.
+      return { ceil: { width: Math.ceil(box.width), height: Math.ceil(box.height) }, rounded: { width: element.offsetWidth, height: element.offsetHeight } };
     };
-    const measuredId = measuring.dataset.nodeId, measuredHidden = measuring.hidden;
-    measuring.hidden = false; measuring.style.visibility = "hidden";
+    const rounding = size.width <= 700 ? "ceil" : "rounded";
+    const assign = (id: string, value: MeasuredLabel) => dimensions.set(id, { compact: value.compact[rounding], detail: value.detail[rounding] });
+    const pending: { id: string; key: string }[] = [];
     for (const node of displayNodes) {
-      fill(measuring, node.id, false);
-      const compact = measure();
-      fill(measuring, node.id, true);
-      dimensions.set(node.id, { compact, detail: measure() });
+      const text = content(node.id);
+      const key = JSON.stringify([node.id, text.className, text.title, text.subtitle, text.status]);
+      const value = measurements.get(key);
+      if (value) assign(node.id, value);
+      else pending.push({ id: node.id, key });
     }
-    if (measuredId && labels.has(measuredId)) fill(measuring, measuredId);
-    else { delete measuring.dataset.nodeId; measuring.className = "node-label"; measuring.removeAttribute("role"); measuring.removeAttribute("aria-label"); measuring.setAttribute("aria-hidden", "true"); measuring.tabIndex = -1; }
-    measuring.hidden = measuredHidden; measuring.style.visibility = "";
+    if (pending.length) {
+      const pool: HTMLElement[] = [];
+      try {
+        // Same parent, CSS and coordinates as the old measuring slot. This
+        // bounded pool is removed synchronously before the browser can paint.
+        for (let index = 0; index < Math.min(pending.length, MAX_VISIBLE_LABELS) * 2; index++) {
+          const element = measuring.cloneNode(true) as HTMLElement;
+          pool.push(element);
+          element.hidden = false; element.style.visibility = "hidden";
+          element.setAttribute("aria-hidden", "true"); element.tabIndex = -1;
+          layer.append(element);
+        }
+        for (let start = 0; start < pending.length; start += MAX_VISIBLE_LABELS) {
+          const count = Math.min(MAX_VISIBLE_LABELS, pending.length - start);
+          for (let index = 0; index < pool.length; index++) pool[index].hidden = index >= count * 2;
+          for (let index = 0; index < count; index++) {
+            fill(pool[index * 2], pending[start + index].id, false);
+            fill(pool[index * 2 + 1], pending[start + index].id, true);
+          }
+          for (let index = 0; index < count; index++) {
+            const { id, key } = pending[start + index];
+            const value = { compact: measure(pool[index * 2]), detail: measure(pool[index * 2 + 1]) };
+            measurements.set(key, value);
+            if (measurements.size > capacity) measurements.delete(measurements.keys().next().value!);
+            assign(id, value);
+          }
+        }
+      } finally { for (const element of pool) element.remove(); }
+    }
     let lastProjection = "", lastPositions = -1, refreshLabels = true;
     let previousLabels = new Map<string, ReturnType<typeof visibleLabels>[number]>();
     const chrome = () => {
@@ -1251,7 +1293,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       if (scene.onBeforeRender === advance) scene.onBeforeRender = before;
       if (scene.onAfterRender === project) scene.onAfterRender = after;
     };
-  }, [ready, labelFontRevision, minimapRevision, nodes, displayNodes, displayLinks, outlineLinks, allConnections, collapsedCounts, cores, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal, groupTitle, pinnedNames, readingMembers, showAllCore]);
+  }, [ready, labelFontRevision, minimapRevision, snapshot.nodes, nodes, displayNodes, displayLinks, outlineLinks, allConnections, collapsedCounts, cores, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal, groupTitle, pinnedNames, readingMembers, showAllCore]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;

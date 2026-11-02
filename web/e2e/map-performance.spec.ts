@@ -1,10 +1,20 @@
 import {test,expect,type Page} from "playwright/test";
+import {MAX_VISIBLE_LABELS} from "../src/presentation";
 import {createMapFixture} from "../src/map-fixture";
 import {installGraphProbe,settledFramesMatch} from "./graph-probe";
 
-declare global { interface Window { __mapGpu: { programs:number; deleted:number; shadersDisposed:number; planesDisposed:number; duplicateLines:number; duplicateArrows:number } } }
+declare global { interface Window { __mapGpu: { programs:number; deleted:number; shadersDisposed:number; planesDisposed:number; duplicateLines:number; duplicateArrows:number; labelMeasurements:number; peakMeasuringLabels:number } } }
 function observeGpu() {
- const totals=window.__mapGpu={programs:0,deleted:0,shadersDisposed:0,planesDisposed:0,duplicateLines:0,duplicateArrows:0};
+ const totals=window.__mapGpu={programs:0,deleted:0,shadersDisposed:0,planesDisposed:0,duplicateLines:0,duplicateArrows:0,labelMeasurements:0,peakMeasuringLabels:0};
+ const bounds=HTMLElement.prototype.getBoundingClientRect;
+ HTMLElement.prototype.getBoundingClientRect=function(){
+  if(this.classList.contains("node-label")&&this.style.visibility==="hidden"){
+   totals.labelMeasurements++;
+   const hidden=[...document.querySelectorAll<HTMLElement>(".node-label")].filter(element=>element.style.visibility==="hidden").length;
+   totals.peakMeasuringLabels=Math.max(totals.peakMeasuringLabels,hidden);
+  }
+  return bounds.call(this);
+ };
  for(const [method,key] of [["createProgram","programs"],["deleteProgram","deleted"]] as const){
   const original=WebGL2RenderingContext.prototype[method];
   (WebGL2RenderingContext.prototype as any)[method]=function(...args:unknown[]){totals[key]++;
@@ -86,6 +96,17 @@ test("shared GPU resources survive state changes and release on map unmount",asy
  await page.goto("/");
   await expect(page.locator(".graph-viewport canvas[data-engine]")).toBeVisible({timeout:30_000});
   await settled(page);
+ // Connection emphasis changes neither literal names nor their font/box metrics.
+ await page.locator(".view-options > summary").click();
+ const measured=await page.evaluate(()=>window.__mapGpu.labelMeasurements);
+ expect(measured).toBeGreaterThan(0);
+ await page.getByRole("checkbox",{name:"연결선 모두 보기",exact:true}).check();
+ await settled(page);
+ expect(await page.evaluate(()=>window.__mapGpu.labelMeasurements)).toBe(measured);
+ await page.getByRole("checkbox",{name:"연결선 모두 보기",exact:true}).uncheck();
+ await settled(page);
+ expect(await page.evaluate(()=>window.__mapGpu.labelMeasurements)).toBe(measured);
+ await page.locator(".view-options > summary").click();
  await cycle(page);
   const changes=await cycle(page);
  expect(changes.reduce((sum,n)=>sum+n,0)).toBeLessThanOrEqual(8);
@@ -102,5 +123,8 @@ test("shared GPU resources survive state changes and release on map unmount",asy
   await settled(page);
   await expand(page);
   await choose(page);
+ expect(await page.evaluate(()=>window.__mapGpu.peakMeasuringLabels)).toBeGreaterThan(0);
+ expect(await page.evaluate(()=>window.__mapGpu.peakMeasuringLabels)).toBeLessThanOrEqual(MAX_VISIBLE_LABELS*2);
+ expect(await page.evaluate(()=>[...document.querySelectorAll<HTMLElement>(".node-label")].filter(element=>element.style.visibility==="hidden").length)).toBe(0);
  expect(errors).toEqual([]);
 });
