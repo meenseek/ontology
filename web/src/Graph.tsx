@@ -562,6 +562,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     };
     return { retain, release, dispose: () => { for (const resource of retained.keys()) release(resource); },
       geometry: retain(new PlaneGeometry(1, 1)), star: retain(starMaterial()), light: retain(cosmicLightMaterial()),
+      spriteGeometry: null as Sprite["geometry"] | null,
       marker: retain(texture("marker")), selection: retain(texture("selection")), change: retain(texture("change")),
       materials: new Map<string, SpriteMaterial>(), lines: new Map<string, LineBasicMaterial>(),
       summaries: new Map<string, ReturnType<typeof summaryGlyphTexture> & { signature: string; material: SpriteMaterial }>(),
@@ -1394,6 +1395,12 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     // The invisible plane follows the star and status rings, with a 36px minimum.
     group.add(screenSprite(material("hit", "#ffffff", 0), node, "hit", isSelected, 0, summaryMetrics?.hit, undefined, undefined, undefined, undefined,
       () => revealRef.current.current.has(node.id)));
+    // Sprite's default quad is shared globally. Own a byte-identical copy so
+    // ForceGraph cannot dispose it on every node replacement or another map.
+    for (const child of group.children) if (child instanceof Sprite) {
+      resources.spriteGeometry ??= resources.retain(child.geometry.clone());
+      child.geometry = resources.spriteGeometry;
+    }
     return group;
   }, [resources, selected, collapsedCounts, spatialCounts, spatialReveal, glyphMembers, summaryCounts, positions, activeExpandedCore, reveal, ui]);
   const chooseNode = (id: string) => {
