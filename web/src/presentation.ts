@@ -134,19 +134,23 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   };
   const inBounds = (box: LabelBox) => box.left >= edgeGap && box.top >= edgeGap && box.right <= width - edgeGap && box.bottom <= height - edgeGap;
   const overlaps = (a: LabelBox, b: LabelBox) => a.left < b.right + 8 && a.right + 8 > b.left && a.top < b.bottom + 6 && a.bottom + 6 > b.top;
-  const starCells = new Map<string, NonNullable<LabelEnvironment["stars"]>[number][]>();
+  type Star = NonNullable<LabelEnvironment["stars"]>[number];
+  const starCells = new Map<number, Map<number, Star[]>>(), emptyCell: Star[] = [];
+  const starsAt = (x: number, y: number) => starCells.get(x)?.get(y) ?? emptyCell;
   let largestStar = 0;
   for (const star of environment.stars ?? []) {
     if (![star.x, star.y, star.depth, star.radius].every(Number.isFinite) || star.depth < -1 || star.depth > 1 || star.radius <= 0) continue;
     largestStar = Math.max(largestStar, star.radius);
-    const key = `${Math.floor(star.x / 64)},${Math.floor(star.y / 64)}`;
-    const bucket = starCells.get(key) ?? []; bucket.push(star); starCells.set(key, bucket);
+    const x = Math.floor(star.x / 64), y = Math.floor(star.y / 64);
+    let column = starCells.get(x);
+    if (!column) { column = new Map(); starCells.set(x, column); }
+    const bucket = column.get(y) ?? []; bucket.push(star); column.set(y, bucket);
   }
   const hitsStar = (box: LabelBox) => {
     const reach = largestStar + 4;
     for (let x = Math.floor((box.left - reach) / 64); x <= Math.floor((box.right + reach) / 64); x++)
       for (let y = Math.floor((box.top - reach) / 64); y <= Math.floor((box.bottom + reach) / 64); y++)
-        if ((starCells.get(`${x},${y}`) ?? []).some(star => star.id !== box.id &&
+        if (starsAt(x, y).some(star => star.id !== box.id &&
           Math.hypot(star.x - Math.max(box.left, Math.min(box.right, star.x)), star.y - Math.max(box.top, Math.min(box.bottom, star.y))) < star.radius + 4)) return true;
     return false;
   };
@@ -161,21 +165,37 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
   };
   const guideCache = new Map<LabelBox, LabelLeader[]>();
   const guide = (box: LabelBox) => {
+    if (box.guide) return box.guide;
     let lines = guideCache.get(box);
-    if (!lines) { lines = box.guide ?? (leader(box) ? [leader(box)!] : []); guideCache.set(box, lines); }
+    if (!lines) { lines = leader(box) ? [leader(box)!] : []; guideCache.set(box, lines); }
     return lines;
   };
   const passesStar = (line: LabelLeader, id: string) => {
     const reach = largestStar + 4;
+    const dx = line.x2 - line.x1, dy = line.y2 - line.y1, denominator = Math.max(.001, dx * dx + dy * dy);
     for (let x = Math.floor((Math.min(line.x1, line.x2) - reach) / 64); x <= Math.floor((Math.max(line.x1, line.x2) + reach) / 64); x++)
       for (let y = Math.floor((Math.min(line.y1, line.y2) - reach) / 64); y <= Math.floor((Math.max(line.y1, line.y2) + reach) / 64); y++)
-        for (const star of starCells.get(`${x},${y}`) ?? []) {
+        for (const star of starsAt(x, y)) {
           if (star.id === id) continue;
-          const dx = line.x2 - line.x1, dy = line.y2 - line.y1;
-          const t = Math.max(0, Math.min(1, ((star.x - line.x1) * dx + (star.y - line.y1) * dy) / Math.max(.001, dx * dx + dy * dy)));
+          const t = Math.max(0, Math.min(1, ((star.x - line.x1) * dx + (star.y - line.y1) * dy) / denominator));
           if (Math.hypot(star.x - line.x1 - t * dx, star.y - line.y1 - t * dy) < star.radius + 3) return true;
         }
     return false;
+  };
+  // Elbow alternatives share segments, even when their complete routes differ.
+  // Keep exact endpoints and the owning star in this projection-only cache.
+  const blockedSegments = new Map<string, Map<string, boolean>>();
+  const segmentBlocked = (line: LabelLeader, id: string) => {
+    let segments = blockedSegments.get(id);
+    if (!segments) { segments = new Map(); blockedSegments.set(id, segments); }
+    const key = `${line.x1},${line.y1},${line.x2},${line.y2}`, known = segments.get(key);
+    if (known !== undefined) return known;
+    const star = byId.get(id)!;
+    const blocked = passesStar(line, id) || (environment.obstacles ?? []).some(other => {
+      const coversSource = star.x >= other.left && star.x <= other.right && star.y >= other.top && star.y <= other.bottom;
+      return !coversSource && leaderHitsBox(line, other);
+    });
+    segments.set(key, blocked); return blocked;
   };
   const clearAssociation = (box: LabelBox) => {
     const lines = guide(box), star = byId.get(box.id)!;
@@ -185,15 +205,10 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
       const ownGap = fromStar(star, box) - star.radius, reach = largestStar + ownGap;
       for (let x = Math.floor((box.left - reach) / 64); x <= Math.floor((box.right + reach) / 64); x++)
         for (let y = Math.floor((box.top - reach) / 64); y <= Math.floor((box.bottom + reach) / 64); y++)
-          if ((starCells.get(`${x},${y}`) ?? []).some(other => other.id !== box.id && fromStar(other, box) - other.radius <= ownGap)) return false;
+          if (starsAt(x, y).some(other => other.id !== box.id && fromStar(other, box) - other.radius <= ownGap)) return false;
     }
-    if (lines.some(line => passesStar(line, box.id))) return false;
     // A covered source still needs an accessible name outside the covering control.
-    if (lines.length && (environment.obstacles ?? []).some(other => {
-      const coversSource = star.x >= other.left && star.x <= other.right && star.y >= other.top && star.y <= other.bottom;
-      return !coversSource && lines.some(line => leaderHitsBox(line, other));
-    })) return false;
-    return true;
+    return !lines.some(line => segmentBlocked(line, box.id));
   };
   // Every beam state shares the same immutable candidate projection. Its own
   // star/chrome association need only be checked once, independently of peers.
@@ -219,8 +234,8 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
       lines.every(line => otherLines.every(otherLine => !leadersCross(line, otherLine)));
   };
   const fitsTogether = (box: LabelBox, placed: readonly LabelBox[]) => {
-    let clear = associationCache.get(box);
-    if (clear === undefined) { clear = clearAssociation(box); associationCache.set(box, clear); }
+    let clear = box.guide ? undefined : associationCache.get(box);
+    if (clear === undefined) { clear = clearAssociation(box); if (!box.guide) associationCache.set(box, clear); }
     if (!clear) return false;
     if (!placed.length) return true;
     // Beam alternatives revisit these ordered pairs. One-off fallback pockets
@@ -284,15 +299,23 @@ export function visibleLabels(candidates: ProjectedLabel[], width: number, heigh
     ordered.splice(priority.length + disclosed.length, summaries.length, ...summaries);
   }
   // The fallback keeps the label off its own body, then takes the nearest grid spot within reach.
+  // Peer arrangements change, but a star's fallback grid and distance order do not.
+  // The object key also keeps distinct candidate geometries with the same id separate.
+  const fallbackPositions = new Map<ProjectedLabel, LabelBox[]>();
   const nearestFree = (node: ProjectedLabel, placed: readonly LabelBox[], allowTurn = false): LabelBox | undefined => {
     if (allowTurn && remainingRoutePaths <= 0) return;
     const usable = (box: LabelBox) => fromStar(node, box) >= node.radius + 4 && clear(box) && !placed.some(other => overlaps(box, other));
     const arrange = (box: LabelBox) => usable(box) ? fitsTogether(box, placed) ? box : allowTurn ? routed(node, box, placed) : undefined : undefined;
-    const reach = Math.min(node.summary && environment.restingSummaryGap === undefined ? Math.hypot(width, height) : 240, Math.max(width, height), restingReach(node)), spots: LabelBox[] = [];
-    for (let top = Math.max(edgeGap, Math.floor((node.y - reach - node.height) / 12) * 12); top <= Math.min(height - edgeGap - node.height, node.y + reach); top += 12)
-      for (let left = Math.max(edgeGap, Math.floor((node.x - reach - node.width) / 12) * 12); left <= Math.min(width - edgeGap - node.width, node.x + reach); left += 12)
-        spots.push({ id: node.id, left, top, right: left + node.width, bottom: top + node.height });
-    for (const { box } of spots.map(box => ({ box, distance: fromStar(node, box) })).filter(spot => spot.distance <= reach).sort((a, b) => a.distance - b.distance)) {
+    let spots = fallbackPositions.get(node);
+    if (!spots) {
+      const reach = Math.min(node.summary && environment.restingSummaryGap === undefined ? Math.hypot(width, height) : 240, Math.max(width, height), restingReach(node)), grid: LabelBox[] = [];
+      for (let top = Math.max(edgeGap, Math.floor((node.y - reach - node.height) / 12) * 12); top <= Math.min(height - edgeGap - node.height, node.y + reach); top += 12)
+        for (let left = Math.max(edgeGap, Math.floor((node.x - reach - node.width) / 12) * 12); left <= Math.min(width - edgeGap - node.width, node.x + reach); left += 12)
+          grid.push({ id: node.id, left, top, right: left + node.width, bottom: top + node.height });
+      spots = grid.map(box => ({ box, distance: fromStar(node, box) })).filter(spot => spot.distance <= reach).sort((a, b) => a.distance - b.distance).map(spot => spot.box);
+      fallbackPositions.set(node, spots);
+    }
+    for (const box of spots) {
       if (allowTurn && remainingRoutePaths <= 0) break;
       const arranged = arrange(box); if (arranged) return arranged;
     }

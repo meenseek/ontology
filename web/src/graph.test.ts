@@ -3013,9 +3013,11 @@ test("a crowded mobile page can turn a guide while preserving all twelve long ti
   const points = [[202, 314], [203, 263], [131, 295], [286, 280], [294, 231], [255, 324], [180, 214], [157, 365], [105, 250], [237, 370], [236, 178], [93, 352]];
   const nodes: ProjectedLabel[] = points.map(([x, y], index) => ({ id: `page-${index}`, kind: "document", active: true, x, y, depth: 0, radius: 6, width: 145, height: 21 }));
   const original = structuredClone(nodes);
-  const boxes = visibleLabels(nodes, 390, 568, null, null, { stars: nodes,
+  const environment = {
     obstacles: [{ left: 14, top: 14, right: 376, bottom: 106 }, { left: 220, top: 452, right: 376, bottom: 506 }],
-    starTitles: { limit: 0, exempt: new Set(nodes.map(node => node.id)) } });
+    starTitles: { limit: 0, exempt: new Set(nodes.map(node => node.id)) },
+  };
+  const boxes = visibleLabels(nodes, 390, 568, null, null, { ...environment, stars: nodes });
   assert.equal(boxes.length, 12, "a route constraint must not solve the crowded page by hiding its titles");
   assert.ok(boxes.some(box => box.guide), "the fixture needs an actual turn, not only a different straight side");
   const paths = boxes.map(box => box.guide ?? [labelLeader(nodes.find(node => node.id === box.id)!, box)].filter(line => line !== null));
@@ -3025,6 +3027,12 @@ test("a crowded mobile page can turn a guide while preserving all twelve long ti
     assert.ok(paths.slice(index + 1).every(other => other.every(segment => !leadersCross(line, segment))));
   }
   assert.deepEqual(nodes, original, "turning a title guide cannot move a real star");
+  const segment = boxes.find(box => box.guide?.length)!.guide![0];
+  const obstruction = { id: "new-star", x: (segment.x1 + segment.x2) / 2, y: (segment.y1 + segment.y2) / 2, depth: 0, radius: 2 };
+  assert.notDeepEqual(visibleLabels(nodes, 390, 568, null, null, { ...environment, stars: [...nodes, obstruction] }), boxes,
+    "a new star on an elbow invalidates the preceding projection's clear segment");
+  assert.deepEqual(visibleLabels(nodes, 390, 568, null, null, { ...environment, stars: nodes }), boxes,
+    "removing that obstruction restores the original title and guide arrangement");
 });
 
 test("first-view star titles yield to group names while focus, close stars and opened groups keep theirs", () => {
