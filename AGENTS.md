@@ -32,6 +32,10 @@ A repository-only review or development task uses this repository and its synthe
 평가 기준을 읽는 것과 실험·운영 검증을 실행하는 것은 구분하며, 실제 실행은 요청 범위와
 [상세 실행·검증 계약](docs/local-operations.md)을 따른다.
 
+`자동평가 실행`, `최근 평가 결과`, `이전보다 좋아졌는지` 요청은
+[자동평가 실행과 결과 조회](docs/local-operations.md#자동평가-실행과-결과-조회)를 따른다.
+조회 요청은 저장된 결과를 읽으며 새 평가를 자동 실행하지 않는다.
+
 아래에서 현재 작업에 필요한 절만 선택한다. 이전 진입점의 절 링크는 유지하며, 상세 계약은 연결된 문서가 소유한다.
 
 ## 로컬 연결
