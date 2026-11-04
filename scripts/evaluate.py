@@ -30,6 +30,10 @@ class EvaluationError(ValueError):
     pass
 
 
+class EvaluationInterrupted(EvaluationError):
+    pass
+
+
 def require(condition, message):
     if not condition:
         raise EvaluationError(message)
@@ -178,7 +182,7 @@ def command(argv, *, env=None, input_bytes=None, timeout=30):
 @contextmanager
 def interruption():
     def stop(_signum, _frame):
-        raise EvaluationError("Evaluation interrupted")
+        raise EvaluationInterrupted("Evaluation interrupted")
     previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
         yield
@@ -301,6 +305,8 @@ def run(root, suite_path):
             try:
                 command(["docker","exec",name,"pg_isready","-U","ontology","-d",database],timeout=5)
                 break
+            except EvaluationInterrupted:
+                raise
             except EvaluationError:
                 time.sleep(0.2)
         else:

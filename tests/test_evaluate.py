@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import signal
 import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
@@ -59,6 +60,56 @@ class EvaluationContracts(unittest.TestCase):
     def test_boolean_and_number_are_not_interchangeable(self):
         cases = subject.grade(suite(),{'cases':[dict(id='one',observations=[{'ok':1}],duration_ms=1,database_calls=1)]})
         self.assertEqual(cases[0]['status'],'fail')
+
+    def test_required_materials_checks_each_original_body(self):
+        default = subject.load_suite(subject.SUITE)
+        case = next(c for c in default['cases'] if c['id'] == 'required-materials')
+        documents = [{'path':path,'body':default['documents'][path].split('---\n',2)[-1].strip()}
+                     for path in ['personal/api.md','personal/metrics.md','personal/ui.md']]
+        def verdict(items):
+            row = dict(id=case['id'],observations=[{'ok':True,'value':{'documents':items}}],duration_ms=1,database_calls=1)
+            return subject.grade({**default,'cases':[case]},{'cases':[row]})[0]['status']
+        self.assertEqual(verdict(documents),'pass')
+        for index in range(len(documents)):
+            for replacement in ('','unrelated content'):
+                with self.subTest(path=documents[index]['path'],body=replacement):
+                    changed = copy.deepcopy(documents);changed[index]['body'] = replacement
+                    self.assertEqual(verdict(changed),'fail')
+
+    def readiness_run(self, interruption=None):
+        probe_started, attempts = False, 0
+        def execute(argv,**_kwargs):
+            nonlocal probe_started, attempts
+            if argv[:2] == ['docker','exec']:
+                attempts += 1
+                if attempts == 1:
+                    if interruption is not None: signal.raise_signal(interruption)
+                    else: raise subject.EvaluationError('database not ready')
+            if argv[:2] == ['docker','port']: return b'127.0.0.1:5555'
+            if argv[0] == 'cargo':
+                probe_started = True
+                return b'{"cases":[]}'
+            return b''
+        with subject.interruption(), patch.object(subject,'command',side_effect=execute), patch.object(subject,'source_state',return_value={'revision':'a'*40,'source_digest':'b'*64}):
+            value = subject.run(self.root,subject.SUITE)
+        return value, probe_started
+
+    def test_readiness_interruptions_stop_before_probe_and_are_saved(self):
+        for signum in (signal.SIGINT,signal.SIGTERM):
+            with self.subTest(signal=signum):
+                value, started = self.readiness_run(signum)
+                self.assertFalse(started)
+                self.assertEqual(value['error'],'Evaluation interrupted')
+                self.assertEqual(value['status'],'error')
+                self.assertEqual(value['summary']['missing'],value['summary']['requested'])
+                self.assertTrue(value['cleanup']['container_removed'])
+                self.assertEqual(subject.load_report(self.root/(value['id']+'.json')),value)
+
+    def test_readiness_still_retries_temporary_failure(self):
+        value, started = self.readiness_run()
+        self.assertTrue(started)
+        self.assertIsNone(value['error'])
+        self.assertTrue(value['cleanup']['container_removed'])
 
     def test_saved_checksum_and_verdict_corruption_are_rejected(self):
         value = report();path = subject.save(self.root,value)

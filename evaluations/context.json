@@ -43,6 +43,21 @@
             "personal/metrics.md",
             "personal/ui.md"
           ]
+        },
+        {
+          "pointer": "/observations/0/value/documents/0/body",
+          "op": "equals",
+          "value": "월별 상품별 집계는 product_id와 month로 반환한다."
+        },
+        {
+          "pointer": "/observations/0/value/documents/1/body",
+          "op": "equals",
+          "value": "매출은 gross-sales 결제금액 합계다."
+        },
+        {
+          "pointer": "/observations/0/value/documents/2/body",
+          "op": "equals",
+          "value": "대시보드는 표와 월별 필터를 제공한다."
         }
       ]
     },
