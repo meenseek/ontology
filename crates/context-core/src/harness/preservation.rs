@@ -203,6 +203,11 @@ impl ReviewedCareerPreservation {
     pub(super) fn validate_plan(&self, prepared: &PreparedHarnessRun) -> HarnessResult<()> {
         let resolved = &prepared.plan.resolved_request;
         let plan = &resolved.plan;
+        if !resolved.contract.exact_edits().is_empty() {
+            return Err(invalid(
+                "exact edits cannot be combined with reviewed preservation",
+            ));
+        }
         if plan.action != HarnessAction::DocumentWrite
             || plan.owner != DataOwner::Personal
             || !plan.intent.is_career_artifact()

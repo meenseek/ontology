@@ -17865,3 +17865,130 @@ fn ordinary_review_heads_keep_the_pre_exact_bytes() {
         assert!(!content.contains("\"exact_edits\""));
     }
 }
+
+#[cfg(unix)]
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep genuine review setup and both forbidden combinations in one regression"
+)]
+fn reviewed_preservation_rejects_exact_edit_requests() {
+    let repository = synthetic_repository();
+    let workspace = TemporaryWorkspace::create();
+    let path = "vault/personal/writing/preserved-mode.md";
+    let original = "---\nscope: personal\nexport: false\n---\n\noriginal A\n";
+    let reviewed = original.replace("original A", "reviewed B");
+    for root in [&repository.0, &workspace.0] {
+        fs::create_dir_all(root.join("vault/personal/writing")).unwrap();
+    }
+    fs::write(repository.0.join(path), original).unwrap();
+    fs::write(workspace.0.join(path), &reviewed).unwrap();
+    let review_engine =
+        HarnessEngine::open(&repository.0, &workspace.0, policy_configuration()).unwrap();
+    let native_engine =
+        HarnessEngine::open(&repository.0, &repository.0, policy_configuration()).unwrap();
+    let owner = DataOwner::Company {
+        company: "cedar".into(),
+    };
+    let source = "vault/work/cedar/experience/case-studies/case-one.md".to_owned();
+    let manifest = selected_career_manifest(
+        vec![path.into()],
+        vec![(owner.clone(), vec![source.clone()])],
+    );
+    let request = career_review_request(vec![path.into()]);
+    let holistic = career_execution_review_receipt(
+        &review_engine,
+        &request,
+        &manifest,
+        None,
+        &[],
+        "mode-holistic",
+    );
+    let owned = career_execution_review_receipt(
+        &review_engine,
+        &request,
+        &manifest,
+        Some(ContextGrant {
+            owner,
+            purpose: ContextGrantPurpose::CareerWritingEvidence,
+            access: ContextAccess::ReadOnly,
+        }),
+        &[source],
+        "mode-owner",
+    );
+    let mut write = request;
+    write.action = HarnessAction::DocumentWrite;
+    let mut observations = Vec::new();
+    for (case, after) in [
+        ("different-body", "requested C"),
+        ("matching-body", "reviewed B"),
+    ] {
+        let edits = vec![ExactDocumentEdit {
+            path: path.into(),
+            expected_content_digest: byte_digest(original.as_bytes()),
+            replacements: vec![ExactReplacement {
+                before: "original A".into(),
+                after: after.into(),
+            }],
+        }];
+        let mut envelope = RequestEnvelope::from_structured_request(
+            write.clone(),
+            HarnessIntent::CareerArtifact {
+                surface: CareerOutputSurface::Resume,
+            },
+            vec![],
+            vec![],
+            HarnessExecutionProfile::Standard,
+            "literal preservation regression",
+        )
+        .unwrap();
+        let DraftTaskRequest::Write(draft) = &mut envelope.draft else {
+            panic!()
+        };
+        draft.exact_edits = Some(DraftValue::Resolved {
+            value: edits.clone(),
+            decision_identifier: "exact-edits".into(),
+        });
+        envelope
+            .decision_trace
+            .records
+            .push(DecisionRecord::StructuredCaller {
+                identifier: "exact-edits".into(),
+                value_digest: serialized_digest(&edits).unwrap(),
+                description: "explicit literal regression input".into(),
+            });
+        let resolved = native_engine
+            .resolve_test_envelope(&envelope, Some(&manifest))
+            .unwrap();
+        let (prepared, _) = prepare_current_harness_run(&native_engine, &repository.0, &resolved);
+        let result = native_engine.prepare_reviewed_career_preservation(
+            &prepared,
+            &workspace.0,
+            &manifest,
+            holistic.clone(),
+            vec![owned.clone()],
+        );
+        let rejected = match result {
+            Ok(_) => false,
+            Err(error) => {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("exact edits cannot be combined with reviewed preservation"),
+                    "{error}"
+                );
+                true
+            }
+        };
+        let source_unchanged = fs::read(repository.0.join(path)).unwrap() == original.as_bytes();
+        let observation = serde_json::json!({"case":case,"rejected":rejected,"source_unchanged":source_unchanged});
+        println!("PRESERVATION_MODE_OBSERVATION {observation}");
+        observations.push((rejected, source_unchanged));
+    }
+    assert!(
+        observations
+            .iter()
+            .all(|(rejected, unchanged)| *rejected && *unchanged),
+        "exact edits and reviewed preservation must not be combined"
+    );
+}
