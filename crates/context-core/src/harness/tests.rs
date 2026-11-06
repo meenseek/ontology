@@ -17612,6 +17612,20 @@ fn exact_edits_bind_the_candidate_keep_reviews_and_end_rejection_without_revisio
         let resolved = engine.resolve_test_envelope(&envelope, None).unwrap();
         assert_eq!(resolved.plan.max_revisions, 0);
         let prepared = prepared_run_with(&engine, &resolved);
+        for bundle in &prepared.role_bundles {
+            let content = bundle
+                .segments
+                .iter()
+                .find_map(|segment| match segment {
+                    HarnessRoleSegment::ControlHead { content, .. } => Some(content),
+                    _ => None,
+                })
+                .unwrap();
+            let head: serde_json::Value =
+                decode_current_json(content.as_bytes(), "exact edit head").unwrap();
+            assert_eq!(head["exact_edits"], serde_json::to_value(&edits).unwrap());
+        }
+
         let mut step = engine.begin_execution(&resolved, &prepared, &[]).unwrap();
         let invocation = &step.ready_role_invocations[0];
         let changes = exact_edit_changes(
@@ -17817,5 +17831,37 @@ mod exact_literal_tests {
         assert!(exact_edit_changes(&[a.clone(), b.clone()], [&first, &second]).is_ok());
         b.replacements[0].after.push('y');
         assert!(exact_edit_changes(&[a, b], [&first, &second]).is_err());
+    }
+}
+
+#[test]
+fn ordinary_review_heads_keep_the_pre_exact_bytes() {
+    let (_workspace, engine) = external_engine_with_profile(HarnessExecutionProfile::Strict);
+    let resolved = engine
+        .resolve(&personal_scope_request(HarnessAction::DocumentReview))
+        .unwrap();
+    let prepared = prepared_run_with(&engine, &resolved);
+    // Frozen before the serializer fix. The pre-feature head has no literal-edit
+    // field; unchanged accepted review receipts must retain these exact bytes.
+    for bundle in &prepared.role_bundles {
+        let content = bundle
+            .segments
+            .iter()
+            .find_map(|segment| match segment {
+                HarnessRoleSegment::ControlHead { content, .. } => Some(content),
+                _ => None,
+            })
+            .unwrap();
+        let expected = match bundle.role {
+            HarnessRole::Verifier => {
+                "07c85bebba73d4d2bbc06f3a43d4954c3cdf2ec62e87fb2d47f65d40c568c1a3"
+            }
+            HarnessRole::Reviewer => {
+                "d1ec8d3170cfbcf810f7cb5f7d9b9e956aa789fbf6f84905a3acfcbd8dd7c3b3"
+            }
+            _ => panic!("strict document review has only independent review roles"),
+        };
+        assert_eq!(byte_digest(content.as_bytes()), expected);
+        assert!(!content.contains("\"exact_edits\""));
     }
 }

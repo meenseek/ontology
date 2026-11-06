@@ -8245,7 +8245,6 @@ fn career_review_scope(resolved: &ResolvedHarnessRequest) -> Option<CareerReview
 struct RoleControlHead<'a> {
     segment: &'static str,
     task_statement: &'a str,
-    exact_edits: &'a [ExactDocumentEdit],
     action: HarnessAction,
     owner: &'a DataOwner,
     intent: HarnessIntent,
@@ -8287,7 +8286,6 @@ fn role_control_segments(
     let head = serde_json::to_string_pretty(&RoleControlHead {
         segment: "control-head",
         task_statement: &resolved.request.objective,
-        exact_edits: resolved.contract.exact_edits(),
         action: resolved.plan.action,
         owner: &resolved.plan.owner,
         intent: resolved.plan.intent,
@@ -8310,6 +8308,20 @@ fn role_control_segments(
     .map_err(|error| {
         HarnessError::InvalidPlan(format!("failed to encode role control head: {error}"))
     })?;
+    // Ordinary review heads retain their exact pre-existing bytes so accepted
+    // receipts remain reusable. Only explicit literal mode adds this Core-owned
+    // output field. Every user string is escaped by the typed serializer.
+    let head = if resolved.contract.exact_edits().is_empty() {
+        head
+    } else {
+        let fields = head.strip_suffix("\n}").ok_or_else(|| {
+            HarnessError::InvalidPlan("role control head has no object boundary".to_owned())
+        })?;
+        let edits = serde_json::to_string(resolved.contract.exact_edits()).map_err(|error| {
+            HarnessError::InvalidPlan(format!("failed to encode literal edit control: {error}"))
+        })?;
+        format!("{fields},\n  \"exact_edits\": {edits}\n}}")
+    };
     let tail = serde_json::to_string_pretty(&RoleControlTail {
         segment: "control-tail",
         exact_goal: &resolved.request.objective,
