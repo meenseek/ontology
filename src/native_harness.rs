@@ -1815,7 +1815,7 @@ mod tests {
                 terminal: Some((1, true)),
                 ..CodexNativeOutput::default()
             };
-            assert!(native.outcome(true).is_ok());
+            assert!(native.outcome(true, b"[]").is_ok());
         }
         assert!(!values.contains(&serde_json::json!("not-a-unit")));
         for pointer in [
@@ -1850,7 +1850,7 @@ mod tests {
                 terminal: Some((1, true)),
                 ..CodexNativeOutput::default()
             };
-            let error = native.outcome(true).unwrap_err();
+            let error = native.outcome(true, b"[]").unwrap_err();
             assert!(error.contains(category));
             assert!(!error.contains("private-marker"));
         }
@@ -2039,7 +2039,7 @@ mod tests {
                 ..CodexNativeOutput::default()
             };
             assert_eq!(
-                native.outcome(true).unwrap_err(),
+                native.outcome(true, b"[]").unwrap_err(),
                 "native Codex model response cannot report runtime-owned termination"
             );
         }
@@ -3799,7 +3799,24 @@ cp "${{10}}" "$0.schema.$$"
 printf '{"type":"thread.started","thread_id":"native-%s"}\n' "$$"
 n=0
 while IFS= read -r entry; do n=$((n + 1)); done < "$0.calls"
-cat "$0.events.$n"
+python3 - "$0.stdin.$$" "$0.events.$n" <<'PYWIRE'
+import json,sys
+segments=json.load(open(sys.argv[1]))
+targets={s['document']['relative_path']:s['document']['content'] for s in segments if s.get('kind')=='bound-document' and s['document']['source']=='target'}
+for line in open(sys.argv[2]):
+ event=json.loads(line)
+ if event.get('type')=='item.completed' and event['item'].get('type')=='agent_message':
+  message=json.loads(event['item']['text']);result=message.get('outcome',{}).get('result',{})
+  if result.get('role')=='writer':
+   artifact=result['artifact']
+   changes=artifact.get('changes',[]) if artifact['kind']=='changes' else [e['change'] for e in artifact['entries']]
+   for change in changes:
+    if change['operation']=='update':
+     original=targets[change['path']];content=change.pop('content')
+     change['replacements']=[] if original==content else [{'before':original,'after':content}]
+  event['item']['text']=json.dumps(message)
+ print(json.dumps(event))
+PYWIRE
 "#;
 
     fn codex_test_usage() -> CodexUsage {
@@ -4928,7 +4945,7 @@ cat "$0.events.$role"
                 ..CodexNativeOutput::default()
             };
             assert!(
-                native.outcome(true).is_err(),
+                native.outcome(true, b"[]").is_err(),
                 "invalid Harness response must not become success"
             );
         }

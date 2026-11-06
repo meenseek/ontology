@@ -286,6 +286,29 @@ pub(crate) fn codex_role_output_schema(task: &RoleTaskContract) -> Result<String
         .cloned()
         .ok_or_else(|| NativeHarnessError::invalid_input("missing Codex role result schema"))?;
     schema["$defs"]["result"] = result;
+    if role == "writer" {
+        // Only the model's transport encoding is compact. Core still receives
+        // a complete Update and reviews the reconstructed candidate normally.
+        schema["$defs"]["change"]["anyOf"][1] = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "enum": ["update"]},
+                "path": {"type": "string"},
+                "expected_content_digest": {"type": "string"},
+                "replacements": {
+                    "type": "array",
+                    "description": "Return only the exact edits, not the complete updated document. Use an empty array for an unchanged planned target. Each before must occur exactly once in the original bound Target text. Include enough unchanged context to make it unique. All edits match the original simultaneously and must not overlap. before may be empty only for one insertion into an empty target. after may be empty for deletion. Preserve all other bytes. A complete rewrite can replace the whole original text in one edit.",
+                    "items": {
+                        "type": "object",
+                        "properties": {"before": {"type": "string"}, "after": {"type": "string"}},
+                        "required": ["before", "after"], "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["operation", "path", "expected_content_digest", "replacements"],
+            "additionalProperties": false
+        });
+    }
     // Process cancellation/deadlines are observed by the supervisor, not
     // self-reported by a completed model turn. Core permits missing-context
     // requests only from Reviewer.
@@ -321,6 +344,116 @@ pub(crate) fn codex_role_output_schema(task: &RoleTaskContract) -> Result<String
     }
     serde_json::to_string(&schema)
         .map_err(|_| NativeHarnessError::invalid_input("cannot encode Codex role schema"))
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExactReplacement {
+    before: String,
+    after: String,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompactUpdate {
+    operation: String,
+    path: String,
+    expected_content_digest: String,
+    replacements: Vec<ExactReplacement>,
+}
+
+fn expand_compact_update(
+    change: &mut serde_json::Value,
+    segments: &[context_core::harness::RoleInvocationSegment],
+) -> std::result::Result<(), &'static str> {
+    use context_core::harness::{HarnessBoundDocumentSource, RoleInvocationSegment};
+    if change["operation"] != "update" {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(change).map_err(|_| "native Codex update cannot be encoded")?;
+    let update: CompactUpdate = decode_current_json(&bytes, "native Codex compact update")
+        .map_err(|_| "native Codex update requires exact replacements")?;
+    let mut targets = segments.iter().filter_map(|segment| match segment {
+        RoleInvocationSegment::BoundDocument { document }
+            if document.source == HarnessBoundDocumentSource::Target
+                && document.relative_path == update.path =>
+        {
+            Some(document)
+        }
+        _ => None,
+    });
+    let target = targets
+        .next()
+        .ok_or("native Codex update has no bound target")?;
+    if targets.next().is_some()
+        || target.content_digest != update.expected_content_digest
+        || crate::store::digest(target.content.as_bytes()) != target.content_digest
+    {
+        return Err("native Codex update differs from its bound target");
+    }
+    let original = &target.content;
+    let mut ranges = Vec::with_capacity(update.replacements.len());
+    for edit in &update.replacements {
+        if edit.before == edit.after
+            || (edit.before.is_empty() && (!original.is_empty() || update.replacements.len() != 1))
+        {
+            return Err("native Codex update requires nonempty effective edits");
+        }
+        let start = original
+            .find(&edit.before)
+            .ok_or("native Codex replacement does not match its target")?;
+        // rfind also detects overlapping occurrences (e.g. aa in aaa).
+        if original.rfind(&edit.before) != Some(start) {
+            return Err("native Codex replacement is ambiguous");
+        }
+        ranges.push((start, start + edit.before.len(), edit.after.as_str()));
+    }
+    ranges.sort_unstable_by_key(|range| range.0);
+    let mut content = String::new();
+    let mut cursor = 0;
+    for (start, end, after) in ranges {
+        if start < cursor {
+            return Err("native Codex replacements overlap");
+        }
+        content.push_str(&original[cursor..start]);
+        content.push_str(after);
+        cursor = end;
+    }
+    content.push_str(&original[cursor..]);
+    *change = serde_json::json!({"operation": update.operation, "path": update.path,
+        "expected_content_digest": update.expected_content_digest, "content": content});
+    Ok(())
+}
+
+fn expand_writer_updates(
+    response: &mut serde_json::Value,
+    input: &[u8],
+) -> std::result::Result<(), &'static str> {
+    if response.pointer("/outcome/status") != Some(&serde_json::json!("completed"))
+        || response.pointer("/outcome/result/role") != Some(&serde_json::json!("writer"))
+    {
+        return Ok(());
+    }
+    let segments: Vec<context_core::harness::RoleInvocationSegment> =
+        decode_current_json(input, "native Codex frozen input")
+            .map_err(|_| "native Codex update input is invalid")?;
+    let artifact = &mut response["outcome"]["result"]["artifact"];
+    if artifact["kind"] == "changes" {
+        if let Some(changes) = artifact["changes"].as_array_mut() {
+            for change in changes {
+                expand_compact_update(change, &segments)?;
+            }
+        }
+    } else if artifact["kind"] == "curation"
+        && let Some(entries) = artifact["entries"].as_array_mut()
+    {
+        for entry in entries {
+            if let Some(change) = entry.get_mut("change") {
+                expand_compact_update(change, &segments)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -517,6 +650,7 @@ impl CodexNativeOutput {
     pub(crate) fn outcome(
         &self,
         success: bool,
+        input: &[u8],
     ) -> std::result::Result<RoleExecutionOutcome, &'static str> {
         if !success || !matches!(self.terminal, Some((_, true))) {
             return Err("native Codex turn or process failed");
@@ -524,7 +658,14 @@ impl CodexNativeOutput {
         let Some(text) = &self.message else {
             return Err("native Codex completed without an agent_message");
         };
-        let response = decode_current_json::<CodexResponse>(text.as_bytes(), "native Codex role response")
+        let mut wire: serde_json::Value =
+            decode_current_json(text.as_bytes(), "native Codex role response").map_err(
+                |_| "native Codex role response contains invalid JSON syntax or duplicate keys",
+            )?;
+        expand_writer_updates(&mut wire, input)?;
+        let expanded = serde_json::to_vec(&wire)
+            .map_err(|_| "native Codex role response cannot be encoded")?;
+        let response = decode_current_json::<CodexResponse>(&expanded, "native Codex role response")
             .map_err(|_| {
                 // Diagnose shape only. Never include model text, keys, values, or
                 // serde error strings in durable execution failures.
@@ -1311,7 +1452,7 @@ fn run_codex_process_observed(
             } else {
                 observations
                     .native
-                    .outcome(exit.success())
+                    .outcome(exit.success(), input)
                     .unwrap_or_else(|message| RoleExecutionOutcome::Failed {
                         message: codex_failure_message(message, exit, &stderr_tail),
                     })
@@ -1377,6 +1518,244 @@ fn run_codex_process_observed(
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+
+    fn edit_fixture(
+        original: &str,
+        replacements: serde_json::Value,
+    ) -> (CodexNativeOutput, Vec<u8>) {
+        use context_core::harness::{
+            HarnessBoundDocument, HarnessBoundDocumentSource, RoleInvocationSegment,
+        };
+        let digest = crate::store::digest(original.as_bytes());
+        let input = serde_json::to_vec(&vec![RoleInvocationSegment::BoundDocument {
+            document: HarnessBoundDocument {
+                source: HarnessBoundDocumentSource::Target,
+                relative_path: "document.md".into(),
+                content_digest: digest.clone(),
+                content: original.into(),
+                start_line: 1,
+                end_line: original.lines().count(),
+                matched_terms: vec![],
+            },
+        }])
+        .unwrap();
+        let wire = serde_json::json!({"outcome":{"status":"completed","result":{
+            "role":"writer", "artifact":{"kind":"changes","changes":[{
+                "operation":"update", "path":"document.md", "expected_content_digest":digest,
+                "replacements":replacements
+            }]}
+        }}});
+        (
+            CodexNativeOutput {
+                message: Some(wire.to_string()),
+                terminal: Some((1, true)),
+                ..CodexNativeOutput::default()
+            },
+            input,
+        )
+    }
+
+    fn expanded_content(native: &CodexNativeOutput, input: &[u8]) -> String {
+        use context_core::harness::{CompletedRoleResult, FileChange, WriterArtifact};
+        let RoleExecutionOutcome::Completed {
+            result:
+                CompletedRoleResult::Writer {
+                    artifact: WriterArtifact::Changes { changes },
+                },
+        } = native.outcome(true, input).unwrap()
+        else {
+            panic!("expected Writer update")
+        };
+        let FileChange::Update { content, .. } = &changes[0] else {
+            panic!("expected full Core update")
+        };
+        content.clone()
+    }
+
+    #[test]
+    fn compact_updates_preserve_original_bytes_and_bound_output_size() {
+        let mut sizes = vec![];
+        for count in [10, 10_000] {
+            let prefix =
+                "---\r\ntitle: 原文🙂\r\n---\r\nhttps://example.test/a?q=1\r\n".repeat(count);
+            let original = format!("{prefix}삭제할 구절\r\n교체할 문장\n");
+            let (native, input) = edit_fixture(
+                &original,
+                serde_json::json!([
+                    {"before":"교체할 문장", "after":"변경한 합성 문장"},
+                    {"before":"삭제할 구절", "after":""}
+                ]),
+            );
+            assert_eq!(
+                expanded_content(&native, &input),
+                format!("{prefix}\r\n변경한 합성 문장\n")
+            );
+            sizes.push(native.message.unwrap().len());
+        }
+        assert_eq!(
+            sizes[0], sizes[1],
+            "unchanged document size must not grow model output"
+        );
+        let original = "# Unchanged planned target\n한글 · 링크\r\n";
+        let (native, input) = edit_fixture(original, serde_json::json!([]));
+        assert_eq!(expanded_content(&native, &input), original);
+        let (native, input) = edit_fixture(
+            "",
+            serde_json::json!([{ "before":"", "after":"첫 문장\n" }]),
+        );
+        assert_eq!(expanded_content(&native, &input), "첫 문장\n");
+        let task = RoleTaskContract::Writer {
+            targets: vec![],
+            curation_kind: None,
+        };
+        let schema: serde_json::Value =
+            serde_json::from_str(&codex_role_output_schema(&task).unwrap()).unwrap();
+        let update = &schema["$defs"]["change"]["anyOf"][1];
+        assert!(update["properties"].get("content").is_none());
+        assert!(
+            update["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("replacements"))
+        );
+
+        // Existing improvement tooling supplies frozen synthetic cases here;
+        // observations execute the same decoder used by the process supervisor.
+        if let Some(path) = env::var_os("ONTOLOGY_EXACT_EDIT_PLAN") {
+            let plan: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            for case in plan["cases"].as_array().unwrap() {
+                let data: serde_json::Value = serde_json::from_slice(
+                    &fs::read(case["input"]["path"].as_str().unwrap()).unwrap(),
+                )
+                .unwrap();
+                let (native, input) = edit_fixture(
+                    data["document"].as_str().unwrap(),
+                    data["replacements"].clone(),
+                );
+                let content = expanded_content(&native, &input);
+                let digest = crate::store::digest(content.as_bytes());
+                assert_eq!(digest, data["expected_sha256"].as_str().unwrap());
+                println!(
+                    "EXACT_EDIT_OBSERVATION {}",
+                    serde_json::json!({
+                        "case_id":case["id"], "result":{"compact_update_available":true,
+                        "full_document_output_required":false, "expansion_matches_expected":true,
+                        "expanded_sha256":digest,"model_output_bytes":native.message.unwrap().len(),
+                        "original_bytes":data["document"].as_str().unwrap().len()}
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_updates_reject_ambiguous_overlapping_stale_or_unbound_edits() {
+        for (source, edits) in [
+            ("aaa", serde_json::json!([{"before":"aa","after":"b"}])),
+            (
+                "one one",
+                serde_json::json!([{"before":"one","after":"two"}]),
+            ),
+            (
+                "abc",
+                serde_json::json!([{"before":"ab","after":"a"},{"before":"bc","after":"b"}]),
+            ),
+            ("abc", serde_json::json!([{"before":"","after":"x"}])),
+            ("abc", serde_json::json!([{"before":"missing","after":"x"}])),
+            ("abc", serde_json::json!([{"before":"a","after":"a"}])),
+            (
+                "abc",
+                serde_json::json!([{"before":"a","after":"x","extra":true}]),
+            ),
+        ] {
+            let (native, input) = edit_fixture(source, edits);
+            assert!(native.outcome(true, &input).is_err());
+        }
+        let (native, input) = edit_fixture("abc", serde_json::json!([{"before":"a","after":"x"}]));
+        for pointer in [
+            "/outcome/result/artifact/changes/0/path",
+            "/outcome/result/artifact/changes/0/expected_content_digest",
+        ] {
+            let mut wire: serde_json::Value =
+                serde_json::from_str(native.message.as_ref().unwrap()).unwrap();
+            *wire.pointer_mut(pointer).unwrap() = serde_json::json!("unbound-private-marker");
+            let altered = CodexNativeOutput {
+                message: Some(wire.to_string()),
+                terminal: Some((1, true)),
+                ..CodexNativeOutput::default()
+            };
+            let error = altered.outcome(true, &input).unwrap_err();
+            assert!(!error.contains("private-marker"));
+        }
+        let mut segments: serde_json::Value = serde_json::from_slice(&input).unwrap();
+        segments[0]["document"]["source"] = serde_json::json!("evidence");
+        assert!(
+            native
+                .outcome(true, &serde_json::to_vec(&segments).unwrap())
+                .is_err()
+        );
+        let mut segments: serde_json::Value = serde_json::from_slice(&input).unwrap();
+        segments[0]["document"]["content"] = serde_json::json!("tampered");
+        assert!(
+            native
+                .outcome(true, &serde_json::to_vec(&segments).unwrap())
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_update_runs_through_native_process_supervisor() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (native, input) = edit_fixture(
+            "# Heading\nOriginal sentence.\n",
+            serde_json::json!([
+                {"before":"Original sentence.", "after":"Updated sentence."}
+            ]),
+        );
+        let directory = CodexDirectory::create().unwrap();
+        let binary = directory.0.join("fake-codex");
+        let events = [
+            serde_json::json!({"type":"thread.started","thread_id":"compact-update-test"}),
+            serde_json::json!({"type":"turn.started"}),
+            serde_json::json!({"type":"item.completed","item":{"id":"answer","type":"agent_message","text":native.message.unwrap()}}),
+            serde_json::json!({"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0}}),
+        ].map(|value| value.to_string()).join("\n");
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{events}'\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let limits = RoleLifecycleLimits {
+            max_role_execution_millis: 5000,
+            max_role_grace_millis: 100,
+            max_role_close_millis: 500,
+            max_total_role_millis: 5600,
+        };
+        let schema = codex_role_output_schema(&RoleTaskContract::Writer {
+            targets: vec![],
+            curation_kind: None,
+        })
+        .unwrap();
+        let (_, outcome) = run_codex_process_observed(
+            &binary,
+            &input,
+            &[],
+            (HarnessRole::Writer, &schema),
+            &limits,
+            &AtomicBool::new(false),
+            None,
+        )
+        .unwrap();
+        let expected = edit_fixture(
+            "# Heading\nOriginal sentence.\n",
+            serde_json::json!([
+                {"before":"Original sentence.","after":"Updated sentence."}
+            ]),
+        );
+        assert_eq!(outcome, expected.0.outcome(true, &expected.1).unwrap());
+    }
     #[test]
     fn rejected_events_cannot_replace_last_accepted_progress() {
         let mut native = CodexNativeOutput::default();
