@@ -2,10 +2,11 @@ use crate::native_harness::{
     MAX_HARNESS_JSON_BYTES, NativeHarnessError, NativeHarnessResult as Result,
 };
 use context_core::harness::{
-    FrozenReviewArtifact, HarnessEngine, HarnessExecutionEvent, HarnessExecutionRecord,
-    HarnessRole, PreparedHarnessRun, ReportedRoleLifecycle, ReviewArtifactFormat,
-    RoleExecutionOutcome, RoleExecutionResult, RoleInvocationContract, RoleLifecycleLimits,
-    RoleTaskContract, RoleTerminalState, VerificationRequirement, decode_current_json,
+    ExactReplacement, FrozenReviewArtifact, HarnessEngine, HarnessExecutionEvent,
+    HarnessExecutionRecord, HarnessRole, PreparedHarnessRun, ReportedRoleLifecycle,
+    ReviewArtifactFormat, RoleExecutionOutcome, RoleExecutionResult, RoleInvocationContract,
+    RoleLifecycleLimits, RoleTaskContract, RoleTerminalState, VerificationRequirement,
+    decode_current_json,
 };
 use std::{
     env, fs,
@@ -134,7 +135,7 @@ pub(crate) fn execute_codex_frontier(
                                 }))
                                 .unwrap_or_else(|_| {
                                     Err(NativeHarnessError::invalid_input(
-                                        "Codex role worker panicked",
+                                        "native role worker panicked",
                                     ))
                                 });
                             let _ = sender.send(result);
@@ -344,13 +345,6 @@ pub(crate) fn codex_role_output_schema(task: &RoleTaskContract) -> Result<String
     }
     serde_json::to_string(&schema)
         .map_err(|_| NativeHarnessError::invalid_input("cannot encode Codex role schema"))
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct ExactReplacement {
-    before: String,
-    after: String,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -890,6 +884,18 @@ pub(crate) fn execute_codex_role(
             .find(|metadata| metadata.role == invocation.role)
             .ok_or_else(|| NativeHarnessError::invalid_input("missing prepared Codex role task"))?
             .task;
+        if let RoleTaskContract::Writer { exact_edits, .. } = task
+            && !exact_edits.is_empty()
+        {
+            return execute_exact_edit_role(
+                prepared,
+                invocation,
+                exact_edits,
+                cancelled,
+                observations,
+                input.len(),
+            );
+        }
         let schema = codex_role_output_schema(task)?;
         let (lifecycle, outcome) = run_codex_process_observed(
             binary,
@@ -911,6 +917,111 @@ pub(crate) fn execute_codex_role(
             "unsupported runtime: Codex requires Unix process groups",
         ))
     }
+}
+
+// The existing scoped worker executes a pure, explicit candidate computation.
+// These are observed function timestamps/context, never invented Codex events.
+#[cfg(unix)]
+fn execute_exact_edit_role(
+    prepared: &PreparedHarnessRun,
+    invocation: &RoleInvocationContract,
+    edits: &[context_core::harness::ExactDocumentEdit],
+    cancelled: &AtomicBool,
+    observations: &RoleObservations,
+    input_bytes: usize,
+) -> Result<RoleExecutionResult> {
+    use context_core::harness::{
+        CompletedRoleResult, RoleInvocationSegment, WriterArtifact, exact_edit_changes,
+    };
+    let started = std::time::Instant::now();
+    let started_at_millis = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| NativeHarnessError::invalid_input("exact edit clock is unavailable"))?
+            .as_millis(),
+    )
+    .map_err(|_| NativeHarnessError::invalid_input("exact edit clock overflow"))?;
+    let now = || {
+        started_at_millis
+            .saturating_add(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
+    };
+    let ready = now();
+    let outcome = if cancelled.load(Ordering::Relaxed) {
+        RoleExecutionOutcome::Cancelled
+    } else {
+        match exact_edit_changes(
+            edits,
+            invocation
+                .segments
+                .iter()
+                .filter_map(|segment| match segment {
+                    RoleInvocationSegment::BoundDocument { document } => Some(document),
+                    _ => None,
+                }),
+        ) {
+            Ok(changes) => RoleExecutionOutcome::Completed {
+                result: CompletedRoleResult::Writer {
+                    artifact: WriterArtifact::Changes { changes },
+                },
+            },
+            Err(error) => RoleExecutionOutcome::Failed {
+                message: error.to_string(),
+            },
+        }
+    };
+    let terminal = now();
+    if terminal.saturating_sub(started_at_millis)
+        > prepared.plan.lifecycle.max_role_execution_millis.min(
+            prepared
+                .role_run
+                .runtime_capabilities
+                .max_role_execution_millis,
+        )
+    {
+        return Err(NativeHarnessError::invalid_input(
+            "deterministic exact edit exceeded its execution limit",
+        ));
+    }
+    let terminal_state = codex_terminal_state(&outcome);
+    let lifecycle = ReportedRoleLifecycle {
+        role: invocation.role,
+        context_id: format!(
+            "exact-edit:{}:{:?}",
+            invocation.invocation_digest,
+            std::thread::current().id()
+        ),
+        started_at_millis,
+        context_ready_at_millis: ready,
+        first_output_at_millis: matches!(outcome, RoleExecutionOutcome::Completed { .. })
+            .then_some(terminal),
+        interrupt_requested_at_millis: None,
+        grace_deadline_at_millis: None,
+        terminal_at_millis: terminal,
+        closed_at_millis: now(),
+        terminal_state,
+    };
+    let result = invocation
+        .bind_result(lifecycle, outcome)
+        .map_err(|error| NativeHarnessError::invalid_input(error.to_string()))?;
+    observations.record(CodexObservation {
+        kind: "native-exact-edit-observation",
+        role: invocation.role,
+        elapsed_millis: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        serialized_input_bytes: input_bytes,
+        delivered_input_bytes: 0,
+        reported_terminal_state: Some(terminal_state),
+        usage: None,
+        progress: CodexProgress::default(),
+        child_pid: None,
+        process_group: None,
+        process_exit_code: None,
+        process_exit_signal: None,
+        launcher_identity: None,
+        adapter_identity: ExecutableIdentity::adapter(),
+        approval_state: "not-applicable-no-model-launch",
+        model_selection: "not-invoked-deterministic-exact-edits",
+    });
+    Ok(result)
 }
 
 #[cfg(unix)]
@@ -1607,6 +1718,7 @@ mod observation_tests {
         let task = RoleTaskContract::Writer {
             targets: vec![],
             curation_kind: None,
+            exact_edits: vec![],
         };
         let schema: serde_json::Value =
             serde_json::from_str(&codex_role_output_schema(&task).unwrap()).unwrap();
@@ -1736,6 +1848,7 @@ mod observation_tests {
         let schema = codex_role_output_schema(&RoleTaskContract::Writer {
             targets: vec![],
             curation_kind: None,
+            exact_edits: vec![],
         })
         .unwrap();
         let (_, outcome) = run_codex_process_observed(

@@ -1932,6 +1932,7 @@ mod tests {
             &codex_role_output_schema(&RoleTaskContract::Writer {
                 targets: vec![],
                 curation_kind: None,
+                exact_edits: vec![],
             })
             .unwrap(),
         )
@@ -2004,6 +2005,7 @@ mod tests {
                 RoleTaskContract::Writer {
                     targets: vec![],
                     curation_kind: None,
+                    exact_edits: vec![],
                 },
                 false,
             ),
@@ -3211,6 +3213,7 @@ mod tests {
                             &mut records,
                             &mut next_decision,
                         ),
+                        exact_edits: None,
                         delete_targets: test_optional_user_value(
                             request.delete_targets,
                             &statement_identifier,
@@ -3439,6 +3442,27 @@ mod tests {
         concurrency: usize,
         review_artifacts: bool,
     ) -> (HarnessEngine, PreparedHarnessRun, Vec<u8>, PathBuf) {
+        codex_fixture_with_exact_edits(
+            temp,
+            documents,
+            repetitions,
+            action,
+            concurrency,
+            review_artifacts,
+            None,
+        )
+    }
+
+    #[cfg(unix)]
+    fn codex_fixture_with_exact_edits(
+        temp: &TempDirectory,
+        documents: usize,
+        repetitions: usize,
+        action: HarnessAction,
+        concurrency: usize,
+        review_artifacts: bool,
+        exact: Option<&str>,
+    ) -> (HarnessEngine, PreparedHarnessRun, Vec<u8>, PathBuf) {
         let workspace = temp.path().join("workspace");
         fs::create_dir(&workspace).expect("synthetic workspace must be created");
         let extension = if matches!(action, HarnessAction::CodeReview | HarnessAction::CodeWrite) {
@@ -3517,6 +3541,41 @@ mod tests {
                 unreachable!()
             };
             draft.common.review_artifact_paths = Some(value);
+        }
+        if let Some(before_pattern) = exact {
+            use context_core::harness::{ExactDocumentEdit, ExactReplacement};
+            let edits = (0..documents)
+                .map(|index| {
+                    let path = format!("document-{index}.md");
+                    let original = fs::read(workspace.join(&path)).unwrap();
+                    ExactDocumentEdit {
+                        path,
+                        expected_content_digest: test_byte_digest(&original),
+                        replacements: vec![ExactReplacement {
+                            before: before_pattern.replace("{index}", &index.to_string()),
+                            after: format!("# 교체 {index}"),
+                        }],
+                    }
+                })
+                .collect::<Vec<_>>();
+            let RequestSource::UserLanguage { statements } = &mut envelope.source else {
+                unreachable!()
+            };
+            statements[0].text.push_str(&format!(
+                " Apply only these literal edits: {}",
+                serde_json::to_string(&edits).unwrap()
+            ));
+            let mut next = 2000;
+            let value = test_user_value(
+                edits,
+                &statements[0].identifier,
+                &mut envelope.decision_trace.records,
+                &mut next,
+            );
+            let DraftTaskRequest::Write(draft) = &mut envelope.draft else {
+                unreachable!()
+            };
+            draft.exact_edits = Some(value);
         }
         let repository = temp.path().join("source-placeholder");
         let router = HarnessRouter::with_execution_profile(2, HarnessExecutionProfile::Strict)
@@ -5467,6 +5526,186 @@ cat "$0.events.$role"
             context_core::harness::SubjectStatus::Accepted
         );
         codex_assert_exact_transport(&engine, &prepared, &evaluated, &binary);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_edit_frontier_skips_writer_model_keeps_independent_reviews_and_cas_apply() {
+        use context_core::harness::{HarnessCompletionState, SubjectStatus};
+        for rejected in [false, true] {
+            let temp = TempDirectory::new("literal-native-frontier");
+            let (engine, prepared, raw, workspace) = codex_fixture_with_exact_edits(
+                &temp,
+                2,
+                8,
+                HarnessAction::DocumentWrite,
+                2,
+                false,
+                Some("# 문서 {index}"),
+            );
+            assert_eq!(prepared.plan.resolved_request.plan.max_revisions, 0);
+            let originals = (0..2)
+                .map(|i| fs::read_to_string(workspace.join(format!("document-{i}.md"))).unwrap())
+                .collect::<Vec<_>>();
+            let head =
+                HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "literal-edit")
+                    .unwrap();
+            let invocation = &head.ready_role_invocations[0];
+            // Preview only builds the exact subject used by the scripted review fixture.
+            let producer = execute_codex_role(
+                Path::new("/must-not-launch-writer"),
+                &prepared,
+                invocation,
+                &[],
+                &std::sync::atomic::AtomicBool::new(false),
+                &RoleObservations::default(),
+            )
+            .unwrap();
+            let preview = head
+                .advance(
+                    &engine,
+                    &raw,
+                    &prepared,
+                    HarnessExecutionEvent::RoleResult {
+                        result: Box::new(producer),
+                    },
+                )
+                .unwrap();
+            let review = |role| {
+                codex_write_scenario_outcome(
+                    &prepared,
+                    preview
+                        .ready_role_invocations
+                        .iter()
+                        .find(|i| i.role == role)
+                        .unwrap(),
+                    if rejected {
+                        "completed-rejected"
+                    } else {
+                        "completed"
+                    },
+                )
+            };
+            let binary = codex_concurrent_fixture(
+                &temp,
+                &prepared,
+                review(HarnessRole::Reviewer),
+                review(HarnessRole::Verifier),
+                "0.01",
+                "0.02",
+            );
+            let observed = execute_codex_frontier(
+                &engine,
+                &prepared,
+                head,
+                &binary,
+                None,
+                &RoleObservations::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                codex_calls(&binary).len(),
+                2,
+                "only Reviewer and Verifier model transports launch"
+            );
+            codex_assert_concurrent_processes_closed(&binary);
+            assert_eq!(observed.role_execution.role_results.len(), 3);
+            let writer = &observed.role_execution.role_results[0];
+            assert_eq!(writer.role, HarnessRole::Writer);
+            assert!(writer.context_id.starts_with("exact-edit:"));
+            assert_eq!(
+                observed
+                    .role_execution
+                    .role_results
+                    .iter()
+                    .map(|r| &r.context_id)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                3
+            );
+            let evaluation = observed.evaluation.as_ref().unwrap();
+            if rejected {
+                assert_eq!(
+                    evaluation.completion_state,
+                    HarnessCompletionState::Rejected
+                );
+                assert_eq!(evaluation.subject_status, SubjectStatus::Rejected);
+                assert!(HarnessExecutionRecord::revise_durable(&engine, "literal-edit").is_err());
+                assert!(HarnessExecutionRecord::validate_durable(&engine, "literal-edit").is_err());
+                assert!(
+                    HarnessExecutionRecord::apply_durable(&engine, "literal-edit", None).is_err()
+                );
+            } else {
+                assert_eq!(evaluation.subject_status, SubjectStatus::Accepted);
+                HarnessExecutionRecord::validate_durable(&engine, "literal-edit").unwrap();
+                HarnessExecutionRecord::apply_durable(&engine, "literal-edit", None).unwrap();
+            }
+            for (i, original) in originals.iter().enumerate() {
+                let expected = if rejected {
+                    original.clone()
+                } else {
+                    original.replacen(&format!("# 문서 {i}"), &format!("# 교체 {i}"), 1)
+                };
+                assert_eq!(
+                    fs::read_to_string(workspace.join(format!("document-{i}.md"))).unwrap(),
+                    expected
+                );
+            }
+            println!(
+                "literal fixture rejected={rejected} Writer model calls=0 review model transports=2 observed Writer millis={}",
+                writer.lifecycle.terminal_at_millis - writer.lifecycle.started_at_millis
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_edit_frontier_invalid_literals_halt_without_any_model_or_mutation() {
+        use context_core::harness::{ExecutionStatus, HarnessCompletionState};
+        for before in ["한글", "absent"] {
+            let temp = TempDirectory::new("literal-native-invalid");
+            let (engine, prepared, raw, workspace) = codex_fixture_with_exact_edits(
+                &temp,
+                1,
+                2,
+                HarnessAction::DocumentWrite,
+                2,
+                false,
+                Some(before),
+            );
+            let original = fs::read(workspace.join("document-0.md")).unwrap();
+            let head =
+                HarnessExecutionRecord::begin_durable(&engine, &raw, &prepared, "invalid-literal")
+                    .unwrap();
+            let binary = codex_test_script(&temp, "exit 99\n");
+            let observed = execute_codex_frontier(
+                &engine,
+                &prepared,
+                head,
+                &binary,
+                None,
+                &RoleObservations::default(),
+            )
+            .unwrap();
+            assert!(codex_calls(&binary).is_empty());
+            assert_eq!(observed.role_execution.role_results.len(), 1);
+            assert_eq!(
+                observed.role_execution.role_results[0]
+                    .lifecycle
+                    .terminal_state,
+                RoleTerminalState::Failed
+            );
+            let evaluation = observed.evaluation.unwrap();
+            assert_eq!(evaluation.execution_status, ExecutionStatus::Failed);
+            assert_eq!(
+                evaluation.completion_state,
+                HarnessCompletionState::ExecutionHalted
+            );
+            assert_eq!(fs::read(workspace.join("document-0.md")).unwrap(), original);
+            assert!(
+                HarnessExecutionRecord::apply_durable(&engine, "invalid-literal", None).is_err()
+            );
+        }
     }
 
     #[cfg(unix)]

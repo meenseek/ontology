@@ -404,6 +404,7 @@ fn user_profile_code_envelope(statement_text: &str) -> RequestEnvelope {
             write_kind,
             targets,
             delete_targets: None,
+            exact_edits: None,
         }),
         decision_trace: DecisionTrace { records },
     }
@@ -1157,6 +1158,7 @@ fn completed_role_event(
         RoleTaskContract::Writer {
             targets,
             curation_kind,
+            ..
         } => {
             let artifact = if resolved.plan.action == HarnessAction::VaultCuration {
                 WriterArtifact::Curation {
@@ -17045,6 +17047,7 @@ fn review_artifact_changes_stop_prepare_begin_advance_evaluate_and_apply() {
         },
         targets: draft.targets,
         delete_targets: None,
+        exact_edits: None,
     });
     let resolved = engine.resolve_test_envelope(&envelope, None).unwrap();
     let prepared = prepared_run_with(&engine, &resolved);
@@ -17567,4 +17570,252 @@ fn owner_receipt_reuse_checks_current_inputs_without_reissuing_a_role_result() {
             .attest_owner_for_manifest(&receipt, &manifest)
             .is_err()
     );
+}
+
+#[test]
+fn exact_edits_bind_the_candidate_keep_reviews_and_end_rejection_without_revision() {
+    for rejected in [false, true] {
+        let (workspace, engine) = external_engine_with_profile(HarnessExecutionProfile::Strict);
+        let original = fs::read_to_string(workspace.0.join("README.md")).unwrap();
+        let edits = vec![ExactDocumentEdit {
+            path: "README.md".into(),
+            expected_content_digest: byte_digest(original.as_bytes()),
+            replacements: vec![ExactReplacement {
+                before: "External".into(),
+                after: "Updated".into(),
+            }],
+        }];
+        let mut envelope = RequestEnvelope::from_structured_request(
+            personal_scope_request(HarnessAction::DocumentWrite),
+            HarnessIntent::General,
+            vec![],
+            vec![],
+            HarnessExecutionProfile::Strict,
+            "explicit exact fixture",
+        )
+        .unwrap();
+        let DraftTaskRequest::Write(draft) = &mut envelope.draft else {
+            panic!()
+        };
+        draft.exact_edits = Some(DraftValue::Resolved {
+            value: edits.clone(),
+            decision_identifier: "exact-edits".into(),
+        });
+        envelope
+            .decision_trace
+            .records
+            .push(DecisionRecord::StructuredCaller {
+                identifier: "exact-edits".into(),
+                value_digest: serialized_digest(&edits).unwrap(),
+                description: "literal fixture edits".into(),
+            });
+        let resolved = engine.resolve_test_envelope(&envelope, None).unwrap();
+        assert_eq!(resolved.plan.max_revisions, 0);
+        let prepared = prepared_run_with(&engine, &resolved);
+        let mut step = engine.begin_execution(&resolved, &prepared, &[]).unwrap();
+        let invocation = &step.ready_role_invocations[0];
+        let changes = exact_edit_changes(
+            &edits,
+            invocation.segments.iter().filter_map(|s| match s {
+                RoleInvocationSegment::BoundDocument { document } => Some(document),
+                _ => None,
+            }),
+        )
+        .unwrap();
+        let HarnessExecutionEvent::RoleResult { result: old_result } =
+            completed_role_event(&resolved, &prepared, invocation, vec![], "exact-writer")
+        else {
+            panic!()
+        };
+        let forged = invocation
+            .bind_result(old_result.lifecycle.clone(), old_result.outcome.clone())
+            .unwrap();
+        assert!(
+            engine
+                .advance_execution(
+                    &resolved,
+                    &prepared,
+                    &[],
+                    &step.record,
+                    HarnessExecutionEvent::RoleResult {
+                        result: Box::new(forged)
+                    }
+                )
+                .is_err(),
+            "recomputed public digests cannot authorize different literal bytes"
+        );
+        let result = invocation
+            .bind_result(
+                old_result.lifecycle.clone(),
+                RoleExecutionOutcome::Completed {
+                    result: CompletedRoleResult::Writer {
+                        artifact: WriterArtifact::Changes { changes },
+                    },
+                },
+            )
+            .unwrap();
+        step = engine
+            .advance_execution(
+                &resolved,
+                &prepared,
+                &[],
+                &step.record,
+                HarnessExecutionEvent::RoleResult {
+                    result: Box::new(result),
+                },
+            )
+            .unwrap();
+        assert_eq!(step.ready_role_invocations.len(), 2);
+        while let Some(invocation) = step.ready_role_invocations.first() {
+            let findings = if rejected && invocation.role == HarnessRole::Reviewer {
+                vec![BlockingFinding {
+                    message: "literal wording rejected".into(),
+                    evidence: vec![ResultEvidenceReference::ProducedArtifact {
+                        artifact_digest: match &invocation.subject {
+                            EvaluationSubject::ProducedArtifact { artifact_digest } => {
+                                artifact_digest.clone()
+                            }
+                            _ => panic!(),
+                        },
+                        locator: "entire candidate".into(),
+                    }],
+                }]
+            } else {
+                vec![]
+            };
+            let event = completed_role_event(
+                &resolved,
+                &prepared,
+                invocation,
+                findings,
+                &format!("exact-{:?}", invocation.role),
+            );
+            step = engine
+                .advance_execution(&resolved, &prepared, &[], &step.record, event)
+                .unwrap();
+        }
+        let evaluation = engine
+            .evaluate_execution(&resolved, &prepared, &[], &step.record)
+            .unwrap();
+        if rejected {
+            assert_eq!(
+                evaluation.completion_state,
+                HarnessCompletionState::Rejected
+            );
+            assert!(
+                engine
+                    .apply_validated_execution(&resolved, &prepared, &[], &step.record)
+                    .is_err()
+            );
+            assert_eq!(
+                fs::read_to_string(workspace.0.join("README.md")).unwrap(),
+                original
+            );
+        } else {
+            engine
+                .apply_validated_execution(&resolved, &prepared, &[], &step.record)
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(workspace.0.join("README.md")).unwrap(),
+                "# Updated project\n"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod exact_literal_tests {
+    use super::*;
+    fn document(content: &str) -> HarnessBoundDocument {
+        HarnessBoundDocument {
+            source: HarnessBoundDocumentSource::Target,
+            relative_path: "resume.md".into(),
+            content_digest: byte_digest(content.as_bytes()),
+            content: content.into(),
+            start_line: 1,
+            end_line: 1,
+            matched_terms: vec![],
+        }
+    }
+    fn edit(document: &HarnessBoundDocument, pairs: &[(&str, &str)]) -> ExactDocumentEdit {
+        ExactDocumentEdit {
+            path: document.relative_path.clone(),
+            expected_content_digest: document.content_digest.clone(),
+            replacements: pairs
+                .iter()
+                .map(|(before, after)| ExactReplacement {
+                    before: (*before).into(),
+                    after: (*after).into(),
+                })
+                .collect(),
+        }
+    }
+    #[test]
+    fn exact_edits_preserve_other_bytes_and_do_not_cascade() {
+        for (original, pairs, expected) in [
+            (
+                "지연을 개선했습니다.\n",
+                vec![("지연을 개선했습니다.", "응답 시간을 줄였습니다.")],
+                "응답 시간을 줄였습니다.\n",
+            ),
+            (
+                "시작 aaa 끝\n",
+                vec![("시작", "앞"), ("끝", "뒤")],
+                "앞 aaa 뒤\n",
+            ),
+            ("old new\r\n", vec![("old", "new"), ("new", "")], "new \r\n"),
+        ] {
+            let doc = document(original);
+            let changes = exact_edit_changes(&[edit(&doc, &pairs)], [&doc]).unwrap();
+            assert_eq!(
+                changes,
+                vec![FileChange::Update {
+                    path: doc.relative_path.clone(),
+                    expected_content_digest: doc.content_digest.clone(),
+                    content: expected.into()
+                }]
+            );
+        }
+    }
+    #[test]
+    fn exact_edits_reject_ambiguity_overlap_empty_noop_and_absence() {
+        let doc = document("aaa old text");
+        for pairs in [
+            vec![("aa", "x")],
+            vec![("old", "x"), ("old text", "y")],
+            vec![("", "x")],
+            vec![("old", "old")],
+            vec![("absent", "x")],
+            vec![("aaa old text", "")],
+            vec![],
+        ] {
+            assert!(exact_edit_changes(&[edit(&doc, &pairs)], [&doc]).is_err());
+        }
+    }
+    #[test]
+    fn exact_edits_reject_stale_unbound_duplicate_and_forged_source() {
+        let doc = document("old");
+        let expected = edit(&doc, &[("old", "new")]);
+        let mut stale = expected.clone();
+        stale.expected_content_digest = "a".repeat(64);
+        assert!(exact_edit_changes(&[stale], [&doc]).is_err());
+        assert!(exact_edit_changes(std::slice::from_ref(&expected), []).is_err());
+        assert!(exact_edit_changes(&[expected.clone(), expected.clone()], [&doc, &doc]).is_err());
+        let mut forged = doc.clone();
+        forged.content = "forged".into();
+        assert!(exact_edit_changes(&[expected], [&forged]).is_err());
+    }
+    #[test]
+    fn exact_edits_obey_the_shared_multi_target_candidate_limit() {
+        let first = document("a");
+        let mut second = document("b");
+        second.relative_path = "second.md".into();
+        let mut a = edit(&first, &[("a", "x")]);
+        let mut b = edit(&second, &[("b", "y")]);
+        a.replacements[0].after = "x".repeat(MAX_CANDIDATE_BYTES / 2);
+        b.replacements[0].after = "y".repeat(MAX_CANDIDATE_BYTES / 2);
+        assert!(exact_edit_changes(&[a.clone(), b.clone()], [&first, &second]).is_ok());
+        b.replacements[0].after.push('y');
+        assert!(exact_edit_changes(&[a, b], [&first, &second]).is_err());
+    }
 }

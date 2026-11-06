@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ContextGrant, CurationKind, DataOwner, HARNESS_SCHEMA_VERSION, HarnessAction, HarnessError,
-    HarnessExecutionProfile, HarnessIntent, HarnessRequest, HarnessResult, MAX_RETRIEVAL_BYTES,
-    MAX_RETRIEVAL_QUERY_LENGTH, PolicyBinding, PolicyConfiguration, PromotionHandoff,
-    serialized_digest, validate_single_line,
+    ContextGrant, CurationKind, DataOwner, ExactDocumentEdit, HARNESS_SCHEMA_VERSION,
+    HarnessAction, HarnessError, HarnessExecutionProfile, HarnessIntent, HarnessRequest,
+    HarnessResult, MAX_RETRIEVAL_BYTES, MAX_RETRIEVAL_QUERY_LENGTH, PolicyBinding,
+    PolicyConfiguration, PromotionHandoff, serialized_digest, validate_single_line,
 };
 
 const REQUEST_TEXT_LIMIT: usize = 16 * 1024;
@@ -180,6 +180,7 @@ pub struct DraftWriteContract {
     pub write_kind: DraftValue<WriteKind>,
     pub targets: DraftValue<Vec<String>>,
     pub delete_targets: Option<DraftValue<Vec<String>>>,
+    pub exact_edits: Option<DraftValue<Vec<ExactDocumentEdit>>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -253,6 +254,7 @@ pub struct WriteContract {
     pub write_kind: WriteKind,
     pub targets: Vec<String>,
     pub delete_targets: Vec<String>,
+    pub exact_edits: Vec<ExactDocumentEdit>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -650,6 +652,7 @@ impl RequestEnvelope {
                     targets: decisions.value("targets", request.targets)?,
                     delete_targets: decisions
                         .optional_value("delete-targets", request.delete_targets)?,
+                    exact_edits: None,
                 })
             }
             HarnessAction::CodeReview | HarnessAction::DocumentReview => {
@@ -801,6 +804,8 @@ impl RequestEnvelope {
         }
         self.draft
             .validate_promotion_handoff_authority(&self.decision_trace)?;
+        self.draft
+            .validate_exact_edit_authority(&self.decision_trace)?;
         let contract = self.draft.resolve(&self.decision_trace)?;
         contract.to_harness_request().validate()?;
         let decision_trace = self
@@ -948,6 +953,7 @@ impl DraftTaskRequest {
                 task.common.compose_values(composer)?;
                 composer.value("write_kind", &mut task.write_kind)?;
                 composer.value("targets", &mut task.targets)?;
+                composer.optional("exact_edits", &mut task.exact_edits)?;
                 composer.optional("delete_targets", &mut task.delete_targets)
             }
             Self::Review(task) => {
@@ -1444,6 +1450,11 @@ impl DraftTaskRequest {
                 collect_unresolved("write_kind", &contract.write_kind, &mut questions);
                 collect_unresolved("targets", &contract.targets, &mut questions);
                 collect_optional_unresolved(
+                    "exact_edits",
+                    contract.exact_edits.as_ref(),
+                    &mut questions,
+                );
+                collect_optional_unresolved(
                     "delete_targets",
                     contract.delete_targets.as_ref(),
                     &mut questions,
@@ -1505,6 +1516,34 @@ impl DraftTaskRequest {
         matches!(self, Self::Curation(contract) if contract.promotion_handoff.is_some())
     }
 
+    fn validate_exact_edit_authority(&self, trace: &DecisionTrace) -> HarnessResult<()> {
+        let Self::Write(contract) = self else {
+            return Ok(());
+        };
+        let Some(DraftValue::Resolved {
+            value,
+            decision_identifier,
+        }) = &contract.exact_edits
+        else {
+            return Ok(());
+        };
+        if value.is_empty() {
+            return Err(HarnessError::InvalidRequest(
+                "explicit exact edits cannot be empty".to_owned(),
+            ));
+        }
+        if !matches!(
+            trace.authoritative_record(decision_identifier)?,
+            DecisionRecord::UserStatement { .. } | DecisionRecord::StructuredCaller { .. }
+        ) {
+            return Err(HarnessError::InvalidRequest(
+                "exact edits require literal user statements or an explicit structured caller"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_promotion_handoff_authority(&self, trace: &DecisionTrace) -> HarnessResult<()> {
         let Self::Curation(contract) = self else {
             return Ok(());
@@ -1561,6 +1600,10 @@ impl DraftTaskRequest {
                     .collect_decision_identifiers(&mut identifiers);
                 collect_decision_identifier(&contract.write_kind, &mut identifiers);
                 collect_decision_identifier(&contract.targets, &mut identifiers);
+                collect_optional_decision_identifier(
+                    contract.exact_edits.as_ref(),
+                    &mut identifiers,
+                );
                 collect_optional_decision_identifier(
                     contract.delete_targets.as_ref(),
                     &mut identifiers,
@@ -1619,6 +1662,12 @@ impl DraftTaskRequest {
                 common: contract.common.resolve(trace)?,
                 write_kind: resolve_value("write_kind", &contract.write_kind, trace)?,
                 targets: resolve_value("targets", &contract.targets, trace)?,
+                exact_edits: resolve_optional_value(
+                    "exact_edits",
+                    contract.exact_edits.as_ref(),
+                    trace,
+                )?
+                .unwrap_or_default(),
                 delete_targets: resolve_optional_value(
                     "delete_targets",
                     contract.delete_targets.as_ref(),
@@ -1775,6 +1824,18 @@ impl DraftOwnedTaskCommon {
 impl ResolvedTaskContract {
     fn validate(&self) -> HarnessResult<()> {
         match self {
+            Self::Write(contract) if !contract.exact_edits.is_empty() => {
+                if contract.write_kind != WriteKind::Document || !contract.delete_targets.is_empty()
+                {
+                    return Err(HarnessError::InvalidRequest(
+                        "exact edits only update existing documents".to_owned(),
+                    ));
+                }
+                super::exact_edit::validate_exact_edit_targets(
+                    &contract.exact_edits,
+                    &contract.targets,
+                )?;
+            }
             Self::VaultRead(contract) => {
                 validate_single_line(
                     "Vault read query",
@@ -1846,6 +1907,14 @@ impl ResolvedTaskContract {
             },
             Self::VaultRead(_) => HarnessAction::VaultRead,
             Self::Curation(_) => HarnessAction::VaultCuration,
+        }
+    }
+
+    #[must_use]
+    pub fn exact_edits(&self) -> &[ExactDocumentEdit] {
+        match self {
+            Self::Write(contract) => &contract.exact_edits,
+            _ => &[],
         }
     }
 
@@ -2316,6 +2385,7 @@ mod tests {
                 write_kind: resolved_value(write_kind, "write-kind"),
                 targets: resolved_value(targets, "targets"),
                 delete_targets: None,
+                exact_edits: None,
             }),
             decision_trace: DecisionTrace {
                 records: values.into_iter().collect(),
@@ -2360,6 +2430,7 @@ mod tests {
                 write_kind: resolved_value(write_kind, &decision_identifier(5)),
                 targets: resolved_value(targets, &decision_identifier(6)),
                 delete_targets: None,
+                exact_edits: None,
             }),
             decision_trace: DecisionTrace {
                 records: values.into_iter().collect(),
@@ -3163,5 +3234,136 @@ mod tests {
             Err(HarnessError::ClarificationRequired(questions))
                 if questions.iter().any(|question| question.field == "confirmation")
         ));
+    }
+    #[test]
+    fn exact_edits_are_explicit_document_only_and_digest_bound() {
+        let mut envelope = write_envelope().unwrap();
+        let new_targets = vec!["resume.md".to_owned()];
+        let DraftTaskRequest::Write(task) = &mut envelope.draft else {
+            panic!()
+        };
+        task.targets = resolved_value(new_targets.clone(), "targets");
+        *envelope
+            .decision_trace
+            .records
+            .iter_mut()
+            .find(|r| r.identifier() == "targets")
+            .unwrap() = structured_decision("targets", &new_targets).unwrap();
+        let edits = vec![ExactDocumentEdit {
+            path: "resume.md".to_owned(),
+            expected_content_digest: "a".repeat(64),
+            replacements: vec![super::super::ExactReplacement {
+                before: "old".to_owned(),
+                after: "new".to_owned(),
+            }],
+        }];
+        let DraftTaskRequest::Write(task) = &mut envelope.draft else {
+            panic!()
+        };
+        task.exact_edits = Some(resolved_value(edits.clone(), "exact-edits"));
+        envelope
+            .decision_trace
+            .records
+            .push(structured_decision("exact-edits", &edits).unwrap());
+        assert!(
+            envelope.resolve_test_fixture().is_err(),
+            "code writes cannot use document literal mode"
+        );
+        let DraftTaskRequest::Write(task) = &mut envelope.draft else {
+            panic!()
+        };
+        task.write_kind = resolved_value(WriteKind::Document, "write-kind");
+        *envelope
+            .decision_trace
+            .records
+            .iter_mut()
+            .find(|r| r.identifier() == "write-kind")
+            .unwrap() = structured_decision("write-kind", &WriteKind::Document).unwrap();
+        let (resolved, trace, _) = envelope.resolve_test_fixture().unwrap();
+        assert_eq!(resolved.exact_edits(), edits);
+        assert!(
+            trace
+                .records
+                .iter()
+                .any(|r| r.identifier() == "exact-edits")
+        );
+        let exact_index = envelope
+            .decision_trace
+            .records
+            .iter()
+            .position(|r| r.identifier() == "exact-edits")
+            .unwrap();
+        envelope.decision_trace.records[exact_index] = DecisionRecord::ObservedFact {
+            identifier: "exact-edits".into(),
+            value_digest: serialized_digest(&edits).unwrap(),
+            evidence: DecisionEvidence {
+                kind: DecisionEvidenceKind::FileContent,
+                content_digest: "a".repeat(64),
+            },
+        };
+        assert!(
+            envelope.resolve_test_fixture().is_err(),
+            "an observed source cannot authorize literal replacement text"
+        );
+        let DraftTaskRequest::Write(task) = &mut envelope.draft else {
+            panic!()
+        };
+        task.exact_edits = Some(resolved_value(Vec::new(), "exact-edits"));
+        assert!(
+            envelope.resolve_test_fixture().is_err(),
+            "empty explicit mode must not fall back to Writer"
+        );
+    }
+    #[test]
+    fn exact_edits_compose_from_user_statements_without_losing_literal_values() {
+        let mut input = user_write_envelope().unwrap();
+        let edits = vec![ExactDocumentEdit {
+            path: "resume.md".into(),
+            expected_content_digest: "b".repeat(64),
+            replacements: vec![super::super::ExactReplacement {
+                before: "old".into(),
+                after: "new".into(),
+            }],
+        }];
+        let DraftTaskRequest::Write(task) = &mut input.draft else {
+            panic!()
+        };
+        task.write_kind = resolved_value(WriteKind::Document, &decision_identifier(5));
+        task.targets = resolved_value(vec!["resume.md".to_owned()], &decision_identifier(6));
+        task.exact_edits = Some(resolved_value(edits.clone(), "literal-edits"));
+        input
+            .decision_trace
+            .records
+            .push(DecisionRecord::UserStatement {
+                identifier: "literal-edits".into(),
+                value_digest: String::new(),
+                statement_identifiers: vec![statement_identifier(1)],
+            });
+        for record in &mut input.decision_trace.records {
+            record.value_digest_mut().clear();
+        }
+        let composed = bound_composition(&input).unwrap();
+        let (contract, trace, provenance) = composed.resolve().unwrap();
+        assert_eq!(contract.exact_edits(), edits);
+        assert_eq!(provenance.statement_bindings.len(), 1);
+        let DraftTaskRequest::Write(task) = composed.draft else {
+            panic!()
+        };
+        let Some(DraftValue::Resolved {
+            decision_identifier,
+            value,
+        }) = task.exact_edits
+        else {
+            panic!()
+        };
+        assert_eq!(value, edits);
+        assert_ne!(decision_identifier, "literal-edits");
+        assert!(
+            trace
+                .records
+                .iter()
+                .any(|record| record.identifier() == decision_identifier
+                    && record.value_digest() == serialized_digest(&edits).unwrap())
+        );
     }
 }

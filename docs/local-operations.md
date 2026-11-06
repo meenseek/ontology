@@ -853,6 +853,45 @@ Core `Update` 후보를 구성하며, 독립 검토·수락·저장·재조회 �
 새 문서 생성과 삭제의 형식은 그대로다. 이 변경은 모델의 전체 원문 재출력을 줄이며,
 실제 작업의 시간 절감은 다음 동일 유형 작업에서 확인한다.
 
+사용자가 정확한 교체 전·후 문구를 지정한 기존 문서 수정은 생성 Writer를 생략할 수 있다.
+일반 `RequestEnvelope`의 Write draft에 `exact_edits`를 명시한다. 사용자 원문을 참조하는
+`UserStatement` decision에 목록 전체의 값·지문을 결합하며, 구성 중인 입력은 기존
+`resolve --compose-decisions`로 식별자와 지문을 채운다. 모델 해석·제안이나 관측 사실만으로
+이 모드를 선택할 수 없으며, `StructuredCaller`는 기존대로 production 실행 입력이 아니다.
+아래는 기존 사용자 요청에 추가하는 필드의 구조다. path와 SHA는 직전 raw 원문 조회에서
+확인한 현재 값을 사용하고, decision은 같은 요청의 실제 사용자 statement를 참조한다.
+
+```json
+"exact_edits": {
+  "state": "resolved",
+  "decision_identifier": "user-exact-edits",
+  "value": [{
+    "path": "vault/personal/decisions/example.md",
+    "expected_content_digest": "현재 원문의 64자리 SHA-256",
+    "replacements": [{"before": "기존 문장", "after": "정확한 새 문장"}]
+  }]
+}
+```
+
+이 경로는 기존 Markdown target의 update만 지원한다. 계획 대상마다 목록을 한 개씩 주고,
+변경하지 않는 대상은 `replacements: []`로 보존한다. 전체 요청에는 실제 치환이 한 개 이상
+있어야 한다. 각 비어 있지 않은 `before`는 원문에서 정확히 한 번 나타나야 하며 모든 범위는
+서로 겹치지 않아야 한다. 빈 `after`는 해당 구절 삭제다. 문서 전체를 비우는 변경·생성·파일 삭제,
+빈 요청·같은 문구·오래된 SHA·모호한 일치에는 자동 생성 fallback을 하지 않는다.
+
+기존 `begin --codex-binary`는 이 경우 실제 scoped worker에서 Core의 순수 치환을 수행하고,
+Writer 모델을 호출하지 않는다. 실제 경과시간·실행 context를 기존 역할 결과에 결합하며,
+Codex thread나 모델 usage를 만들어 내지 않는다. Core가 bound 원문으로 후보를 다시 계산해
+동일한 전체 Update인지 검사한 뒤, 기존 독립 Reviewer·Verifier와 정책·근거·사실·가독성 검토를
+계속 실행한다. 저장 승인·현재성·CAS·apply·저장 후 raw 재조회는 기존 경계를 따른다.
+명시 문구는 불변이므로 plan의 `max_revisions`는 0이다. 검토가 거절되면 terminal `Rejected`로
+끝나며 `revise`하지 않는다. 문구를 바꾸려면 새 요청을 구성한다. 치환 불일치·모호성은 실제
+Failed 역할 결과로 종료하며 검토 모델도 호출하지 않는다.
+
+결정적 Writer의 진단 kind는 `native-exact-edit-observation`이다. 직렬화 입력 크기와 실제
+경과시간을 남기며 모델 전달 bytes는 0, usage·자식 process는 null, 모델은 미호출로 표시한다.
+이 수치는 생성 호출 제거의 관측이며 독립 모델 검토·저장까지 포함한 총 시간 측정이 아니다.
+
 `--codex-binary` 실행의 stderr에는 `kind=native-role-observation` JSONL 관측이 나온다.
 각 시도의 역할·경과 시간·직렬화/실제 전달 byte 수·관측 terminal state·실제 Codex usage만
 기록한다. 원문·요청·응답 본문은 기록하지 않는다. 관측되지 않은 usage/state는 `null`이며

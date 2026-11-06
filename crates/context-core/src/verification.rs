@@ -16,6 +16,7 @@ use crate::{ContextError, Result, harness::verified_repository_file};
 const CURRENT_HARNESS_RUNTIME_FILES: &[&str] = &[
     "crates/context-core/src/harness.rs",
     "crates/context-core/src/harness/execution.rs",
+    "crates/context-core/src/harness/exact_edit.rs",
     "crates/context-core/src/harness/finalization.rs",
     "crates/context-core/src/harness/persistence.rs",
     "crates/context-core/src/harness/policy.rs",
@@ -281,6 +282,7 @@ fn assert_native_module_wiring(path: &str, syntax: &syn::File, failures: &mut Fa
         "crates/context-core/src/lib.rs" => &["harness"],
         "crates/context-core/src/harness.rs" => &[
             "execution",
+            "exact_edit",
             "finalization",
             "persistence",
             "policy",

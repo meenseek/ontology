@@ -163,6 +163,7 @@ pub fn envelope(
             write_kind: value(WriteKind::Document, 5, &mut records),
             targets: value(targets, 6, &mut records),
             delete_targets: (!deletes.is_empty()).then(|| value(deletes, 7, &mut records)),
+            exact_edits: None,
         })
     };
     RequestEnvelope {

@@ -1529,9 +1529,21 @@ fn validate_completed_role_result(
             RoleTaskContract::Writer {
                 targets,
                 curation_kind,
+                exact_edits,
             },
             CompletedRoleResult::Writer { artifact },
-        ) => validate_writer_artifact(plan, targets, *curation_kind, artifact),
+        ) => {
+            validate_writer_artifact(plan, targets, *curation_kind, artifact)?;
+            if !exact_edits.is_empty() {
+                let expected = exact_edit_changes(exact_edits, role_bundle.bound_documents())?;
+                if artifact != &(WriterArtifact::Changes { changes: expected }) {
+                    return Err(HarnessError::InvalidSubmission(
+                        "Writer result differs from the bound exact edits".to_owned(),
+                    ));
+                }
+            }
+            Ok(())
+        }
         (
             RoleTaskContract::Specialist {
                 source_targets,
@@ -5611,6 +5623,17 @@ impl HarnessExecutionRecord {
     ) -> HarnessResult<Self> {
         prepared.validate_with_engine(raw_prepared_run, engine)?;
         self.validate(prepared, raw_prepared_run)?;
+        if !prepared
+            .plan
+            .resolved_request
+            .contract
+            .exact_edits()
+            .is_empty()
+        {
+            return Err(HarnessError::InvalidSubmission(
+                "exact edits require a new request instead of revision".to_owned(),
+            ));
+        }
         let evaluation = self.evaluation.as_ref().ok_or_else(|| {
             HarnessError::InvalidSubmission(
                 "current revision requires a Harness engine evaluation".to_owned(),
@@ -7781,7 +7804,7 @@ fn planned_target_paths(plan: &ResolvedHarnessPlan) -> Vec<String> {
         .collect()
 }
 
-fn validate_artifact_text(field: &str, value: &str) -> HarnessResult<()> {
+pub(super) fn validate_artifact_text(field: &str, value: &str) -> HarnessResult<()> {
     if value.trim().is_empty() {
         return Err(HarnessError::InvalidSubmission(format!(
             "{field} must not be empty"

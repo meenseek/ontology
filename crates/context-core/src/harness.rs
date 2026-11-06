@@ -25,6 +25,8 @@ use crate::{
     frontmatter::{ParsedFrontmatter, split_markdown_frontmatter},
 };
 
+mod exact_edit;
+pub use exact_edit::{ExactDocumentEdit, ExactReplacement, exact_edit_changes};
 mod preservation;
 mod reviewed_snapshot;
 pub use preservation::ReviewedCareerPreservation;
@@ -1473,6 +1475,7 @@ pub enum RoleTaskContract {
     Writer {
         targets: Vec<TargetBinding>,
         curation_kind: Option<CurationKind>,
+        exact_edits: Vec<ExactDocumentEdit>,
     },
     Specialist {
         source_targets: Vec<TargetBinding>,
@@ -4957,6 +4960,11 @@ impl HarnessEngine {
             workspace_policies,
             vault: &self.vault,
         })?;
+        if !contract.exact_edits().is_empty() {
+            exact_edit::validate_exact_edit_bindings(contract.exact_edits(), &plan.targets)?;
+            // Immutable user literals cannot be revised by a generative Writer.
+            plan.max_revisions = 0;
+        }
         plan.review_artifacts =
             self.bind_review_artifacts(contract.review_artifact_paths(), &plan.targets)?;
         plan.source_versions = self.plan_source_versions(
@@ -5149,7 +5157,7 @@ impl HarnessEngine {
                     context_bundle_digest: context_bundle_digest.clone(),
                     promotion_handoff: resolved.plan.promotion_handoff.clone(),
                 };
-                let task = role_task_contract(&resolved.plan, role);
+                let task = role_task_contract(resolved, role);
                 Ok(PreparedRoleMetadata {
                     resolved_plan_digest: resolved.resolved_plan_digest.clone(),
                     contract_digest: resolved.plan.contract_digest.clone(),
@@ -5229,7 +5237,7 @@ impl HarnessEngine {
             .ok_or_else(|| {
                 HarnessError::InvalidPlan(format!("role {role:?} has no policy bundle"))
             })?;
-        let task = role_task_contract(&resolved.plan, role);
+        let task = role_task_contract(resolved, role);
         let (control_head, control_tail) =
             role_control_segments(resolved, career_claim_lineage, role, &task)?;
         let mut documents = self.collect_mandatory_role_documents(
@@ -8178,12 +8186,14 @@ fn career_claim_lineage_for_role(resolved: &ResolvedHarnessRequest) -> Vec<Caree
         })
 }
 
-fn role_task_contract(plan: &ResolvedHarnessPlan, role: HarnessRole) -> RoleTaskContract {
+fn role_task_contract(resolved: &ResolvedHarnessRequest, role: HarnessRole) -> RoleTaskContract {
+    let plan = &resolved.plan;
     let requirements = role_requirements(plan, role);
     match role {
         HarnessRole::Writer => RoleTaskContract::Writer {
             targets: plan.targets.clone(),
             curation_kind: plan.curation_kind,
+            exact_edits: resolved.contract.exact_edits().to_vec(),
         },
         HarnessRole::Specialist => RoleTaskContract::Specialist {
             source_targets: plan.targets.clone(),
@@ -8235,6 +8245,7 @@ fn career_review_scope(resolved: &ResolvedHarnessRequest) -> Option<CareerReview
 struct RoleControlHead<'a> {
     segment: &'static str,
     task_statement: &'a str,
+    exact_edits: &'a [ExactDocumentEdit],
     action: HarnessAction,
     owner: &'a DataOwner,
     intent: HarnessIntent,
@@ -8276,6 +8287,7 @@ fn role_control_segments(
     let head = serde_json::to_string_pretty(&RoleControlHead {
         segment: "control-head",
         task_statement: &resolved.request.objective,
+        exact_edits: resolved.contract.exact_edits(),
         action: resolved.plan.action,
         owner: &resolved.plan.owner,
         intent: resolved.plan.intent,
