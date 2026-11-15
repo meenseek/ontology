@@ -36,7 +36,7 @@ async fn call(store: &Store, v: Value) -> Value {
 async fn native_memory_contract() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE document_subjects,memory_grouping,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects")
+    sqlx_core::query::query("TRUNCATE document_subjects,memory_grouping,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects")
         .execute(store.pool())
         .await
         .expect("reset synthetic memories only");
@@ -128,18 +128,21 @@ async fn native_memory_contract() {
     )
     .await;
     assert_eq!(store.brain(cmd(create)).await, Err(Error::Gone));
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_history WHERE memory_id=$1")
-        .bind(id)
-        .fetch_one(store.pool())
-        .await
-        .expect("erased history");
+    let count: i64 = sqlx_core::query_scalar::query_scalar(
+        "SELECT count(*) FROM memory_history WHERE memory_id=$1",
+    )
+    .bind(id)
+    .fetch_one(store.pool())
+    .await
+    .expect("erased history");
     assert_eq!(count, 0);
-    let tombstone: Value =
-        sqlx::query_scalar("SELECT to_jsonb(c) FROM memory_creations c WHERE memory_id=$1")
-            .bind(id)
-            .fetch_one(store.pool())
-            .await
-            .expect("minimal tombstone");
+    let tombstone: Value = sqlx_core::query_scalar::query_scalar(
+        "SELECT to_jsonb(c) FROM memory_creations c WHERE memory_id=$1",
+    )
+    .bind(id)
+    .fetch_one(store.pool())
+    .await
+    .expect("minimal tombstone");
     assert_eq!(tombstone.as_object().expect("object").len(), 4);
     assert!(!tombstone.to_string().contains("test-create"));
     let proposal=call(&store,json!({"op":"propose","scope":"personal","idempotency_key":"proposal-key","memory":input()})).await;
@@ -326,7 +329,7 @@ async fn detail_and_subject_queries_stay_bounded_across_cardinalities() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for size in [0, 1, 20] {
-        sqlx::query("TRUNCATE document_subjects,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
+        sqlx_core::query::query("TRUNCATE document_subjects,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
             .execute(store.pool()).await.expect("reset isolated query fixture");
         let attached = if size == 20 { 10 } else { 0 };
         let records: Vec<_> = (0..=attached)
@@ -853,10 +856,11 @@ async fn sync_contract() {
         .import_context(&vault, &scopes, &inventory.inventory_digest)
         .await
         .expect("canonical import");
-    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .expect("identity");
+    let store_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .expect("identity");
     let mut both = config.clone();
     both["sources"].as_array_mut().expect("sources").push(json!({"kind":"context","store_id":store_id,"context_scope":"personal","scope":"personal","paths":["projects/note.md"]}));
     write_config(&both);
@@ -890,7 +894,7 @@ async fn sync_contract() {
 async fn capture_search_and_historical_evidence_contract() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE document_subjects,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
+    sqlx_core::query::query("TRUNCATE document_subjects,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
     let content_only = json!({"op":"remember","scope":"meenseek","idempotency_key":"body-only-record","memory":{"body":"  관찰한 내용\n\n아직 판단하지 않았다."}});
     let record = call(&store, content_only.clone()).await;
     assert_eq!(record["kind"], "record");
@@ -914,12 +918,13 @@ async fn capture_search_and_historical_evidence_contract() {
         "same automatic intent normalizes consistently"
     );
     let manual = call(&store,json!({"op":"remember","scope":"meenseek","idempotency_key":"legacy-manual-key","memory":{"kind":"fact","title":"Manual","body":"Body"}})).await;
-    let stored_digest: String =
-        sqlx::query_scalar("SELECT payload_digest FROM memory_creations WHERE memory_id=$1")
-            .bind(manual["id"].as_str().unwrap())
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+    let stored_digest: String = sqlx_core::query_scalar::query_scalar(
+        "SELECT payload_digest FROM memory_creations WHERE memory_id=$1",
+    )
+    .bind(manual["id"].as_str().unwrap())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     assert_eq!(stored_digest,digest(br#"[false,{"kind":"fact","title":"Manual","body":"Body","subject_id":null,"effective_from":null,"effective_until":null,"evidence":[]}]"#),"explicit title keeps the previously deployed request digest");
     call(&store, json!({"op":"correct","scope":"meenseek","id":record["id"],"revision":1,"memory":{"body":"결론을 내릴 근거가 부족하다."}})).await;
     call(
@@ -986,7 +991,7 @@ async fn capture_search_and_historical_evidence_contract() {
         ids.push(memory["id"].as_str().unwrap().to_owned());
     }
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_contents")
+        sqlx_core::query_scalar::query_scalar::<_, i64>("SELECT count(*) FROM evidence_contents")
             .fetch_one(store.pool())
             .await
             .unwrap(),
@@ -1053,7 +1058,7 @@ async fn capture_search_and_historical_evidence_contract() {
     )
     .await;
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
+        sqlx_core::query_scalar::query_scalar::<_, i64>(
             "SELECT count(*) FROM evidence_contents WHERE scope='meenseek'"
         )
         .fetch_one(store.pool())
@@ -1067,7 +1072,7 @@ async fn capture_search_and_historical_evidence_contract() {
     )
     .await;
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
+        sqlx_core::query_scalar::query_scalar::<_, i64>(
             "SELECT count(*) FROM evidence_contents WHERE scope='meenseek'"
         )
         .fetch_one(store.pool())
@@ -1076,7 +1081,7 @@ async fn capture_search_and_historical_evidence_contract() {
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
+        sqlx_core::query_scalar::query_scalar::<_, i64>(
             "SELECT count(*) FROM evidence_contents WHERE scope='personal'"
         )
         .fetch_one(store.pool())
@@ -1126,10 +1131,10 @@ async fn capture_search_and_historical_evidence_contract() {
 async fn evidence_migration_preserves_existing_records() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches")
+    sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches")
         .execute(store.pool()).await.unwrap();
     context_history::legacy_history(&store).await;
-    sqlx::query("TRUNCATE document_subjects,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
+    sqlx_core::query::query("TRUNCATE document_subjects,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
     let hash = digest(b"migration-evidence");
     let mut source = ImportedRecord {
         source_id: format!("s_{hash}"),
@@ -1157,33 +1162,35 @@ async fn evidence_migration_preserves_existing_records() {
         call(&store,json!({"op":"remember","scope":"meenseek","idempotency_key":format!("migration-plain-{i}"),"memory":{"body":"No classification required"}})).await;
     }
     async fn existing(store: &Store) -> Value {
-        sqlx::query_scalar("SELECT jsonb_build_object('memories',(SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM memories m),'history',(SELECT jsonb_agg(to_jsonb(h)-'grouping_only' ORDER BY memory_id,revision) FROM memory_history h),'creations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY memory_id) FROM memory_creations c),'subjects',(SELECT jsonb_agg(to_jsonb(s)-'revision'-'definition' ORDER BY id) FROM subjects s),'sources',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM sources s),'records',(SELECT jsonb_agg(to_jsonb(r)-'reference_paths' ORDER BY entity_id) FROM source_records r),'entities',(SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM entities e))").fetch_one(store.pool()).await.unwrap()
+        sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('memories',(SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM memories m),'history',(SELECT jsonb_agg(to_jsonb(h)-'grouping_only' ORDER BY memory_id,revision) FROM memory_history h),'creations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY memory_id) FROM memory_creations c),'subjects',(SELECT jsonb_agg(to_jsonb(s)-'revision'-'definition' ORDER BY id) FROM subjects s),'sources',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM sources s),'records',(SELECT jsonb_agg(to_jsonb(r)-'reference_paths' ORDER BY entity_id) FROM source_records r),'entities',(SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM entities e))").fetch_one(store.pool()).await.unwrap()
     }
     let before = existing(&store).await;
     // Recreate the actual pre-upgrade schema, retaining every existing row, timestamp and digest.
-    sqlx::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'; DROP TABLE document_subjects; DROP TABLE document_subject_history; DROP TABLE subject_history; ALTER TABLE subjects DROP COLUMN definition, DROP COLUMN revision; ALTER TABLE source_records DROP COLUMN reference_paths; DELETE FROM ontology_migrations WHERE name='013-knowledge-taxonomy.sql'; DROP FUNCTION context_projection_refresh_guard() CASCADE; DELETE FROM ontology_migrations WHERE name='012-context-projection-refresh.sql'; DELETE FROM ontology_migrations WHERE name='014-grouping-claim-ownership.sql'; DROP TABLE memory_grouping; DELETE FROM ontology_migrations WHERE name='011-personal-memory-grouping.sql'; DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code='vault-read-failed')); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name IN ('008-context-consumers.sql','009-context-manual-edits.sql','010-profile-manual-edits.sql'); DROP TABLE context_projection_versions; DROP FUNCTION context_projection_validate(); DROP TABLE context_material_versions; ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TABLE context_materials; DROP TABLE context_apply_batches; DROP FUNCTION context_core_contract_immutable(); DROP TABLE context_store; DROP FUNCTION context_record_version(); DROP FUNCTION context_material_revision(); DROP FUNCTION context_immutable_record(); DROP FUNCTION context_exclusive_gate(); DROP TABLE curation_reviews; DROP TABLE evidence_snapshots; DROP TABLE evidence_contents; DELETE FROM ontology_migrations WHERE name IN ('003-evidence-snapshots.sql','004-curation-reviews.sql','005-context-materials.sql','006-context-history.sql','007-context-native.sql');").execute(store.pool()).await.unwrap();
-    sqlx::query("CREATE TABLE evidence_snapshots (failure_fixture boolean)")
+    sqlx_core::raw_sql::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'; DROP TABLE document_subjects; DROP TABLE document_subject_history; DROP TABLE subject_history; ALTER TABLE subjects DROP COLUMN definition, DROP COLUMN revision; ALTER TABLE source_records DROP COLUMN reference_paths; DELETE FROM ontology_migrations WHERE name='013-knowledge-taxonomy.sql'; DROP FUNCTION context_projection_refresh_guard() CASCADE; DELETE FROM ontology_migrations WHERE name='012-context-projection-refresh.sql'; DELETE FROM ontology_migrations WHERE name='014-grouping-claim-ownership.sql'; DROP TABLE memory_grouping; DELETE FROM ontology_migrations WHERE name='011-personal-memory-grouping.sql'; DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code='vault-read-failed')); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name IN ('008-context-consumers.sql','009-context-manual-edits.sql','010-profile-manual-edits.sql'); DROP TABLE context_projection_versions; DROP FUNCTION context_projection_validate(); DROP TABLE context_material_versions; ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TABLE context_materials; DROP TABLE context_apply_batches; DROP FUNCTION context_core_contract_immutable(); DROP TABLE context_store; DROP FUNCTION context_record_version(); DROP FUNCTION context_material_revision(); DROP FUNCTION context_immutable_record(); DROP FUNCTION context_exclusive_gate(); DROP TABLE curation_reviews; DROP TABLE evidence_snapshots; DROP TABLE evidence_contents; DELETE FROM ontology_migrations WHERE name IN ('003-evidence-snapshots.sql','004-curation-reviews.sql','005-context-materials.sql','006-context-history.sql','007-context-native.sql');").execute(store.pool()).await.unwrap();
+    sqlx_core::query::query("CREATE TABLE evidence_snapshots (failure_fixture boolean)")
         .execute(store.pool())
         .await
         .unwrap();
     assert_eq!(store.initialize().await, Err(Error::Baseline));
     assert_eq!(existing(&store).await, before);
     assert_eq!(
-        sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass('evidence_contents')::text")
-            .fetch_one(store.pool())
-            .await
-            .unwrap(),
+        sqlx_core::query_scalar::query_scalar::<_, Option<String>>(
+            "SELECT to_regclass('evidence_contents')::text"
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
         None,
         "failed append rolls back preceding CREATE and migration marker"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ontology_migrations")
+        sqlx_core::query_scalar::query_scalar::<_, i64>("SELECT count(*) FROM ontology_migrations")
             .fetch_one(store.pool())
             .await
             .unwrap(),
         2
     );
-    sqlx::query("DROP TABLE evidence_snapshots")
+    sqlx_core::query::query("DROP TABLE evidence_snapshots")
         .execute(store.pool())
         .await
         .unwrap();
@@ -1194,7 +1201,7 @@ async fn evidence_migration_preserves_existing_records() {
     store.initialize().await.unwrap();
     assert_eq!(existing(&store).await, before);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_snapshots")
+        sqlx_core::query_scalar::query_scalar::<_, i64>("SELECT count(*) FROM evidence_snapshots")
             .fetch_one(store.pool())
             .await
             .unwrap(),
@@ -1212,7 +1219,7 @@ async fn evidence_migration_preserves_existing_records() {
 async fn subject_delete_keeps_records_and_bounds_database_calls() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE document_subjects,memory_grouping,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects")
+    sqlx_core::query::query("TRUNCATE document_subjects,memory_grouping,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects")
         .execute(store.pool()).await.expect("reset synthetic memories only");
 
     let empty = call(&store, json!({"op":"subject-create","scope":"personal","idempotency_key":"empty-delete","name":"빈 합성 묶음"})).await;
@@ -1264,7 +1271,7 @@ async fn subject_delete_keeps_records_and_bounds_database_calls() {
     let candidate = &options["items"][0];
     let evidence = json!({"entity_id":candidate["entity_id"],"source_revision":candidate["source_revision"],"content_digest":candidate["content_digest"],"generation":candidate["generation"]});
     let suggestion = call(&store, json!({"op":"remember","scope":"personal","idempotency_key":"suggestion-memory","memory":{"title":"미분류 기록","body":"후보 묶음을 기다림"}})).await;
-    sqlx::query("UPDATE memory_grouping SET state='suggested',suggestions=jsonb_build_object('candidate_ids',jsonb_build_array($2::text),'candidate_names',jsonb_build_object($2::text,'합성 묶음')) WHERE memory_id=$1")
+    sqlx_core::query::query("UPDATE memory_grouping SET state='suggested',suggestions=jsonb_build_object('candidate_ids',jsonb_build_array($2::text),'candidate_names',jsonb_build_object($2::text,'합성 묶음')) WHERE memory_id=$1")
         .bind(suggestion["id"].as_str().unwrap()).bind(id).execute(store.pool()).await.unwrap();
     let mut memories = Vec::new();
     for index in 0..20 {

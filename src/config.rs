@@ -1,5 +1,5 @@
 use crate::domain::Error;
-use sqlx::postgres::{PgConnectOptions, PgSslMode};
+use sqlx_postgres::{PgConnectOptions, PgSslMode};
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,

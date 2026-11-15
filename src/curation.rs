@@ -9,7 +9,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::Row;
+use sqlx_core::row::Row;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -289,7 +289,7 @@ impl Store {
  AND NOT COALESCE(latest.current,false)
  ORDER BY i.id LIMIT $2) q"#
         );
-        let mut items: Vec<Value> = sqlx::query_scalar(sql)
+        let mut items: Vec<Value> = sqlx_core::query_scalar::query_scalar(sql)
             .bind(scope.as_str())
             .bind((limit + 1) as i64)
             .bind(after)
@@ -321,7 +321,7 @@ impl Store {
         }
         self.count(1);
         let sql = curation_query!(" SELECT to_jsonb(i) FROM inputs i WHERE id=ANY($2) ORDER BY id");
-        let items: Vec<Value> = sqlx::query_scalar(sql)
+        let items: Vec<Value> = sqlx_core::query_scalar::query_scalar(sql)
             .bind(scope.as_str())
             .bind(ids)
             .fetch_all(self.pool())
@@ -340,7 +340,7 @@ impl Store {
         let sql = curation_query!(
             " SELECT to_jsonb(r)-'key_digest'-'input_digest' FROM receipts r WHERE id=$2"
         );
-        let value = sqlx::query_scalar(sql)
+        let value = sqlx_core::query_scalar::query_scalar(sql)
             .bind(scope.as_str())
             .bind(id)
             .fetch_optional(self.pool())
@@ -376,7 +376,7 @@ impl Store {
         let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
         self.lock_memories(&mut tx, scope).await?;
         self.count(1);
-        let existing=sqlx::query("SELECT id,candidate_digest,author FROM curation_reviews WHERE scope=$1 AND key_digest=$2")
+        let existing=sqlx_core::query::query("SELECT id,candidate_digest,author FROM curation_reviews WHERE scope=$1 AND key_digest=$2")
             .bind(scope.as_str()).bind(digest(key.as_bytes())).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?;
         if let Some(row) = existing {
             if row.get::<String, _>("candidate_digest") != candidate_digest
@@ -416,7 +416,7 @@ impl Store {
         }
         self.curation_check(&mut tx, scope, &candidate).await?;
         self.count(1);
-        sqlx::query("INSERT INTO curation_reviews(id,scope,key_digest,source_id,input_digest,candidate_digest,candidate,author) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+        sqlx_core::query::query("INSERT INTO curation_reviews(id,scope,key_digest,source_id,input_digest,candidate_digest,candidate,author) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
             .bind(&id).bind(scope.as_str()).bind(digest(key.as_bytes())).bind(&candidate.source_id).bind(input_digest).bind(candidate_digest).bind(candidate_json).bind(author)
             .execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         self.count(1);
@@ -425,7 +425,7 @@ impl Store {
     }
     async fn curation_check(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tx: &mut sqlx_core::transaction::Transaction<'_, sqlx_postgres::Postgres>,
         scope: Scope,
         candidate: &Candidate,
     ) -> Result<(), Error> {
@@ -438,7 +438,7 @@ impl Store {
                 .iter()
                 .map(|b| b.entity_id.as_str())
                 .collect();
-            sqlx::query("SELECT s.id FROM sources s JOIN entities e ON e.scope=s.scope AND e.source_id=s.id JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE s.scope=$1 AND (e.id=ANY($2) OR e.id IN (SELECT x->>'entity_id' FROM memories m CROSS JOIN LATERAL jsonb_array_elements(m.document->'evidence') x WHERE m.scope=$1 AND m.id=ANY($2))) ORDER BY s.id FOR SHARE OF s,p")
+            sqlx_core::query::query("SELECT s.id FROM sources s JOIN entities e ON e.scope=s.scope AND e.source_id=s.id JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE s.scope=$1 AND (e.id=ANY($2) OR e.id IN (SELECT x->>'entity_id' FROM memories m CROSS JOIN LATERAL jsonb_array_elements(m.document->'evidence') x WHERE m.scope=$1 AND m.id=ANY($2))) ORDER BY s.id FOR SHARE OF s,p")
                 .bind(scope.as_str()).bind(ids).fetch_all(&mut **tx).await.map_err(|_|Error::Storage)?;
         }
         self.count(1);
@@ -449,7 +449,7 @@ impl Store {
             .iter()
             .map(|b| b.entity_id.as_str())
             .collect();
-        let rows = sqlx::query(sql)
+        let rows = sqlx_core::query::query(sql)
             .bind(scope.as_str())
             .bind(ids)
             .fetch_all(&mut **tx)
@@ -497,7 +497,7 @@ impl Store {
         }
         if let Some(target) = candidate.target() {
             self.count(1);
-            let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memories WHERE scope=$1 AND id=$2 AND revision=$3 AND status='accepted' AND document->'curation'->>'source_id'=$4)")
+            let valid:bool=sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM memories WHERE scope=$1 AND id=$2 AND revision=$3 AND status='accepted' AND document->'curation'->>'source_id'=$4)")
                 .bind(scope.as_str()).bind(&target.id).bind(target.revision).bind(&candidate.source_id).fetch_one(&mut **tx).await.map_err(|_|Error::Storage)?;
             if !valid {
                 return Err(Error::Conflict);
@@ -515,7 +515,7 @@ impl Store {
         let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
         self.lock_memories(&mut tx, scope).await?;
         self.count(1);
-        let row=sqlx::query("SELECT candidate,candidate_digest,author,input_digest,result,review FROM curation_reviews WHERE scope=$1 AND id=$2 FOR UPDATE")
+        let row=sqlx_core::query::query("SELECT candidate,candidate_digest,author,input_digest,result,review FROM curation_reviews WHERE scope=$1 AND id=$2 FOR UPDATE")
             .bind(scope.as_str()).bind(id).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?.ok_or(Error::NotFound)?;
         if row.get::<String, _>("candidate_digest") != review.candidate_digest
             || row.get::<String, _>("author") == review.reviewer
@@ -540,7 +540,7 @@ impl Store {
             ReviewDecision::Reject => json!({"outcome":"rejected","review_id":id}),
             ReviewDecision::Approve => {
                 self.count(1);
-                let duplicate:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM curation_reviews WHERE scope=$1 AND source_id=$2 AND input_digest=$3 AND result->>'outcome' IN ('created','updated','no-change','forgotten'))")
+                let duplicate:bool=sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM curation_reviews WHERE scope=$1 AND source_id=$2 AND input_digest=$3 AND result->>'outcome' IN ('created','updated','no-change','forgotten'))")
                     .bind(scope.as_str()).bind(&candidate.source_id).bind(row.get::<String,_>("input_digest")).fetch_one(&mut *tx).await.map_err(|_|Error::Storage)?;
                 if duplicate {
                     return Err(Error::Conflict);
@@ -578,16 +578,16 @@ impl Store {
                             )
                             .await?;
                             self.count(1);
-                            sqlx::query("UPDATE memories SET revision=revision+1,document=$3,subject_id=CASE WHEN $4 THEN NULL ELSE subject_id END,updated_at=now() WHERE scope=$1 AND id=$2")
+                            sqlx_core::query::query("UPDATE memories SET revision=revision+1,document=$3,subject_id=CASE WHEN $4 THEN NULL ELSE subject_id END,updated_at=now() WHERE scope=$1 AND id=$2")
                                 .bind(scope.as_str()).bind(&target.id).bind(document).bind(automatic).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
                             (target.id.clone(), "updated")
                         } else {
                             let memory_id = format!("m_{}", Uuid::new_v4());
                             self.count(1);
-                            sqlx::query("INSERT INTO memory_creations(scope,key_digest,payload_digest,memory_id) VALUES($1,$2,$3,$4)")
+                            sqlx_core::query::query("INSERT INTO memory_creations(scope,key_digest,payload_digest,memory_id) VALUES($1,$2,$3,$4)")
                                 .bind(scope.as_str()).bind(digest(format!("curation:{id}").as_bytes())).bind(&review.candidate_digest).bind(&memory_id).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
                             self.count(1);
-                            sqlx::query("INSERT INTO memories(id,scope,revision,status,document) VALUES($1,$2,1,'accepted',$3)")
+                            sqlx_core::query::query("INSERT INTO memories(id,scope,revision,status,document) VALUES($1,$2,1,'accepted',$3)")
                                 .bind(&memory_id).bind(scope.as_str()).bind(document).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
                             crate::grouping::on_capture(&mut tx, scope, &memory_id, &input).await?;
                             (memory_id, "created")
@@ -601,7 +601,7 @@ impl Store {
             }
         };
         self.count(1);
-        sqlx::query("UPDATE curation_reviews SET review=$3,result=$4,reviewed_at=now() WHERE scope=$1 AND id=$2")
+        sqlx_core::query::query("UPDATE curation_reviews SET review=$3,result=$4,reviewed_at=now() WHERE scope=$1 AND id=$2")
             .bind(scope.as_str()).bind(id).bind(review_json).bind(&result).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         self.count(1);
         tx.commit().await.map_err(|_| Error::Storage)?;

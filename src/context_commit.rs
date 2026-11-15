@@ -13,7 +13,10 @@ use context_core::harness::{
     SourceStoreIdentity, SourceVersion, StoredSourceState, VerifiedContextCommit,
 };
 use serde_json::{Value, json};
-use sqlx::{Connection, PgConnection, Row, postgres::PgRow};
+use sqlx_core::connection::Connection;
+use sqlx_core::row::Row;
+use sqlx_postgres::PgConnection;
+use sqlx_postgres::PgRow;
 use std::collections::{BTreeMap, BTreeSet};
 
 // Observe the PostgreSQL application payload at the encoder and returned-row
@@ -56,19 +59,23 @@ struct SqlParameter<T> {
     value: T,
     parameters: std::sync::Arc<std::sync::Mutex<(sha2::Sha256, usize)>>,
 }
-impl<T: sqlx::Type<sqlx::Postgres>> sqlx::Type<sqlx::Postgres> for SqlParameter<T> {
-    fn type_info() -> sqlx::postgres::PgTypeInfo {
+impl<T: sqlx_core::types::Type<sqlx_postgres::Postgres>>
+    sqlx_core::types::Type<sqlx_postgres::Postgres> for SqlParameter<T>
+{
+    fn type_info() -> sqlx_postgres::PgTypeInfo {
         T::type_info()
     }
-    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+    fn compatible(ty: &sqlx_postgres::PgTypeInfo) -> bool {
         T::compatible(ty)
     }
 }
-impl<'q, T: sqlx::Encode<'q, sqlx::Postgres>> sqlx::Encode<'q, sqlx::Postgres> for SqlParameter<T> {
+impl<'q, T: sqlx_core::encode::Encode<'q, sqlx_postgres::Postgres>>
+    sqlx_core::encode::Encode<'q, sqlx_postgres::Postgres> for SqlParameter<T>
+{
     fn encode_by_ref(
         &self,
-        buffer: &mut sqlx::postgres::PgArgumentBuffer,
-    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        buffer: &mut sqlx_postgres::PgArgumentBuffer,
+    ) -> Result<sqlx_core::encode::IsNull, sqlx_core::error::BoxDynError> {
         use sha2::Digest;
         let start = buffer.len();
         let result = self.value.encode_by_ref(buffer)?;
@@ -79,13 +86,13 @@ impl<'q, T: sqlx::Encode<'q, sqlx::Postgres>> sqlx::Encode<'q, sqlx::Postgres> f
         let bytes = &buffer[start..];
         observed
             .0
-            .update([u8::from(matches!(&result, sqlx::encode::IsNull::Yes))]);
+            .update([u8::from(matches!(&result, sqlx_core::encode::IsNull::Yes))]);
         observed.0.update(bytes.len().to_be_bytes());
         observed.0.update(bytes);
         observed.1 = observed.1.saturating_add(bytes.len());
         Ok(result)
     }
-    fn produces(&self) -> Option<sqlx::postgres::PgTypeInfo> {
+    fn produces(&self) -> Option<sqlx_postgres::PgTypeInfo> {
         self.value.produces()
     }
     fn size_hint(&self) -> usize {
@@ -122,7 +129,7 @@ impl<'a> SqlObservation<'a> {
     }
     fn finish(&self, started: u64, succeeded: bool, rows: &[PgRow]) {
         use sha2::Digest;
-        use sqlx::ValueRef;
+        use sqlx_core::value::ValueRef;
         let mut bytes = 0usize;
         let mut complete = true;
         for row in rows {
@@ -165,7 +172,7 @@ impl<'a> SqlObservation<'a> {
     }
     async fn fetch_all(
         self,
-        query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+        query: sqlx_core::query::Query<'_, sqlx_postgres::Postgres, sqlx_postgres::PgArguments>,
         connection: &mut PgConnection,
     ) -> HarnessResult<Vec<PgRow>> {
         let started = self.start();
@@ -179,9 +186,9 @@ impl<'a> SqlObservation<'a> {
     }
     async fn execute(
         self,
-        query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+        query: sqlx_core::query::Query<'_, sqlx_postgres::Postgres, sqlx_postgres::PgArguments>,
         connection: &mut PgConnection,
-    ) -> HarnessResult<sqlx::postgres::PgQueryResult> {
+    ) -> HarnessResult<sqlx_postgres::PgQueryResult> {
         let started = self.start();
         let result = query.execute(connection).await;
         self.finish(started, result.is_ok(), &[]);
@@ -210,7 +217,7 @@ impl NativeContextSession {
 fn conflict<T>() -> HarnessResult<T> {
     Err(source_error(Error::Conflict))
 }
-fn storage(_: sqlx::Error) -> context_core::harness::HarnessError {
+fn storage(_: sqlx_core::error::Error) -> context_core::harness::HarnessError {
     source_error(Error::Storage)
 }
 fn encode(value: &impl serde::Serialize) -> HarnessResult<Vec<u8>> {
@@ -314,7 +321,7 @@ async fn versions(
     let rows = {
         let statement = "SELECT source_path,material_id::text,revision,content_digest,deleted FROM context_materials WHERE source_path=ANY($1) ORDER BY source_path COLLATE \"C\"";
         let observation = SqlObservation::new(store, observations, statement);
-        let query = sqlx::query(statement).bind(observation.bind(&paths));
+        let query = sqlx_core::query::query(statement).bind(observation.bind(&paths));
         observation.fetch_all(query, &mut *connection).await?
     };
     let states = rows
@@ -355,7 +362,7 @@ async fn effect(
     let mut rows = {
         let statement = "SELECT *,apply_id::text AS id,store_id::text AS store_identity FROM context_apply_batches WHERE state IN ('pending','committed') OR core_run_id=$1 OR core_apply_attempt_id=$2 OR expected_batch_id=$3 OR expected_journal_locator=$4";
         let observation = SqlObservation::new(store, observations, statement);
-        let query = sqlx::query(statement)
+        let query = sqlx_core::query::query(statement)
             .bind(observation.bind(&a.run_identifier))
             .bind(observation.bind(&a.attempt_identifier))
             .bind(observation.bind(&a.expected_batch_identifier))
@@ -443,7 +450,7 @@ async fn committed_rows(
     let rows = {
         let statement = "SELECT m.source_path,m.material_id::text,m.revision,m.content_digest,m.deleted,p.payload_digest FROM context_materials m JOIN context_material_versions v USING(material_id,revision) JOIN context_projection_versions p USING(material_id,revision) WHERE m.source_path=ANY($1) AND m.last_apply_id=$2::uuid AND v.apply_id=$2::uuid AND m.content=v.content AND m.content_digest=v.content_digest AND m.byte_len=v.byte_len AND m.deleted=v.deleted AND m.restricted=v.restricted AND m.search_text IS NOT DISTINCT FROM v.search_text AND p.payload_digest=encode(sha256(convert_to(p.payload::text,'UTF8')),'hex') AND p.payload->>'source_digest'=m.content_digest ORDER BY m.source_path COLLATE \"C\"";
         let observation = SqlObservation::new(store, observations, statement);
-        let query = sqlx::query(statement)
+        let query = sqlx_core::query::query(statement)
             .bind(observation.bind(&paths))
             .bind(observation.bind(apply_id));
         observation.fetch_all(query, &mut *connection).await?
@@ -491,7 +498,7 @@ impl ContextCommitSession for NativeContextSession {
         self.handle.block_on(async {
             let statement = "SELECT EXISTS(SELECT 1 FROM context_apply_batches WHERE state IN ('pending','committed') OR core_run_id=$1 OR prepared_run_digest=$2)";
             let observation = SqlObservation::new(&self.store, &self.sql_observations, statement);
-            let query = sqlx::query(statement)
+            let query = sqlx_core::query::query(statement)
                 .bind(observation.bind(contract.run_identifier()))
                 .bind(observation.bind(contract.prepared_run_digest()));
             let rows = observation.fetch_all(query, &mut connection).await?;
@@ -517,7 +524,7 @@ impl ContextCommitSession for NativeContextSession {
                 if row.get::<String,_>("state")!="pending" {return conflict();}
             } else if contract.requires_commit() {
                 let a=contract.attempt();
-                { let statement = "INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state,core_contract,core_contract_digest) VALUES(gen_random_uuid(),$1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11)"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx::query(statement)
+                { let statement = "INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state,core_contract,core_contract_digest) VALUES(gen_random_uuid(),$1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11)"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx_core::query::query(statement)
                     .bind(observation.bind(&self.identity.store_id)).bind(observation.bind(&a.run_identifier)).bind(observation.bind(&a.prepared_run_digest)).bind(observation.bind(&a.candidate_digest)).bind(observation.bind(expected(contract)))
                     .bind(observation.bind(serde_json::to_value(contract.targets()).map_err(|_|source_error(Error::Storage))?)).bind(observation.bind(&a.attempt_identifier)).bind(observation.bind(&a.expected_batch_identifier)).bind(observation.bind(&a.expected_journal_relative_path)).bind(observation.bind(&bytes)).bind(observation.bind(digest(&bytes)))
                     ; observation.execute(query, &mut tx).await? };
@@ -662,12 +669,12 @@ impl ContextCommitSession for NativeContextSession {
                 }
                 let records=Value::Array(records);
                 // JSON byte arrays decode inside PG to avoid per-target network calls.
-                { let statement = "WITH input AS (SELECT x.*,decode((SELECT string_agg(lpad(to_hex(v::int),2,'0'),'') FROM jsonb_array_elements_text(x.content) AS b(v)),'hex') AS bytes FROM jsonb_to_recordset($1) AS x(scope text,path text,source_path text,content jsonb,sha text,deleted boolean,id uuid,revision bigint,search_text text)) INSERT INTO context_materials(scope,path,source_path,content_digest,content,byte_len,restricted,search_text,deleted,origin_kind,source_root,source_digest,imported_at,last_apply_id) SELECT scope,path,source_path,sha,COALESCE(bytes,''::bytea),jsonb_array_length(content),false,search_text,deleted,'native',NULL,NULL,NULL,$2::uuid FROM input WHERE id IS NULL"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx::query(statement)
+                { let statement = "WITH input AS (SELECT x.*,decode((SELECT string_agg(lpad(to_hex(v::int),2,'0'),'') FROM jsonb_array_elements_text(x.content) AS b(v)),'hex') AS bytes FROM jsonb_to_recordset($1) AS x(scope text,path text,source_path text,content jsonb,sha text,deleted boolean,id uuid,revision bigint,search_text text)) INSERT INTO context_materials(scope,path,source_path,content_digest,content,byte_len,restricted,search_text,deleted,origin_kind,source_root,source_digest,imported_at,last_apply_id) SELECT scope,path,source_path,sha,COALESCE(bytes,''::bytea),jsonb_array_length(content),false,search_text,deleted,'native',NULL,NULL,NULL,$2::uuid FROM input WHERE id IS NULL"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx_core::query::query(statement)
                     .bind(observation.bind(&records)).bind(observation.bind(&apply_id)); observation.execute(query, &mut tx).await? };
-                { let statement = "WITH input AS (SELECT x.*,decode((SELECT string_agg(lpad(to_hex(v::int),2,'0'),'') FROM jsonb_array_elements_text(x.content) AS b(v)),'hex') AS bytes FROM jsonb_to_recordset($1) AS x(scope text,path text,source_path text,content jsonb,sha text,deleted boolean,id uuid,revision bigint,search_text text)) UPDATE context_materials m SET content=COALESCE(i.bytes,''::bytea),content_digest=i.sha,byte_len=jsonb_array_length(i.content),search_text=i.search_text,deleted=i.deleted,last_apply_id=$2::uuid FROM input i WHERE i.id=m.material_id AND i.revision=m.revision AND i.source_path=m.source_path"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx::query(statement)
+                { let statement = "WITH input AS (SELECT x.*,decode((SELECT string_agg(lpad(to_hex(v::int),2,'0'),'') FROM jsonb_array_elements_text(x.content) AS b(v)),'hex') AS bytes FROM jsonb_to_recordset($1) AS x(scope text,path text,source_path text,content jsonb,sha text,deleted boolean,id uuid,revision bigint,search_text text)) UPDATE context_materials m SET content=COALESCE(i.bytes,''::bytea),content_digest=i.sha,byte_len=jsonb_array_length(i.content),search_text=i.search_text,deleted=i.deleted,last_apply_id=$2::uuid FROM input i WHERE i.id=m.material_id AND i.revision=m.revision AND i.source_path=m.source_path"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx_core::query::query(statement)
                     .bind(observation.bind(&records)).bind(observation.bind(&apply_id)); observation.execute(query, &mut tx).await? };
                 let paths=payloads.keys().cloned().collect::<Vec<_>>();
-                let rows={ let statement = "SELECT source_path,material_id::text,revision FROM context_materials WHERE source_path=ANY($1)"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx::query(statement).bind(observation.bind(&paths)); observation.fetch_all(query, &mut tx).await? };
+                let rows={ let statement = "SELECT source_path,material_id::text,revision FROM context_materials WHERE source_path=ANY($1)"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx_core::query::query(statement).bind(observation.bind(&paths)); observation.fetch_all(query, &mut tx).await? };
                 if rows.len()!=page.len(){return conflict();}
                 let projections=rows.iter().map(|row|json!({"material_id":row.get::<String,_>("material_id"),"revision":row.get::<i64,_>("revision"),"payload":payloads[&row.get::<String,_>("source_path")]})).collect::<Vec<_>>();
                 let input_bytes = serde_json::to_vec(&projections).map_or(usize::MAX, |bytes| bytes.len());
@@ -682,7 +689,7 @@ impl ContextCommitSession for NativeContextSession {
             }
             let (resulting,projection_digest)=committed_rows(&self.store, &self.sql_observations, &mut tx,&apply_id,&previous(contract)).await?;
             let receipt=ContextCommitReceipt::from_persisted(verified,previous(contract),resulting,projection_digest)?;
-            { let statement = "UPDATE context_apply_batches SET state='committed',actual_batch_id=$2,actual_journal_locator=$3,commit_receipt=$4,updated_at=now() WHERE apply_id=$1::uuid AND state='pending'"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx::query(statement)
+            { let statement = "UPDATE context_apply_batches SET state='committed',actual_batch_id=$2,actual_journal_locator=$3,commit_receipt=$4,updated_at=now() WHERE apply_id=$1::uuid AND state='pending'"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx_core::query::query(statement)
                 .bind(observation.bind(&apply_id)).bind(observation.bind(receipt.batch_identifier())).bind(observation.bind(receipt.journal_relative_path())).bind(observation.bind(serde_json::to_value(&receipt).map_err(|_|source_error(Error::Storage))?)); observation.execute(query, &mut tx).await? };
             tx.commit().await.map_err(storage)?;
             Ok(receipt)
@@ -714,7 +721,7 @@ impl ContextCommitSession for NativeContextSession {
                 if state=="finalized" {
                     if row.get::<Option<String>,_>("final_core_receipt_digest").as_deref()!=Some(apply_receipt.apply_receipt_digest.as_str()){return conflict();}
                 }else if state=="committed"{
-                    { let statement = "UPDATE context_apply_batches SET state='finalized',final_core_receipt_digest=$2,updated_at=now() WHERE apply_id=$1::uuid"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx::query(statement).bind(observation.bind(row.get::<String,_>("id"))).bind(observation.bind(&apply_receipt.apply_receipt_digest)); observation.execute(query, &mut tx).await? };
+                    { let statement = "UPDATE context_apply_batches SET state='finalized',final_core_receipt_digest=$2,updated_at=now() WHERE apply_id=$1::uuid"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx_core::query::query(statement).bind(observation.bind(row.get::<String,_>("id"))).bind(observation.bind(&apply_receipt.apply_receipt_digest)); observation.execute(query, &mut tx).await? };
                 }else{return conflict();}
             }else if row.is_some()||apply_receipt.context_commit_receipt.is_some(){return conflict();}
             tx.commit().await.map_err(storage)
@@ -741,7 +748,7 @@ impl ContextCommitSession for NativeContextSession {
             check_versions(&self.store, &self.sql_observations, &mut tx,&previous(contract)).await?;
             if let Some(row)=row {
                 if !matches!(row.get::<String,_>("state").as_str(),"pending"|"aborted")||row.get::<Option<Value>,_>("commit_receipt").is_some(){return conflict();}
-                { let statement = "UPDATE context_apply_batches SET state='aborted',updated_at=now() WHERE apply_id=$1::uuid"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx::query(statement).bind(observation.bind(row.get::<String,_>("id"))); observation.execute(query, &mut tx).await? };
+                { let statement = "UPDATE context_apply_batches SET state='aborted',updated_at=now() WHERE apply_id=$1::uuid"; let observation = SqlObservation::new(&self.store, &self.sql_observations, statement); let query = sqlx_core::query::query(statement).bind(observation.bind(row.get::<String,_>("id"))); observation.execute(query, &mut tx).await? };
             }
             tx.commit().await.map_err(storage)
         })

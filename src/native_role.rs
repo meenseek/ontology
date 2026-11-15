@@ -1270,6 +1270,12 @@ fn run_codex_process_observed(
             "never",
             "--sandbox",
             "read-only",
+            // Core already bound the role's policies and input. Top-level AGENTS
+            // and session hooks would start a second task inside this read-only role.
+            "--config",
+            "project_doc_max_bytes=0",
+            "--disable",
+            "hooks",
         ])
         .arg("--output-schema")
         .arg(&schema_path);
@@ -1813,6 +1819,103 @@ mod observation_tests {
                 .outcome(true, &serde_json::to_vec(&segments).unwrap())
                 .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_role_process_excludes_top_level_startup_and_preserves_input() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut observed = Vec::new();
+        for (role, case_id) in [
+            (HarnessRole::Writer, "prepared-writer"),
+            (HarnessRole::Reviewer, "prepared-reviewer"),
+        ] {
+            let fixture = CodexDirectory::create().unwrap();
+            let binary = fixture.0.join("capture-codex");
+            fs::write(&binary, r#"#!/usr/bin/env python3
+import json, os, stat, sys
+from pathlib import Path
+payload = sys.stdin.buffer.read()
+capture = {"argv": sys.argv[1:], "stdin_hex": payload.hex(), "cwd": os.getcwd(),
+           "cwd_mode": stat.S_IMODE(os.stat(os.getcwd()).st_mode),
+           "schema_exists": Path(sys.argv[sys.argv.index("--output-schema") + 1]).is_file()}
+Path(__file__).with_name("captured.json").write_text(json.dumps(capture))
+message = json.dumps({"outcome": {"status": "failed", "message": "synthetic invocation capture only"}})
+for event in [{"type": "thread.started", "thread_id": "prepared-role-probe"},
+              {"type": "turn.started"},
+              {"type": "item.completed", "item": {"id": "answer", "type": "agent_message", "text": message}},
+              {"type": "turn.completed", "usage": {"input_tokens": 0, "cached_input_tokens": 0,
+                  "cache_write_input_tokens": 0, "output_tokens": 0, "reasoning_output_tokens": 0}}]:
+    print(json.dumps(event), flush=True)
+"#).unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+            let input = serde_json::to_vec(&serde_json::json!([{
+                "segment": "control-head", "role": role,
+                "task_statement": "Synthetic prepared role; no outer task startup."
+            }]))
+            .unwrap();
+            let limits = RoleLifecycleLimits {
+                max_role_execution_millis: 5000,
+                max_role_grace_millis: 100,
+                max_role_close_millis: 500,
+                max_total_role_millis: 5600,
+            };
+            let (_, outcome) = run_codex_process_observed(
+                &binary,
+                &input,
+                &[],
+                (role, codex_output_schema()),
+                &limits,
+                &AtomicBool::new(false),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(outcome, RoleExecutionOutcome::Failed { .. }));
+            let capture: serde_json::Value =
+                serde_json::from_slice(&fs::read(fixture.0.join("captured.json")).unwrap())
+                    .unwrap();
+            let argv = capture["argv"].as_array().unwrap();
+            let pair = |key: &str, value: &str| {
+                argv.windows(2)
+                    .any(|args| args[0] == key && args[1] == value)
+            };
+            let result = serde_json::json!({
+                "ambient_agents_disabled": pair("--config", "project_doc_max_bytes=0"),
+                "ambient_hooks_disabled": pair("--disable", "hooks"),
+                "read_only_sandbox": pair("--sandbox", "read-only"),
+                "model_configuration_preserved": !argv.iter().any(|arg|
+                    arg.as_str().is_some_and(|arg|
+                        ["--model", "-m", "--ignore-user-config", "--profile", "-p"]
+                            .contains(&arg))),
+            });
+            assert_eq!(
+                capture["stdin_hex"],
+                input
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            assert_eq!(capture["cwd_mode"], 0o700);
+            assert_eq!(capture["schema_exists"], true);
+            assert!(!Path::new(capture["cwd"].as_str().unwrap()).exists());
+            println!(
+                "NATIVE_ROLE_CONTEXT_OBSERVATION {}",
+                serde_json::json!({
+                    "case_id": case_id, "result": result,
+                })
+            );
+            observed.push(result);
+        }
+        for result in observed {
+            assert!(
+                result
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .all(|value| value.as_bool() == Some(true)),
+                "prepared roles must exclude ambient task startup: {result}"
+            );
+        }
     }
 
     #[cfg(unix)]

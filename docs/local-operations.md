@@ -798,14 +798,23 @@ Native Codex 실행기는 source read gate를 놓기 전에 Core가 검증한 by
 역할마다 전용 private cwd에 같은 상대 경로와 권한 `0600`으로 파일을 만들고, PNG/JPEG는
 `codex exec --image`로 첨부한다. PDF는 그 cwd에서 읽기 전용 파일 도구로 검사한다.
 이 cwd는 시스템 임시 위치에 새로 만든 권한 `0700` 디렉터리이며 출력 schema와 검증된
-첨부만 둔다. 원래 workspace의 `AGENTS.md`는 복사하지 않는다. `project_doc_max_bytes=0`
-override는 적용하지 않는다. `AGENTS.md`를 추가한 실험이 실제 역할 cwd에서의 개선을
-입증하지 못했기 때문이다. stdin bytes의 일치는 CLI가 별도로 결합하는 전역 지침까지
-포함한 전체 모델 입력의 동일성을 증명하지 않는다.
+첨부만 둔다. 원래 workspace의 `AGENTS.md`는 복사하지 않는다. Core가 발급한 이 준비된
+역할 호출에서만 `project_doc_max_bytes=0`과 `--disable hooks`로 일반 `AGENTS.md` 자동 주입과
+세션 훅을 끈다. 상위가 수행한 초기 원문 조회·정책 선택·작업 등록을 읽기 전용 하위 역할이
+다시 시작하지 않도록 하는 경계다. 일반 Codex 작업의 전역 설정·훅과 역할의 모델 선택·인증·
+읽기 전용 sandbox는 변경하지 않는다. 역할별 정책·대상·근거는 Core가 결합한 입력으로
+유지하고, 역할의 시간·토큰과 종료는 상위 native 실행기가 계속 관측한다. stdin bytes의
+일치는 CLI·도구가 제공하는 전체 문맥의 의미적 동일성이나 모델의 주의를 증명하지 않는다.
 기존 JSON segments는 그대로 stdin에 전달한다. 검토 결과는 `bound-review-artifact` 근거로
 경로·digest·page 등 locator를 인용할 수 있으며, 평가 대상 자체에 대한 근거도 계속 필요하다.
 모든 역할의 임시 cwd와 첨부는 기존 프로세스 종료 절차에서 함께 정리한다. 이전 runtime의
 prepared run은 새 실행기에 이식하지 않고, 복구가 필요하면 원래 runtime과 기록을 보존한다.
+
+이 경계의 회귀 검사는 `cargo test --locked --lib native_role::observation_tests::prepared_role_process_excludes_top_level_startup_and_preserves_input -- --exact`다.
+Writer와 Reviewer의 실제 subprocess 인자·입력 bytes·읽기 전용 옵션·임시 cwd 정리를 확인한다.
+설치된 Codex와의 실제 연결은 `ONTOLOGY_TEST_CODEX_BINARY=/absolute/path/to/codex bash scripts/verify.sh`로
+별도 확인한다. 기존 합성 DB의 Writer·Reviewer가 결합된 PNG·PDF를 읽고 판정하는 검사이며,
+실제 사용자 원문 저장의 성공은 해당 작업의 native apply와 raw readback으로 확인한다.
 
 Native 원문만 변경하는 호출은 `--context-view`와 `--workspace-root`를 같은 이번 작업 소유 source view로 지정한다. 기존 원문은 prepare의 `targets[].state`가 `existing`인지 확인한다. 별도의 filesystem 작업 공간은 일반 파일 target을 위한 경계이며 Native 기존 원문의 조회 공간을 대신하지 않는다.
 
@@ -1310,6 +1319,9 @@ bash scripts/verify.sh
 앱 DB와 `ontology-data` 볼륨을 사용하지 않는다. 현재 workspace의 Rust
 형식·컴파일·Clippy·테스트·의존성 보안 점검, pnpm 잠금 파일 기준 설치와 웹 테스트·타입
 검사·빌드·운영 의존성 보안 점검을 수행한다. 기존 audit와 install 정책을 유지한다.
+
+DB 클라이언트는 `sqlx-core`와 `sqlx-postgres`를 직접 사용한다. 사용하지 않는 SQLite·MySQL
+드라이버와 SQLx facade·매크로 경로는 의존성에서 제외하며 버전·기능은 `Cargo.toml`이 소유한다.
 
 검증 범위는 native Core의 source/version binding·역할·적용·복구 경계, native context
 consumer와 갱신, Git 커밋 가져오기와 실패·부재 처리, 사용자 기록 보존, 검색·분류·연결·이력,

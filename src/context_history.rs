@@ -1,7 +1,8 @@
 //! PostgreSQL recovery gate for current context reads and imported-file writes.
 //! This is storage bookkeeping; Core alone owns candidate validation and acceptance.
 use crate::{domain::Error, store::Store};
-use sqlx::{Postgres, Transaction};
+use sqlx_core::transaction::Transaction;
+use sqlx_postgres::Postgres;
 
 impl Store {
     pub(crate) async fn lock_context(
@@ -19,7 +20,7 @@ impl Store {
 
     pub(crate) async fn context_gate_in(
         &self,
-        conn: &mut sqlx::PgConnection,
+        conn: &mut sqlx_postgres::PgConnection,
         exclusive: bool,
     ) -> Result<(), Error> {
         self.context_gate_mode(conn, exclusive, false).await
@@ -29,7 +30,7 @@ impl Store {
     // when there is no committed change (and therefore no notification).
     pub(crate) async fn wait_context_gate_in(
         &self,
-        conn: &mut sqlx::PgConnection,
+        conn: &mut sqlx_postgres::PgConnection,
     ) -> Result<(), Error> {
         self.context_gate_mode(conn, false, true).await
     }
@@ -42,12 +43,12 @@ impl Store {
 
     async fn context_gate_mode(
         &self,
-        conn: &mut sqlx::PgConnection,
+        conn: &mut sqlx_postgres::PgConnection,
         exclusive: bool,
         wait: bool,
     ) -> Result<(), Error> {
         self.count(1);
-        let acquired: bool = sqlx::query_scalar(if wait {
+        let acquired: bool = sqlx_core::query_scalar::query_scalar(if wait {
             "SELECT true FROM pg_advisory_xact_lock_shared(478310003)"
         } else if exclusive {
             "SELECT pg_try_advisory_xact_lock(478310003)"
@@ -61,7 +62,7 @@ impl Store {
             return Err(Error::ContextPending);
         }
         self.count(1);
-        let pending: bool = sqlx::query_scalar(
+        let pending: bool = sqlx_core::query_scalar::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM context_apply_batches WHERE state IN ('pending','committed'))",
             )
             .fetch_one(&mut *conn)

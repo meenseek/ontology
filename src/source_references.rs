@@ -8,7 +8,7 @@ use crate::{
 use pulldown_cmark::{Event, Parser, Tag};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::Row;
+use sqlx_core::row::Row;
 use std::collections::{BTreeSet, HashSet};
 
 fn destination(href: &str) -> Option<String> {
@@ -144,7 +144,7 @@ impl Store {
         let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
         let ids: Vec<&str> = sources.iter().map(|s| s.entity_id.as_str()).collect();
         self.count(1);
-        let rows = sqlx::query("SELECT e.id,s.path,s.status,s.verified_revision,r.content,r.source_revision,r.content_digest,r.present FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN source_records r ON r.scope=e.scope AND r.entity_id=e.id WHERE e.scope=$1 AND e.id=ANY($2) AND s.kind='git' AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=s.id) ORDER BY e.id FOR UPDATE OF s,r")
+        let rows = sqlx_core::query::query("SELECT e.id,s.path,s.status,s.verified_revision,r.content,r.source_revision,r.content_digest,r.present FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN source_records r ON r.scope=e.scope AND r.entity_id=e.id WHERE e.scope=$1 AND e.id=ANY($2) AND s.kind='git' AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=s.id) ORDER BY e.id FOR UPDATE OF s,r")
             .bind(scope.as_str()).bind(ids).fetch_all(&mut *tx).await.map_err(|_| Error::Storage)?;
         if rows.len() != sources.len() {
             return Err(Error::Conflict);
@@ -173,7 +173,7 @@ impl Store {
             projections.push(json!({"entity_id":id,"reference_paths":paths(&row.get::<String,_>("path"),&content,false)}));
         }
         self.count(1);
-        let changed = sqlx::query("UPDATE source_records r SET reference_paths=i.reference_paths FROM jsonb_to_recordset($1) AS i(entity_id text,reference_paths text[]) WHERE r.scope=$2 AND r.entity_id=i.entity_id AND r.reference_paths IS DISTINCT FROM i.reference_paths")
+        let changed = sqlx_core::query::query("UPDATE source_records r SET reference_paths=i.reference_paths FROM jsonb_to_recordset($1) AS i(entity_id text,reference_paths text[]) WHERE r.scope=$2 AND r.entity_id=i.entity_id AND r.reference_paths IS DISTINCT FROM i.reference_paths")
             .bind(json!(projections)).bind(scope.as_str()).execute(&mut *tx).await.map_err(|_| Error::Storage)?.rows_affected();
         self.count(1);
         tx.commit().await.map_err(|_| Error::Storage)?;

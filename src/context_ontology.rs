@@ -11,7 +11,7 @@ use context_core::{
     redaction::redact_secrets,
 };
 use serde_json::{Value, json};
-use sqlx::Row;
+use sqlx_core::row::Row;
 use std::path::Path;
 
 impl Store {
@@ -33,7 +33,7 @@ impl Store {
         let result = async {
             self.count(1);
             // All source bytes, provenance and transfer bounds use the same SQL snapshot.
-            let rows = sqlx::query(r#"
+            let rows = sqlx_core::query::query(r#"
                 WITH selected AS MATERIALIZED (
                     SELECT path,material_id,revision,content_digest,byte_len,deleted,restricted,content
                     FROM context_materials WHERE scope=$1 AND path=ANY($2)

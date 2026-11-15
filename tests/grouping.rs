@@ -125,7 +125,7 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::query("TRUNCATE curation_reviews,memory_grouping,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects RESTART IDENTITY CASCADE")
+    sqlx_core::query::query("TRUNCATE curation_reviews,memory_grouping,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects RESTART IDENTITY CASCADE")
         .execute(store.pool()).await.unwrap();
     let temp = tempfile::tempdir().unwrap();
     let binary = temp.path().join("codex");
@@ -237,10 +237,12 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
         suggested["grouping"]["suggestions"]["new_subject"],
         "새 주제"
     );
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM subjects WHERE scope='personal'")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let count: i64 = sqlx_core::query_scalar::query_scalar(
+        "SELECT count(*) FROM subjects WHERE scope='personal'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     assert_eq!(count, 1, "a model suggestion cannot create a subject");
 
     let invalid_name = call(&store, json!({"op":"remember","scope":"personal","idempotency_key":"grouping-test-invalid-name","memory":input()})).await;
@@ -301,43 +303,48 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
             tokio::spawn(async move { store.grouping_once().await.unwrap() })
         };
         wait_marker(&gates.join("old-started")).await;
-        let old_token:String=sqlx::query_scalar("UPDATE memory_grouping SET lease_until=now()-interval '1 second' WHERE memory_id=$1 RETURNING claim_token::text").bind(id).fetch_one(store.pool()).await.unwrap();
+        let old_token:String=sqlx_core::query_scalar::query_scalar("UPDATE memory_grouping SET lease_until=now()-interval '1 second' WHERE memory_id=$1 RETURNING claim_token::text").bind(id).fetch_one(store.pool()).await.unwrap();
         let new_worker = {
             let store = store.clone();
             tokio::spawn(async move { store.grouping_once().await.unwrap() })
         };
         wait_marker(&gates.join("new-started")).await;
-        let before: Value =
-            sqlx::query_scalar("SELECT to_jsonb(g) FROM memory_grouping g WHERE memory_id=$1")
-                .bind(id)
-                .fetch_one(store.pool())
-                .await
-                .unwrap();
+        let before: Value = sqlx_core::query_scalar::query_scalar(
+            "SELECT to_jsonb(g) FROM memory_grouping g WHERE memory_id=$1",
+        )
+        .bind(id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
         assert_ne!(before["claim_token"], old_token);
-        let histories: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM memory_history WHERE memory_id=$1")
-                .bind(id)
-                .fetch_one(store.pool())
-                .await
-                .unwrap();
+        let histories: i64 = sqlx_core::query_scalar::query_scalar(
+            "SELECT count(*) FROM memory_history WHERE memory_id=$1",
+        )
+        .bind(id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
         std::fs::write(gates.join("old-release"), b"").unwrap();
         assert!(old_worker.await.unwrap());
-        let after: Value =
-            sqlx::query_scalar("SELECT to_jsonb(g) FROM memory_grouping g WHERE memory_id=$1")
-                .bind(id)
-                .fetch_one(store.pool())
-                .await
-                .unwrap();
+        let after: Value = sqlx_core::query_scalar::query_scalar(
+            "SELECT to_jsonb(g) FROM memory_grouping g WHERE memory_id=$1",
+        )
+        .bind(id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
         assert_eq!(
             after, before,
             "old success/error cannot change another process's claim"
         );
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_history WHERE memory_id=$1")
-                .bind(id)
-                .fetch_one(store.pool())
-                .await
-                .unwrap(),
+            sqlx_core::query_scalar::query_scalar::<_, i64>(
+                "SELECT count(*) FROM memory_history WHERE memory_id=$1"
+            )
+            .bind(id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
             histories
         );
         std::fs::write(gates.join("new-release"), b"").unwrap();
@@ -346,7 +353,7 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
         assert_eq!(applied["subject_id"], subject["id"]);
         assert_eq!(applied["revision"], 2);
         assert!(
-            sqlx::query_scalar::<_, Option<String>>(
+            sqlx_core::query_scalar::query_scalar::<_, Option<String>>(
                 "SELECT claim_token::text FROM memory_grouping WHERE memory_id=$1"
             )
             .bind(id)
@@ -364,7 +371,7 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
     for attempts in [2, 3] {
         let item=call(&store,json!({"op":"remember","scope":"personal","idempotency_key":format!("legacy-claim-{attempts}"),"memory":input()})).await;
         let id = item["id"].as_str().unwrap();
-        sqlx::query("UPDATE memory_grouping SET state='processing',attempts=$2,lease_until=now()-interval '1 second',claim_token=NULL WHERE memory_id=$1").bind(id).bind(attempts).execute(store.pool()).await.unwrap();
+        sqlx_core::query::query("UPDATE memory_grouping SET state='processing',attempts=$2,lease_until=now()-interval '1 second',claim_token=NULL WHERE memory_id=$1").bind(id).bind(attempts).execute(store.pool()).await.unwrap();
         assert_eq!(store.grouping_once().await.unwrap(), attempts < 3);
         let state = call(&store, json!({"op":"read","scope":"personal","id":id})).await;
         assert_eq!(
@@ -397,22 +404,22 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
     };
     wait_marker(&gates.join("old-started")).await;
     let mut blocking = store.pool().begin().await.unwrap();
-    let blocker: i32 = sqlx::query_scalar(
+    let blocker: i32 = sqlx_core::query_scalar::query_scalar(
         "SELECT pg_backend_pid() FROM pg_advisory_xact_lock(hashtextextended('personal',478312))",
     )
     .fetch_one(&mut *blocking)
     .await
     .unwrap();
-    sqlx::query("UPDATE memory_grouping SET lease_until=clock_timestamp()+interval '2 seconds' WHERE memory_id=$1").bind(id).execute(store.pool()).await.unwrap();
+    sqlx_core::query::query("UPDATE memory_grouping SET lease_until=clock_timestamp()+interval '2 seconds' WHERE memory_id=$1").bind(id).execute(store.pool()).await.unwrap();
     std::fs::write(gates.join("old-release"), b"").unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10),async {
         loop {
-            let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks w JOIN pg_locks b USING(locktype,database,classid,objid,objsubid) WHERE NOT w.granted AND b.granted AND b.pid=$1)").bind(blocker).fetch_one(store.pool()).await.unwrap();
+            let waiting:bool=sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks w JOIN pg_locks b USING(locktype,database,classid,objid,objsubid) WHERE NOT w.granted AND b.granted AND b.pid=$1)").bind(blocker).fetch_one(store.pool()).await.unwrap();
             if waiting {break;}
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         loop {
-            let expired:bool=sqlx::query_scalar("SELECT lease_until<clock_timestamp() FROM memory_grouping WHERE memory_id=$1").bind(id).fetch_one(store.pool()).await.unwrap();
+            let expired:bool=sqlx_core::query_scalar::query_scalar("SELECT lease_until<clock_timestamp() FROM memory_grouping WHERE memory_id=$1").bind(id).fetch_one(store.pool()).await.unwrap();
             if expired {break;}
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -423,11 +430,13 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
     assert_eq!(expired["revision"], 1);
     assert_eq!(expired["subject_id"], Value::Null);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_history WHERE memory_id=$1")
-            .bind(id)
-            .fetch_one(store.pool())
-            .await
-            .unwrap(),
+        sqlx_core::query_scalar::query_scalar::<_, i64>(
+            "SELECT count(*) FROM memory_history WHERE memory_id=$1"
+        )
+        .bind(id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
         1
     );
     fake_codex(
@@ -451,15 +460,16 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
         tokio::spawn(async move { store.grouping_once().await.unwrap() })
     };
     wait_marker(&gates.join("old-started")).await;
-    sqlx::query("UPDATE memory_grouping SET lease_until=clock_timestamp()+interval '2 seconds' WHERE memory_id=$1").bind(id).execute(store.pool()).await.unwrap();
-    let before: Value =
-        sqlx::query_scalar("SELECT to_jsonb(g) FROM memory_grouping g WHERE memory_id=$1")
-            .bind(id)
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+    sqlx_core::query::query("UPDATE memory_grouping SET lease_until=clock_timestamp()+interval '2 seconds' WHERE memory_id=$1").bind(id).execute(store.pool()).await.unwrap();
+    let before: Value = sqlx_core::query_scalar::query_scalar(
+        "SELECT to_jsonb(g) FROM memory_grouping g WHERE memory_id=$1",
+    )
+    .bind(id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     let mut blocking = store.pool().begin().await.unwrap();
-    let blocker: i32 = sqlx::query_scalar(
+    let blocker: i32 = sqlx_core::query_scalar::query_scalar(
         "SELECT pg_backend_pid() FROM memory_grouping WHERE memory_id=$1 FOR UPDATE",
     )
     .bind(id)
@@ -469,7 +479,7 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
     std::fs::write(gates.join("old-release"), b"").unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let waiting: bool = sqlx::query_scalar(
+            let waiting: bool = sqlx_core::query_scalar::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
             )
             .bind(blocker)
@@ -482,7 +492,7 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         loop {
-            let expired: bool = sqlx::query_scalar(
+            let expired: bool = sqlx_core::query_scalar::query_scalar(
                 "SELECT lease_until<clock_timestamp() FROM memory_grouping WHERE memory_id=$1",
             )
             .bind(id)
@@ -499,12 +509,13 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
     .expect("failure waits on an unchanged row across lease expiry");
     blocking.commit().await.unwrap();
     assert!(worker.await.unwrap());
-    let after: Value =
-        sqlx::query_scalar("SELECT to_jsonb(g) FROM memory_grouping g WHERE memory_id=$1")
-            .bind(id)
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+    let after: Value = sqlx_core::query_scalar::query_scalar(
+        "SELECT to_jsonb(g) FROM memory_grouping g WHERE memory_id=$1",
+    )
+    .bind(id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     assert_eq!(
         before, after,
         "expired failure must not turn the queue into error"
@@ -741,12 +752,13 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
     let company_prepared = call(&store,json!({"op":"curation","scope":"meenseek","command":{"action":"prepare","idempotency_key":"company-preserved-curation","author":"writer-task","candidate":curated_candidate(&company_context["items"][0],"회사 검토 이력을 보존한다",None)}})).await;
     let company_applied = call(&store,json!({"op":"curation","scope":"meenseek","command":{"action":"apply","id":company_prepared["id"],"review":{"candidate_digest":company_prepared["candidate_digest"],"reviewer":"reviewer-task","decision":"approve","reason":"회사 합성 근거와 범위를 검토했다"}}})).await;
     let company_id = company_applied["memory_id"].as_str().unwrap();
-    let original: Value = sqlx::query_scalar("SELECT document FROM memories WHERE id=$1")
-        .bind(company_id)
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-    let old_pins: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(p)-'revision' ORDER BY entity_id) FROM evidence_snapshots p WHERE memory_id=$1 AND revision=1").bind(company_id).fetch_one(store.pool()).await.unwrap();
+    let original: Value =
+        sqlx_core::query_scalar::query_scalar("SELECT document FROM memories WHERE id=$1")
+            .bind(company_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    let old_pins: Value = sqlx_core::query_scalar::query_scalar("SELECT jsonb_agg(to_jsonb(p)-'revision' ORDER BY entity_id) FROM evidence_snapshots p WHERE memory_id=$1 AND revision=1").bind(company_id).fetch_one(store.pool()).await.unwrap();
     call(&store,json!({"op":"correct","scope":"meenseek","id":company["id"],"revision":company["revision"],"memory":{"title":"회사 메모","body":"회사 원문의 새 관측"}})).await;
     let choice = json!({"op":"grouping-set","scope":"meenseek","id":company_id,"revision":1,"subject_id":company_subject["id"],"mode":"manual"});
     for (scope, target, mode, expected) in [
@@ -790,16 +802,17 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
         assigned["evidence"][0]["current"], false,
         "stale source does not block metadata-only grouping"
     );
-    let current: Value = sqlx::query_scalar("SELECT document FROM memories WHERE id=$1")
-        .bind(company_id)
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let current: Value =
+        sqlx_core::query_scalar::query_scalar("SELECT document FROM memories WHERE id=$1")
+            .bind(company_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     assert_eq!(
         current, original,
         "all document fields stay byte-equivalent"
     );
-    let pins: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(p)-'revision' ORDER BY entity_id) FROM evidence_snapshots p WHERE memory_id=$1 AND revision=2").bind(company_id).fetch_one(store.pool()).await.unwrap();
+    let pins: Value = sqlx_core::query_scalar::query_scalar("SELECT jsonb_agg(to_jsonb(p)-'revision' ORDER BY entity_id) FROM evidence_snapshots p WHERE memory_id=$1 AND revision=2").bind(company_id).fetch_one(store.pool()).await.unwrap();
     assert_eq!(
         pins, old_pins,
         "previous evidence pins are copied rather than rebuilt"
@@ -828,11 +841,13 @@ async fn personal_grouping_is_durable_and_respects_manual_choice() {
     .await;
     assert_eq!(store.brain(serde_json::from_value(json!({"op":"grouping-set","scope":"meenseek","id":company_id,"revision":4,"subject_id":null,"mode":"off"})).unwrap()).await,Err(ontology::domain::Error::Conflict));
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_grouping WHERE memory_id=$1")
-            .bind(company_id)
-            .fetch_one(store.pool())
-            .await
-            .unwrap(),
+        sqlx_core::query_scalar::query_scalar::<_, i64>(
+            "SELECT count(*) FROM memory_grouping WHERE memory_id=$1"
+        )
+        .bind(company_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
         0
     );
 
@@ -881,11 +896,12 @@ async fn model_input_and_temporary_directory_cleanup(store: &Store, binary: &Pat
     let subject = call(store, json!({"op":"subject-create","scope":"personal","idempotency_key":"redaction-defined-subject","name":"API_KEY: synthetic-subject","definition":definition})).await;
     let fallback = call(store, json!({"op":"subject-create","scope":"personal","idempotency_key":"redaction-fallback-subject","name":"합성 예시 묶음"})).await;
     call(store, json!({"op":"remember","scope":"personal","idempotency_key":"redaction-example","memory":{"title":"secret: synthetic-example","body":"합성 예시","subject_id":fallback["id"]}})).await;
-    let before: Value = sqlx::query_scalar("SELECT to_jsonb(s) FROM subjects s WHERE id=$1")
-        .bind(subject["id"].as_str().unwrap())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let before: Value =
+        sqlx_core::query_scalar::query_scalar("SELECT to_jsonb(s) FROM subjects s WHERE id=$1")
+            .bind(subject["id"].as_str().unwrap())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
 
     for outcome in ["success", "failure", "cancel"] {
         let capture = temp.join(format!("judgment-{outcome}"));
@@ -986,11 +1002,12 @@ async fn model_input_and_temporary_directory_cleanup(store: &Store, binary: &Pat
             assert_eq!(current["grouping"]["state"], "error");
         }
     }
-    let after: Value = sqlx::query_scalar("SELECT to_jsonb(s) FROM subjects s WHERE id=$1")
-        .bind(subject["id"].as_str().unwrap())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let after: Value =
+        sqlx_core::query_scalar::query_scalar("SELECT to_jsonb(s) FROM subjects s WHERE id=$1")
+            .bind(subject["id"].as_str().unwrap())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     assert_eq!(
         after, before,
         "redaction must not change stored definitions"
@@ -1129,7 +1146,7 @@ async fn metadata_only_memory_changes_preserve_downstream_evidence(store: &Store
         let gap_dependent = call(store,json!({"op":"remember","scope":scope,"idempotency_key":format!("currency-gap-dependent-{scope}"),"memory":{"body":"이력 누락을 확인한다","evidence":[pin],"grouping_preference":"off"}})).await;
         let grouped=call(store,json!({"op":"grouping-set","scope":scope,"id":gap["id"],"revision":1,"subject_id":subject["id"],"mode":"manual"})).await;
         call(store,json!({"op":"grouping-set","scope":scope,"id":gap["id"],"revision":grouped["revision"],"subject_id":null,"mode":"off"})).await;
-        sqlx::query("DELETE FROM memory_history WHERE memory_id=$1 AND revision=2")
+        sqlx_core::query::query("DELETE FROM memory_history WHERE memory_id=$1 AND revision=2")
             .bind(gap["id"].as_str().unwrap())
             .execute(store.pool())
             .await

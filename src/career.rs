@@ -11,7 +11,8 @@ use context_core::{
     },
     harness::{HarnessError, PolicyConfiguration, SourceVersion, StoredSourceState},
 };
-use sqlx::{PgConnection, Row};
+use sqlx_core::row::Row;
+use sqlx_postgres::PgConnection;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -38,10 +39,11 @@ impl Store {
             .map_err(|_| Error::Invalid)?;
         let mut connection = self.dedicated_context_connection(false).await?;
         self.count(1);
-        let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-            .fetch_one(&mut connection)
-            .await
-            .map_err(|_| Error::Storage)?;
+        let store_id: String =
+            sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+                .fetch_one(&mut connection)
+                .await
+                .map_err(|_| Error::Storage)?;
         let store = self.clone();
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
@@ -91,7 +93,7 @@ pub(crate) fn snapshot(
     store.count(1);
     handle
         .block_on(
-            sqlx::raw_sql("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            sqlx_core::raw_sql::raw_sql("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 .execute(&mut *connection),
         )
         .map_err(|error| storage_error(Stage::CareerSnapshotBegin, error))?;
@@ -122,7 +124,7 @@ pub(crate) fn snapshot(
     })();
     store.count(1);
     handle
-        .block_on(sqlx::raw_sql("ROLLBACK").execute(connection))
+        .block_on(sqlx_core::raw_sql::raw_sql("ROLLBACK").execute(connection))
         .map_err(|error| storage_error(Stage::CareerSnapshotEnd, error))?;
     result
 }
@@ -137,7 +139,7 @@ async fn read_wave(
         .map(|p| p.strip_prefix("vault/").ok_or(Error::Invalid))
         .collect::<Result<_, _>>()?;
     store.count(1);
-    let rows = sqlx::query(r#"
+    let rows = sqlx_core::query::query(r#"
         WITH selected AS MATERIALIZED (
             SELECT source_path,material_id,revision,origin_kind,source_digest,content_digest,byte_len,content
             FROM context_materials WHERE source_path=ANY($1) AND NOT deleted AND NOT restricted

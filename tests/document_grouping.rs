@@ -89,7 +89,7 @@ async fn import_native(store: &Store, root: &Path) {
         .unwrap();
 }
 async fn material(store: &Store, path: &str) -> Value {
-    let id: String = sqlx::query_scalar(
+    let id: String = sqlx_core::query_scalar::query_scalar(
         "SELECT material_id::text FROM context_materials WHERE scope='personal' AND path=$1",
     )
     .bind(path)
@@ -99,11 +99,11 @@ async fn material(store: &Store, path: &str) -> Value {
     json!({"material_id":id})
 }
 async fn preserved_sources(store: &Store) -> Value {
-    sqlx::query_scalar("SELECT jsonb_build_object('originals',(SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY material_id),'[]') FROM context_materials m),'git',(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY entity_id),'[]') FROM source_records p),'memberships',(SELECT COALESCE(jsonb_agg(to_jsonb(d) ORDER BY scope,source_id),'[]') FROM document_subjects d),'history',(SELECT COALESCE(jsonb_agg(to_jsonb(h) ORDER BY scope,source_id,revision),'[]') FROM document_subject_history h))")
+    sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('originals',(SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY material_id),'[]') FROM context_materials m),'git',(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY entity_id),'[]') FROM source_records p),'memberships',(SELECT COALESCE(jsonb_agg(to_jsonb(d) ORDER BY scope,source_id),'[]') FROM document_subjects d),'history',(SELECT COALESCE(jsonb_agg(to_jsonb(h) ORDER BY scope,source_id,revision),'[]') FROM document_subject_history h))")
         .fetch_one(store.pool()).await.unwrap()
 }
 async fn queue(store: &Store, key: &str) -> Value {
-    sqlx::query_scalar(
+    sqlx_core::query_scalar::query_scalar(
         "SELECT to_jsonb(g) FROM document_grouping g WHERE scope='personal' AND source_id=$1",
     )
     .bind(key)
@@ -137,7 +137,7 @@ async fn wait_marker(path: &Path) {
 async fn wait_blocked(store: &Store, blocker: i32, count: i64) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let waiting: i64 = sqlx::query_scalar(
+            let waiting: i64 = sqlx_core::query_scalar::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))",
             )
             .bind(blocker)
@@ -156,12 +156,12 @@ async fn wait_blocked(store: &Store, blocker: i32, count: i64) {
 async fn wait_expired_blocker(store: &Store, key: &str, blocker: i32) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))").bind(blocker).fetch_one(store.pool()).await.unwrap();
+            let waiting:bool=sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))").bind(blocker).fetch_one(store.pool()).await.unwrap();
             if waiting {break;}
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         loop {
-            let expired:bool=sqlx::query_scalar("SELECT lease_until<clock_timestamp() FROM document_grouping WHERE scope='personal' AND source_id=$1").bind(key).fetch_one(store.pool()).await.unwrap();
+            let expired:bool=sqlx_core::query_scalar::query_scalar("SELECT lease_until<clock_timestamp() FROM document_grouping WHERE scope='personal' AND source_id=$1").bind(key).fetch_one(store.pool()).await.unwrap();
             if expired {break;}
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -180,7 +180,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::raw_sql("TRUNCATE document_grouping_dirty,document_grouping,document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
+    sqlx_core::raw_sql::raw_sql("TRUNCATE document_grouping_dirty,document_grouping,document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.unwrap();
     let temp = tempfile::tempdir().unwrap();
     let binary = temp.path().join("codex");
     let capture = temp.path().join("input");
@@ -211,7 +211,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     // Exact pre-015 upgrade fixture: preserve originals and decisions, baseline
     // both app scopes even when a company binding has not been created yet.
     context_history::legacy_history(&store).await;
-    sqlx::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'").execute(store.pool()).await.unwrap();
+    sqlx_core::raw_sql::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'").execute(store.pool()).await.unwrap();
     store.initialize().await.unwrap();
     assert_eq!(preserved_sources(&store).await, preserved);
     assert_eq!(
@@ -222,10 +222,11 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
         membership(&store, "personal", &json!({"entity_id":old_git.entity_id})).await["grouping"]["mode"],
         "off"
     );
-    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let store_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     ContextReader::new()
         .import(
             &store,
@@ -278,31 +279,31 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     // Same-byte projection loss/restoration is not a new classification, and
     // cannot turn an expired-attempt error back into pending without consent.
     let native_id = native["material_id"].as_str().unwrap();
-    let payload:Value=sqlx::query_scalar("SELECT payload FROM context_projection_versions p JOIN context_materials m USING(material_id,revision) WHERE material_id=$1::uuid").bind(native_id).fetch_one(store.pool()).await.unwrap();
+    let payload:Value=sqlx_core::query_scalar::query_scalar("SELECT payload FROM context_projection_versions p JOIN context_materials m USING(material_id,revision) WHERE material_id=$1::uuid").bind(native_id).fetch_one(store.pool()).await.unwrap();
     for state in ["assigned", "error"] {
-        sqlx::query("UPDATE document_grouping SET state=$2,attempts=CASE WHEN $2='error' THEN 3 ELSE attempts END WHERE scope='personal' AND source_id=$1").bind(native_id).bind(state).execute(store.pool()).await.unwrap();
-        let before: Value = sqlx::query_scalar(
+        sqlx_core::query::query("UPDATE document_grouping SET state=$2,attempts=CASE WHEN $2='error' THEN 3 ELSE attempts END WHERE scope='personal' AND source_id=$1").bind(native_id).bind(state).execute(store.pool()).await.unwrap();
+        let before: Value = sqlx_core::query_scalar::query_scalar(
             "SELECT to_jsonb(g) FROM document_grouping g WHERE scope='personal' AND source_id=$1",
         )
         .bind(native_id)
         .fetch_one(store.pool())
         .await
         .unwrap();
-        sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER; ALTER TABLE context_projection_versions ENABLE TRIGGER document_grouping_projection_changed")
+        sqlx_core::raw_sql::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER; ALTER TABLE context_projection_versions ENABLE TRIGGER document_grouping_projection_changed")
             .execute(store.pool())
             .await
             .unwrap();
         let excluded =
             json!({"status":"excluded","source_digest":payload["source_digest"],"terms":[]});
-        sqlx::query("UPDATE context_projection_versions SET payload=$2,payload_digest=encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex') WHERE material_id=$1::uuid").bind(native_id).bind(excluded).execute(store.pool()).await.unwrap();
+        sqlx_core::query::query("UPDATE context_projection_versions SET payload=$2,payload_digest=encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex') WHERE material_id=$1::uuid").bind(native_id).bind(excluded).execute(store.pool()).await.unwrap();
         store.discover_document_grouping().await.unwrap();
-        sqlx::query("UPDATE context_projection_versions SET payload=$2,payload_digest=encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex') WHERE material_id=$1::uuid").bind(native_id).bind(&payload).execute(store.pool()).await.unwrap();
-        sqlx::raw_sql("ALTER TABLE context_projection_versions ENABLE TRIGGER USER")
+        sqlx_core::query::query("UPDATE context_projection_versions SET payload=$2,payload_digest=encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex') WHERE material_id=$1::uuid").bind(native_id).bind(&payload).execute(store.pool()).await.unwrap();
+        sqlx_core::raw_sql::raw_sql("ALTER TABLE context_projection_versions ENABLE TRIGGER USER")
             .execute(store.pool())
             .await
             .unwrap();
         assert!(!once(&store).await.unwrap());
-        let after: Value = sqlx::query_scalar(
+        let after: Value = sqlx_core::query_scalar::query_scalar(
             "SELECT to_jsonb(g) FROM document_grouping g WHERE scope='personal' AND source_id=$1",
         )
         .bind(native_id)
@@ -317,18 +318,18 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
 
     // Losing eligibility is cancellation, never a fresh attempt budget.
     for attempts in [2, 3] {
-        sqlx::query("UPDATE document_grouping SET state='pending',attempts=$2 WHERE scope='personal' AND source_id=$1").bind(native_id).bind(attempts).execute(store.pool()).await.unwrap();
-        sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER; ALTER TABLE context_projection_versions ENABLE TRIGGER document_grouping_projection_changed")
+        sqlx_core::query::query("UPDATE document_grouping SET state='pending',attempts=$2 WHERE scope='personal' AND source_id=$1").bind(native_id).bind(attempts).execute(store.pool()).await.unwrap();
+        sqlx_core::raw_sql::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER; ALTER TABLE context_projection_versions ENABLE TRIGGER document_grouping_projection_changed")
             .execute(store.pool())
             .await
             .unwrap();
         let excluded =
             json!({"status":"excluded","source_digest":payload["source_digest"],"terms":[]});
-        sqlx::query("UPDATE context_projection_versions SET payload=$2,payload_digest=encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex') WHERE material_id=$1::uuid").bind(native_id).bind(excluded).execute(store.pool()).await.unwrap();
+        sqlx_core::query::query("UPDATE context_projection_versions SET payload=$2,payload_digest=encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex') WHERE material_id=$1::uuid").bind(native_id).bind(excluded).execute(store.pool()).await.unwrap();
         store.discover_document_grouping().await.unwrap();
         assert_eq!(queue(&store, native_id).await["state"], "ineligible");
-        sqlx::query("UPDATE context_projection_versions SET payload=$2,payload_digest=encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex') WHERE material_id=$1::uuid").bind(native_id).bind(&payload).execute(store.pool()).await.unwrap();
-        sqlx::raw_sql("ALTER TABLE context_projection_versions ENABLE TRIGGER USER")
+        sqlx_core::query::query("UPDATE context_projection_versions SET payload=$2,payload_digest=encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex') WHERE material_id=$1::uuid").bind(native_id).bind(&payload).execute(store.pool()).await.unwrap();
+        sqlx_core::raw_sql::raw_sql("ALTER TABLE context_projection_versions ENABLE TRIGGER USER")
             .execute(store.pool())
             .await
             .unwrap();
@@ -446,11 +447,11 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     import_native(&store, &root).await;
     let late = material(&store, "notes/late.md").await;
     let late_id = late["material_id"].as_str().unwrap();
-    sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER; ALTER TABLE context_projection_versions ENABLE TRIGGER document_grouping_projection_changed")
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER; ALTER TABLE context_projection_versions ENABLE TRIGGER document_grouping_projection_changed")
         .execute(store.pool())
         .await
         .unwrap();
-    let projection: Value = sqlx::query_scalar(
+    let projection: Value = sqlx_core::query_scalar::query_scalar(
         "DELETE FROM context_projection_versions WHERE material_id=$1::uuid RETURNING payload",
     )
     .bind(late_id)
@@ -459,15 +460,17 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     .unwrap();
     store.discover_document_grouping().await.unwrap();
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM document_grouping WHERE source_id=$1")
-            .bind(late_id)
-            .fetch_one(store.pool())
-            .await
-            .unwrap(),
+        sqlx_core::query_scalar::query_scalar::<_, i64>(
+            "SELECT count(*) FROM document_grouping WHERE source_id=$1"
+        )
+        .bind(late_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
         0
     );
-    sqlx::query("INSERT INTO context_projection_versions(material_id,revision,payload,payload_digest) SELECT material_id,revision,$2,encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex') FROM context_materials WHERE material_id=$1::uuid").bind(late_id).bind(projection).execute(store.pool()).await.unwrap();
-    sqlx::raw_sql("ALTER TABLE context_projection_versions ENABLE TRIGGER USER")
+    sqlx_core::query::query("INSERT INTO context_projection_versions(material_id,revision,payload,payload_digest) SELECT material_id,revision,$2,encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex') FROM context_materials WHERE material_id=$1::uuid").bind(late_id).bind(projection).execute(store.pool()).await.unwrap();
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_projection_versions ENABLE TRIGGER USER")
         .execute(store.pool())
         .await
         .unwrap();
@@ -514,11 +517,13 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
         group["id"]
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM document_grouping WHERE source_id=$1")
-            .bind(late_id)
-            .fetch_one(store.pool())
-            .await
-            .unwrap(),
+        sqlx_core::query_scalar::query_scalar::<_, i64>(
+            "SELECT count(*) FROM document_grouping WHERE source_id=$1"
+        )
+        .bind(late_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
         2,
         "one canonical decision per app scope"
     );
@@ -668,7 +673,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
         false,
     );
     let mut recovery = store.pool().begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(478310003)")
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock(478310003)")
         .execute(&mut *recovery)
         .await
         .unwrap();
@@ -714,7 +719,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     };
     wait_capture(&gate_capture).await;
     let mut recovery = store.pool().begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(478310003)")
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock(478310003)")
         .execute(&mut *recovery)
         .await
         .unwrap();
@@ -737,11 +742,13 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     // result and its failure bookkeeping. Give the NEW input a fresh budget.
     retry(&store, "personal", &native).await;
     let current = membership(&store, "personal", &native).await;
-    sqlx::query("UPDATE document_grouping SET attempts=2 WHERE scope='personal' AND source_id=$1")
-        .bind(native_id)
-        .execute(store.pool())
-        .await
-        .unwrap();
+    sqlx_core::query::query(
+        "UPDATE document_grouping SET attempts=2 WHERE scope='personal' AND source_id=$1",
+    )
+    .bind(native_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
     let release = temp.path().join("recovery-drift-release");
     let captured = temp.path().join("recovery-drift-input");
     provider(
@@ -757,29 +764,31 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
     };
     wait_capture(&captured).await;
     let mut first = store.pool().begin().await.unwrap();
-    let first_pid: i32 = sqlx::query_scalar(
+    let first_pid: i32 = sqlx_core::query_scalar::query_scalar(
         "SELECT pg_backend_pid() FROM pg_advisory_xact_lock(hashtextextended('personal',478312))",
     )
     .fetch_one(&mut *first)
     .await
     .unwrap();
     let mut recovery = store.pool().begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(478310003)")
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock(478310003)")
         .execute(&mut *recovery)
         .await
         .unwrap();
     std::fs::write(&release, b"").unwrap();
     wait_blocked(&store, first_pid, 1).await;
     let mut second = store.pool().begin().await.unwrap();
-    let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+    let second_pid: i32 = sqlx_core::query_scalar::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *second)
         .await
         .unwrap();
     let second = tokio::spawn(async move {
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('personal',478312))")
-            .execute(&mut *second)
-            .await
-            .unwrap();
+        sqlx_core::query::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('personal',478312))",
+        )
+        .execute(&mut *second)
+        .await
+        .unwrap();
         second
     });
     wait_blocked(&store, first_pid, 2).await;
@@ -875,12 +884,13 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
         tokio::spawn(async move { once(&store).await.unwrap() })
     };
     wait_capture(&captured).await;
-    let revision: i64 =
-        sqlx::query_scalar("SELECT revision FROM subjects WHERE scope='personal' AND id=$1")
-            .bind(undefined["id"].as_str().unwrap())
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+    let revision: i64 = sqlx_core::query_scalar::query_scalar(
+        "SELECT revision FROM subjects WHERE scope='personal' AND id=$1",
+    )
+    .bind(undefined["id"].as_str().unwrap())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     call(&store,json!({"op":"subject-define","scope":"personal","id":undefined["id"],"revision":revision,"name":"처리 중 다시 명확해진 경쟁 목적","definition":definition})).await;
     let before = preserved_sources(&store).await;
     std::fs::write(&release, b"").unwrap();
@@ -922,7 +932,7 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
             tokio::spawn(async move { store.document_grouping_once().await.unwrap() })
         };
         wait_marker(&gates.join("old-started")).await;
-        let old_token:String=sqlx::query_scalar("UPDATE document_grouping SET lease_until=clock_timestamp()-interval '1 second' WHERE scope='personal' AND source_id=$1 RETURNING claim_token::text").bind(&item.entity_id).fetch_one(store.pool()).await.unwrap();
+        let old_token:String=sqlx_core::query_scalar::query_scalar("UPDATE document_grouping SET lease_until=clock_timestamp()-interval '1 second' WHERE scope='personal' AND source_id=$1 RETURNING claim_token::text").bind(&item.entity_id).fetch_one(store.pool()).await.unwrap();
         let new = {
             let store = store.clone();
             tokio::spawn(async move { store.document_grouping_once().await.unwrap() })
@@ -973,14 +983,14 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
             tokio::spawn(async move { store.document_grouping_once().await.unwrap() })
         };
         wait_capture(&captured).await;
-        sqlx::query("UPDATE document_grouping SET lease_until=clock_timestamp()+interval '2 seconds' WHERE scope='personal' AND source_id=$1").bind(&item.entity_id).execute(store.pool()).await.unwrap();
+        sqlx_core::query::query("UPDATE document_grouping SET lease_until=clock_timestamp()+interval '2 seconds' WHERE scope='personal' AND source_id=$1").bind(&item.entity_id).execute(store.pool()).await.unwrap();
         let before = queue(&store, &item.entity_id).await;
         let originals = preserved_sources(&store).await;
         let mut blocking = store.pool().begin().await.unwrap();
         let blocker: i32 = if fails {
-            sqlx::query_scalar("SELECT pg_backend_pid() FROM document_grouping WHERE scope='personal' AND source_id=$1 FOR UPDATE").bind(&item.entity_id).fetch_one(&mut *blocking).await.unwrap()
+            sqlx_core::query_scalar::query_scalar("SELECT pg_backend_pid() FROM document_grouping WHERE scope='personal' AND source_id=$1 FOR UPDATE").bind(&item.entity_id).fetch_one(&mut *blocking).await.unwrap()
         } else {
-            sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(hashtextextended('personal',478312))").fetch_one(&mut *blocking).await.unwrap()
+            sqlx_core::query_scalar::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(hashtextextended('personal',478312))").fetch_one(&mut *blocking).await.unwrap()
         };
         std::fs::write(&release, b"").unwrap();
         wait_expired_blocker(&store, &item.entity_id, blocker).await;
@@ -1004,10 +1014,12 @@ async fn documents_discover_current_identity_and_preserve_intent_and_claims() {
 async fn wait_dirty_empty(store: &Store) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty")
-                .fetch_one(store.pool())
-                .await
-                .unwrap();
+            let count: i64 = sqlx_core::query_scalar::query_scalar(
+                "SELECT count(*) FROM document_grouping_dirty",
+            )
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
             if count == 0 {
                 break;
             }
@@ -1021,7 +1033,7 @@ async fn wait_dirty_empty(store: &Store) {
 async fn listener_pid(store: &Store) -> i32 {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE application_name='document_discovery_events_test' AND query LIKE 'LISTEN%' AND state='idle'")
+            let pid: Option<i32> = sqlx_core::query_scalar::query_scalar("SELECT pid FROM pg_stat_activity WHERE application_name='document_discovery_events_test' AND query LIKE 'LISTEN%' AND state='idle'")
                 .fetch_optional(store.pool()).await.unwrap();
             if let Some(pid) = pid { break pid; }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1084,18 +1096,19 @@ async fn discovery_events(store: &Store, url: &str) {
         })
         .collect();
     let mut blocked = store.pool().begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('personal',478312))")
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock(hashtextextended('personal',478312))")
         .execute(&mut *blocked)
         .await
         .unwrap();
     for batch in items.chunks(100) {
         store.apply_import(batch).await.unwrap();
     }
-    let backlog: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty WHERE scope='personal'")
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+    let backlog: i64 = sqlx_core::query_scalar::query_scalar(
+        "SELECT count(*) FROM document_grouping_dirty WHERE scope='personal'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     assert_eq!(
         backlog, 160,
         "more than one discovery batch is durably waiting"
@@ -1103,7 +1116,7 @@ async fn discovery_events(store: &Store, url: &str) {
     blocked.commit().await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let count: i64 = sqlx::query_scalar(
+            let count: i64 = sqlx_core::query_scalar::query_scalar(
                 "SELECT count(*) FROM document_grouping WHERE source_id=ANY($1::text[])",
             )
             .bind(
@@ -1127,17 +1140,18 @@ async fn discovery_events(store: &Store, url: &str) {
     let item = &items[0];
     let before = queue(store, &item.entity_id).await;
     let mut rollback = store.pool().begin().await.unwrap();
-    sqlx::query("UPDATE source_records SET present=false,absence_revision=source_revision WHERE entity_id=$1")
+    sqlx_core::query::query("UPDATE source_records SET present=false,absence_revision=source_revision WHERE entity_id=$1")
         .bind(&item.entity_id)
         .execute(&mut *rollback)
         .await
         .unwrap();
-    let inside: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty WHERE source_id=$1")
-            .bind(&item.entity_id)
-            .fetch_one(&mut *rollback)
-            .await
-            .unwrap();
+    let inside: i64 = sqlx_core::query_scalar::query_scalar(
+        "SELECT count(*) FROM document_grouping_dirty WHERE source_id=$1",
+    )
+    .bind(&item.entity_id)
+    .fetch_one(&mut *rollback)
+    .await
+    .unwrap();
     assert_eq!(inside, 1);
     rollback.rollback().await.unwrap();
     wait_dirty_empty(store).await;
@@ -1148,7 +1162,7 @@ async fn discovery_events(store: &Store, url: &str) {
     );
 
     // A missing record invalidates only that pending identity; restoration wakes it.
-    sqlx::query("DELETE FROM source_records WHERE entity_id=$1")
+    sqlx_core::query::query("DELETE FROM source_records WHERE entity_id=$1")
         .bind(&item.entity_id)
         .execute(store.pool())
         .await
@@ -1165,20 +1179,22 @@ async fn discovery_events(store: &Store, url: &str) {
 
     // Simulate a committed invalidation whose notification was lost. Killing the
     // listener must cause a reconnect drain without any subsequent notification.
-    sqlx::query(
+    sqlx_core::query::query(
         "UPDATE document_grouping SET state='ineligible' WHERE scope='personal' AND source_id=$1",
     )
     .bind(&item.entity_id)
     .execute(store.pool())
     .await
     .unwrap();
-    sqlx::query("INSERT INTO document_grouping_dirty(scope,entity_id) VALUES('personal',$1)")
-        .bind(&item.entity_id)
-        .execute(store.pool())
-        .await
-        .unwrap();
+    sqlx_core::query::query(
+        "INSERT INTO document_grouping_dirty(scope,entity_id) VALUES('personal',$1)",
+    )
+    .bind(&item.entity_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
     let pid = listener_pid(store).await;
-    sqlx::query("SELECT pg_terminate_backend($1)")
+    sqlx_core::query::query("SELECT pg_terminate_backend($1)")
         .bind(pid)
         .execute(store.pool())
         .await
@@ -1191,30 +1207,31 @@ async fn discovery_events(store: &Store, url: &str) {
     // Deduplication, acknowledgement rollback and a producer racing an ack.
     let mut producer = store.pool().begin().await.unwrap();
     for present in [false, true] {
-        sqlx::query("UPDATE source_records SET present=$2,absence_revision=CASE WHEN $2 THEN NULL ELSE source_revision END WHERE entity_id=$1")
+        sqlx_core::query::query("UPDATE source_records SET present=$2,absence_revision=CASE WHEN $2 THEN NULL ELSE source_revision END WHERE entity_id=$1")
             .bind(&item.entity_id)
             .bind(present)
             .execute(&mut *producer)
             .await
             .unwrap();
     }
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty WHERE source_id=$1")
-            .bind(&item.entity_id)
-            .fetch_one(&mut *producer)
-            .await
-            .unwrap();
+    let count: i64 = sqlx_core::query_scalar::query_scalar(
+        "SELECT count(*) FROM document_grouping_dirty WHERE source_id=$1",
+    )
+    .bind(&item.entity_id)
+    .fetch_one(&mut *producer)
+    .await
+    .unwrap();
     assert_eq!(count, 1, "one durable identity for repeated changes");
     producer.commit().await.unwrap();
     let mut ack = store.pool().begin().await.unwrap();
-    sqlx::query("DELETE FROM document_grouping_dirty WHERE source_id=$1")
+    sqlx_core::query::query("DELETE FROM document_grouping_dirty WHERE source_id=$1")
         .bind(&item.entity_id)
         .execute(&mut *ack)
         .await
         .unwrap();
     ack.rollback().await.unwrap();
     let mut ack = store.pool().begin().await.unwrap();
-    let blocker: i32 = sqlx::query_scalar(
+    let blocker: i32 = sqlx_core::query_scalar::query_scalar(
         "SELECT pg_backend_pid() FROM document_grouping_dirty WHERE source_id=$1 FOR UPDATE",
     )
     .bind(&item.entity_id)
@@ -1232,19 +1249,20 @@ async fn discovery_events(store: &Store, url: &str) {
         tokio::spawn(async move { store.apply_import(&[changed]).await })
     };
     wait_blocked(store, blocker, 1).await;
-    sqlx::query("DELETE FROM document_grouping_dirty WHERE source_id=$1")
+    sqlx_core::query::query("DELETE FROM document_grouping_dirty WHERE source_id=$1")
         .bind(&item.entity_id)
         .execute(&mut *ack)
         .await
         .unwrap();
     ack.commit().await.unwrap();
     writer.await.unwrap().unwrap();
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty WHERE source_id=$1")
-            .bind(&item.entity_id)
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+    let count: i64 = sqlx_core::query_scalar::query_scalar(
+        "SELECT count(*) FROM document_grouping_dirty WHERE source_id=$1",
+    )
+    .bind(&item.entity_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     assert_eq!(
         count, 1,
         "producer commit survives an in-flight acknowledgement"
@@ -1252,11 +1270,11 @@ async fn discovery_events(store: &Store, url: &str) {
     // Startup must not skip an existing committed dirty row locked by a
     // producer that later rolls back, since rollback emits no notification.
     let mut producer = store.pool().begin().await.unwrap();
-    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+    let blocker: i32 = sqlx_core::query_scalar::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *producer)
         .await
         .unwrap();
-    sqlx::query("UPDATE source_records SET present=false,absence_revision=source_revision WHERE entity_id=$1")
+    sqlx_core::query::query("UPDATE source_records SET present=false,absence_revision=source_revision WHERE entity_id=$1")
         .bind(&item.entity_id)
         .execute(&mut *producer)
         .await

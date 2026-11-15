@@ -72,16 +72,18 @@ async fn purpose_decisions_preserve_sources_and_reject_stale_concurrent_judgment
         updated,
         "birth retries return current state without restoring the old definition"
     );
-    let history: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(h) ORDER BY revision) FROM subject_history h WHERE subject_id=$1").bind(created["id"].as_str()).fetch_one(store.pool()).await.unwrap();
+    let history: Value = sqlx_core::query_scalar::query_scalar("SELECT jsonb_agg(to_jsonb(h) ORDER BY revision) FROM subject_history h WHERE subject_id=$1").bind(created["id"].as_str()).fetch_one(store.pool()).await.unwrap();
     assert_eq!(history.as_array().unwrap().len(), 2);
     assert_eq!(history[0]["definition"], definition());
     assert_eq!(history[0]["action"], "create");
     let invalid = json!({"op":"subject-create","scope":"personal","idempotency_key":"invalid-complete-birth","name":"실패한 목적","definition":{"purpose":"목적","include":"","exclude":"제외"}});
     assert_eq!(store.brain(command(invalid)).await, Err(Error::Invalid));
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM subjects WHERE name='실패한 목적'")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let count: i64 = sqlx_core::query_scalar::query_scalar(
+        "SELECT count(*) FROM subjects WHERE name='실패한 목적'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     assert_eq!(count, 0, "invalid complete birth writes no partial subject");
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("vault");
@@ -96,7 +98,7 @@ async fn purpose_decisions_preserve_sources_and_reject_stale_concurrent_judgment
         .import_context(&root, &scopes, &manifest.inventory_digest)
         .await
         .unwrap();
-    let material:String=sqlx::query_scalar("SELECT material_id::text FROM context_materials WHERE scope='personal' AND path='purpose.md'").fetch_one(store.pool()).await.unwrap();
+    let material:String=sqlx_core::query_scalar::query_scalar("SELECT material_id::text FROM context_materials WHERE scope='personal' AND path='purpose.md'").fetch_one(store.pool()).await.unwrap();
     let identity = json!({"material_id":material,"entity_id":null});
     let read = json!({"op":"document-subject","scope":"personal","document":identity});
     let empty = call(&store, read.clone()).await;
@@ -123,10 +125,11 @@ async fn purpose_decisions_preserve_sources_and_reject_stale_concurrent_judgment
     let assigned = one.or(two).unwrap();
     assert_eq!(assigned["subject_id"], subject["id"]);
     assert_eq!(assigned["review_needed"], false);
-    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let store_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     ontology::context_importer::ContextReader::new()
         .import(
             &store,
@@ -142,7 +145,7 @@ async fn purpose_decisions_preserve_sources_and_reject_stale_concurrent_judgment
         1,
         "binding cannot fork native membership"
     );
-    let bound:String=sqlx::query_scalar("SELECT e.id FROM entities e JOIN context_source_bindings b ON b.source_id=e.source_id WHERE b.material_id=$1::uuid AND e.scope='personal'").bind(&material).fetch_one(store.pool()).await.unwrap();
+    let bound:String=sqlx_core::query_scalar::query_scalar("SELECT e.id FROM entities e JOIN context_source_bindings b ON b.source_id=e.source_id WHERE b.material_id=$1::uuid AND e.scope='personal'").bind(&material).fetch_one(store.pool()).await.unwrap();
     assert!(matches!(store.brain(command(json!({"op":"document-subject","scope":"personal","document":{"entity_id":bound}}))).await,Err(Error::NotFound)),"native bindings require canonical material identity");
     let before_graph = store.calls();
     let limited = store
@@ -284,7 +287,7 @@ async fn purpose_decisions_preserve_sources_and_reject_stale_concurrent_judgment
         matches!(store.brain(command(cross)).await, Err(Error::Conflict)),
         "target group belongs to the original app scope"
     );
-    let restricted:String=sqlx::query_scalar("SELECT material_id::text FROM context_materials WHERE scope='personal' AND path='raw/private.md'").fetch_one(store.pool()).await.unwrap();
+    let restricted:String=sqlx_core::query_scalar::query_scalar("SELECT material_id::text FROM context_materials WHERE scope='personal' AND path='raw/private.md'").fetch_one(store.pool()).await.unwrap();
     assert!(matches!(store.brain(command(json!({"op":"document-subject","scope":"personal","document":{"material_id":restricted}}))).await,Err(Error::NotFound)));
 
     let h = digest(b"purpose-git-fixture");

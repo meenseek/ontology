@@ -3843,7 +3843,7 @@ printf '%s\n' "$$" >> "$0.calls"
 printf '%s\n' "$PWD" > "$0.cwd.$$"
 ls -ld "$PWD" >> "$0.cwd.$$"
 printf '%s\n' "$@" > "$0.args.$$"
-cp "${{10}}" "$0.schema.$$"
+cp "${{14}}" "$0.schema.$$"
 {body}
 "#
         );
@@ -4073,7 +4073,7 @@ PYWIRE
             .expect("args must be captured");
         let args = args.lines().collect::<Vec<_>>();
         assert_eq!(
-            &args[..9],
+            &args[..13],
             [
                 "exec",
                 "--ephemeral",
@@ -4083,12 +4083,16 @@ PYWIRE
                 "never",
                 "--sandbox",
                 "read-only",
+                "--config",
+                "project_doc_max_bytes=0",
+                "--disable",
+                "hooks",
                 "--output-schema"
             ]
         );
-        assert_eq!(args.len(), 11);
-        assert_eq!(args[10], "-");
-        assert_eq!(Path::new(args[9]).parent(), Some(Path::new(cwd_path)));
+        assert_eq!(args.len(), 15);
+        assert_eq!(args[14], "-");
+        assert_eq!(Path::new(args[13]).parent(), Some(Path::new(cwd_path)));
         let schema = fs::read(format!("{}.schema.{pid}", binary.display()))
             .expect("schema must be captured");
         if let Some(expected_schema) = expected_schema {
@@ -6195,7 +6199,7 @@ wait
     fn test_configured_control_digest() -> String {
         let store = test_store();
         test_runtime().block_on(async {
-            sqlx::query_scalar("SELECT content_digest FROM context_materials WHERE scope='profile' AND path='rules/control.md'").fetch_one(store.pool()).await.expect("fixture policy metadata")
+            sqlx_core::query_scalar::query_scalar("SELECT content_digest FROM context_materials WHERE scope='profile' AND path='rules/control.md'").fetch_one(store.pool()).await.expect("fixture policy metadata")
         })
     }
 
@@ -6279,7 +6283,7 @@ wait
                 );
                 let store = Store::connect(&url).await.expect("test database");
                 store.initialize().await.expect("test migrations");
-                sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset owned native CLI fixture");
+                sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset owned native CLI fixture");
                 let fixture = context_fixture::build();
                 let root = fixture.path().canonicalize().expect("synthetic fixture root");
                 let scopes = context_fixture::SCOPES

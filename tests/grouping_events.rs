@@ -22,7 +22,7 @@ async fn browser_events_share_the_queue_listener_and_wait_for_committed_changes(
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::query("TRUNCATE memory_grouping,document_grouping CASCADE")
+    sqlx_core::query::query("TRUNCATE memory_grouping,document_grouping CASCADE")
         .execute(store.pool())
         .await
         .unwrap();
@@ -30,7 +30,7 @@ async fn browser_events_share_the_queue_listener_and_wait_for_committed_changes(
     // Let the single existing listener register and both empty workers settle.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let listening: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND query LIKE 'LISTEN %ontology_grouping%' AND state='idle')")
+            let listening: bool = sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND query LIKE 'LISTEN %ontology_grouping%' AND state='idle')")
                 .fetch_one(store.pool()).await.unwrap();
             let before = store.calls();
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -149,7 +149,7 @@ async fn browser_events_share_the_queue_listener_and_wait_for_committed_changes(
         "healthy quiet streams perform no store calls"
     );
     let mut tx = store.pool().begin().await.unwrap();
-    sqlx::query("SELECT pg_notify('ontology_grouping','')")
+    sqlx_core::query::query("SELECT pg_notify('ontology_grouping','')")
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -161,7 +161,7 @@ async fn browser_events_share_the_queue_listener_and_wait_for_committed_changes(
         "rollback produces no notice"
     );
     let mut tx = store.pool().begin().await.unwrap();
-    sqlx::query("SELECT pg_notify('ontology_grouping','')")
+    sqlx_core::query::query("SELECT pg_notify('ontology_grouping','')")
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -176,7 +176,7 @@ async fn browser_events_share_the_queue_listener_and_wait_for_committed_changes(
             .unwrap();
         assert_eq!(data.as_ref(), b"data: changed\n\n");
     }
-    let reconnected: bool = sqlx::query_scalar("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND query LIKE 'LISTEN %ontology_grouping%' AND state='idle' LIMIT 1")
+    let reconnected: bool = sqlx_core::query_scalar::query_scalar("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND query LIKE 'LISTEN %ontology_grouping%' AND state='idle' LIMIT 1")
         .fetch_one(store.pool()).await.unwrap();
     assert!(reconnected);
     for body in &mut bodies {

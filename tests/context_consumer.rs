@@ -35,11 +35,11 @@ async fn store() -> Store {
     );
     let s = Store::connect(&url).await.expect("owned PostgreSQL");
     s.initialize().await.expect("append migrations");
-    sqlx::query("TRUNCATE document_grouping,document_subjects,memory_grouping,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY").execute(s.pool()).await.expect("owned fixture reset");
+    sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,memory_grouping,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY").execute(s.pool()).await.expect("owned fixture reset");
     s
 }
 async fn store_id(s: &Store) -> String {
-    sqlx::query_scalar("SELECT store_id::text FROM context_store")
+    sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
         .fetch_one(s.pool())
         .await
         .expect("identity")
@@ -82,7 +82,7 @@ async fn source_evidence(s: &Store, id: &str) -> Value {
     json!({"entity_id":e["entity_id"],"source_revision":e["source_revision"],"content_digest":e["content_digest"],"generation":e["generation"]})
 }
 async fn source_generation(s: &Store, scope: Scope, entity: &str) -> i64 {
-    sqlx::query_scalar("SELECT s.generation FROM sources s JOIN entities e ON e.scope=s.scope AND e.source_id=s.id WHERE e.scope=$1 AND e.id=$2")
+    sqlx_core::query_scalar::query_scalar("SELECT s.generation FROM sources s JOIN entities e ON e.scope=s.scope AND e.source_id=s.id WHERE e.scope=$1 AND e.id=$2")
         .bind(scope.as_str()).bind(entity).fetch_one(s.pool()).await.expect("numeric persisted source generation")
 }
 async fn native_prepare_many(
@@ -93,7 +93,7 @@ async fn native_prepare_many(
     body: &str,
     mut deletes: Vec<String>,
 ) -> context_core::harness::PreparedHarnessRun {
-    let policy:String=sqlx::query_scalar("SELECT content_digest FROM context_materials WHERE scope='profile' AND path='rules/control.md'").fetch_one(s.pool()).await.expect("bound policy");
+    let policy:String=sqlx_core::query_scalar::query_scalar("SELECT content_digest FROM context_materials WHERE scope='profile' AND path='rules/control.md'").fetch_one(s.pool()).await.expect("bound policy");
     paths.sort();
     deletes.sort();
     assert!(
@@ -380,7 +380,7 @@ async fn context_consumer_identity_and_projection() {
                 digest(body.as_bytes())
             );
             assert_eq!(detail["current"], true);
-            assert_eq!(sqlx::query_scalar::<_,String>("SELECT material_id::text FROM context_source_bindings WHERE source_id=$1").bind(&source).fetch_one(s.pool()).await.expect("bound material"),sqlx::query_scalar::<_,String>("SELECT material_id::text FROM context_materials WHERE source_root=$1 AND source_path=$2").bind(root.to_str().expect("root")).bind(path).fetch_one(s.pool()).await.expect("canonical identity"));
+            assert_eq!(sqlx_core::query_scalar::query_scalar::<_,String>("SELECT material_id::text FROM context_source_bindings WHERE source_id=$1").bind(&source).fetch_one(s.pool()).await.expect("bound material"),sqlx_core::query_scalar::query_scalar::<_,String>("SELECT material_id::text FROM context_materials WHERE source_root=$1 AND source_path=$2").bind(root.to_str().expect("root")).bind(path).fetch_one(s.pool()).await.expect("canonical identity"));
         }
         // Both one reference and the ten-reference memory boundary acquire ordered
         // source rows once; acceptance with no replacement input rechecks stored evidence.
@@ -613,24 +613,27 @@ async fn context_consumer_identity_and_projection() {
             .is_ok()
     );
     let snapshot = "SELECT jsonb_build_object('memories',(SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM memories m),'memory_history',(SELECT jsonb_agg(to_jsonb(h)-'grouping_only' ORDER BY memory_id,revision) FROM memory_history h),'snapshots',(SELECT jsonb_agg(to_jsonb(e) ORDER BY memory_id,revision,entity_id) FROM evidence_snapshots e),'contents',(SELECT jsonb_agg(to_jsonb(c) ORDER BY scope,digest) FROM evidence_contents c),'classifications',(SELECT jsonb_agg(to_jsonb(t) ORDER BY entity_id,topic_id) FROM entity_topics t),'links',(SELECT jsonb_agg(to_jsonb(r) ORDER BY left_id,right_id) FROM related_materials r),'sources',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM sources s),'entities',(SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM entities e),'records',(SELECT jsonb_agg(to_jsonb(p)-'reference_paths' ORDER BY entity_id) FROM source_records p),'history',(SELECT jsonb_agg(to_jsonb(h) ORDER BY id) FROM confirmation_history h))";
-    let previous: Value = sqlx::query_scalar(snapshot)
+    let previous: Value = sqlx_core::query_scalar::query_scalar(snapshot)
         .fetch_one(s.pool())
         .await
         .expect("all existing app values");
-    sqlx::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'; DROP TABLE document_subjects; DROP TABLE document_subject_history; DROP TABLE subject_history; ALTER TABLE subjects DROP COLUMN definition, DROP COLUMN revision; ALTER TABLE source_records DROP COLUMN reference_paths; DELETE FROM ontology_migrations WHERE name='013-knowledge-taxonomy.sql'; DROP TRIGGER context_projection_immutable ON context_projection_versions; CREATE TRIGGER context_projection_immutable BEFORE UPDATE OR DELETE ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION context_immutable_record(); DROP TRIGGER context_projection_check ON context_projection_versions; CREATE TRIGGER context_projection_check BEFORE INSERT ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION context_projection_validate(); DROP FUNCTION context_projection_refresh_guard(); DELETE FROM ontology_migrations WHERE name='012-context-projection-refresh.sql'; DELETE FROM ontology_migrations WHERE name='014-grouping-claim-ownership.sql'; DROP TABLE memory_grouping; DELETE FROM ontology_migrations WHERE name='011-personal-memory-grouping.sql'; DELETE FROM ontology_migrations WHERE name IN ('009-context-manual-edits.sql','010-profile-manual-edits.sql'); ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; ALTER TABLE context_material_versions DROP COLUMN manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code IN ('vault-read-failed','context-read-failed'))); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; ").execute(s.pool()).await.expect("owned exact pre-008 shape");
-    let unmatched: (String, String) =
-        sqlx::query_as("SELECT id,path FROM sources WHERE kind='vault' ORDER BY id LIMIT 1")
-            .fetch_one(s.pool())
-            .await
-            .expect("legacy source");
-    sqlx::query("UPDATE sources SET path='personal/unmatched-migration.md' WHERE id=$1")
-        .bind(&unmatched.0)
-        .execute(s.pool())
-        .await
-        .expect("owned unmatched legacy fixture");
+    sqlx_core::raw_sql::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'; DROP TABLE document_subjects; DROP TABLE document_subject_history; DROP TABLE subject_history; ALTER TABLE subjects DROP COLUMN definition, DROP COLUMN revision; ALTER TABLE source_records DROP COLUMN reference_paths; DELETE FROM ontology_migrations WHERE name='013-knowledge-taxonomy.sql'; DROP TRIGGER context_projection_immutable ON context_projection_versions; CREATE TRIGGER context_projection_immutable BEFORE UPDATE OR DELETE ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION context_immutable_record(); DROP TRIGGER context_projection_check ON context_projection_versions; CREATE TRIGGER context_projection_check BEFORE INSERT ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION context_projection_validate(); DROP FUNCTION context_projection_refresh_guard(); DELETE FROM ontology_migrations WHERE name='012-context-projection-refresh.sql'; DELETE FROM ontology_migrations WHERE name='014-grouping-claim-ownership.sql'; DROP TABLE memory_grouping; DELETE FROM ontology_migrations WHERE name='011-personal-memory-grouping.sql'; DELETE FROM ontology_migrations WHERE name IN ('009-context-manual-edits.sql','010-profile-manual-edits.sql'); ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; ALTER TABLE context_material_versions DROP COLUMN manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code IN ('vault-read-failed','context-read-failed'))); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; ").execute(s.pool()).await.expect("owned exact pre-008 shape");
+    let unmatched: (String, String) = sqlx_core::query_as::query_as(
+        "SELECT id,path FROM sources WHERE kind='vault' ORDER BY id LIMIT 1",
+    )
+    .fetch_one(s.pool())
+    .await
+    .expect("legacy source");
+    sqlx_core::query::query(
+        "UPDATE sources SET path='personal/unmatched-migration.md' WHERE id=$1",
+    )
+    .bind(&unmatched.0)
+    .execute(s.pool())
+    .await
+    .expect("owned unmatched legacy fixture");
     assert_eq!(s.initialize().await, Err(Error::Baseline));
     assert_eq!(
-        sqlx::query_scalar::<_, Option<String>>(
+        sqlx_core::query_scalar::query_scalar::<_, Option<String>>(
             "SELECT to_regclass('context_source_bindings')::text"
         )
         .fetch_one(s.pool())
@@ -638,32 +641,32 @@ async fn context_consumer_identity_and_projection() {
         .expect("rollback schema"),
         None
     );
-    sqlx::query("UPDATE sources SET path=$2 WHERE id=$1")
+    sqlx_core::query::query("UPDATE sources SET path=$2 WHERE id=$1")
         .bind(&unmatched.0)
         .bind(&unmatched.1)
         .execute(s.pool())
         .await
         .expect("restore exact legacy path");
-    sqlx::query("CREATE TABLE context_source_bindings(failure_fixture boolean)")
+    sqlx_core::query::query("CREATE TABLE context_source_bindings(failure_fixture boolean)")
         .execute(s.pool())
         .await
         .expect("injected migration collision");
     assert_eq!(s.initialize().await, Err(Error::Baseline));
     assert_eq!(
-        sqlx::query_scalar::<_, Value>(snapshot)
+        sqlx_core::query_scalar::query_scalar::<_, Value>(snapshot)
             .fetch_one(s.pool())
             .await
             .expect("rollback preserves rows"),
         previous
     );
-    sqlx::query("DROP TABLE context_source_bindings")
+    sqlx_core::query::query("DROP TABLE context_source_bindings")
         .execute(s.pool())
         .await
         .expect("remove injected collision");
     s.initialize().await.expect("actual 007 to008 upgrade");
     s.initialize().await.expect("repeat initialize");
     assert_eq!(
-        sqlx::query_scalar::<_, Value>(snapshot)
+        sqlx_core::query_scalar::query_scalar::<_, Value>(snapshot)
             .fetch_one(s.pool())
             .await
             .expect("preserved rows"),
@@ -671,23 +674,29 @@ async fn context_consumer_identity_and_projection() {
     );
     let migration_sha =
         digest(include_str!("../schema/migrations/008-context-consumers.sql").as_bytes());
-    sqlx::query("UPDATE ontology_migrations SET digest=$1 WHERE name='008-context-consumers.sql'")
-        .bind("a".repeat(64))
-        .execute(s.pool())
-        .await
-        .expect("tampered marker fixture");
+    sqlx_core::query::query(
+        "UPDATE ontology_migrations SET digest=$1 WHERE name='008-context-consumers.sql'",
+    )
+    .bind("a".repeat(64))
+    .execute(s.pool())
+    .await
+    .expect("tampered marker fixture");
     assert_eq!(s.initialize().await, Err(Error::Baseline));
-    sqlx::query("UPDATE ontology_migrations SET digest=$1 WHERE name='008-context-consumers.sql'")
-        .bind(&migration_sha)
-        .execute(s.pool())
-        .await
-        .expect("restore exact marker");
-    sqlx::query("DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'")
-        .execute(s.pool())
-        .await
-        .expect("missing marker fixture");
+    sqlx_core::query::query(
+        "UPDATE ontology_migrations SET digest=$1 WHERE name='008-context-consumers.sql'",
+    )
+    .bind(&migration_sha)
+    .execute(s.pool())
+    .await
+    .expect("restore exact marker");
+    sqlx_core::query::query(
+        "DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'",
+    )
+    .execute(s.pool())
+    .await
+    .expect("missing marker fixture");
     assert_eq!(s.initialize().await, Err(Error::Baseline));
-    sqlx::query(
+    sqlx_core::query::query(
         "INSERT INTO ontology_migrations(name,digest) VALUES('008-context-consumers.sql',$1)",
     )
     .bind(migration_sha)
@@ -750,7 +759,7 @@ async fn context_consumer_revision_and_evidence() {
         )
         .await
         .expect("native consumer");
-    let material:String=sqlx::query_scalar("SELECT material_id::text FROM context_materials WHERE scope='personal' AND path='consumer/revision.md'").fetch_one(s.pool()).await.expect("material");
+    let material:String=sqlx_core::query_scalar::query_scalar("SELECT material_id::text FROM context_materials WHERE scope='personal' AND path='consumer/revision.md'").fetch_one(s.pool()).await.expect("material");
     let (source, entity) = identity(Scope::Personal, SourceKind::Context, &id, &material);
     reader
         .import(
@@ -868,13 +877,14 @@ async fn context_consumer_revision_and_evidence() {
         assert_eq!(s.brain(cmd(json!({"op":"curation","scope":"personal","command":{"action":"prepare","idempotency_key":format!("stale-{}",prepared["id"].as_str().expect("review id")),"author":"synthetic-writer","candidate":candidate}}))).await,Err(Error::Conflict));
     }
     let mut forged = e.clone();
-    forged["generation"] =
-        sqlx::query_scalar::<_, i64>("SELECT generation FROM sources WHERE id=$1")
-            .bind(&source)
-            .fetch_optional(s.pool())
-            .await
-            .expect("generation")
-            .map_or(json!(999), |v| json!(v));
+    forged["generation"] = sqlx_core::query_scalar::query_scalar::<_, i64>(
+        "SELECT generation FROM sources WHERE id=$1",
+    )
+    .bind(&source)
+    .fetch_optional(s.pool())
+    .await
+    .expect("generation")
+    .map_or(json!(999), |v| json!(v));
     assert!(s.brain(cmd(json!({"op":"remember","scope":"personal","idempotency_key":"forged-old-projection","memory":{"body":"reject old snapshot with new generation","evidence":[forged]}}))).await.is_err());
     reader
         .import(
@@ -1009,7 +1019,7 @@ async fn context_consumer_revision_and_evidence() {
             let sha = digest(b"same");
             let rust =
                 revision_token(&id, &material, rev, deleted, &sha, "native", None).expect("token");
-            let sql: String = sqlx::query_scalar(
+            let sql: String = sqlx_core::query_scalar::query_scalar(
                 "SELECT context_source_revision($1::uuid,$2::uuid,$3,$4,$5,'native',NULL)",
             )
             .bind(&id)
@@ -1038,7 +1048,7 @@ async fn context_consumer_atomic_read_publish() {
         &[cs("personal")],
     )
     .await;
-    let alternate: String = sqlx::query_scalar(
+    let alternate: String = sqlx_core::query_scalar::query_scalar(
         "SELECT material_id::text FROM context_materials WHERE path='alternate-binding.md'",
     )
     .fetch_one(s.pool())
@@ -1072,19 +1082,21 @@ async fn context_consumer_atomic_read_publish() {
             &files[0].0,
         );
         let before = s.detail(Scope::Personal, &entity).await.expect("before");
-        let actual: String = sqlx::query_scalar(
+        let actual: String = sqlx_core::query_scalar::query_scalar(
             "SELECT material_id::text FROM context_source_bindings WHERE source_id=$1",
         )
         .bind(&source)
         .fetch_one(s.pool())
         .await
         .expect("actual binding");
-        sqlx::query("UPDATE context_source_bindings SET material_id=$2::uuid WHERE source_id=$1")
-            .bind(&source)
-            .bind(&alternate)
-            .execute(s.pool())
-            .await
-            .expect("owned rebind conflict fixture");
+        sqlx_core::query::query(
+            "UPDATE context_source_bindings SET material_id=$2::uuid WHERE source_id=$1",
+        )
+        .bind(&source)
+        .bind(&alternate)
+        .execute(s.pool())
+        .await
+        .expect("owned rebind conflict fixture");
         let from = s.dependency_observations().len();
         let calls = s.calls();
         assert_eq!(
@@ -1102,14 +1114,16 @@ async fn context_consumer_atomic_read_publish() {
                 .expect("conflict rollback"),
             before
         );
-        sqlx::query("UPDATE context_source_bindings SET material_id=$2::uuid WHERE source_id=$1")
-            .bind(&source)
-            .bind(actual)
-            .execute(s.pool())
-            .await
-            .expect("restore exact owned binding");
+        sqlx_core::query::query(
+            "UPDATE context_source_bindings SET material_id=$2::uuid WHERE source_id=$1",
+        )
+        .bind(&source)
+        .bind(actual)
+        .execute(s.pool())
+        .await
+        .expect("restore exact owned binding");
         let mut pending = s.pool().begin().await.expect("exclusive connection");
-        sqlx::query("SELECT pg_advisory_xact_lock(478310003)")
+        sqlx_core::query::query("SELECT pg_advisory_xact_lock(478310003)")
             .execute(&mut *pending)
             .await
             .expect("held gate");
@@ -1129,7 +1143,7 @@ async fn context_consumer_atomic_read_publish() {
             before
         );
         // A SQL fault after the read must roll publication back before marking only resolved IDs.
-        sqlx::raw_sql("CREATE FUNCTION consumer_fail_publish() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'owned injected publication failure'; END $$; CREATE TRIGGER consumer_fail_publish BEFORE INSERT OR UPDATE ON context_source_bindings FOR EACH STATEMENT EXECUTE FUNCTION consumer_fail_publish();").execute(s.pool()).await.expect("fault injection");
+        sqlx_core::raw_sql::raw_sql("CREATE FUNCTION consumer_fail_publish() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'owned injected publication failure'; END $$; CREATE TRIGGER consumer_fail_publish BEFORE INSERT OR UPDATE ON context_source_bindings FOR EACH STATEMENT EXECUTE FUNCTION consumer_fail_publish();").execute(s.pool()).await.expect("fault injection");
         let observed_from = s.dependency_observations().len();
         let calls = s.calls();
         assert_eq!(
@@ -1146,17 +1160,19 @@ async fn context_consumer_atomic_read_publish() {
         let after = s.detail(Scope::Personal, &entity).await.expect("preserved");
         assert_eq!(after["projection"], before["projection"]);
         assert_eq!(after["source"]["failure_code"], "context-read-failed");
-        sqlx::raw_sql("DROP TRIGGER consumer_fail_publish ON context_source_bindings; DROP FUNCTION consumer_fail_publish();").execute(s.pool()).await.expect("remove owned fault");
+        sqlx_core::raw_sql::raw_sql("DROP TRIGGER consumer_fail_publish ON context_source_bindings; DROP FUNCTION consumer_fail_publish();").execute(s.pool()).await.expect("remove owned fault");
         reader
             .import(&s, &id, &cs("personal"), &paths, Scope::Personal)
             .await
             .expect("retry current");
         assert_eq!(
-            sqlx::query_scalar::<_, String>("SELECT status FROM sources WHERE id=$1")
-                .bind(source)
-                .fetch_one(s.pool())
-                .await
-                .expect("status"),
+            sqlx_core::query_scalar::query_scalar::<_, String>(
+                "SELECT status FROM sources WHERE id=$1"
+            )
+            .bind(source)
+            .fetch_one(s.pool())
+            .await
+            .expect("status"),
             "ok"
         );
     }
@@ -1183,9 +1199,9 @@ async fn context_consumer_atomic_read_publish() {
         vec![],
     )
     .await;
-    sqlx::raw_sql("CREATE FUNCTION consumer_hold_publish() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(478310099); RETURN NEW; END $$; CREATE TRIGGER consumer_hold_publish BEFORE INSERT ON sources FOR EACH ROW EXECUTE FUNCTION consumer_hold_publish();").execute(s.pool()).await.expect("owned publication barrier");
+    sqlx_core::raw_sql::raw_sql("CREATE FUNCTION consumer_hold_publish() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(478310099); RETURN NEW; END $$; CREATE TRIGGER consumer_hold_publish BEFORE INSERT ON sources FOR EACH ROW EXECUTE FUNCTION consumer_hold_publish();").execute(s.pool()).await.expect("owned publication barrier");
     let mut barrier = s.pool().begin().await.expect("barrier connection");
-    sqlx::query("SELECT pg_advisory_xact_lock(478310099)")
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock(478310099)")
         .execute(&mut *barrier)
         .await
         .expect("hold publication");
@@ -1202,7 +1218,7 @@ async fn context_consumer_atomic_read_publish() {
             )
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(2),async {loop{let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=478310099 AND NOT granted)").fetch_one(s.pool()).await.expect("barrier metadata");if waiting{break;}tokio::time::sleep(std::time::Duration::from_millis(10)).await;}}).await.expect("publication reached held barrier");
+    tokio::time::timeout(std::time::Duration::from_secs(2),async {loop{let waiting:bool=sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=478310099 AND NOT granted)").fetch_one(s.pool()).await.expect("barrier metadata");if waiting{break;}tokio::time::sleep(std::time::Duration::from_millis(10)).await;}}).await.expect("publication reached held barrier");
     let workspace = root.clone();
     let run = "consumer-atomic-native-2".to_owned();
     let commit_store = s.clone();
@@ -1242,7 +1258,7 @@ async fn context_consumer_atomic_read_publish() {
             .expect("same connection publication"),
         1
     );
-    sqlx::raw_sql(
+    sqlx_core::raw_sql::raw_sql(
         "DROP TRIGGER consumer_hold_publish ON sources; DROP FUNCTION consumer_hold_publish();",
     )
     .execute(s.pool())
@@ -1260,7 +1276,7 @@ async fn context_consumer_atomic_read_publish() {
         prepared,
     )
     .await;
-    let material:String=sqlx::query_scalar("SELECT material_id::text FROM context_materials WHERE scope='personal' AND path='consumer/atomic-native.md'").fetch_one(s.pool()).await.expect("material");
+    let material:String=sqlx_core::query_scalar::query_scalar("SELECT material_id::text FROM context_materials WHERE scope='personal' AND path='consumer/atomic-native.md'").fetch_one(s.pool()).await.expect("material");
     let (_, entity) = identity(Scope::Personal, SourceKind::Context, &id, &material);
     assert_eq!(
         s.detail(Scope::Personal, &entity)
@@ -1316,14 +1332,15 @@ async fn context_consumer_commit_invalidation() {
         )
         .await
         .expect("bind");
-    let material:String=sqlx::query_scalar("SELECT material_id::text FROM context_materials WHERE scope='personal' AND path='consumer/invalidation.md'").fetch_one(s.pool()).await.expect("material");
+    let material:String=sqlx_core::query_scalar::query_scalar("SELECT material_id::text FROM context_materials WHERE scope='personal' AND path='consumer/invalidation.md'").fetch_one(s.pool()).await.expect("material");
     let (source, entity) = identity(Scope::Personal, SourceKind::Context, &id, &material);
     let before = s.detail(Scope::Personal, &entity).await.expect("before");
-    let generation: i64 = sqlx::query_scalar("SELECT generation FROM sources WHERE id=$1")
-        .bind(&source)
-        .fetch_one(s.pool())
-        .await
-        .expect("generation");
+    let generation: i64 =
+        sqlx_core::query_scalar::query_scalar("SELECT generation FROM sources WHERE id=$1")
+            .bind(&source)
+            .fetch_one(s.pool())
+            .await
+            .expect("generation");
     let prepared = native_prepare(
         &s,
         &root,
@@ -1348,11 +1365,13 @@ async fn context_consumer_commit_invalidation() {
     assert_eq!(after["current"], false);
     assert_eq!(after["projection"], before["projection"]);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT generation FROM sources WHERE id=$1")
-            .bind(&source)
-            .fetch_one(s.pool())
-            .await
-            .expect("increment"),
+        sqlx_core::query_scalar::query_scalar::<_, i64>(
+            "SELECT generation FROM sources WHERE id=$1"
+        )
+        .bind(&source)
+        .fetch_one(s.pool())
+        .await
+        .expect("increment"),
         generation + 1
     );
     let graph = brain(
@@ -1398,7 +1417,7 @@ async fn context_consumer_commit_invalidation() {
         true
     );
     let snapshot = "SELECT jsonb_build_object('materials',(SELECT jsonb_agg(to_jsonb(m) ORDER BY material_id) FROM context_materials m),'versions',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v),'sources',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM sources s),'records',(SELECT jsonb_agg(to_jsonb(p) ORDER BY entity_id) FROM source_records p))";
-    let rollback_before: Value = sqlx::query_scalar(snapshot)
+    let rollback_before: Value = sqlx_core::query_scalar::query_scalar(snapshot)
         .fetch_one(s.pool())
         .await
         .expect("complete canonical and consumer snapshot");
@@ -1413,7 +1432,7 @@ async fn context_consumer_commit_invalidation() {
         vec![],
     )
     .await;
-    sqlx::raw_sql("CREATE FUNCTION zz_consumer_commit_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'owned failure after consumer invalidation'; END $$; CREATE TRIGGER zz_consumer_commit_fail AFTER UPDATE ON context_materials FOR EACH STATEMENT EXECUTE FUNCTION zz_consumer_commit_fail();").execute(s.pool()).await.expect("late injected failure");
+    sqlx_core::raw_sql::raw_sql("CREATE FUNCTION zz_consumer_commit_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'owned failure after consumer invalidation'; END $$; CREATE TRIGGER zz_consumer_commit_fail AFTER UPDATE ON context_materials FOR EACH STATEMENT EXECUTE FUNCTION zz_consumer_commit_fail();").execute(s.pool()).await.expect("late injected failure");
     let workspace = root.clone();
     let failed = s
         .with_native_commit(root, id.clone(), move |session| {
@@ -1436,13 +1455,13 @@ async fn context_consumer_commit_invalidation() {
         .await;
     assert!(failed.is_err());
     assert_eq!(
-        sqlx::query_scalar::<_, Value>(snapshot)
+        sqlx_core::query_scalar::query_scalar::<_, Value>(snapshot)
             .fetch_one(s.pool())
             .await
             .expect("read rolled-back rows"),
         rollback_before
     );
-    sqlx::raw_sql("DROP TRIGGER zz_consumer_commit_fail ON context_materials; DROP FUNCTION zz_consumer_commit_fail();").execute(s.pool()).await.expect("remove only owned failure hook");
+    sqlx_core::raw_sql::raw_sql("DROP TRIGGER zz_consumer_commit_fail ON context_materials; DROP FUNCTION zz_consumer_commit_fail();").execute(s.pool()).await.expect("remove only owned failure hook");
     let root = view.path().canonicalize().expect("owned view");
     let recovered = harness_fixture::command(
         &s,
@@ -1453,17 +1472,18 @@ async fn context_consumer_commit_invalidation() {
     )
     .await;
     assert!(recovered.status.success(), "actual late-failure recovery");
-    let generation: i64 = sqlx::query_scalar("SELECT generation FROM sources WHERE id=$1")
-        .bind(&source)
-        .fetch_one(s.pool())
-        .await
-        .expect("current generation");
-    sqlx::query("UPDATE sources SET generation=9223372036854775807 WHERE id=$1")
+    let generation: i64 =
+        sqlx_core::query_scalar::query_scalar("SELECT generation FROM sources WHERE id=$1")
+            .bind(&source)
+            .fetch_one(s.pool())
+            .await
+            .expect("current generation");
+    sqlx_core::query::query("UPDATE sources SET generation=9223372036854775807 WHERE id=$1")
         .bind(&source)
         .execute(s.pool())
         .await
         .expect("owned overflow boundary fixture");
-    let overflow_before: Value = sqlx::query_scalar(snapshot)
+    let overflow_before: Value = sqlx_core::query_scalar::query_scalar(snapshot)
         .fetch_one(s.pool())
         .await
         .expect("overflow baseline");
@@ -1498,7 +1518,7 @@ async fn context_consumer_commit_invalidation() {
         })
         .await;
     assert_eq!(overflow, Err(Error::Storage));
-    let overflow_after: Value = sqlx::query_scalar(snapshot)
+    let overflow_after: Value = sqlx_core::query_scalar::query_scalar(snapshot)
         .fetch_one(s.pool())
         .await
         .expect("rolled back overflow");
@@ -1506,7 +1526,7 @@ async fn context_consumer_commit_invalidation() {
         overflow_after == overflow_before,
         "overflow cannot change canonical bytes, revisions or consumers"
     );
-    sqlx::query("UPDATE sources SET generation=$2 WHERE id=$1")
+    sqlx_core::query::query("UPDATE sources SET generation=$2 WHERE id=$1")
         .bind(&source)
         .bind(generation)
         .execute(s.pool())
@@ -1525,11 +1545,13 @@ async fn context_consumer_commit_invalidation() {
         "actual overflow recovery after restoring capacity"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT generation FROM sources WHERE id=$1")
-            .bind(&source)
-            .fetch_one(s.pool())
-            .await
-            .expect("one recovered invalidation"),
+        sqlx_core::query_scalar::query_scalar::<_, i64>(
+            "SELECT generation FROM sources WHERE id=$1"
+        )
+        .bind(&source)
+        .fetch_one(s.pool())
+        .await
+        .expect("one recovered invalidation"),
         generation + 1
     );
 }
@@ -1835,11 +1857,13 @@ async fn boundary_reads(s: &Store, id: &str) {
         assert_eq!(reader.body_calls, 1);
         assert!(s.calls() - before <= 17);
         report_path(s, from, n, false);
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sources WHERE path LIKE $1")
-            .bind(format!("personal/parse-{n}-%"))
-            .fetch_one(s.pool())
-            .await
-            .expect("no partial publication");
+        let count: i64 = sqlx_core::query_scalar::query_scalar(
+            "SELECT count(*) FROM sources WHERE path LIKE $1",
+        )
+        .bind(format!("personal/parse-{n}-%"))
+        .fetch_one(s.pool())
+        .await
+        .expect("no partial publication");
         assert_eq!(count, 0);
     }
     let originals = tempfile::tempdir().expect("owned malformed byte fixtures");
@@ -1854,7 +1878,7 @@ async fn boundary_reads(s: &Store, id: &str) {
     // NUL cannot enter PostgreSQL text/search columns. Keep this negative exact-byte
     // fixture in bytea with no search text; it creates no Core acceptance receipt.
     let nul = b"---\ntitle: NUL\n---\nbody\0end";
-    sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('personal','nul.md',$1,'personal/nul.md',$2,$2,$3,$4,false,NULL)").bind(root.to_str().expect("root")).bind(digest(nul)).bind(nul.as_slice()).bind(nul.len() as i64).execute(s.pool()).await.expect("owned NUL bytea boundary fixture");
+    sqlx_core::query::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('personal','nul.md',$1,'personal/nul.md',$2,$2,$3,$4,false,NULL)").bind(root.to_str().expect("root")).bind(digest(nul)).bind(nul.as_slice()).bind(nul.len() as i64).execute(s.pool()).await.expect("owned NUL bytea boundary fixture");
     for path in ["utf8.md", "nul.md"] {
         let before = s.calls();
         assert_eq!(
@@ -1887,9 +1911,9 @@ async fn concurrent_native_invalidation(
     proposal: &Value,
 ) {
     let prepared = native_prepare_many(s, root, "consumer-revision-2", paths, body, vec![]).await;
-    sqlx::raw_sql("CREATE FUNCTION consumer_accept_barrier() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(478310096); RETURN NEW; END $$; CREATE TRIGGER consumer_accept_barrier AFTER UPDATE ON sources FOR EACH ROW EXECUTE FUNCTION consumer_accept_barrier();").execute(s.pool()).await.expect("owned invalidation barrier");
+    sqlx_core::raw_sql::raw_sql("CREATE FUNCTION consumer_accept_barrier() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(478310096); RETURN NEW; END $$; CREATE TRIGGER consumer_accept_barrier AFTER UPDATE ON sources FOR EACH ROW EXECUTE FUNCTION consumer_accept_barrier();").execute(s.pool()).await.expect("owned invalidation barrier");
     let mut barrier = s.pool().begin().await.expect("barrier");
-    sqlx::query("SELECT pg_advisory_xact_lock(478310096)")
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock(478310096)")
         .execute(&mut *barrier)
         .await
         .expect("hold source update");
@@ -1908,7 +1932,7 @@ async fn concurrent_native_invalidation(
     });
     // Actual Core may perform source verification before reaching the short SQL barrier.
     tokio::time::timeout(std::time::Duration::from_secs(60),async {loop {
-        let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=478310096 AND NOT granted)").fetch_one(s.pool()).await.expect("barrier metadata");
+        let waiting:bool=sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=478310096 AND NOT granted)").fetch_one(s.pool()).await.expect("barrier metadata");
         if waiting {break;} tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }}).await.expect("actual native consumer invalidation reached barrier");
     let accepting = s.clone();
@@ -1931,7 +1955,7 @@ async fn concurrent_native_invalidation(
             .expect("accept task"),
         Err(Error::Conflict)
     );
-    sqlx::raw_sql(
+    sqlx_core::raw_sql::raw_sql(
         "DROP TRIGGER consumer_accept_barrier ON sources; DROP FUNCTION consumer_accept_barrier();",
     )
     .execute(s.pool())
@@ -2298,11 +2322,13 @@ async fn context_consumer_native_accept_measurements() {
         // Hold an actual selected native row; the configured PostgreSQL lock timeout
         // makes the direct lock query fail before any freshness or mutation request.
         let mut blocker = s.pool().begin().await.expect("owned row lock transaction");
-        sqlx::query("SELECT id FROM memories WHERE scope='personal' AND id=$1 FOR UPDATE")
-            .bind(&ids[n - 1])
-            .fetch_one(&mut *blocker)
-            .await
-            .expect("hold selected native evidence");
+        sqlx_core::query::query(
+            "SELECT id FROM memories WHERE scope='personal' AND id=$1 FOR UPDATE",
+        )
+        .bind(&ids[n - 1])
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("hold selected native evidence");
         let from = s.dependency_observations().len();
         let failure = tokio::time::timeout(
             std::time::Duration::from_secs(10),

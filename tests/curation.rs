@@ -43,7 +43,7 @@ async fn curation_lifecycle_and_call_bounds() {
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::raw_sql("TRUNCATE curation_reviews,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE;").execute(store.pool()).await.unwrap();
+    sqlx_core::raw_sql::raw_sql("TRUNCATE curation_reviews,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE;").execute(store.pool()).await.unwrap();
     let before = store.calls();
     assert_eq!(
         call(&store, command("pending", json!({}))).await.unwrap()["items"],
@@ -116,10 +116,12 @@ async fn curation_lifecycle_and_call_bounds() {
             "same prepare is idempotent"
         );
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_contents")
-                .fetch_one(store.pool())
-                .await
-                .unwrap(),
+            sqlx_core::query_scalar::query_scalar::<_, i64>(
+                "SELECT count(*) FROM evidence_contents"
+            )
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
             if size == 1 { 0 } else { 1 },
             "prepare does not pin unused content"
         );
@@ -195,17 +197,17 @@ async fn curation_lifecycle_and_call_bounds() {
     invalid["quotations"][0]["quote"] = json!("원문에 없는 인용");
     assert_eq!(call(&store,command("prepare",json!({"idempotency_key":"candidate-invalid-quote","author":"writer-task","candidate":invalid}))).await,Err(Error::Invalid));
     let unchanged=call(&store,command("prepare",json!({"idempotency_key":"candidate-no-knowledge","author":"writer-task","candidate":candidate(current["items"].as_array().unwrap(),None)}))).await.unwrap();
-    let before_count: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+    let before_count: i64 = sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM memories")
         .fetch_one(store.pool())
         .await
         .unwrap();
     // Failure at the receipt write rolls back the whole mutation, then an exact retry succeeds.
-    sqlx::raw_sql("CREATE FUNCTION fail_curation_apply() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic apply failure'; END $$; CREATE TRIGGER fail_curation_apply BEFORE UPDATE ON curation_reviews FOR EACH ROW EXECUTE FUNCTION fail_curation_apply();").execute(store.pool()).await.unwrap();
+    sqlx_core::raw_sql::raw_sql("CREATE FUNCTION fail_curation_apply() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic apply failure'; END $$; CREATE TRIGGER fail_curation_apply BEFORE UPDATE ON curation_reviews FOR EACH ROW EXECUTE FUNCTION fail_curation_apply();").execute(store.pool()).await.unwrap();
     assert_eq!(
         call(&store, review(&unchanged, "reviewer-task", "approve")).await,
         Err(Error::Storage)
     );
-    sqlx::raw_sql("DROP TRIGGER fail_curation_apply ON curation_reviews; DROP FUNCTION fail_curation_apply();").execute(store.pool()).await.unwrap();
+    sqlx_core::raw_sql::raw_sql("DROP TRIGGER fail_curation_apply ON curation_reviews; DROP FUNCTION fail_curation_apply();").execute(store.pool()).await.unwrap();
     assert_eq!(
         call(&store, review(&unchanged, "reviewer-task", "approve"))
             .await
@@ -213,7 +215,7 @@ async fn curation_lifecycle_and_call_bounds() {
         "no-change"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memories")
+        sqlx_core::query_scalar::query_scalar::<_, i64>("SELECT count(*) FROM memories")
             .fetch_one(store.pool())
             .await
             .unwrap(),
@@ -326,24 +328,24 @@ async fn curation_lifecycle_and_call_bounds() {
         .await
         .unwrap();
     let prepared=call(&store,command("prepare",json!({"idempotency_key":"learning-create","author":"writer-task","candidate":candidate(context["items"].as_array().unwrap(),Some("실행 시간은 30분이다. 품질 개선은 아직 판단할 수 없다."))}))).await.unwrap();
-    let record_count: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+    let record_count: i64 = sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM memories")
         .fetch_one(store.pool())
         .await
         .unwrap();
-    sqlx::raw_sql("CREATE FUNCTION fail_curation_apply() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic apply failure'; END $$; CREATE TRIGGER fail_curation_apply BEFORE UPDATE ON curation_reviews FOR EACH ROW EXECUTE FUNCTION fail_curation_apply();").execute(store.pool()).await.unwrap();
+    sqlx_core::raw_sql::raw_sql("CREATE FUNCTION fail_curation_apply() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic apply failure'; END $$; CREATE TRIGGER fail_curation_apply BEFORE UPDATE ON curation_reviews FOR EACH ROW EXECUTE FUNCTION fail_curation_apply();").execute(store.pool()).await.unwrap();
     assert_eq!(
         call(&store, review(&prepared, "reviewer-task", "approve")).await,
         Err(Error::Storage)
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memories")
+        sqlx_core::query_scalar::query_scalar::<_, i64>("SELECT count(*) FROM memories")
             .fetch_one(store.pool())
             .await
             .unwrap(),
         record_count,
         "late failure rolls back new knowledge and history"
     );
-    sqlx::raw_sql("DROP TRIGGER fail_curation_apply ON curation_reviews; DROP FUNCTION fail_curation_apply();").execute(store.pool()).await.unwrap();
+    sqlx_core::raw_sql::raw_sql("DROP TRIGGER fail_curation_apply ON curation_reviews; DROP FUNCTION fail_curation_apply();").execute(store.pool()).await.unwrap();
     let created = call(&store, review(&prepared, "reviewer-task", "approve"))
         .await
         .unwrap();
@@ -536,7 +538,7 @@ fn native_token(item: &Value) -> Value {
 }
 
 async fn memory_state(store: &Store) -> Value {
-    sqlx::query_scalar("SELECT jsonb_build_object('memories',(SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM memories m),'history',(SELECT jsonb_agg(to_jsonb(h) ORDER BY memory_id,revision) FROM memory_history h),'creations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY scope,key_digest) FROM memory_creations c),'contents',(SELECT jsonb_agg(to_jsonb(c) ORDER BY scope,digest) FROM evidence_contents c),'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY scope,memory_id,revision,entity_id) FROM evidence_snapshots s),'reviews',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM curation_reviews r))")
+    sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('memories',(SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM memories m),'history',(SELECT jsonb_agg(to_jsonb(h) ORDER BY memory_id,revision) FROM memory_history h),'creations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY scope,key_digest) FROM memory_creations c),'contents',(SELECT jsonb_agg(to_jsonb(c) ORDER BY scope,digest) FROM evidence_contents c),'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY scope,memory_id,revision,entity_id) FROM evidence_snapshots s),'reviews',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM curation_reviews r))")
         .fetch_one(store.pool()).await.unwrap()
 }
 
@@ -575,7 +577,7 @@ async fn document_size_limit_contract(store: &Store) {
         raw = call(store,json!({"op":"remember","scope":"meenseek","idempotency_key":format!("size-chain-raw-{index}"),"memory":{"title":"size chain","body":format!("synthetic next chain source {index}"),"evidence":[native_token(&derived)]}})).await.unwrap();
     }
     assert_eq!(raw["evidence"].as_array().unwrap().len(), 8);
-    let room: i32 = sqlx::query_scalar("SELECT 24576-octet_length((document || jsonb_build_object('body',''))::text) FROM memories WHERE id=$1")
+    let room: i32 = sqlx_core::query_scalar::query_scalar("SELECT 24576-octet_length((document || jsonb_build_object('body',''))::text) FROM memories WHERE id=$1")
         .bind(raw["id"].as_str().unwrap()).fetch_one(store.pool()).await.unwrap();
     assert!(
         (1..8192).contains(&room),
@@ -584,12 +586,13 @@ async fn document_size_limit_contract(store: &Store) {
     let refs = raw["evidence"].as_array().unwrap().iter().map(|e| json!({"entity_id":e["entity_id"],"source_revision":e["source_revision"],"content_digest":e["content_digest"],"generation":e["generation"]})).collect::<Vec<_>>();
     let mut input = json!({"title":"size chain","body":"x".repeat(room as usize),"evidence":refs});
     let boundary = call(store,json!({"op":"remember","scope":"meenseek","idempotency_key":"size-exact-boundary","memory":input})).await.unwrap();
-    let bytes: i32 =
-        sqlx::query_scalar("SELECT octet_length(document::text) FROM memories WHERE id=$1")
-            .bind(boundary["id"].as_str().unwrap())
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+    let bytes: i32 = sqlx_core::query_scalar::query_scalar(
+        "SELECT octet_length(document::text) FROM memories WHERE id=$1",
+    )
+    .bind(boundary["id"].as_str().unwrap())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     assert_eq!(
         bytes, 24576,
         "the exact PostgreSQL JSONB limit remains accepted"
@@ -640,13 +643,15 @@ async fn document_size_limit_contract(store: &Store) {
     let mut legacy_candidate = prepared["candidate"].clone();
     legacy_candidate["finding"]["applicability"] = draft["finding"]["applicability"].clone();
     let legacy_digest = digest(&serde_json::to_vec(&legacy_candidate).unwrap());
-    sqlx::query("UPDATE curation_reviews SET candidate=$2,candidate_digest=$3 WHERE id=$1")
-        .bind(prepared["id"].as_str().unwrap())
-        .bind(&legacy_candidate)
-        .bind(&legacy_digest)
-        .execute(store.pool())
-        .await
-        .unwrap();
+    sqlx_core::query::query(
+        "UPDATE curation_reviews SET candidate=$2,candidate_digest=$3 WHERE id=$1",
+    )
+    .bind(prepared["id"].as_str().unwrap())
+    .bind(&legacy_candidate)
+    .bind(&legacy_digest)
+    .execute(store.pool())
+    .await
+    .unwrap();
     let mut legacy = prepared.clone();
     legacy["candidate_digest"] = json!(legacy_digest);
     let before = memory_state(store).await;
@@ -660,13 +665,15 @@ async fn document_size_limit_contract(store: &Store) {
         before,
         "failed apply leaves original, pending receipt and snapshots unchanged"
     );
-    sqlx::query("UPDATE curation_reviews SET candidate=$2,candidate_digest=$3 WHERE id=$1")
-        .bind(prepared["id"].as_str().unwrap())
-        .bind(&prepared["candidate"])
-        .bind(prepared["candidate_digest"].as_str().unwrap())
-        .execute(store.pool())
-        .await
-        .unwrap();
+    sqlx_core::query::query(
+        "UPDATE curation_reviews SET candidate=$2,candidate_digest=$3 WHERE id=$1",
+    )
+    .bind(prepared["id"].as_str().unwrap())
+    .bind(&prepared["candidate"])
+    .bind(prepared["candidate_digest"].as_str().unwrap())
+    .execute(store.pool())
+    .await
+    .unwrap();
     assert_eq!(
         call(store, review(&prepared, "reviewer-task", "approve"))
             .await

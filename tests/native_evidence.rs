@@ -15,7 +15,7 @@ async fn store() -> Store {
     );
     let store = Store::connect(&url).await.expect("isolated database");
     store.initialize().await.expect("isolated schema");
-    sqlx::query("TRUNCATE curation_reviews,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
+    sqlx_core::query::query("TRUNCATE curation_reviews,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
         .execute(store.pool()).await.expect("reset synthetic rows only");
     store
 }
@@ -354,7 +354,7 @@ async fn native_evidence_contract() {
         ("native-erased-review", &origin),
         ("native-retained-review", &another_origin),
     ] {
-        sqlx::query("INSERT INTO curation_reviews(id,scope,key_digest,source_id,input_digest,candidate_digest,candidate,author) VALUES($1,'meenseek',$1,$2,'synthetic','synthetic',$3,'synthetic reviewer')")
+        sqlx_core::query::query("INSERT INTO curation_reviews(id,scope,key_digest,source_id,input_digest,candidate_digest,candidate,author) VALUES($1,'meenseek',$1,$2,'synthetic','synthetic',$3,'synthetic reviewer')")
             .bind(key).bind(basis["id"].as_str().unwrap())
             .bind(json!({"basis":[native_reference(basis)],"quotations":[{"entity_id":basis["id"],"quote":shared_body}]}))
             .execute(store.pool()).await.unwrap();
@@ -364,10 +364,11 @@ async fn native_evidence_contract() {
         json!({"op":"forget","scope":"meenseek","id":origin["id"],"revision":1}),
     )
     .await;
-    let reviews: Vec<String> = sqlx::query_scalar("SELECT id FROM curation_reviews ORDER BY id")
-        .fetch_all(store.pool())
-        .await
-        .unwrap();
+    let reviews: Vec<String> =
+        sqlx_core::query_scalar::query_scalar("SELECT id FROM curation_reviews ORDER BY id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
     assert_eq!(reviews, vec!["native-retained-review"]);
     assert_eq!(
         historical(&store, &owner, 1, origin["id"].as_str().unwrap()).await["available"],

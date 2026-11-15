@@ -6,7 +6,9 @@ use crate::{
 use context_core::document::parse_markdown_bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Postgres, QueryBuilder, Row};
+use sqlx_core::query_builder::QueryBuilder;
+use sqlx_core::row::Row;
+use sqlx_postgres::Postgres;
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -476,7 +478,7 @@ impl Store {
 
     async fn insert_context(
         &self,
-        tx: &mut sqlx::Transaction<'_, Postgres>,
+        tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>,
         initial: &Scan,
         root: &Path,
         scopes: &[ContextScope],
@@ -584,7 +586,7 @@ impl Store {
         let mut tx = self.lock_context(false).await?;
         let result = async {
         self.count(1);
-        let rows = sqlx::query("SELECT material_id::text,revision,origin_kind,path,content_digest,byte_len,source_root,source_path,source_digest FROM context_materials WHERE scope=$1 AND NOT deleted AND NOT restricted AND ($2='' OR strpos(lower(path),lower($2))>0 OR strpos(lower(search_text),lower($2))>0) AND ($3::text IS NULL OR path COLLATE \"C\">$3 COLLATE \"C\") ORDER BY path COLLATE \"C\" LIMIT $4")
+        let rows = sqlx_core::query::query("SELECT material_id::text,revision,origin_kind,path,content_digest,byte_len,source_root,source_path,source_digest FROM context_materials WHERE scope=$1 AND NOT deleted AND NOT restricted AND ($2='' OR strpos(lower(path),lower($2))>0 OR strpos(lower(search_text),lower($2))>0) AND ($3::text IS NULL OR path COLLATE \"C\">$3 COLLATE \"C\") ORDER BY path COLLATE \"C\" LIMIT $4")
             .bind(scope.as_str()).bind(query).bind(after).bind((limit + 1) as i64).fetch_all(&mut *tx).await.map_err(|_| Error::Storage)?;
         let more = rows.len() > limit;
         let items: Vec<_> = rows.iter().take(limit).map(|row| json!({"scope":scope,"path":row.get::<String,_>("path"),"content_digest":row.get::<String,_>("content_digest"),"byte_len":row.get::<i64,_>("byte_len"),"material_id":row.get::<String,_>("material_id"),"revision":row.get::<i64,_>("revision"),"origin_kind":row.get::<String,_>("origin_kind"),"source_digest":row.get::<Option<String>,_>("source_digest"),"source_root":row.get::<Option<String>,_>("source_root"),"source_path":row.get::<String,_>("source_path")})).collect();
@@ -603,7 +605,7 @@ impl Store {
         let mut tx = self.lock_context(false).await?;
         let result = async {
         self.count(1);
-        let scopes: Vec<String> = sqlx::query_scalar(
+        let scopes: Vec<String> = sqlx_core::query_scalar::query_scalar(
             "SELECT DISTINCT scope COLLATE \"C\" AS scope FROM context_materials WHERE NOT deleted AND NOT restricted ORDER BY scope LIMIT $1",
         )
         .bind((MAX_CONTEXT_SCOPES + 1) as i64)
@@ -662,11 +664,11 @@ impl Store {
         let mut tx = self.lock_context(false).await?;
         let result = async {
             self.count(1);
-            let rows=sqlx::query("SELECT v.revision,v.content_digest,v.byte_len,extract(epoch FROM v.recorded_at)::bigint AS recorded_at,CASE WHEN v.manual_edit_id IS NOT NULL THEN 'manual' WHEN v.apply_id IS NOT NULL THEN 'core' ELSE 'import' END AS change_kind FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.scope=$1 AND m.path=$2 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted AND ($3::bigint IS NULL OR v.revision<$3) ORDER BY v.revision DESC LIMIT 21")
+            let rows=sqlx_core::query::query("SELECT v.revision,v.content_digest,v.byte_len,extract(epoch FROM v.recorded_at)::bigint AS recorded_at,CASE WHEN v.manual_edit_id IS NOT NULL THEN 'manual' WHEN v.apply_id IS NOT NULL THEN 'core' ELSE 'import' END AS change_kind FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.scope=$1 AND m.path=$2 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted AND ($3::bigint IS NULL OR v.revision<$3) ORDER BY v.revision DESC LIMIT 21")
                 .bind(scope.as_str()).bind(path).bind(before).fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?;
             if rows.is_empty() && before.is_none() {
                 self.count(1);
-                let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted AND NOT restricted)").bind(scope.as_str()).bind(path).fetch_one(&mut *tx).await.map_err(|_|Error::Storage)?;
+                let exists:bool=sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted AND NOT restricted)").bind(scope.as_str()).bind(path).fetch_one(&mut *tx).await.map_err(|_|Error::Storage)?;
                 if !exists { return Err(Error::NotFound); }
             }
             let more=rows.len()>20;
@@ -694,7 +696,7 @@ impl Store {
             // Materialize once: the history view reconstructs content from chunks.
             // Keep the metadata limit before reconstruction and the actual-byte
             // limit afterwards without evaluating that reconstruction twice.
-            let row=sqlx::query("WITH version AS MATERIALIZED (SELECT v.content_digest,v.byte_len,CASE WHEN v.byte_len BETWEEN 0 AND $4 THEN v.content END AS content FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.scope=$1 AND m.path=$2 AND v.revision=$3 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted) SELECT content_digest,byte_len,CASE WHEN octet_length(content)<=$4 THEN content END AS content FROM version")
+            let row=sqlx_core::query::query("WITH version AS MATERIALIZED (SELECT v.content_digest,v.byte_len,CASE WHEN v.byte_len BETWEEN 0 AND $4 THEN v.content END AS content FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.scope=$1 AND m.path=$2 AND v.revision=$3 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted) SELECT content_digest,byte_len,CASE WHEN octet_length(content)<=$4 THEN content END AS content FROM version")
                 .bind(scope.as_str()).bind(path).bind(revision).bind(limit as i64).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?.ok_or(Error::NotFound)?;
             let bytes=row.get::<Option<Vec<u8>>,_>("content").ok_or(Error::Limit)?;
             let sha:String=row.get("content_digest");
@@ -730,7 +732,7 @@ impl Store {
         }
         self.count(1);
         // Both stored length and actual length bound transfer before allocating a Rust body.
-        let row = sqlx::query("SELECT material_id::text,revision,origin_kind,byte_len,content_digest,source_digest,source_path,CASE WHEN byte_len BETWEEN 0 AND $4 AND octet_length(content) <= $4 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted AND (NOT restricted OR $3)")
+        let row = sqlx_core::query::query("SELECT material_id::text,revision,origin_kind,byte_len,content_digest,source_digest,source_path,CASE WHEN byte_len BETWEEN 0 AND $4 AND octet_length(content) <= $4 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted AND (NOT restricted OR $3)")
             .bind(scope.as_str()).bind(path).bind(archive).bind(byte_limit as i64).fetch_optional(&mut *tx).await.map_err(|_| Error::Storage)?.ok_or(Error::NotFound)?;
         let bytes = row
             .get::<Option<Vec<u8>>, _>("content")
@@ -792,7 +794,7 @@ impl Store {
         let result = async {
         self.count(1);
         // The window sum bounds the complete result before PostgreSQL sends any bodies.
-        let rows = sqlx::query("WITH selected AS MATERIALIZED (SELECT path,byte_len,content_digest,content,sum(byte_len) OVER () AS total FROM context_materials WHERE scope=$1 AND path=ANY($2) AND NOT deleted AND (NOT restricted OR $3)) SELECT path,byte_len,content_digest,CASE WHEN total <= $4 THEN content END AS content FROM selected ORDER BY path COLLATE \"C\"")
+        let rows = sqlx_core::query::query("WITH selected AS MATERIALIZED (SELECT path,byte_len,content_digest,content,sum(byte_len) OVER () AS total FROM context_materials WHERE scope=$1 AND path=ANY($2) AND NOT deleted AND (NOT restricted OR $3)) SELECT path,byte_len,content_digest,CASE WHEN total <= $4 THEN content END AS content FROM selected ORDER BY path COLLATE \"C\"")
             .bind(scope.as_str()).bind(paths).bind(archive).bind(MAX_TOTAL_BYTES as i64).fetch_all(&mut *tx).await.map_err(|_| Error::Storage)?;
         if rows.len() != paths.len() {
             return Err(Error::NotFound);
@@ -823,15 +825,15 @@ impl Store {
     }
 }
 
-async fn stored_inventory<'e, E: sqlx::Executor<'e, Database = Postgres>>(
+async fn stored_inventory<'e, E: sqlx_core::executor::Executor<'e, Database = Postgres>>(
     executor: E,
     inventory: &Inventory,
-) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
+) -> Result<Vec<sqlx_postgres::PgRow>, Error> {
     let scopes: Vec<_> = inventory.scopes.iter().map(ContextScope::as_str).collect();
-    sqlx::query("SELECT scope,path,source_path,source_digest,content_digest,byte_len,restricted,encode(sha256(content),'hex') AS actual_digest FROM context_materials WHERE source_root=$1 AND scope=ANY($2) AND NOT deleted ORDER BY scope COLLATE \"C\",path COLLATE \"C\" LIMIT $3")
+    sqlx_core::query::query("SELECT scope,path,source_path,source_digest,content_digest,byte_len,restricted,encode(sha256(content),'hex') AS actual_digest FROM context_materials WHERE source_root=$1 AND scope=ANY($2) AND NOT deleted ORDER BY scope COLLATE \"C\",path COLLATE \"C\" LIMIT $3")
         .bind(&inventory.source_root).bind(scopes).bind((MAX_FILES + 1) as i64).fetch_all(executor).await.map_err(|_| Error::Storage)
 }
-fn verify_rows(inventory: &Inventory, rows: &[sqlx::postgres::PgRow]) -> Result<(), Error> {
+fn verify_rows(inventory: &Inventory, rows: &[sqlx_postgres::PgRow]) -> Result<(), Error> {
     if rows.len() != inventory.entries.len() {
         return Err(Error::Conflict);
     }

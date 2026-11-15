@@ -7,10 +7,10 @@ use crate::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{
-    PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx_core::row::Row;
+use sqlx_postgres::PgConnectOptions;
+use sqlx_postgres::PgPool;
+use sqlx_postgres::PgPoolOptions;
 use std::{
     sync::{
         Arc,
@@ -92,15 +92,15 @@ impl Store {
             .acquire_timeout(Duration::from_secs(3))
             .after_connect(|connection, _| {
                 Box::pin(async move {
-                    sqlx::query("SET statement_timeout = '5s'")
+                    sqlx_core::query::query("SET statement_timeout = '5s'")
                         .execute(&mut *connection)
                         .await?;
-                    sqlx::query("SET lock_timeout = '3s'")
+                    sqlx_core::query::query("SET lock_timeout = '3s'")
                         .execute(&mut *connection)
                         .await?;
                     // The graph projection runs in milliseconds without JIT, but its
                     // estimated cost otherwise triggers seconds of JIT compilation.
-                    sqlx::query("SET jit = off")
+                    sqlx_core::query::query("SET jit = off")
                         .execute(&mut *connection)
                         .await?;
                     Ok(())
@@ -208,9 +208,9 @@ impl Store {
     pub(crate) fn dependency_finish_rows(
         &self,
         start: DependencyStart,
-        result: &Result<Vec<sqlx::postgres::PgRow>, Error>,
+        result: &Result<Vec<sqlx_postgres::PgRow>, Error>,
     ) {
-        use sqlx::ValueRef;
+        use sqlx_core::value::ValueRef;
         let bytes = result.as_ref().ok().and_then(|rows| {
             rows.iter().try_fold(0usize, |total, row| {
                 (0..row.len()).try_fold(total, |total, index| {
@@ -232,12 +232,12 @@ impl Store {
     }
     pub(crate) async fn consumer_control(
         &self,
-        conn: &mut sqlx::PgConnection,
+        conn: &mut sqlx_postgres::PgConnection,
         statement: &'static str,
     ) -> Result<(), Error> {
         let observation = self.dependency_start(statement, &Vec::<String>::new())?;
         self.count(1);
-        let result = sqlx::query(statement)
+        let result = sqlx_core::query::query(statement)
             .execute(conn)
             .await
             .map(|r| r.rows_affected())
@@ -253,39 +253,41 @@ impl Store {
         let mut tx = self.pool.begin().await.map_err(|_| Error::Storage)?;
         // Schema backfills have a separate finite budget. SET LOCAL restores the
         // ordinary five-second query limit on commit or rollback.
-        sqlx::query("SET LOCAL statement_timeout = '180s'")
+        sqlx_core::query::query("SET LOCAL statement_timeout = '180s'")
             .execute(&mut *tx)
             .await
             .map_err(|_| Error::Storage)?;
-        sqlx::query("SELECT pg_advisory_xact_lock(478310001)")
+        sqlx_core::query::query("SELECT pg_advisory_xact_lock(478310001)")
             .execute(&mut *tx)
             .await
             .map_err(|_| Error::Storage)?;
-        let exists: bool =
-            sqlx::query_scalar("SELECT to_regclass('public.ontology_baseline') IS NOT NULL")
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|_| Error::Storage)?;
+        let exists: bool = sqlx_core::query_scalar::query_scalar(
+            "SELECT to_regclass('public.ontology_baseline') IS NOT NULL",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| Error::Storage)?;
         if exists {
-            let stored: Option<String> =
-                sqlx::query_scalar("SELECT digest FROM ontology_baseline WHERE singleton = true")
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|_| Error::Baseline)?;
+            let stored: Option<String> = sqlx_core::query_scalar::query_scalar(
+                "SELECT digest FROM ontology_baseline WHERE singleton = true",
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| Error::Baseline)?;
             if stored.as_deref() != Some(&digest) {
                 return Err(Error::Baseline);
             }
         } else {
-            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S')").fetch_one(&mut *tx).await.map_err(|_| Error::Storage)?;
+            let count: i64 = sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S')").fetch_one(&mut *tx).await.map_err(|_| Error::Storage)?;
             if count != 0 {
                 return Err(Error::Baseline);
             }
-            sqlx::raw_sql(baseline)
+            sqlx_core::raw_sql::raw_sql(baseline)
                 .execute(&mut *tx)
                 .await
                 .map_err(|_| Error::Baseline)?;
-            sqlx::query("CREATE TABLE ontology_baseline (singleton boolean PRIMARY KEY CHECK(singleton), digest text NOT NULL)").execute(&mut *tx).await.map_err(|_| Error::Storage)?;
-            sqlx::query("INSERT INTO ontology_baseline VALUES(true,$1)")
+            sqlx_core::query::query("CREATE TABLE ontology_baseline (singleton boolean PRIMARY KEY CHECK(singleton), digest text NOT NULL)").execute(&mut *tx).await.map_err(|_| Error::Storage)?;
+            sqlx_core::query::query("INSERT INTO ontology_baseline VALUES(true,$1)")
                 .bind(digest)
                 .execute(&mut *tx)
                 .await
@@ -296,14 +298,15 @@ impl Store {
                     .map(|(id, label)| json!({"id":id,"label":label}))
                     .collect::<Vec<_>>()
             );
-            sqlx::query("INSERT INTO areas SELECT id,label FROM jsonb_to_recordset($1) AS x(id text,label text)").bind(areas).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
+            sqlx_core::query::query("INSERT INTO areas SELECT id,label FROM jsonb_to_recordset($1) AS x(id text,label text)").bind(areas).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
         }
-        sqlx::query("CREATE TABLE IF NOT EXISTS ontology_migrations (name text PRIMARY KEY, digest text NOT NULL)")
+        sqlx_core::query::query("CREATE TABLE IF NOT EXISTS ontology_migrations (name text PRIMARY KEY, digest text NOT NULL)")
             .execute(&mut *tx).await.map_err(|_| Error::Baseline)?;
-        let migrations = sqlx::query("SELECT name,digest FROM ontology_migrations ORDER BY name")
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|_| Error::Baseline)?;
+        let migrations =
+            sqlx_core::query::query("SELECT name,digest FROM ontology_migrations ORDER BY name")
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|_| Error::Baseline)?;
         let expected = [
             (SOURCE_PROVIDERS_NAME, SOURCE_PROVIDERS_MIGRATION),
             ("002-second-brain.sql", SECOND_BRAIN_MIGRATION),
@@ -390,16 +393,18 @@ impl Store {
                     return Err(Error::Baseline);
                 }
             } else {
-                sqlx::raw_sql(*sql)
+                sqlx_core::raw_sql::raw_sql(*sql)
                     .execute(&mut *tx)
                     .await
                     .map_err(|_| Error::Baseline)?;
-                sqlx::query("INSERT INTO ontology_migrations(name,digest) VALUES($1,$2)")
-                    .bind(name)
-                    .bind(hash)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|_| Error::Baseline)?;
+                sqlx_core::query::query(
+                    "INSERT INTO ontology_migrations(name,digest) VALUES($1,$2)",
+                )
+                .bind(name)
+                .bind(hash)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| Error::Baseline)?;
             }
         }
         tx.commit().await.map_err(|_| Error::Storage)
@@ -417,7 +422,7 @@ impl Store {
         validate_search(query)?;
         crate::domain::validate_area(scope, area)?;
         self.count(1);
-        sqlx::query_scalar(r#"
+        sqlx_core::query_scalar::query_scalar(r#"
 WITH scoped AS MATERIALIZED (
  SELECT e.id,e.revision,s.kind,s.path,s.status,p.present,(s.status='ok' AND p.present AND p.source_revision=s.verified_revision) AS current,left(COALESCE(p.content,''),200) AS excerpt,
  ARRAY(SELECT a.area FROM entity_areas a WHERE a.scope=$1 AND a.entity_id=e.id ORDER BY a.area) AS areas,
@@ -439,7 +444,7 @@ SELECT jsonb_build_object('items',COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDE
         let result=async {
         validate_id(id)?;
         self.count(1);
-        sqlx::query_scalar(r#"
+        sqlx_core::query_scalar::query_scalar(r#"
 SELECT jsonb_build_object('id',e.id,'revision',e.revision,
  'areas',ARRAY(SELECT a.area FROM entity_areas a WHERE a.scope=$1 AND a.entity_id=e.id ORDER BY a.area),
  'topics',ARRAY(SELECT t.name FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id WHERE et.scope=$1 AND et.entity_id=e.id ORDER BY t.name),
@@ -467,7 +472,7 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
         self.count(1);
         let mut tx = self.pool.begin().await.map_err(|_| Error::Storage)?;
         self.count(1);
-        let old=sqlx::query(r#"SELECT e.revision,
+        let old=sqlx_core::query::query(r#"SELECT e.revision,
  ARRAY(SELECT a.area FROM entity_areas a WHERE a.scope=$1 AND a.entity_id=e.id ORDER BY a.area) AS areas,
  ARRAY(SELECT t.name FROM entity_topics et JOIN topics t ON t.scope=et.scope AND t.id=et.topic_id WHERE et.scope=$1 AND et.entity_id=e.id ORDER BY t.name) AS topics
  FROM entities e WHERE e.scope=$1 AND e.id=$2 FOR UPDATE"#).bind(scope.as_str()).bind(id).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?.ok_or(Error::NotFound)?;
@@ -478,20 +483,20 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
         }
         let previous = json!({"areas":old.get::<Vec<String>,_>("areas"),"topics":old.get::<Vec<String>,_>("topics")});
         self.count(1);
-        sqlx::query("INSERT INTO topics(scope,name) SELECT $1,unnest($2::text[]) ON CONFLICT(scope,name) DO NOTHING").bind(scope.as_str()).bind(&change.topics).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+        sqlx_core::query::query("INSERT INTO topics(scope,name) SELECT $1,unnest($2::text[]) ON CONFLICT(scope,name) DO NOTHING").bind(scope.as_str()).bind(&change.topics).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         self.count(1);
-        sqlx::query(r#"WITH removed AS (DELETE FROM entity_areas WHERE scope=$1 AND entity_id=$2 AND NOT(area=ANY($3))) INSERT INTO entity_areas SELECT $1,$2,unnest($3::text[]) ON CONFLICT DO NOTHING"#).bind(scope.as_str()).bind(id).bind(&change.areas).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+        sqlx_core::query::query(r#"WITH removed AS (DELETE FROM entity_areas WHERE scope=$1 AND entity_id=$2 AND NOT(area=ANY($3))) INSERT INTO entity_areas SELECT $1,$2,unnest($3::text[]) ON CONFLICT DO NOTHING"#).bind(scope.as_str()).bind(id).bind(&change.areas).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         self.count(1);
-        sqlx::query(r#"WITH removed AS (DELETE FROM entity_topics WHERE scope=$1 AND entity_id=$2 AND topic_id NOT IN (SELECT id FROM topics WHERE scope=$1 AND name=ANY($3))) INSERT INTO entity_topics SELECT $1,$2,id FROM topics WHERE scope=$1 AND name=ANY($3) ON CONFLICT DO NOTHING"#).bind(scope.as_str()).bind(id).bind(&change.topics).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+        sqlx_core::query::query(r#"WITH removed AS (DELETE FROM entity_topics WHERE scope=$1 AND entity_id=$2 AND topic_id NOT IN (SELECT id FROM topics WHERE scope=$1 AND name=ANY($3))) INSERT INTO entity_topics SELECT $1,$2,id FROM topics WHERE scope=$1 AND name=ANY($3) ON CONFLICT DO NOTHING"#).bind(scope.as_str()).bind(id).bind(&change.topics).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         self.count(1);
-        sqlx::query("UPDATE entities SET revision=revision+1 WHERE scope=$1 AND id=$2")
+        sqlx_core::query::query("UPDATE entities SET revision=revision+1 WHERE scope=$1 AND id=$2")
             .bind(scope.as_str())
             .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(|_| Error::Storage)?;
         self.count(1);
-        sqlx::query("INSERT INTO confirmation_history(scope,entity_id,revision,kind,previous,confirmed) VALUES($1,$2,$3,'classification',$4,$5)").bind(scope.as_str()).bind(id).bind(revision+1).bind(previous).bind(json!({"areas":change.areas,"topics":change.topics})).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+        sqlx_core::query::query("INSERT INTO confirmation_history(scope,entity_id,revision,kind,previous,confirmed) VALUES($1,$2,$3,'classification',$4,$5)").bind(scope.as_str()).bind(id).bind(revision+1).bind(previous).bind(json!({"areas":change.areas,"topics":change.topics})).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         self.count(1);
         tx.commit().await.map_err(|_| Error::Storage)
     }
@@ -504,7 +509,7 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
         self.count(1);
         let mut tx = self.pool.begin().await.map_err(|_| Error::Storage)?;
         self.count(1);
-        let rows = sqlx::query(
+        let rows = sqlx_core::query::query(
             "SELECT id,revision FROM entities WHERE scope=$1 AND id=ANY($2) ORDER BY id FOR UPDATE",
         )
         .bind(scope.as_str())
@@ -531,7 +536,7 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
             (change.target_id.as_str(), id)
         };
         self.count(1);
-        let counts: Vec<i64> = sqlx::query_scalar("SELECT count(*) FROM related_materials WHERE scope=$1 AND (left_id=ANY($2) OR right_id=ANY($2)) GROUP BY scope")
+        let counts: Vec<i64> = sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM related_materials WHERE scope=$1 AND (left_id=ANY($2) OR right_id=ANY($2)) GROUP BY scope")
             .bind(scope.as_str()).bind(vec![id,change.target_id.as_str()]).fetch_all(&mut *tx).await.map_err(|_| Error::Storage)?;
         // Conservatively bound combined degree to keep every detail response complete.
         if !change.remove && counts.first().is_some_and(|n| *n >= 100) {
@@ -540,20 +545,22 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
         }
         self.count(1);
         let affected = if change.remove {
-            sqlx::query("DELETE FROM related_materials WHERE scope=$1 AND left_id=$2 AND right_id=$3").bind(scope.as_str()).bind(left).bind(right).execute(&mut *tx).await
+            sqlx_core::query::query("DELETE FROM related_materials WHERE scope=$1 AND left_id=$2 AND right_id=$3").bind(scope.as_str()).bind(left).bind(right).execute(&mut *tx).await
         } else {
-            sqlx::query("INSERT INTO related_materials(scope,left_id,right_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(scope.as_str()).bind(left).bind(right).execute(&mut *tx).await
+            sqlx_core::query::query("INSERT INTO related_materials(scope,left_id,right_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(scope.as_str()).bind(left).bind(right).execute(&mut *tx).await
         }.map_err(|_| Error::Storage)?.rows_affected();
         if affected > 0 {
             self.count(1);
-            sqlx::query("UPDATE entities SET revision=revision+1 WHERE scope=$1 AND id=$2")
-                .bind(scope.as_str())
-                .bind(id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|_| Error::Storage)?;
+            sqlx_core::query::query(
+                "UPDATE entities SET revision=revision+1 WHERE scope=$1 AND id=$2",
+            )
+            .bind(scope.as_str())
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| Error::Storage)?;
             self.count(1);
-            sqlx::query("INSERT INTO confirmation_history(scope,entity_id,revision,kind,previous,confirmed) VALUES($1,$2,$3,$4,$5,$6)")
+            sqlx_core::query::query("INSERT INTO confirmation_history(scope,entity_id,revision,kind,previous,confirmed) VALUES($1,$2,$3,$4,$5,$6)")
                 .bind(scope.as_str()).bind(id).bind(old_revision+1).bind(if change.remove{"link-remove"}else{"link-add"})
                 .bind(json!({"target_id":change.target_id,"linked":change.remove})).bind(json!({"target_id":change.target_id,"linked":!change.remove}))
                 .execute(&mut *tx).await.map_err(|_| Error::Storage)?;
@@ -563,14 +570,17 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
     }
     // Hold this transaction from before provider observation through persistence. The shared
     // try-lock bounds overlap across manual commands, app polling, and other app processes.
-    pub async fn lock_import(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, Error> {
+    pub async fn lock_import(
+        &self,
+    ) -> Result<sqlx_core::transaction::Transaction<'static, sqlx_postgres::Postgres>, Error> {
         self.count(1);
         let mut tx = self.pool.begin().await.map_err(|_| Error::Storage)?;
         self.count(1);
-        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(478310002)")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|_| Error::Storage)?;
+        let acquired: bool =
+            sqlx_core::query_scalar::query_scalar("SELECT pg_try_advisory_xact_lock(478310002)")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|_| Error::Storage)?;
         if !acquired {
             self.count(1);
             tx.rollback().await.map_err(|_| Error::Storage)?;
@@ -580,7 +590,7 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
     }
     pub async fn finish_import(
         &self,
-        tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        tx: sqlx_core::transaction::Transaction<'_, sqlx_postgres::Postgres>,
     ) -> Result<(), Error> {
         self.count(1);
         tx.commit().await.map_err(|_| Error::Storage)
@@ -600,7 +610,7 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
     }
     pub(crate) async fn apply_import_in(
         &self,
-        conn: &mut sqlx::PgConnection,
+        conn: &mut sqlx_postgres::PgConnection,
         records: &[ImportedRecord],
     ) -> Result<(), Error> {
         let observation = self.dependency_start("apply_import_in", &records)?;
@@ -618,7 +628,7 @@ FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN sour
             } else { Vec::new() });
         }
         self.count(1);
-        sqlx::query(r#"
+        sqlx_core::query::query(r#"
 WITH input AS MATERIALIZED (SELECT * FROM jsonb_to_recordset($1) AS x(source_id text,entity_id text,scope text,repository text,path text,kind text,source_revision text,digest text,content text,reference_paths text[])),
 s AS (INSERT INTO sources(id,scope,repository,path,kind,status,last_success_at,verified_revision)
  SELECT source_id,scope,repository,path,kind,CASE WHEN content IS NULL THEN 'missing' ELSE 'ok' END,now(),source_revision FROM input
@@ -644,7 +654,7 @@ INSERT INTO source_records(entity_id,scope,content,content_digest,source_revisio
     }
     pub(crate) async fn mark_failed_in(
         &self,
-        conn: &mut sqlx::PgConnection,
+        conn: &mut sqlx_postgres::PgConnection,
         source_ids: &[String],
         kind: SourceKind,
     ) -> Result<(), Error> {
@@ -660,7 +670,7 @@ INSERT INTO source_records(entity_id,scope,content,content_digest,source_revisio
             return Ok(());
         }
         self.count(1);
-        sqlx::query("UPDATE sources SET generation=generation+CASE WHEN status='failed' THEN 0 ELSE 1 END,status='failed',failure_code=$2,last_attempt_at=now() WHERE id=ANY($1) AND kind=$3")
+        sqlx_core::query::query("UPDATE sources SET generation=generation+CASE WHEN status='failed' THEN 0 ELSE 1 END,status='failed',failure_code=$2,last_attempt_at=now() WHERE id=ANY($1) AND kind=$3")
             .bind(source_ids).bind(kind.failure_code()).bind(kind.as_str())
             .execute(conn).await.map_err(|_| Error::Storage)?;
         Ok(())

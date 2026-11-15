@@ -63,15 +63,15 @@ async fn manual_edit_preserves_original_and_records_a_separate_version() {
     assert_eq!(history["items"].as_array().unwrap().len(), 2);
     assert_eq!(history["items"][0]["change_kind"], "manual");
     assert_eq!(history["items"][1]["change_kind"], "import");
-    let provenance: (String, String, i64) = sqlx::query_as("SELECT source_digest,source_path,revision FROM context_materials WHERE scope='personal' AND path='note.md'").fetch_one(store.pool()).await.expect("source provenance");
+    let provenance: (String, String, i64) = sqlx_core::query_as::query_as("SELECT source_digest,source_path,revision FROM context_materials WHERE scope='personal' AND path='note.md'").fetch_one(store.pool()).await.expect("source provenance");
     assert_eq!(
         provenance,
         (digest(before), "personal/note.md".to_owned(), 2)
     );
-    let version: (Option<String>, Option<String>) = sqlx::query_as("SELECT apply_id::text,manual_edit_id::text FROM context_material_versions WHERE material_id=(SELECT material_id FROM context_materials WHERE scope='personal' AND path='note.md') AND revision=2").fetch_one(store.pool()).await.expect("manual version");
+    let version: (Option<String>, Option<String>) = sqlx_core::query_as::query_as("SELECT apply_id::text,manual_edit_id::text FROM context_material_versions WHERE material_id=(SELECT material_id FROM context_materials WHERE scope='personal' AND path='note.md') AND revision=2").fetch_one(store.pool()).await.expect("manual version");
     assert_eq!(version.0, None);
     assert_eq!(version.1, result.manual_edit_id);
-    let projection: (String,) = sqlx::query_as("SELECT payload->>'source_digest' FROM context_projection_versions WHERE material_id=(SELECT material_id FROM context_materials WHERE scope='personal' AND path='note.md') AND revision=2").fetch_one(store.pool()).await.expect("matching projection");
+    let projection: (String,) = sqlx_core::query_as::query_as("SELECT payload->>'source_digest' FROM context_projection_versions WHERE material_id=(SELECT material_id FROM context_materials WHERE scope='personal' AND path='note.md') AND revision=2").fetch_one(store.pool()).await.expect("matching projection");
     assert_eq!(projection.0, result.content_digest);
     assert_eq!(
         store
@@ -140,7 +140,7 @@ async fn manual_edit_preserves_original_and_records_a_separate_version() {
             .expect("large Markdown history")["content"],
         large_before
     );
-    let large_projection: (String,) = sqlx::query_as("SELECT payload->>'status' FROM context_projection_versions WHERE material_id=(SELECT material_id FROM context_materials WHERE scope='profile' AND path='large.md') AND revision=1")
+    let large_projection: (String,) = sqlx_core::query_as::query_as("SELECT payload->>'status' FROM context_projection_versions WHERE material_id=(SELECT material_id FROM context_materials WHERE scope='profile' AND path='large.md') AND revision=1")
         .fetch_one(store.pool()).await.expect("large Markdown projection");
     assert_eq!(large_projection.0, "unavailable");
     assert_eq!(
@@ -173,7 +173,7 @@ async fn store() -> Store {
     );
     let store = Store::connect(&url).await.expect("isolated PostgreSQL");
     store.initialize().await.expect("additive migrations");
-    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
+    sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
         .execute(store.pool())
         .await
         .expect("reset synthetic materials only");
@@ -328,7 +328,7 @@ async fn postgres_transport_preserves_bytes_scope_archive_and_provenance() {
     );
     assert_eq!(result["inserted"], 9);
     assert_eq!(result["verified"], 9);
-    let saved: Value = sqlx::query_scalar(
+    let saved: Value = sqlx_core::query_scalar::query_scalar(
         "SELECT jsonb_agg(to_jsonb(m) ORDER BY scope,path) FROM context_materials m",
     )
     .fetch_one(store.pool())
@@ -341,7 +341,7 @@ async fn postgres_transport_preserves_bytes_scope_archive_and_provenance() {
         .expect("idempotent retry");
     assert_eq!(store.calls() - before, 6);
     assert_eq!(repeat["inserted"], 0);
-    let unchanged: Value = sqlx::query_scalar(
+    let unchanged: Value = sqlx_core::query_scalar::query_scalar(
         "SELECT jsonb_agg(to_jsonb(m) ORDER BY scope,path) FROM context_materials m",
     )
     .fetch_one(store.pool())
@@ -564,7 +564,7 @@ async fn source_drift_and_existing_ontology_edits_fail_atomically() {
     );
     let edited = b"ontology owned edit";
     let apply = synthetic_apply(&store).await;
-    sqlx::query("UPDATE context_materials SET content=$1,content_digest=$2,byte_len=$3,search_text='ontology owned edit',last_apply_id=$4::uuid WHERE scope='personal' AND path='note.md'")
+    sqlx_core::query::query("UPDATE context_materials SET content=$1,content_digest=$2,byte_len=$3,search_text='ontology owned edit',last_apply_id=$4::uuid WHERE scope='personal' AND path='note.md'")
         .bind(edited.as_slice()).bind(digest(edited)).bind(edited.len() as i64).bind(&apply).execute(store.pool()).await.expect("synthetic future ontology edit");
     finish_synthetic_apply(&store, &apply).await;
     assert_eq!(
@@ -586,7 +586,7 @@ async fn source_drift_and_existing_ontology_edits_fail_atomically() {
         Err(Error::Conflict)
     );
     let apply = synthetic_apply(&store).await;
-    let result = sqlx::query(
+    let result = sqlx_core::query::query(
         "UPDATE context_materials SET last_apply_id=$1::uuid,content='different'::bytea WHERE scope='personal'",
     )
     .bind(&apply)
@@ -602,7 +602,7 @@ async fn cardinality_limits_and_call_counts_are_explicit() {
     let store = store().await;
     let scopes = [scope("personal")];
     for size in [0usize, 1, 101] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
+        sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
             .execute(store.pool())
             .await
             .expect("reset bounded fixture");
@@ -795,7 +795,7 @@ async fn context_discovery_and_selected_bytes_have_bounded_calls() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for size in [0usize, 1, 101] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
+        sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
             .execute(store.pool())
             .await
             .expect("isolated fixture reset");
@@ -882,7 +882,7 @@ async fn context_discovery_and_selected_bytes_have_bounded_calls() {
             "three restricted selections each pass the gate without fetching bytes"
         );
     }
-    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
+    sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
         .execute(store.pool())
         .await
         .expect("isolated discovery bound");
@@ -926,16 +926,16 @@ async fn context_discovery_and_selected_bytes_have_bounded_calls() {
 
 // Explicitly synthetic persistence fixtures. No helper represents Core acceptance.
 async fn synthetic_apply(store: &Store) -> String {
-    sqlx::query_scalar("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-run',repeat('a',64),repeat('b',64),'{}','[{\"synthetic\":true}]','synthetic-attempt-'||i.id,'synthetic-batch-'||i.id,'synthetic-journal-'||i.id,'pending' FROM i CROSS JOIN context_store s RETURNING apply_id::text")
+    sqlx_core::query_scalar::query_scalar("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-run',repeat('a',64),repeat('b',64),'{}','[{\"synthetic\":true}]','synthetic-attempt-'||i.id,'synthetic-batch-'||i.id,'synthetic-journal-'||i.id,'pending' FROM i CROSS JOIN context_store s RETURNING apply_id::text")
         .fetch_one(store.pool()).await.expect("explicit synthetic pending apply")
 }
 async fn finish_synthetic_apply(store: &Store, apply: &str) {
-    sqlx::query("UPDATE context_apply_batches SET state='finalized',actual_batch_id=expected_batch_id,actual_journal_locator=expected_journal_locator,commit_receipt='{\"synthetic\":true}',final_core_receipt_digest=repeat('c',64) WHERE apply_id=$1::uuid")
+    sqlx_core::query::query("UPDATE context_apply_batches SET state='finalized',actual_batch_id=expected_batch_id,actual_journal_locator=expected_journal_locator,commit_receipt='{\"synthetic\":true}',final_core_receipt_digest=repeat('c',64) WHERE apply_id=$1::uuid")
         .bind(apply).execute(store.pool()).await.expect("synthetic terminal fixture, not a Core receipt");
 }
 async fn update_synthetic_material(store: &Store, path: &str, bytes: &[u8], deleted: bool) {
     let apply = synthetic_apply(store).await;
-    sqlx::query("UPDATE context_materials SET content=$1,content_digest=$2,byte_len=$3,search_text=$4,deleted=$5,last_apply_id=$6::uuid WHERE scope='personal' AND path=$7")
+    sqlx_core::query::query("UPDATE context_materials SET content=$1,content_digest=$2,byte_len=$3,search_text=$4,deleted=$5,last_apply_id=$6::uuid WHERE scope='personal' AND path=$7")
         .bind(bytes).bind(digest(bytes)).bind(bytes.len() as i64)
         .bind(if deleted { None } else { std::str::from_utf8(bytes).ok() })
         .bind(deleted).bind(&apply).bind(path).execute(store.pool()).await.expect("synthetic material revision");
@@ -944,7 +944,7 @@ async fn update_synthetic_material(store: &Store, path: &str, bytes: &[u8], dele
 
 #[tokio::test]
 async fn native_identity_origins_and_continuous_history_are_enforced() {
-    use sqlx::Row;
+    use sqlx_core::row::Row;
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     let (_temp, root) = source();
@@ -955,7 +955,7 @@ async fn native_identity_origins_and_continuous_history_are_enforced() {
         .import_context(&root, &scopes, &manifest.inventory_digest)
         .await
         .expect("imported version one");
-    let origin: Value = sqlx::query_scalar("SELECT to_jsonb(m) - ARRAY['content','content_digest','byte_len','search_text','revision','deleted','last_apply_id'] FROM context_materials m WHERE path='imported.md'")
+    let origin: Value = sqlx_core::query_scalar::query_scalar("SELECT to_jsonb(m) - ARRAY['content','content_digest','byte_len','search_text','revision','deleted','last_apply_id'] FROM context_materials m WHERE path='imported.md'")
         .fetch_one(store.pool()).await.expect("immutable imported origin");
     for _ in 0..2 {
         store.initialize().await.expect("migration replay");
@@ -963,10 +963,11 @@ async fn native_identity_origins_and_continuous_history_are_enforced() {
             .import_context(&root, &scopes, &manifest.inventory_digest)
             .await
             .expect("idempotent import");
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM context_material_versions")
-            .fetch_one(store.pool())
-            .await
-            .expect("version count");
+        let count: i64 =
+            sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM context_material_versions")
+                .fetch_one(store.pool())
+                .await
+                .expect("version count");
         assert_eq!(count, 1);
     }
     update_synthetic_material(&store, "imported.md", b"changed", false).await;
@@ -1004,10 +1005,10 @@ async fn native_identity_origins_and_continuous_history_are_enforced() {
         Err(Error::NotFound)
     );
     update_synthetic_material(&store, "imported.md", b"recreated", false).await;
-    let unchanged: Value = sqlx::query_scalar("SELECT to_jsonb(m) - ARRAY['content','content_digest','byte_len','search_text','revision','deleted','last_apply_id'] FROM context_materials m WHERE path='imported.md'")
+    let unchanged: Value = sqlx_core::query_scalar::query_scalar("SELECT to_jsonb(m) - ARRAY['content','content_digest','byte_len','search_text','revision','deleted','last_apply_id'] FROM context_materials m WHERE path='imported.md'")
         .fetch_one(store.pool()).await.expect("same imported identity after recreation");
     assert_eq!(origin, unchanged);
-    let versions = sqlx::query("SELECT revision,content,content_digest,byte_len,deleted,apply_id::text FROM context_material_versions ORDER BY revision")
+    let versions = sqlx_core::query::query("SELECT revision,content,content_digest,byte_len,deleted,apply_id::text FROM context_material_versions ORDER BY revision")
         .fetch_all(store.pool()).await.expect("exact history");
     for (index, (version, expected)) in versions
         .iter()
@@ -1032,7 +1033,7 @@ async fn native_identity_origins_and_continuous_history_are_enforced() {
     }
     assert_eq!(versions.len(), 5);
     let apply = synthetic_apply(&store).await;
-    sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,imported_at,origin_kind,content,content_digest,byte_len,restricted,search_text,last_apply_id) VALUES('personal','native.md',NULL,'personal/native.md',NULL,NULL,'native',$1,$2,6,false,'native',$3::uuid)")
+    sqlx_core::query::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,imported_at,origin_kind,content,content_digest,byte_len,restricted,search_text,last_apply_id) VALUES('personal','native.md',NULL,'personal/native.md',NULL,NULL,'native',$1,$2,6,false,'native',$3::uuid)")
         .bind(b"native".as_slice()).bind(digest(b"native")).bind(&apply).execute(store.pool()).await.expect("honest native origin");
     finish_synthetic_apply(&store, &apply).await;
     let native = store
@@ -1079,7 +1080,7 @@ async fn native_identity_origins_and_continuous_history_are_enforced() {
             .expect("native retained"),
         "again"
     );
-    let consistent: bool = sqlx::query_scalar("SELECT bool_and(ROW(m.content,m.content_digest,m.byte_len,m.restricted,m.search_text,m.deleted,m.last_apply_id) IS NOT DISTINCT FROM ROW(v.content,v.content_digest,v.byte_len,v.restricted,v.search_text,v.deleted,v.apply_id)) FROM context_materials m JOIN context_material_versions v USING(material_id,revision)")
+    let consistent: bool = sqlx_core::query_scalar::query_scalar("SELECT bool_and(ROW(m.content,m.content_digest,m.byte_len,m.restricted,m.search_text,m.deleted,m.last_apply_id) IS NOT DISTINCT FROM ROW(v.content,v.content_digest,v.byte_len,v.restricted,v.search_text,v.deleted,v.apply_id)) FROM context_materials m JOIN context_material_versions v USING(material_id,revision)")
         .fetch_one(store.pool()).await.expect("current and history consistency");
     assert!(consistent);
     let apply = synthetic_apply(&store).await;
@@ -1095,7 +1096,9 @@ async fn native_identity_origins_and_continuous_history_are_enforced() {
         "created_at=now()+interval '1 day'",
         "revision=7",
     ] {
-        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new("UPDATE context_materials SET ");
+        let mut query = sqlx_core::query_builder::QueryBuilder::<sqlx_postgres::Postgres>::new(
+            "UPDATE context_materials SET ",
+        );
         query
             .push(assignment)
             .push(",last_apply_id=")
@@ -1114,7 +1117,10 @@ async fn native_identity_origins_and_continuous_history_are_enforced() {
         "DELETE FROM context_store",
     ] {
         assert!(
-            sqlx::query(sql).execute(store.pool()).await.is_err(),
+            sqlx_core::query::query(sql)
+                .execute(store.pool())
+                .await
+                .is_err(),
             "reject {sql}"
         );
     }
@@ -1124,14 +1130,16 @@ async fn native_identity_origins_and_continuous_history_are_enforced() {
         .begin()
         .await
         .expect("overflow fixture transaction");
-    sqlx::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=9223372036854775807 WHERE path='imported.md'; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;")
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=9223372036854775807 WHERE path='imported.md'; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;")
         .execute(&mut *tx).await.expect("synthetic maximum revision");
     assert!(
-        sqlx::query("UPDATE context_materials SET last_apply_id=$1::uuid WHERE path='imported.md'")
-            .bind(&apply)
-            .execute(&mut *tx)
-            .await
-            .is_err()
+        sqlx_core::query::query(
+            "UPDATE context_materials SET last_apply_id=$1::uuid WHERE path='imported.md'"
+        )
+        .bind(&apply)
+        .execute(&mut *tx)
+        .await
+        .is_err()
     );
     tx.rollback()
         .await
@@ -1154,7 +1162,7 @@ async fn pending_and_committed_gate_every_store_read_before_sources_or_absence()
     let apply = synthetic_apply(&store).await;
     for state in ["pending", "committed"] {
         if state == "committed" {
-            sqlx::query("UPDATE context_apply_batches SET state='committed',actual_batch_id=expected_batch_id,actual_journal_locator=expected_journal_locator,commit_receipt='{\"synthetic\":true}' WHERE apply_id=$1::uuid")
+            sqlx_core::query::query("UPDATE context_apply_batches SET state='committed',actual_batch_id=expected_batch_id,actual_journal_locator=expected_journal_locator,commit_receipt='{\"synthetic\":true}' WHERE apply_id=$1::uuid")
                 .bind(&apply).execute(store.pool()).await.expect("synthetic committed recovery record");
         }
         let before = store.calls();
@@ -1232,11 +1240,13 @@ async fn pending_and_committed_gate_every_store_read_before_sources_or_absence()
         .await
         .expect("finalized opens reads");
     let apply = synthetic_apply(&store).await;
-    sqlx::query("UPDATE context_apply_batches SET state='aborted' WHERE apply_id=$1::uuid")
-        .bind(&apply)
-        .execute(store.pool())
-        .await
-        .expect("synthetic aborted preparation");
+    sqlx_core::query::query(
+        "UPDATE context_apply_batches SET state='aborted' WHERE apply_id=$1::uuid",
+    )
+    .bind(&apply)
+    .execute(store.pool())
+    .await
+    .expect("synthetic aborted preparation");
     assert_eq!(
         store
             .read_context(&scopes[0], "note.md", false)
@@ -1278,7 +1288,7 @@ async fn ontology_audit_is_exact_bounded_and_preserves_sources() {
         .await
         .unwrap();
     let snapshot_sql = "SELECT jsonb_build_object('sources',(SELECT jsonb_agg(to_jsonb(m) ORDER BY scope,path) FROM context_materials m),'versions',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v),'projections',(SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p))";
-    let before: Value = sqlx::query_scalar(snapshot_sql)
+    let before: Value = sqlx_core::query_scalar::query_scalar(snapshot_sql)
         .fetch_one(store.pool())
         .await
         .unwrap();
@@ -1339,7 +1349,7 @@ async fn ontology_audit_is_exact_bounded_and_preserves_sources() {
         std::env::var("TEST_DATABASE_URL").unwrap()
     );
     let readonly = Store::connect(&readonly_url).await.unwrap();
-    let mode: String = sqlx::query_scalar("SHOW transaction_read_only")
+    let mode: String = sqlx_core::query_scalar::query_scalar("SHOW transaction_read_only")
         .fetch_one(readonly.pool())
         .await
         .unwrap();
@@ -1351,7 +1361,7 @@ async fn ontology_audit_is_exact_bounded_and_preserves_sources() {
             .unwrap(),
         untyped
     );
-    let after: Value = sqlx::query_scalar(snapshot_sql)
+    let after: Value = sqlx_core::query_scalar::query_scalar(snapshot_sql)
         .fetch_one(store.pool())
         .await
         .unwrap();
@@ -1475,7 +1485,7 @@ async fn actual_connection_gates_serialize_readers_writers_and_pending_insertion
     .expect("no second pool checkout at any current read");
     drop(held);
     let mut reader = store.pool().begin().await.expect("actual shared reader");
-    sqlx::query("SELECT pg_advisory_xact_lock_shared(478310003)")
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock_shared(478310003)")
         .execute(&mut *reader)
         .await
         .expect("hold shared gate");
@@ -1489,23 +1499,25 @@ async fn actual_connection_gates_serialize_readers_writers_and_pending_insertion
             .await,
         Err(Error::ContextPending)
     );
-    let insertion = sqlx::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-race',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s")
+    let insertion = sqlx_core::query::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-race',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s")
         .execute(store.pool()).await;
     assert!(
         insertion.is_err(),
         "pending insertion cannot pass a current reader"
     );
     let mut writer = store.pool().begin().await.expect("actual native writer");
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(478310003)")
-        .fetch_one(&mut *writer)
-        .await
-        .expect("exclusive attempt");
+    let acquired: bool =
+        sqlx_core::query_scalar::query_scalar("SELECT pg_try_advisory_xact_lock(478310003)")
+            .fetch_one(&mut *writer)
+            .await
+            .expect("exclusive attempt");
     assert!(!acquired);
     reader.commit().await.expect("reader releases actual gate");
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(478310003)")
-        .fetch_one(&mut *writer)
-        .await
-        .expect("exclusive retry");
+    let acquired: bool =
+        sqlx_core::query_scalar::query_scalar("SELECT pg_try_advisory_xact_lock(478310003)")
+            .fetch_one(&mut *writer)
+            .await
+            .expect("exclusive retry");
     assert!(acquired);
     let before = store.calls();
     assert_eq!(store.context_scopes().await, Err(Error::ContextPending));
@@ -1530,11 +1542,11 @@ async fn current_context_call_budget_is_constant_for_one_and_two_thousand_materi
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for size in [1i64, 2000] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches")
+        sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches")
             .execute(store.pool())
             .await
             .expect("complete synthetic reset");
-        sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) SELECT 'personal',lpad(n::text,4,'0')||'.md','/synthetic','personal/'||lpad(n::text,4,'0')||'.md',encode(sha256(convert_to(repeat('marker ',512),'UTF8')),'hex'),encode(sha256(convert_to(repeat('marker ',512),'UTF8')),'hex'),convert_to(repeat('marker ',512),'UTF8'),3584,false,repeat('marker ',512) FROM generate_series(1,$1) n")
+        sqlx_core::query::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) SELECT 'personal',lpad(n::text,4,'0')||'.md','/synthetic','personal/'||lpad(n::text,4,'0')||'.md',encode(sha256(convert_to(repeat('marker ',512),'UTF8')),'hex'),encode(sha256(convert_to(repeat('marker ',512),'UTF8')),'hex'),convert_to(repeat('marker ',512),'UTF8'),3584,false,repeat('marker ',512) FROM generate_series(1,$1) n")
             .bind(size).execute(store.pool()).await.expect("batched synthetic canonical materials");
         let before = store.calls();
         assert_eq!(
@@ -1588,7 +1600,7 @@ async fn read_holds_its_shared_gate_until_the_actual_current_query_finishes() {
         .begin()
         .await
         .expect("owned synthetic table blocker");
-    sqlx::query("LOCK TABLE context_materials IN ACCESS EXCLUSIVE MODE")
+    sqlx_core::query::query("LOCK TABLE context_materials IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *blocker)
         .await
         .expect("pause current query only");
@@ -1596,13 +1608,13 @@ async fn read_holds_its_shared_gate_until_the_actual_current_query_finishes() {
     let task = tokio::spawn(async move { reader.context_scopes().await });
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING(pid) WHERE l.locktype='advisory' AND l.classid=0 AND l.objid=478310003 AND l.mode='ShareLock' AND l.granted AND a.wait_event_type='Lock' AND a.query LIKE '%SELECT DISTINCT scope%')")
+            let active: bool = sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING(pid) WHERE l.locktype='advisory' AND l.classid=0 AND l.objid=478310003 AND l.mode='ShareLock' AND l.granted AND a.wait_event_type='Lock' AND a.query LIKE '%SELECT DISTINCT scope%')")
                 .fetch_one(store.pool()).await.expect("observe actual query backend and shared gate");
             if active { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await.expect("current query waits on the same backend that holds the shared gate");
-    let insertion = sqlx::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-race',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s")
+    let insertion = sqlx_core::query::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-race',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s")
         .execute(store.pool()).await;
     assert!(
         insertion.is_err(),
@@ -1629,7 +1641,7 @@ async fn storage_rejects_invalid_apply_shapes_and_unbound_native_origins() {
     let store = store().await;
     let insert_native = "INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,imported_at,origin_kind,content,content_digest,byte_len,restricted,search_text,last_apply_id) VALUES('personal','native.md',NULL,'personal/native.md',NULL,NULL,'native',''::bytea,encode(sha256(''::bytea),'hex'),0,false,'',$1::uuid)";
     assert!(
-        sqlx::query(insert_native)
+        sqlx_core::query::query(insert_native)
             .bind(None::<String>)
             .execute(store.pool())
             .await
@@ -1654,8 +1666,9 @@ async fn storage_rejects_invalid_apply_shapes_and_unbound_native_origins() {
         "expected_batch_id=''",
         "expected_journal_locator=''",
     ] {
-        let mut query =
-            sqlx::QueryBuilder::<sqlx::Postgres>::new("UPDATE context_apply_batches SET ");
+        let mut query = sqlx_core::query_builder::QueryBuilder::<sqlx_postgres::Postgres>::new(
+            "UPDATE context_apply_batches SET ",
+        );
         query
             .push(assignment)
             .push(" WHERE apply_id=")
@@ -1666,24 +1679,26 @@ async fn storage_rejects_invalid_apply_shapes_and_unbound_native_origins() {
             "invalid persistence shape: {assignment}"
         );
     }
-    let second = sqlx::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-second',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s")
+    let second = sqlx_core::query::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-second',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s")
         .execute(store.pool()).await;
     assert!(second.is_err(), "only one unresolved apply per store");
-    sqlx::query(insert_native)
+    sqlx_core::query::query(insert_native)
         .bind(&apply)
         .execute(store.pool())
         .await
         .expect("native pending identity");
     assert!(
-        sqlx::query("UPDATE context_materials SET last_apply_id=$1::uuid WHERE path='native.md'")
-            .bind(&apply)
-            .execute(store.pool())
-            .await
-            .is_err(),
+        sqlx_core::query::query(
+            "UPDATE context_materials SET last_apply_id=$1::uuid WHERE path='native.md'"
+        )
+        .bind(&apply)
+        .execute(store.pool())
+        .await
+        .is_err(),
         "same apply cannot reuse a material revision"
     );
     finish_synthetic_apply(&store, &apply).await;
-    assert!(sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,imported_at,origin_kind,content,content_digest,byte_len,restricted,search_text,last_apply_id) VALUES('personal','other.md',NULL,'personal/other.md',NULL,NULL,'native',''::bytea,encode(sha256(''::bytea),'hex'),0,false,'',$1::uuid)")
+    assert!(sqlx_core::query::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,imported_at,origin_kind,content,content_digest,byte_len,restricted,search_text,last_apply_id) VALUES('personal','other.md',NULL,'personal/other.md',NULL,NULL,'native',''::bytea,encode(sha256(''::bytea),'hex'),0,false,'',$1::uuid)")
         .bind(&apply).execute(store.pool()).await.is_err(), "terminal apply cannot create native material");
-    assert!(sqlx::query("UPDATE context_materials SET content='x'::bytea,content_digest=encode(sha256('x'::bytea),'hex'),byte_len=1 WHERE path='native.md'").execute(store.pool()).await.is_err(), "raw update lacks a new pending apply");
+    assert!(sqlx_core::query::query("UPDATE context_materials SET content='x'::bytea,content_digest=encode(sha256('x'::bytea),'hex'),byte_len=1 WHERE path='native.md'").execute(store.pool()).await.is_err(), "raw update lacks a new pending apply");
 }

@@ -34,7 +34,7 @@ async fn store() -> Store {
     );
     let store = Store::connect(&url).await.expect("test PG");
     store.initialize().await.expect("007 migration");
-    sqlx::query("TRUNCATE document_grouping,document_subjects,memory_grouping,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics").execute(store.pool()).await.expect("reset fixture");
+    sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,memory_grouping,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects,curation_reviews,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics").execute(store.pool()).await.expect("reset fixture");
     store
 }
 fn fixture(count: usize, body: &[u8]) -> (tempfile::TempDir, PathBuf) {
@@ -159,7 +159,7 @@ async fn native_unclosed_metadata_stays_unavailable_and_exact_cli_writes_nothing
     assert_eq!(status["counts"]["unavailable"], malformed.len());
     for (index, original) in malformed.iter().enumerate() {
         let path = format!("unclosed-{index}.md");
-        let payload: Value = sqlx::query_scalar(
+        let payload: Value = sqlx_core::query_scalar::query_scalar(
             "SELECT p.payload FROM context_materials m JOIN context_projection_versions p USING(material_id,revision) WHERE m.scope='personal' AND m.path=$1",
         )
         .bind(&path)
@@ -327,7 +327,7 @@ async fn native_read_documents_ignores_discarded_search_payload_size() {
     assert!(content.len() < 65536);
     let (_fixture, root) = fixture(1, content.as_bytes());
     import(&store, &root).await;
-    let payload: Value = sqlx::query_scalar(
+    let payload: Value = sqlx_core::query_scalar::query_scalar(
         "SELECT payload FROM context_projection_versions p JOIN context_materials m USING(material_id,revision) WHERE m.scope='personal' AND m.path='0000.md'",
     )
     .fetch_one(store.pool())
@@ -875,7 +875,7 @@ async fn native_career_discovery_batches_inventory_and_rejects_forged_or_stale_c
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     // Negative storage fixture: same original bytes with a newer native source identity.
-    sqlx::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=revision+1 WHERE source_path='personal/facts/cases/0000.md'; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;").execute(store.pool()).await.unwrap();
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=revision+1 WHERE source_path='personal/facts/cases/0000.md'; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;").execute(store.pool()).await.unwrap();
     let output = cli(command(&comparison)).await;
     assert!(!output.status.success());
     assert!(
@@ -1103,7 +1103,7 @@ async fn native_core_resolve_prepare_uses_only_canonical_store_source_versions()
     for _ in 0..2 {
         // A deliberately corrupted metadata fixture tests rejection, never a claimed native commit.
         // The original bytes and digest stay identical while the selected policy revision changes.
-        sqlx::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=revision+1 WHERE scope='profile' AND path='rules/control.md'; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;").execute(store.pool()).await.expect("same-byte revision drift fixture");
+        sqlx_core::raw_sql::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=revision+1 WHERE scope='profile' AND path='rules/control.md'; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;").execute(store.pool()).await.expect("same-byte revision drift fixture");
         let prepared = prepared.clone();
         store
             .with_native_context(root.clone(), move |source| {
@@ -1256,7 +1256,7 @@ async fn native_provider_rejects_foreign_views_links_and_file_descendant_collisi
             .is_err()
     );
     let bytes = b"nested";
-    sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('personal','0000.md/child.md','/synthetic','personal/0000.md/child.md',$1,$1,$2,6,false,'nested')").bind(ontology::store::digest(bytes)).bind(bytes.as_slice()).execute(store.pool()).await.expect("stored namespace collision");
+    sqlx_core::query::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('personal','0000.md/child.md','/synthetic','personal/0000.md/child.md',$1,$1,$2,6,false,'nested')").bind(ontology::store::digest(bytes)).bind(bytes.as_slice()).execute(store.pool()).await.expect("stored namespace collision");
     let view = tempfile::tempdir().expect("collision view");
     fs::set_permissions(view.path(), fs::Permissions::from_mode(0o700)).expect("private root");
     store
@@ -1288,12 +1288,12 @@ async fn native_provider_rejects_live_ancestors_before_direct_descendant_access(
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for count in [1, 2000] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches")
+        sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches")
             .execute(store.pool()).await.expect("owned collision fixture reset");
         let (_fixture, root) = fixture(count, b"# Original");
         import(&store, &root).await;
         let bytes = b"nested";
-        sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('personal','0000.md/child.md','/synthetic','personal/0000.md/child.md',$1,$1,$2,6,false,'nested')")
+        sqlx_core::query::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('personal','0000.md/child.md','/synthetic','personal/0000.md/child.md',$1,$1,$2,6,false,'nested')")
             .bind(ontology::store::digest(bytes)).bind(bytes.as_slice())
             .execute(store.pool()).await.expect("stored file and descendant collision");
         let view = tempfile::tempdir().expect("fresh collision view");
@@ -1339,7 +1339,7 @@ async fn native_projection_status_and_rebuild_are_atomic_and_batched() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     for count in [1, 101] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset");
+        sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset");
         let (_fixture, root) = fixture(
             count,
             b"---\nexport: false\naliases: [growth]\n---\n# Native\nGrowth",
@@ -1369,7 +1369,7 @@ async fn native_projection_status_and_rebuild_are_atomic_and_batched() {
             5 + pages,
             "no-op adds no projection calls"
         );
-        sqlx::query("TRUNCATE context_projection_versions")
+        sqlx_core::query::query("TRUNCATE context_projection_versions")
             .execute(store.pool())
             .await
             .expect("owned missing projection fixture");
@@ -1397,9 +1397,9 @@ async fn native_projection_status_and_rebuild_are_atomic_and_batched() {
             7 + 3 * pages,
             "bounded page queries plus refresh permission and final manifest"
         );
-        let original:Value=sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p").fetch_one(store.pool()).await.expect("projection snapshot");
+        let original:Value=sqlx_core::query_scalar::query_scalar("SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p").fetch_one(store.pool()).await.expect("projection snapshot");
         assert!(
-            sqlx::query(
+            sqlx_core::query::query(
                 "UPDATE context_projection_versions SET payload=payload||'{\"title\":\"tamper\"}'"
             )
             .execute(store.pool())
@@ -1407,7 +1407,7 @@ async fn native_projection_status_and_rebuild_are_atomic_and_batched() {
             .is_err()
         );
         assert!(
-            sqlx::query("DELETE FROM context_projection_versions")
+            sqlx_core::query::query("DELETE FROM context_projection_versions")
                 .execute(store.pool())
                 .await
                 .is_err()
@@ -1427,7 +1427,7 @@ async fn native_projection_status_and_rebuild_are_atomic_and_batched() {
             )
             .await
             .expect("verify immutable payloads");
-        let unchanged:Value=sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p").fetch_one(store.pool()).await.expect("unchanged projection");
+        let unchanged:Value=sqlx_core::query_scalar::query_scalar("SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p").fetch_one(store.pool()).await.expect("unchanged projection");
         assert_eq!(original, unchanged);
     }
 }
@@ -1440,27 +1440,27 @@ async fn native_migration_007_preserves_006_rows_and_rolls_back_failed_upgrade()
     let (_fixture, root) = fixture(2, b"# Historical original\nexact bytes");
     import(&store, &root).await;
     // Historical fixture metadata is deliberately not a Core commit/acceptance proof.
-    sqlx::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'historical-fixture',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s").execute(store.pool()).await.expect("legacy batch fixture");
-    sqlx::query("UPDATE context_apply_batches SET state='finalized',actual_batch_id=expected_batch_id,actual_journal_locator=expected_journal_locator,commit_receipt='{\"historical_fixture\":true}',final_core_receipt_digest=repeat('c',64)").execute(store.pool()).await.expect("historical terminal metadata fixture");
-    sqlx::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'; DROP TABLE document_subjects; DROP TABLE document_subject_history; DROP TABLE subject_history; ALTER TABLE subjects DROP COLUMN definition, DROP COLUMN revision; ALTER TABLE source_records DROP COLUMN reference_paths; DELETE FROM ontology_migrations WHERE name='013-knowledge-taxonomy.sql'; DROP FUNCTION context_projection_refresh_guard() CASCADE; DELETE FROM ontology_migrations WHERE name='012-context-projection-refresh.sql'; DELETE FROM ontology_migrations WHERE name='014-grouping-claim-ownership.sql'; DROP TABLE memory_grouping; DELETE FROM ontology_migrations WHERE name='011-personal-memory-grouping.sql'; DELETE FROM ontology_migrations WHERE name IN ('009-context-manual-edits.sql','010-profile-manual-edits.sql'); ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; ALTER TABLE context_material_versions DROP COLUMN manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code='vault-read-failed')); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; DROP TABLE context_projection_versions; DROP FUNCTION context_projection_validate(); DROP TRIGGER context_core_contract_immutable ON context_apply_batches; DROP FUNCTION context_core_contract_immutable(); ALTER TABLE context_apply_batches DROP COLUMN core_contract, DROP COLUMN core_contract_digest; DELETE FROM ontology_migrations WHERE name='007-context-native.sql';").execute(store.pool()).await.expect("owned pre-007 fixture");
+    sqlx_core::query::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'historical-fixture',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s").execute(store.pool()).await.expect("legacy batch fixture");
+    sqlx_core::query::query("UPDATE context_apply_batches SET state='finalized',actual_batch_id=expected_batch_id,actual_journal_locator=expected_journal_locator,commit_receipt='{\"historical_fixture\":true}',final_core_receipt_digest=repeat('c',64)").execute(store.pool()).await.expect("historical terminal metadata fixture");
+    sqlx_core::raw_sql::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'; DROP TABLE document_subjects; DROP TABLE document_subject_history; DROP TABLE subject_history; ALTER TABLE subjects DROP COLUMN definition, DROP COLUMN revision; ALTER TABLE source_records DROP COLUMN reference_paths; DELETE FROM ontology_migrations WHERE name='013-knowledge-taxonomy.sql'; DROP FUNCTION context_projection_refresh_guard() CASCADE; DELETE FROM ontology_migrations WHERE name='012-context-projection-refresh.sql'; DELETE FROM ontology_migrations WHERE name='014-grouping-claim-ownership.sql'; DROP TABLE memory_grouping; DELETE FROM ontology_migrations WHERE name='011-personal-memory-grouping.sql'; DELETE FROM ontology_migrations WHERE name IN ('009-context-manual-edits.sql','010-profile-manual-edits.sql'); ALTER TABLE context_materials DROP COLUMN last_manual_edit_id; ALTER TABLE context_material_versions DROP COLUMN manual_edit_id; DROP TABLE context_manual_edits; DROP FUNCTION context_manual_edit_complete(); DROP TRIGGER context_invalidate_consumers ON context_materials; DROP TABLE context_source_bindings; DROP FUNCTION context_invalidate_consumers(); DROP FUNCTION context_source_revision(uuid,uuid,bigint,boolean,text,text,text); ALTER TABLE sources DROP CONSTRAINT sources_kind_check; ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK(kind IN ('git','vault')); ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check; ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR (kind='git' AND failure_code='git-read-failed') OR (kind='vault' AND failure_code='vault-read-failed')); ALTER TABLE sources ADD CONSTRAINT sources_vault_status_check CHECK(kind<>'vault' OR status<>'missing'); DELETE FROM ontology_migrations WHERE name='008-context-consumers.sql'; DROP TABLE context_projection_versions; DROP FUNCTION context_projection_validate(); DROP TRIGGER context_core_contract_immutable ON context_apply_batches; DROP FUNCTION context_core_contract_immutable(); ALTER TABLE context_apply_batches DROP COLUMN core_contract, DROP COLUMN core_contract_digest; DELETE FROM ontology_migrations WHERE name='007-context-native.sql';").execute(store.pool()).await.expect("owned pre-007 fixture");
     let snapshot_sql = "SELECT jsonb_build_object('store',(SELECT to_jsonb(s) FROM context_store s),'materials',(SELECT jsonb_agg(to_jsonb(m)-'last_manual_edit_id' ORDER BY scope,path) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v)-'manual_edit_id' ORDER BY material_id,revision) FROM context_material_versions v),'batches',(SELECT jsonb_agg(to_jsonb(b)-ARRAY['core_contract','core_contract_digest'] ORDER BY apply_id) FROM context_apply_batches b))";
-    let before: Value = sqlx::query_scalar(snapshot_sql)
+    let before: Value = sqlx_core::query_scalar::query_scalar(snapshot_sql)
         .fetch_one(store.pool())
         .await
         .expect("all original native storage columns");
-    sqlx::query("ALTER TABLE context_apply_batches ADD COLUMN core_contract bytea")
+    sqlx_core::query::query("ALTER TABLE context_apply_batches ADD COLUMN core_contract bytea")
         .execute(store.pool())
         .await
         .expect("deliberate later DDL conflict");
     assert_eq!(store.initialize().await, Err(Error::Baseline));
-    let absent:bool=sqlx::query_scalar("SELECT to_regclass('context_projection_versions') IS NULL AND to_regprocedure('context_projection_validate()') IS NULL AND NOT EXISTS(SELECT 1 FROM ontology_migrations WHERE name='007-context-native.sql')").fetch_one(store.pool()).await.expect("transactional DDL rollback");
+    let absent:bool=sqlx_core::query_scalar::query_scalar("SELECT to_regclass('context_projection_versions') IS NULL AND to_regprocedure('context_projection_validate()') IS NULL AND NOT EXISTS(SELECT 1 FROM ontology_migrations WHERE name='007-context-native.sql')").fetch_one(store.pool()).await.expect("transactional DDL rollback");
     assert!(absent);
-    sqlx::query("ALTER TABLE context_apply_batches DROP COLUMN core_contract")
+    sqlx_core::query::query("ALTER TABLE context_apply_batches DROP COLUMN core_contract")
         .execute(store.pool())
         .await
         .expect("remove intentional conflict");
     assert_eq!(
-        sqlx::query_scalar::<_, Value>(snapshot_sql)
+        sqlx_core::query_scalar::query_scalar::<_, Value>(snapshot_sql)
             .fetch_one(store.pool())
             .await
             .expect("failure preserved values"),
@@ -1468,15 +1468,15 @@ async fn native_migration_007_preserves_006_rows_and_rolls_back_failed_upgrade()
     );
     store.initialize().await.expect("actual 006 to007 upgrade");
     assert_eq!(
-        sqlx::query_scalar::<_, Value>(snapshot_sql)
+        sqlx_core::query_scalar::query_scalar::<_, Value>(snapshot_sql)
             .fetch_one(store.pool())
             .await
             .expect("every old column preserved"),
         before
     );
-    let unchanged:bool=sqlx::query_scalar("SELECT bool_and(core_contract IS NULL AND core_contract_digest IS NULL) FROM context_apply_batches").fetch_one(store.pool()).await.expect("no invented legacy contract");
+    let unchanged:bool=sqlx_core::query_scalar::query_scalar("SELECT bool_and(core_contract IS NULL AND core_contract_digest IS NULL) FROM context_apply_batches").fetch_one(store.pool()).await.expect("no invented legacy contract");
     assert!(unchanged);
-    assert!(sqlx::query("UPDATE context_apply_batches SET core_contract='invented'::bytea,core_contract_digest=encode(sha256('invented'::bytea),'hex')").execute(store.pool()).await.is_err(),"cannot retrofit acceptance bytes");
+    assert!(sqlx_core::query::query("UPDATE context_apply_batches SET core_contract='invented'::bytea,core_contract_digest=encode(sha256('invented'::bytea),'hex')").execute(store.pool()).await.is_err(),"cannot retrofit acceptance bytes");
 }
 
 #[tokio::test]
@@ -1549,7 +1549,7 @@ async fn native_projection_preserves_multilingual_ontology_and_excludes_unsafe_d
     fs::create_dir(root.join("personal/raw")).expect("raw");
     fs::write(root.join("personal/raw/note.md"), b"hidden raw text").expect("restricted original");
     import(&store, &root).await;
-    let rows:Vec<(String,Value)>=sqlx::query_as("SELECT m.path,p.payload FROM context_materials m JOIN context_projection_versions p USING(material_id,revision) ORDER BY m.path").fetch_all(store.pool()).await.expect("projection fixture");
+    let rows:Vec<(String,Value)>=sqlx_core::query_as::query_as("SELECT m.path,p.payload FROM context_materials m JOIN context_projection_versions p USING(material_id,revision) ORDER BY m.path").fetch_all(store.pool()).await.expect("projection fixture");
     for (path, payload) in &rows {
         let expected = match path.as_str() {
             "ontology.md" => "searchable",
@@ -1639,7 +1639,7 @@ async fn native_current_revision_and_tombstone_never_reuse_old_projections_or_vi
         .await
         .expect("initial source");
     // Negative fixture: simulate corrupted storage metadata without manufacturing any Core receipt.
-    sqlx::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=revision+1; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;").execute(store.pool()).await.expect("same-byte revision drift fixture");
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=revision+1; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;").execute(store.pool()).await.expect("same-byte revision drift fixture");
     assert_eq!(
         store
             .semantic_context(&[scope()], "original", 10, false)
@@ -1663,7 +1663,7 @@ async fn native_current_revision_and_tombstone_never_reuse_old_projections_or_vi
         })
         .await
         .expect("version source");
-    sqlx::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=revision+1,deleted=true,content=''::bytea,content_digest=encode(sha256(''::bytea),'hex'),byte_len=0,search_text=NULL; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;").execute(store.pool()).await.expect("tombstone fixture");
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER context_revision; ALTER TABLE context_materials DISABLE TRIGGER context_version; UPDATE context_materials SET revision=revision+1,deleted=true,content=''::bytea,content_digest=encode(sha256(''::bytea),'hex'),byte_len=0,search_text=NULL; ALTER TABLE context_materials ENABLE TRIGGER context_revision; ALTER TABLE context_materials ENABLE TRIGGER context_version;").execute(store.pool()).await.expect("tombstone fixture");
     assert!(
         store
             .semantic_context(&[scope()], "original", 10, false)
@@ -1697,13 +1697,13 @@ async fn native_projection_failure_rolls_back_earlier_pages() {
     let store = store().await;
     let (_fixture, root) = fixture(101, b"# Original projection");
     import(&store, &root).await;
-    let last:(String,i64,Value)=sqlx::query_as("SELECT material_id::text,revision,payload FROM context_projection_versions ORDER BY material_id DESC LIMIT 1").fetch_one(store.pool()).await.expect("final page fixture");
-    sqlx::query("TRUNCATE context_projection_versions")
+    let last:(String,i64,Value)=sqlx_core::query_as::query_as("SELECT material_id::text,revision,payload FROM context_projection_versions ORDER BY material_id DESC LIMIT 1").fetch_one(store.pool()).await.expect("final page fixture");
+    sqlx_core::query::query("TRUNCATE context_projection_versions")
         .execute(store.pool())
         .await
         .expect("missing projections");
-    sqlx::query("INSERT INTO context_projection_versions(material_id,revision,payload,payload_digest) VALUES($1::uuid,$2,$3,encode(sha256(convert_to($3::jsonb::text,'UTF8')),'hex'))").bind(&last.0).bind(last.1).bind(&last.2).execute(store.pool()).await.expect("final page fixture");
-    sqlx::raw_sql("CREATE FUNCTION native_test_late_projection_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF EXISTS(SELECT 1 FROM context_projection_versions WHERE material_id=NEW.material_id) THEN RAISE EXCEPTION 'Synthetic late projection failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER native_test_late_projection_failure BEFORE INSERT ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION native_test_late_projection_failure();").execute(store.pool()).await.expect("owned late-page failure trigger");
+    sqlx_core::query::query("INSERT INTO context_projection_versions(material_id,revision,payload,payload_digest) VALUES($1::uuid,$2,$3,encode(sha256(convert_to($3::jsonb::text,'UTF8')),'hex'))").bind(&last.0).bind(last.1).bind(&last.2).execute(store.pool()).await.expect("final page fixture");
+    sqlx_core::raw_sql::raw_sql("CREATE FUNCTION native_test_late_projection_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF EXISTS(SELECT 1 FROM context_projection_versions WHERE material_id=NEW.material_id) THEN RAISE EXCEPTION 'Synthetic late projection failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER native_test_late_projection_failure BEFORE INSERT ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION native_test_late_projection_failure();").execute(store.pool()).await.expect("owned late-page failure trigger");
     let status = store
         .projection_status(&[scope()])
         .await
@@ -1717,15 +1717,16 @@ async fn native_projection_failure_rolls_back_earlier_pages() {
             .await,
         Err(Error::Storage)
     );
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM context_projection_versions")
-        .fetch_one(store.pool())
-        .await
-        .expect("rolled back first page");
+    let count: i64 =
+        sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM context_projection_versions")
+            .fetch_one(store.pool())
+            .await
+            .expect("rolled back first page");
     assert_eq!(
         count, 1,
         "a later refresh failure cannot publish earlier pages"
     );
-    sqlx::raw_sql("DROP TRIGGER native_test_late_projection_failure ON context_projection_versions; DROP FUNCTION native_test_late_projection_failure();").execute(store.pool()).await.expect("remove owned trigger");
+    sqlx_core::raw_sql::raw_sql("DROP TRIGGER native_test_late_projection_failure ON context_projection_versions; DROP FUNCTION native_test_late_projection_failure();").execute(store.pool()).await.expect("remove owned trigger");
 }
 
 #[path = "native_harness.rs"]
@@ -2016,7 +2017,7 @@ async fn native_commit_revision_and_scope_integrity() {
             .context_commit_receipt
             .expect("real commit receipt");
         receipt.validate().expect("Core receipt validates");
-        let row:(String,i64,String,bool,Option<String>,Option<String>,String)=sqlx::query_as("SELECT material_id::text,revision,origin_kind,deleted,source_root,source_digest,content_digest FROM context_materials WHERE scope='personal' AND path='knowledge/native-runtime-proof.md'").fetch_one(store.pool()).await.expect("actual native row");
+        let row:(String,i64,String,bool,Option<String>,Option<String>,String)=sqlx_core::query_as::query_as("SELECT material_id::text,revision,origin_kind,deleted,source_root,source_digest,content_digest FROM context_materials WHERE scope='personal' AND path='knowledge/native-runtime-proof.md'").fetch_one(store.pool()).await.expect("actual native row");
         if let Some(expected) = &identity {
             assert_eq!(&row.0, expected);
         } else {
@@ -2028,9 +2029,9 @@ async fn native_commit_revision_and_scope_integrity() {
         assert_eq!(row.4, None);
         assert_eq!(row.5, None);
         assert_eq!(row.6, ontology::store::digest(content.as_bytes()));
-        let states:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM context_material_versions WHERE material_id=$1::uuid),(SELECT count(*) FROM context_projection_versions WHERE material_id=$1::uuid)").bind(&row.0).fetch_one(store.pool()).await.expect("append history and projections");
+        let states:(i64,i64)=sqlx_core::query_as::query_as("SELECT (SELECT count(*) FROM context_material_versions WHERE material_id=$1::uuid),(SELECT count(*) FROM context_projection_versions WHERE material_id=$1::uuid)").bind(&row.0).fetch_one(store.pool()).await.expect("append history and projections");
         assert_eq!(states, (index, index));
-        let state: String = sqlx::query_scalar(
+        let state: String = sqlx_core::query_scalar::query_scalar(
             "SELECT state FROM context_apply_batches WHERE core_apply_attempt_id=$1",
         )
         .bind(receipt.attempt_identifier())
@@ -2084,7 +2085,7 @@ async fn native_candidate(
     body: &str,
     curation: bool,
 ) -> context_core::harness::PreparedHarnessRun {
-    let policy:String=sqlx::query_scalar("SELECT content_digest FROM context_materials WHERE scope='profile' AND path='rules/control.md'").fetch_one(store.pool()).await.expect("actual policy SHA");
+    let policy:String=sqlx_core::query_scalar::query_scalar("SELECT content_digest FROM context_materials WHERE scope='profile' AND path='rules/control.md'").fetch_one(store.pool()).await.expect("actual policy SHA");
     harness_fixture::prepare(
         store,
         root.to_owned(),
@@ -2236,10 +2237,11 @@ async fn native_context_commit_excludes_external_targets() {
         fs::read_to_string(workspace.join("document.md")).expect("external bytes"),
         "# Accepted external file"
     );
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM context_apply_batches")
-        .fetch_one(store.pool())
-        .await
-        .expect("effects");
+    let count: i64 =
+        sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM context_apply_batches")
+            .fetch_one(store.pool())
+            .await
+            .expect("effects");
     assert_eq!(count, 0);
 }
 #[tokio::test]
@@ -2434,10 +2436,11 @@ async fn native_crash_case(point: &'static str) {
     let directory = root.join(format!(".llm-context-vault-harness/runs/{run}"));
     let saved_head = fs::read(directory.join("head.json")).expect("actual validated Core head");
     let fault_directory = directory.clone();
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .expect("identity");
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .expect("identity");
     let workspace = root.clone();
     let run_copy = run.clone();
     store
@@ -2539,12 +2542,13 @@ async fn native_crash_case(point: &'static str) {
         fs::write(directory.join("head.json"), saved_head)
             .expect("restore exact actual validated Core head");
     }
-    let state: String =
-        sqlx::query_scalar("SELECT state FROM context_apply_batches WHERE core_run_id=$1")
-            .bind(&run)
-            .fetch_one(store.pool())
-            .await
-            .expect("durable effect");
+    let state: String = sqlx_core::query_scalar::query_scalar(
+        "SELECT state FROM context_apply_batches WHERE core_run_id=$1",
+    )
+    .bind(&run)
+    .fetch_one(store.pool())
+    .await
+    .expect("durable effect");
     assert_eq!(
         state,
         if matches!(
@@ -2628,12 +2632,13 @@ async fn native_crash_case(point: &'static str) {
             "DB-Missing ancestors must not erase a preserved recovery target"
         );
     }
-    let final_state: String =
-        sqlx::query_scalar("SELECT state FROM context_apply_batches WHERE core_run_id=$1")
-            .bind(&run)
-            .fetch_one(store.pool())
-            .await
-            .expect("recovery cleanup");
+    let final_state: String = sqlx_core::query_scalar::query_scalar(
+        "SELECT state FROM context_apply_batches WHERE core_run_id=$1",
+    )
+    .bind(&run)
+    .fetch_one(store.pool())
+    .await
+    .expect("recovery cleanup");
     assert_eq!(
         final_state,
         if matches!(point, "after-begin" | "partial-rollback") {
@@ -2686,11 +2691,12 @@ async fn native_projection_atomicity_and_freshness() {
         false,
     )
     .await;
-    sqlx::raw_sql("CREATE FUNCTION native_test_projection_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic projection failure'; END $$; CREATE TRIGGER native_test_projection_failure BEFORE INSERT ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION native_test_projection_failure();").execute(store.pool()).await.expect("owned transactional failure fixture");
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .expect("store identity");
+    sqlx_core::raw_sql::raw_sql("CREATE FUNCTION native_test_projection_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic projection failure'; END $$; CREATE TRIGGER native_test_projection_failure BEFORE INSERT ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION native_test_projection_failure();").execute(store.pool()).await.expect("owned transactional failure fixture");
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .expect("store identity");
     let workspace = root.clone();
     let observed = store.clone();
     let result = store
@@ -2720,14 +2726,14 @@ async fn native_projection_atomicity_and_freshness() {
         .await
         .expect("transaction failure returned");
     assert!(result);
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = sqlx_core::query_scalar::query_scalar(
         "SELECT count(*) FROM context_materials WHERE path='knowledge/native-atomic.md'",
     )
     .fetch_one(store.pool())
     .await
     .expect("rollback count");
     assert_eq!(count, 0);
-    sqlx::raw_sql("DROP TRIGGER native_test_projection_failure ON context_projection_versions; DROP FUNCTION native_test_projection_failure();").execute(store.pool()).await.expect("remove owned failure fixture");
+    sqlx_core::raw_sql::raw_sql("DROP TRIGGER native_test_projection_failure ON context_projection_versions; DROP FUNCTION native_test_projection_failure();").execute(store.pool()).await.expect("remove owned failure fixture");
     let output = harness_fixture::command(
         &store,
         &root,
@@ -2948,7 +2954,7 @@ cat "$0.events"
             .await
             .unwrap();
         let updated = if mutation == 2 {
-            sqlx::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-pending',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s")
+            sqlx_core::query::query("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-pending',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s")
                 .execute(store.pool()).await.map(|_| ()).map_err(|_| Error::Storage)
         } else {
             match store
@@ -3026,10 +3032,12 @@ cat "$0.events"
     assert_eq!(rejected["kind"], "role-submission-error");
     assert!(rejected["submission"]["submitted_result"].is_object());
     if mutation == 2 {
-        sqlx::query("DELETE FROM context_apply_batches WHERE core_run_id='synthetic-pending'")
-            .execute(store.pool())
-            .await
-            .expect("reacquisition failure released the gate");
+        sqlx_core::query::query(
+            "DELETE FROM context_apply_batches WHERE core_run_id='synthetic-pending'",
+        )
+        .execute(store.pool())
+        .await
+        .expect("reacquisition failure released the gate");
     }
     assert_eq!(
         store
@@ -3113,10 +3121,11 @@ async fn native_callback_completion_releases_owned_gates_on_success_and_failure(
     let store = store().await;
     let (_fixture, root) = fixture(1, b"# Callback original");
     import(&store, &root).await;
-    let identity: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let identity: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     let mut revision = 1;
     let mut body = "# Callback original".to_owned();
     fn outcome(case: u8) -> Result<(), Error> {
@@ -3179,15 +3188,16 @@ async fn native_callback_completion_releases_owned_gates_on_success_and_failure(
 
 #[tokio::test]
 async fn native_escaped_sources_keep_their_lifetime_and_unlock_ack_works_before_disconnect() {
-    use sqlx::Connection;
+    use sqlx_core::connection::Connection;
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     let (_fixture, root) = fixture(1, b"# Escaped original");
     import(&store, &root).await;
-    let identity: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let identity: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     for exclusive in [false, true] {
         let view = harness_fixture::view();
         let path = view.path().canonicalize().unwrap();
@@ -3226,11 +3236,11 @@ async fn native_escaped_sources_keep_their_lifetime_and_unlock_ack_works_before_
         // Escaped ownership retains its existing lifetime. Await the server's
         // release after the final owner drops; do not sleep or retry a write.
         let mut gate = store.pool().begin().await.unwrap();
-        sqlx::query("SET LOCAL lock_timeout='3s'")
+        sqlx_core::query::query("SET LOCAL lock_timeout='3s'")
             .execute(&mut *gate)
             .await
             .unwrap();
-        sqlx::query("SELECT pg_advisory_xact_lock(478310003)")
+        sqlx_core::query::query("SELECT pg_advisory_xact_lock(478310003)")
             .execute(&mut *gate)
             .await
             .unwrap();
@@ -3239,12 +3249,12 @@ async fn native_escaped_sources_keep_their_lifetime_and_unlock_ack_works_before_
     // Calibrate acknowledged release independently of socket teardown: this
     // backend remains connected while the real writer becomes available.
     let url = std::env::var("TEST_DATABASE_URL").unwrap();
-    let mut connection = sqlx::PgConnection::connect(&url).await.unwrap();
-    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+    let mut connection = sqlx_postgres::PgConnection::connect(&url).await.unwrap();
+    let pid: i32 = sqlx_core::query_scalar::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut connection)
         .await
         .unwrap();
-    sqlx::query("SELECT pg_advisory_lock_shared(478310003)")
+    sqlx_core::query::query("SELECT pg_advisory_lock_shared(478310003)")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -3260,12 +3270,12 @@ async fn native_escaped_sources_keep_their_lifetime_and_unlock_ack_works_before_
             .await,
         Err(Error::ContextPending)
     ));
-    sqlx::query("SELECT pg_advisory_unlock_all()")
+    sqlx_core::query::query("SELECT pg_advisory_unlock_all()")
         .execute(&mut connection)
         .await
         .unwrap();
     assert_eq!(
-        sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        sqlx_core::query_scalar::query_scalar::<_, i32>("SELECT pg_backend_pid()")
             .fetch_one(&mut connection)
             .await
             .unwrap(),
@@ -3312,10 +3322,11 @@ async fn native_blocked_output_case(block_stderr: bool) {
         "vault/personal/knowledge/skills.md",
     )
     .await;
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     let original = store
         .read_context(&scope(), "knowledge/skills.md", false)
         .await
@@ -3464,10 +3475,11 @@ async fn native_body_cache_byte_capacity_keeps_reads_available() {
         })
         .await
         .unwrap();
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     store
         .with_native_commit(view.path().canonicalize().unwrap(), id, |session| {
             let source = session.fresh_source().unwrap();
@@ -3611,10 +3623,11 @@ async fn native_cli_real_codex_producer_and_reviewer() {
         "vault/personal/knowledge/composed-cli.md",
         Some(vec!["review-artifacts/image.png".into(), "review-artifacts/document.pdf".into()]),
     ).await;
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     // Preserve the existing authenticated CLI environment, overriding only the
     // database with this owned, freshly reset synthetic test store.
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
@@ -4009,7 +4022,7 @@ async fn native_promotion_commit_search_and_next_read() {
 // Revision proof: the contracts and verified bytes below are issued by the actual
 // durable Core path. Corruption is confined to this owned PostgreSQL fixture.
 async fn native_rows_fingerprint(store: &Store) -> String {
-    sqlx::query_scalar("SELECT encode(sha256(convert_to(jsonb_build_object('current',(SELECT jsonb_agg(to_jsonb(m) ORDER BY material_id) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v),'projections',(SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p))::text,'UTF8')),'hex')")
+    sqlx_core::query_scalar::query_scalar("SELECT encode(sha256(convert_to(jsonb_build_object('current',(SELECT jsonb_agg(to_jsonb(m) ORDER BY material_id) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v),'projections',(SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p))::text,'UTF8')),'hex')")
         .fetch_one(store.pool()).await.expect("owned current/history/projection fingerprint")
 }
 struct NativeContractCapture<'a> {
@@ -4067,10 +4080,11 @@ async fn capture_native_contract(
     run: &str,
 ) -> context_core::harness::ContextApplyContract {
     use context_core::harness::*;
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .expect("owned identity");
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .expect("owned identity");
     let workspace = root.to_owned();
     let run = run.to_owned();
     store
@@ -4105,10 +4119,11 @@ async fn native_begin_rejects(
 ) {
     use context_core::harness::ContextCommitSession;
     let before = native_rows_fingerprint(store).await;
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .expect("owned identity");
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .expect("owned identity");
     store
         .with_native_commit(root.to_owned(), id, move |session| {
             assert!(
@@ -4129,10 +4144,11 @@ async fn native_recovery_rejects(
 ) {
     use context_core::harness::*;
     let before = native_rows_fingerprint(store).await;
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .expect("owned identity");
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .expect("owned identity");
     let workspace = workspace.to_owned();
     let run = contract.attempt().run_identifier.clone();
     let identity = contract.store_identity().expect("native contract").clone();
@@ -4206,7 +4222,7 @@ async fn native_revision_contract_boundaries_preserve_pending_and_rows() {
     );
     let base_url = std::env::var("TEST_DATABASE_URL").expect("owned DB URL");
     let database = "ontology_test_contract_foreign";
-    sqlx::query("CREATE DATABASE ontology_test_contract_foreign")
+    sqlx_core::query::query("CREATE DATABASE ontology_test_contract_foreign")
         .execute(store.pool())
         .await
         .expect("owned foreign database");
@@ -4240,17 +4256,19 @@ async fn native_revision_contract_boundaries_preserve_pending_and_rows() {
         .await
         .expect("pending session");
     let effect_before: Value =
-        sqlx::query_scalar("SELECT to_jsonb(b) FROM context_apply_batches b")
+        sqlx_core::query_scalar::query_scalar("SELECT to_jsonb(b) FROM context_apply_batches b")
             .fetch_one(store.pool())
             .await
             .expect("actual effect");
     native_begin_rejects(&store, &root, b.clone()).await;
     native_recovery_rejects(&store, &root, &root, &b).await;
     assert!(
-        sqlx::query_scalar::<_, Value>("SELECT to_jsonb(b) FROM context_apply_batches b")
-            .fetch_one(store.pool())
-            .await
-            .expect("retained effect")
+        sqlx_core::query_scalar::query_scalar::<_, Value>(
+            "SELECT to_jsonb(b) FROM context_apply_batches b"
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("retained effect")
             == effect_before
     );
     let selected = a
@@ -4261,21 +4279,21 @@ async fn native_revision_contract_boundaries_preserve_pending_and_rows() {
     let StoredSourceState::Live { revision, .. } = selected.state else {
         panic!("live prepared policy")
     };
-    sqlx::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER USER; UPDATE context_materials SET revision=revision+1 WHERE source_path='profile/rules/control.md'; ALTER TABLE context_materials ENABLE TRIGGER USER;").execute(store.pool()).await.expect("owned same-byte non-target revision drift");
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER USER; UPDATE context_materials SET revision=revision+1 WHERE source_path='profile/rules/control.md'; ALTER TABLE context_materials ENABLE TRIGGER USER;").execute(store.pool()).await.expect("owned same-byte non-target revision drift");
     native_begin_rejects(&store, &root, a.clone()).await;
     native_recovery_rejects(&store, &root, &root, &a).await;
-    sqlx::query("ALTER TABLE context_materials DISABLE TRIGGER USER")
+    sqlx_core::query::query("ALTER TABLE context_materials DISABLE TRIGGER USER")
         .execute(store.pool())
         .await
         .expect("restore only owned drift");
-    sqlx::query(
+    sqlx_core::query::query(
         "UPDATE context_materials SET revision=$1 WHERE source_path='profile/rules/control.md'",
     )
     .bind(i64::try_from(revision).expect("stored revision"))
     .execute(store.pool())
     .await
     .expect("restore exact prepared version");
-    sqlx::query("ALTER TABLE context_materials ENABLE TRIGGER USER")
+    sqlx_core::query::query("ALTER TABLE context_materials ENABLE TRIGGER USER")
         .execute(store.pool())
         .await
         .expect("restore material invariants");
@@ -4287,7 +4305,7 @@ async fn native_revision_contract_boundaries_preserve_pending_and_rows() {
         "expected_source_versions",
         "context_targets",
     ] {
-        sqlx::query("ALTER TABLE context_apply_batches DISABLE TRIGGER USER")
+        sqlx_core::query::query("ALTER TABLE context_apply_batches DISABLE TRIGGER USER")
             .execute(store.pool())
             .await
             .expect("owned corruption setup");
@@ -4305,35 +4323,41 @@ async fn native_revision_contract_boundaries_preserve_pending_and_rows() {
         };
         // Disable the owned fixture table's user triggers only while injecting
         // a damaged persisted boundary; restore them before native checks.
-        let changed = sqlx::query(mutation).execute(store.pool()).await;
-        sqlx::query("ALTER TABLE context_apply_batches ENABLE TRIGGER USER")
+        let changed = sqlx_core::query::query(mutation)
+            .execute(store.pool())
+            .await;
+        sqlx_core::query::query("ALTER TABLE context_apply_batches ENABLE TRIGGER USER")
             .execute(store.pool())
             .await
             .expect("restore trigger");
         changed.expect("owned contract corruption");
-        let damaged: Value = sqlx::query_scalar("SELECT to_jsonb(b) FROM context_apply_batches b")
-            .fetch_one(store.pool())
-            .await
-            .expect("damaged effect");
+        let damaged: Value = sqlx_core::query_scalar::query_scalar(
+            "SELECT to_jsonb(b) FROM context_apply_batches b",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("damaged effect");
         native_begin_rejects(&store, &root, a.clone()).await;
         native_recovery_rejects(&store, &root, &root, &a).await;
         assert!(
-            sqlx::query_scalar::<_, Value>("SELECT to_jsonb(b) FROM context_apply_batches b")
-                .fetch_one(store.pool())
-                .await
-                .expect("retained damaged effect")
+            sqlx_core::query_scalar::query_scalar::<_, Value>(
+                "SELECT to_jsonb(b) FROM context_apply_batches b"
+            )
+            .fetch_one(store.pool())
+            .await
+            .expect("retained damaged effect")
                 == damaged
         );
-        sqlx::query("ALTER TABLE context_apply_batches DISABLE TRIGGER USER")
+        sqlx_core::query::query("ALTER TABLE context_apply_batches DISABLE TRIGGER USER")
             .execute(store.pool())
             .await
             .expect("restore fixture contract");
-        sqlx::query("UPDATE context_apply_batches SET core_contract=$1,core_contract_digest=$2,expected_source_versions=$3,context_targets=$4,updated_at=$5::timestamptz")
+        sqlx_core::query::query("UPDATE context_apply_batches SET core_contract=$1,core_contract_digest=$2,expected_source_versions=$3,context_targets=$4,updated_at=$5::timestamptz")
             .bind(serde_json::to_vec(&a).expect("exact actual contract bytes"))
             .bind(effect_before["core_contract_digest"].as_str().expect("stored digest")).bind(&effect_before["expected_source_versions"]).bind(&effect_before["context_targets"])
             .bind(effect_before["updated_at"].as_str().expect("stored timestamp"))
             .execute(store.pool()).await.expect("restore exact actual effect values");
-        sqlx::query("ALTER TABLE context_apply_batches ENABLE TRIGGER USER")
+        sqlx_core::query::query("ALTER TABLE context_apply_batches ENABLE TRIGGER USER")
             .execute(store.pool())
             .await
             .expect("restore immutable trigger");
@@ -4347,10 +4371,11 @@ async fn native_revision_contract_boundaries_preserve_pending_and_rows() {
     )
     .await;
     assert!(recovered.status.success(), "actual no-mutation recovery");
-    let state: String = sqlx::query_scalar("SELECT state FROM context_apply_batches")
-        .fetch_one(store.pool())
-        .await
-        .expect("terminal cleanup");
+    let state: String =
+        sqlx_core::query_scalar::query_scalar("SELECT state FROM context_apply_batches")
+            .fetch_one(store.pool())
+            .await
+            .expect("terminal cleanup");
     assert_eq!(state, "aborted");
     assert!(!root.join("vault/personal/knowledge/contract-a.md").exists());
     let absent_recovery = harness_fixture::command(
@@ -4366,7 +4391,7 @@ async fn native_revision_contract_boundaries_preserve_pending_and_rows() {
         "second actual contract closes without an aliased effect"
     );
     foreign.pool().close().await;
-    sqlx::query("DROP DATABASE ontology_test_contract_foreign")
+    sqlx_core::query::query("DROP DATABASE ontology_test_contract_foreign")
         .execute(store.pool())
         .await
         .expect("remove only owned foreign database");
@@ -4448,7 +4473,7 @@ impl context_core::harness::ContextCommitSession for NativeCommitRejectionProbe<
             })
             .expect("actual imported target version");
         self.handle.block_on(async {
-            sqlx::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER USER; UPDATE context_materials SET revision=revision+1 WHERE path='knowledge/boundary-imported.md'; ALTER TABLE context_materials ENABLE TRIGGER USER;").execute(self.store.pool()).await.expect("owned target version drift at verified commit");
+            sqlx_core::raw_sql::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER USER; UPDATE context_materials SET revision=revision+1 WHERE path='knowledge/boundary-imported.md'; ALTER TABLE context_materials ENABLE TRIGGER USER;").execute(self.store.pool()).await.expect("owned target version drift at verified commit");
         });
         let drifted = self.handle.block_on(native_rows_fingerprint(&self.store));
         let sql_start = self
@@ -4475,9 +4500,9 @@ impl context_core::harness::ContextCommitSession for NativeCommitRejectionProbe<
             drifted
         );
         self.handle.block_on(async {
-            sqlx::query("ALTER TABLE context_materials DISABLE TRIGGER USER").execute(self.store.pool()).await.expect("restore target fixture");
-            sqlx::query("UPDATE context_materials SET revision=$1 WHERE path='knowledge/boundary-imported.md'").bind(i64::try_from(revision).expect("stored revision")).execute(self.store.pool()).await.expect("restore exact target version");
-            sqlx::query("ALTER TABLE context_materials ENABLE TRIGGER USER").execute(self.store.pool()).await.expect("restore target invariants");
+            sqlx_core::query::query("ALTER TABLE context_materials DISABLE TRIGGER USER").execute(self.store.pool()).await.expect("restore target fixture");
+            sqlx_core::query::query("UPDATE context_materials SET revision=$1 WHERE path='knowledge/boundary-imported.md'").bind(i64::try_from(revision).expect("stored revision")).execute(self.store.pool()).await.expect("restore exact target version");
+            sqlx_core::query::query("ALTER TABLE context_materials ENABLE TRIGGER USER").execute(self.store.pool()).await.expect("restore target invariants");
         });
         assert_eq!(
             self.handle.block_on(native_rows_fingerprint(&self.store)),
@@ -4485,7 +4510,7 @@ impl context_core::harness::ContextCommitSession for NativeCommitRejectionProbe<
         );
         let bytes = serde_json::to_vec(contract).expect("actual canonical contract");
         self.handle.block_on(async {
-            sqlx::raw_sql("ALTER TABLE context_apply_batches DISABLE TRIGGER USER; UPDATE context_apply_batches SET core_contract=NULL,core_contract_digest=NULL; ALTER TABLE context_apply_batches ENABLE TRIGGER USER;").execute(self.store.pool()).await.expect("owned persisted contract corruption");
+            sqlx_core::raw_sql::raw_sql("ALTER TABLE context_apply_batches DISABLE TRIGGER USER; UPDATE context_apply_batches SET core_contract=NULL,core_contract_digest=NULL; ALTER TABLE context_apply_batches ENABLE TRIGGER USER;").execute(self.store.pool()).await.expect("owned persisted contract corruption");
         });
         let sql_start = self
             .inner
@@ -4511,10 +4536,10 @@ impl context_core::harness::ContextCommitSession for NativeCommitRejectionProbe<
             before
         );
         self.handle.block_on(async {
-            sqlx::query("ALTER TABLE context_apply_batches DISABLE TRIGGER USER").execute(self.store.pool()).await.expect("restore actual contract");
-            sqlx::query("UPDATE context_apply_batches SET core_contract=$1,core_contract_digest=$2").bind(&bytes).bind(ontology::store::digest(&bytes)).execute(self.store.pool()).await.expect("restore exact issued bytes");
-            sqlx::query("ALTER TABLE context_apply_batches ENABLE TRIGGER USER").execute(self.store.pool()).await.expect("restore invariant triggers");
-            sqlx::raw_sql("CREATE FUNCTION native_revision_skip_target() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$; CREATE TRIGGER native_revision_skip_target BEFORE INSERT ON context_materials FOR EACH ROW WHEN (NEW.path='knowledge/boundary-new.md') EXECUTE FUNCTION native_revision_skip_target();").execute(self.store.pool()).await.expect("owned missing-row fault");
+            sqlx_core::query::query("ALTER TABLE context_apply_batches DISABLE TRIGGER USER").execute(self.store.pool()).await.expect("restore actual contract");
+            sqlx_core::query::query("UPDATE context_apply_batches SET core_contract=$1,core_contract_digest=$2").bind(&bytes).bind(ontology::store::digest(&bytes)).execute(self.store.pool()).await.expect("restore exact issued bytes");
+            sqlx_core::query::query("ALTER TABLE context_apply_batches ENABLE TRIGGER USER").execute(self.store.pool()).await.expect("restore invariant triggers");
+            sqlx_core::raw_sql::raw_sql("CREATE FUNCTION native_revision_skip_target() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$; CREATE TRIGGER native_revision_skip_target BEFORE INSERT ON context_materials FOR EACH ROW WHEN (NEW.path='knowledge/boundary-new.md') EXECUTE FUNCTION native_revision_skip_target();").execute(self.store.pool()).await.expect("owned missing-row fault");
         });
         let sql_start = self
             .inner
@@ -4544,7 +4569,7 @@ impl context_core::harness::ContextCommitSession for NativeCommitRejectionProbe<
         let state: String = self
             .handle
             .block_on(
-                sqlx::query_scalar("SELECT state FROM context_apply_batches")
+                sqlx_core::query_scalar::query_scalar("SELECT state FROM context_apply_batches")
                     .fetch_one(self.store.pool()),
             )
             .expect("retained real pending effect");
@@ -4568,7 +4593,7 @@ async fn native_revision_imported_update_and_commit_cardinality_recovery() {
     .expect("synthetic imported original");
     import(&store, &fixture_root).await;
     let origin_sql = "SELECT jsonb_build_object('material_id',material_id,'origin_kind',origin_kind,'source_root',source_root,'source_digest',source_digest,'imported_at',imported_at) FROM context_materials WHERE path='knowledge/boundary-imported.md'";
-    let origin: Value = sqlx::query_scalar(origin_sql)
+    let origin: Value = sqlx_core::query_scalar::query_scalar(origin_sql)
         .fetch_one(store.pool())
         .await
         .expect("actual imported origin");
@@ -4637,7 +4662,7 @@ async fn native_revision_imported_update_and_commit_cardinality_recovery() {
         .expect("failed native commit leaves recovery evidence");
     // Close the failed dedicated transaction before DDL teardown. PostgreSQL
     // releases its row/table locks when the session connection is closed.
-    sqlx::raw_sql("DROP TRIGGER native_revision_skip_target ON context_materials; DROP FUNCTION native_revision_skip_target();").execute(store.pool()).await.expect("remove owned fault after connection release");
+    sqlx_core::raw_sql::raw_sql("DROP TRIGGER native_revision_skip_target ON context_materials; DROP FUNCTION native_revision_skip_target();").execute(store.pool()).await.expect("remove owned fault after connection release");
     assert_eq!(native_rows_fingerprint(&store).await, before);
     for path in ["boundary-imported.md", "boundary-new.md"] {
         assert_eq!(
@@ -4678,16 +4703,16 @@ async fn native_revision_imported_update_and_commit_cardinality_recovery() {
     assert_eq!(receipt.resulting().len(), 2);
     receipt.validate().expect("actual Core receipt");
     assert!(
-        sqlx::query_scalar::<_, Value>(origin_sql)
+        sqlx_core::query_scalar::query_scalar::<_, Value>(origin_sql)
             .fetch_one(store.pool())
             .await
             .expect("immutable imported origin after commit")
             == origin
     );
-    let (revision, history, projections, bytes): (i64,i64,i64,Vec<u8>) = sqlx::query_as("SELECT m.revision,(SELECT count(*) FROM context_material_versions WHERE material_id=m.material_id),(SELECT count(*) FROM context_projection_versions WHERE material_id=m.material_id),m.content FROM context_materials m WHERE path='knowledge/boundary-imported.md'").fetch_one(store.pool()).await.expect("actual imported update history");
+    let (revision, history, projections, bytes): (i64,i64,i64,Vec<u8>) = sqlx_core::query_as::query_as("SELECT m.revision,(SELECT count(*) FROM context_material_versions WHERE material_id=m.material_id),(SELECT count(*) FROM context_projection_versions WHERE material_id=m.material_id),m.content FROM context_materials m WHERE path='knowledge/boundary-imported.md'").fetch_one(store.pool()).await.expect("actual imported update history");
     assert_eq!((revision, history, projections), (2, 2, 2));
     assert_eq!(bytes, body.as_bytes());
-    let original: Vec<u8> = sqlx::query_scalar("SELECT v.content FROM context_material_versions v JOIN context_materials m USING(material_id) WHERE m.path='knowledge/boundary-imported.md' AND v.revision=1").fetch_one(store.pool()).await.expect("immutable imported historical bytes");
+    let original: Vec<u8> = sqlx_core::query_scalar::query_scalar("SELECT v.content FROM context_material_versions v JOIN context_materials m USING(material_id) WHERE m.path='knowledge/boundary-imported.md' AND v.revision=1").fetch_one(store.pool()).await.expect("immutable imported historical bytes");
     assert_eq!(original, b"# Imported original\nImmutable origin bytes");
     let final_before = native_rows_fingerprint(&store).await;
     let repeat = harness_fixture::command(
@@ -5019,10 +5044,11 @@ async fn assert_native_career_cli_pipeline(preserve: bool) {
         fs::read(workspace.join(target)).expect("unchanged career artifact"),
         body
     );
-    let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM context_apply_batches")
-        .fetch_one(store.pool())
-        .await
-        .expect("nonmutating effect count");
+    let effects: i64 =
+        sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM context_apply_batches")
+            .fetch_one(store.pool())
+            .await
+            .expect("nonmutating effect count");
     assert_eq!(effects, 0);
 
     if preserve {
@@ -5219,16 +5245,17 @@ async fn assert_native_career_cli_pipeline(preserve: bool) {
                     .as_bytes(),
                 body
             );
-            let revision: i64 = sqlx::query_scalar("SELECT revision FROM context_materials WHERE scope='personal' AND path='writing/preserved-cli.md'")
+            let revision: i64 = sqlx_core::query_scalar::query_scalar("SELECT revision FROM context_materials WHERE scope='personal' AND path='writing/preserved-cli.md'")
                 .fetch_one(store.pool()).await.unwrap();
             assert_eq!(
                 revision, 1,
                 "retry/recover must not create another revision"
             );
-            let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM context_apply_batches")
-                .fetch_one(store.pool())
-                .await
-                .unwrap();
+            let effects: i64 =
+                sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM context_apply_batches")
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
             assert_eq!(effects, 1, "exactly one native effect");
         }
         assert_eq!(fs::read(workspace.join(target)).unwrap(), body);
@@ -5542,11 +5569,12 @@ async fn native_business_create_cli_preserves_missing_staging_parents() {
     let store = store().await;
     let policy = harness_fixture::seed(&store).await;
     let before = native_rows_fingerprint(&store).await;
-    let sources_before: i64 = sqlx::query_scalar("SELECT count(*) FROM source_records")
-        .fetch_one(store.pool())
-        .await
-        .expect("source record count before preparation");
-    let knowledge_count: i64 = sqlx::query_scalar(
+    let sources_before: i64 =
+        sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM source_records")
+            .fetch_one(store.pool())
+            .await
+            .expect("source record count before preparation");
+    let knowledge_count: i64 = sqlx_core::query_scalar::query_scalar(
         "SELECT count(*) FROM context_materials WHERE starts_with(source_path,'personal/business/knowledge/')",
     )
     .fetch_one(store.pool())
@@ -5731,10 +5759,11 @@ async fn native_business_create_cli_preserves_missing_staging_parents() {
             .await
             .expect("fresh native Missing after begin");
         assert_eq!(native_rows_fingerprint(&store).await, before);
-        let sources_after: i64 = sqlx::query_scalar("SELECT count(*) FROM source_records")
-            .fetch_one(store.pool())
-            .await
-            .expect("source record count after begin");
+        let sources_after: i64 =
+            sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM source_records")
+                .fetch_one(store.pool())
+                .await
+                .expect("source record count after begin");
         assert_eq!(sources_after, sources_before);
     }
 }
@@ -5803,16 +5832,16 @@ async fn native_literal_bracket_projections_refresh_without_source_or_classifica
         .await
         .expect("import");
     let snapshot = "SELECT jsonb_build_object('identity',(SELECT to_jsonb(s) FROM context_store s),'originals',(SELECT jsonb_agg(to_jsonb(m) ORDER BY material_id) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v),'subjects',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM subjects s),'areas',(SELECT jsonb_agg(to_jsonb(a) ORDER BY entity_id,area) FROM entity_areas a),'topics',(SELECT jsonb_agg(to_jsonb(t) ORDER BY entity_id,topic_id) FROM entity_topics t))";
-    let before: Value = sqlx::query_scalar(snapshot)
+    let before: Value = sqlx_core::query_scalar::query_scalar(snapshot)
         .fetch_one(store.pool())
         .await
         .expect("canonical snapshot");
     // Reproduce the exact legacy exclusion written before the literal-path fix.
-    sqlx::query("TRUNCATE context_projection_versions")
+    sqlx_core::query::query("TRUNCATE context_projection_versions")
         .execute(store.pool())
         .await
         .expect("owned projection fixture");
-    sqlx::query("INSERT INTO context_projection_versions(material_id,revision,payload,payload_digest) SELECT material_id,revision,p,encode(sha256(convert_to(p::text,'UTF8')),'hex') FROM context_materials CROSS JOIN LATERAL (SELECT jsonb_build_object('status','excluded','source_digest',content_digest,'terms','[]'::jsonb) AS p) x").execute(store.pool()).await.expect("legacy excluded rows");
+    sqlx_core::query::query("INSERT INTO context_projection_versions(material_id,revision,payload,payload_digest) SELECT material_id,revision,p,encode(sha256(convert_to(p::text,'UTF8')),'hex') FROM context_materials CROSS JOIN LATERAL (SELECT jsonb_build_object('status','excluded','source_digest',content_digest,'terms','[]'::jsonb) AS p) x").execute(store.pool()).await.expect("legacy excluded rows");
     let status = store.projection_status(&selected).await.expect("status");
     assert_eq!(status["ready"], false);
     assert_eq!(status["counts"]["excluded"], 3);
@@ -5868,14 +5897,14 @@ async fn native_literal_bracket_projections_refresh_without_source_or_classifica
         3
     );
     assert_eq!(
-        sqlx::query_scalar::<_, Value>(snapshot)
+        sqlx_core::query_scalar::query_scalar::<_, Value>(snapshot)
             .fetch_one(store.pool())
             .await
             .expect("unchanged originals"),
         before
     );
     assert!(
-        sqlx::query("UPDATE context_projection_versions SET payload=payload")
+        sqlx_core::query::query("UPDATE context_projection_versions SET payload=payload")
             .execute(store.pool())
             .await
             .is_err(),
@@ -5900,12 +5929,13 @@ async fn native_current_refresh_guard_keeps_history_identity_source_and_transact
         .await
         .expect("existing manual-edit revision boundary");
     assert_eq!(edited.revision, 2);
-    let revisions: i64 = sqlx::query_scalar("SELECT count(*) FROM context_material_versions")
-        .fetch_one(store.pool())
-        .await
-        .expect("actual historical revision");
+    let revisions: i64 =
+        sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM context_material_versions")
+            .fetch_one(store.pool())
+            .await
+            .expect("actual historical revision");
     assert_eq!(revisions, 2);
-    let before: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p").fetch_one(store.pool()).await.expect("snapshot");
+    let before: Value = sqlx_core::query_scalar::query_scalar("SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p").fetch_one(store.pool()).await.expect("snapshot");
     for statement in [
         "UPDATE context_projection_versions SET payload=payload WHERE revision=2",
         "UPDATE context_projection_versions SET revision=1 WHERE revision=2",
@@ -5919,13 +5949,16 @@ async fn native_current_refresh_guard_keeps_history_identity_source_and_transact
         if !statement
             .starts_with("UPDATE context_projection_versions SET payload=payload WHERE revision=2")
         {
-            sqlx::query("SELECT set_config('ontology.projection_refresh','on',true)")
+            sqlx_core::query::query("SELECT set_config('ontology.projection_refresh','on',true)")
                 .execute(&mut *tx)
                 .await
                 .expect("owned explicit refresh permission");
         }
         assert!(
-            sqlx::query(statement).execute(&mut *tx).await.is_err(),
+            sqlx_core::query::query(statement)
+                .execute(&mut *tx)
+                .await
+                .is_err(),
             "reject {statement}"
         );
         tx.rollback().await.expect("rollback rejected refresh");
@@ -5936,35 +5969,39 @@ async fn native_current_refresh_guard_keeps_history_identity_source_and_transact
             .begin()
             .await
             .expect("disabled refresh permission");
-        sqlx::query("SELECT set_config('ontology.projection_refresh',$1,true)")
+        sqlx_core::query::query("SELECT set_config('ontology.projection_refresh',$1,true)")
             .bind(flag)
             .execute(&mut *tx)
             .await
             .expect("disabled local flag");
         assert!(
-            sqlx::query("UPDATE context_projection_versions SET payload=payload WHERE revision=2")
-                .execute(&mut *tx)
-                .await
-                .is_err()
+            sqlx_core::query::query(
+                "UPDATE context_projection_versions SET payload=payload WHERE revision=2"
+            )
+            .execute(&mut *tx)
+            .await
+            .is_err()
         );
         tx.rollback().await.expect("rollback disabled permission");
     }
-    assert_eq!(sqlx::query_scalar::<_, Value>("SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p").fetch_one(store.pool()).await.expect("unchanged history"), before);
+    assert_eq!(sqlx_core::query_scalar::query_scalar::<_, Value>("SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p").fetch_one(store.pool()).await.expect("unchanged history"), before);
     let mut tx = store
         .pool()
         .begin()
         .await
         .expect("rollback permission test");
-    sqlx::query("SELECT set_config('ontology.projection_refresh','on',true)")
+    sqlx_core::query::query("SELECT set_config('ontology.projection_refresh','on',true)")
         .execute(&mut *tx)
         .await
         .expect("transaction local");
     tx.rollback().await.expect("rollback");
     assert!(
-        sqlx::query("UPDATE context_projection_versions SET payload=payload WHERE revision=2")
-            .execute(store.pool())
-            .await
-            .is_err(),
+        sqlx_core::query::query(
+            "UPDATE context_projection_versions SET payload=payload WHERE revision=2"
+        )
+        .execute(store.pool())
+        .await
+        .is_err(),
         "rolled back permission cannot authorize another pooled query"
     );
 }
@@ -5976,15 +6013,15 @@ async fn native_migration_012_preserves_all_existing_rows_and_rejects_corrupt_re
     context_history::legacy_history(&store).await;
     let (_fixture, root) = fixture(1, b"# Preserve original");
     import(&store, &root).await;
-    sqlx::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'; ALTER TABLE memory_grouping DROP COLUMN claim_token; DELETE FROM ontology_migrations WHERE name='014-grouping-claim-ownership.sql'; DROP TABLE document_subjects; DROP TABLE document_subject_history; DROP TABLE subject_history; ALTER TABLE subjects DROP COLUMN definition, DROP COLUMN revision; ALTER TABLE source_records DROP COLUMN reference_paths; DELETE FROM ontology_migrations WHERE name='013-knowledge-taxonomy.sql'; DROP TRIGGER context_projection_immutable ON context_projection_versions; CREATE TRIGGER context_projection_immutable BEFORE UPDATE OR DELETE ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION context_immutable_record(); DROP TRIGGER context_projection_check ON context_projection_versions; CREATE TRIGGER context_projection_check BEFORE INSERT ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION context_projection_validate(); DROP FUNCTION context_projection_refresh_guard(); DELETE FROM ontology_migrations WHERE name='012-context-projection-refresh.sql';").execute(store.pool()).await.expect("owned pre-012 schema");
+    sqlx_core::raw_sql::raw_sql("DROP FUNCTION grouping_queue_changed() CASCADE; DELETE FROM ontology_migrations WHERE name='019-classification-queue-events.sql'; DROP FUNCTION document_grouping_source_changed() CASCADE; DROP FUNCTION document_grouping_invalidate(text,uuid,text); DROP TABLE document_grouping_dirty; DELETE FROM ontology_migrations WHERE name='018-document-discovery-events.sql'; DROP TABLE career_workflows; DELETE FROM ontology_migrations WHERE name='017-career-workflows.sql'; ALTER TABLE memory_history DROP COLUMN grouping_only; DELETE FROM ontology_migrations WHERE name='016-memory-grouping-history.sql'; DROP TABLE document_grouping; DELETE FROM ontology_migrations WHERE name='015-document-grouping.sql'; ALTER TABLE memory_grouping DROP COLUMN claim_token; DELETE FROM ontology_migrations WHERE name='014-grouping-claim-ownership.sql'; DROP TABLE document_subjects; DROP TABLE document_subject_history; DROP TABLE subject_history; ALTER TABLE subjects DROP COLUMN definition, DROP COLUMN revision; ALTER TABLE source_records DROP COLUMN reference_paths; DELETE FROM ontology_migrations WHERE name='013-knowledge-taxonomy.sql'; DROP TRIGGER context_projection_immutable ON context_projection_versions; CREATE TRIGGER context_projection_immutable BEFORE UPDATE OR DELETE ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION context_immutable_record(); DROP TRIGGER context_projection_check ON context_projection_versions; CREATE TRIGGER context_projection_check BEFORE INSERT ON context_projection_versions FOR EACH ROW EXECUTE FUNCTION context_projection_validate(); DROP FUNCTION context_projection_refresh_guard(); DELETE FROM ontology_migrations WHERE name='012-context-projection-refresh.sql';").execute(store.pool()).await.expect("owned pre-012 schema");
     let snapshot = "SELECT jsonb_build_object('identity',(SELECT to_jsonb(s) FROM context_store s),'originals',(SELECT jsonb_agg(to_jsonb(m) ORDER BY material_id) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v),'projections',(SELECT jsonb_agg(to_jsonb(p) ORDER BY material_id,revision) FROM context_projection_versions p))";
-    let before: Value = sqlx::query_scalar(snapshot)
+    let before: Value = sqlx_core::query_scalar::query_scalar(snapshot)
         .fetch_one(store.pool())
         .await
         .expect("pre-upgrade values");
     store.initialize().await.expect("actual 011 to 012 upgrade");
     assert_eq!(
-        sqlx::query_scalar::<_, Value>(snapshot)
+        sqlx_core::query_scalar::query_scalar::<_, Value>(snapshot)
             .fetch_one(store.pool())
             .await
             .expect("post-upgrade values"),
@@ -5995,7 +6032,7 @@ async fn native_migration_012_preserves_all_existing_rows_and_rejects_corrupt_re
         .await
         .expect("valid manifest");
     // Intentionally corrupt one derived checksum inside the owned test DB.
-    sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER context_projection_immutable; DO $$ DECLARE n text; BEGIN SELECT conname INTO STRICT n FROM pg_constraint WHERE conrelid='context_projection_versions'::regclass AND contype='c' AND pg_get_constraintdef(oid) LIKE '%payload_digest%'; EXECUTE format('ALTER TABLE context_projection_versions DROP CONSTRAINT %I',n); END $$; UPDATE context_projection_versions SET payload_digest=repeat('a',64); ALTER TABLE context_projection_versions ADD CONSTRAINT native_test_projection_checksum CHECK(payload_digest=encode(sha256(convert_to(payload::text,'UTF8')),'hex')) NOT VALID; ALTER TABLE context_projection_versions ENABLE TRIGGER context_projection_immutable;").execute(store.pool()).await.expect("owned damaged checksum fixture");
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER context_projection_immutable; DO $$ DECLARE n text; BEGIN SELECT conname INTO STRICT n FROM pg_constraint WHERE conrelid='context_projection_versions'::regclass AND contype='c' AND pg_get_constraintdef(oid) LIKE '%payload_digest%'; EXECUTE format('ALTER TABLE context_projection_versions DROP CONSTRAINT %I',n); END $$; UPDATE context_projection_versions SET payload_digest=repeat('a',64); ALTER TABLE context_projection_versions ADD CONSTRAINT native_test_projection_checksum CHECK(payload_digest=encode(sha256(convert_to(payload::text,'UTF8')),'hex')) NOT VALID; ALTER TABLE context_projection_versions ENABLE TRIGGER context_projection_immutable;").execute(store.pool()).await.expect("owned damaged checksum fixture");
     assert_eq!(
         store.projection_status(&[scope()]).await,
         Err(Error::Storage)
@@ -6011,7 +6048,7 @@ async fn native_migration_012_preserves_all_existing_rows_and_rejects_corrupt_re
             .await,
         Err(Error::Conflict)
     );
-    let current_values: Value = sqlx::query_scalar("SELECT jsonb_agg(jsonb_build_array(m.material_id::text,m.revision,m.scope,m.path,m.content_digest,p.payload->>'status',p.payload_digest) ORDER BY m.material_id,m.revision,m.path) FROM context_materials m LEFT JOIN context_projection_versions p USING(material_id,revision)").fetch_one(store.pool()).await.expect("owned corrupt current manifest fields");
+    let current_values: Value = sqlx_core::query_scalar::query_scalar("SELECT jsonb_agg(jsonb_build_array(m.material_id::text,m.revision,m.scope,m.path,m.content_digest,p.payload->>'status',p.payload_digest) ORDER BY m.material_id,m.revision,m.path) FROM context_materials m LEFT JOIN context_projection_versions p USING(material_id,revision)").fetch_one(store.pool()).await.expect("owned corrupt current manifest fields");
     let corrupt_manifest =
         ontology::store::digest(&serde_json::to_vec(&current_values).expect("manifest bytes"));
     assert_eq!(
@@ -6023,13 +6060,13 @@ async fn native_migration_012_preserves_all_existing_rows_and_rejects_corrupt_re
         .begin()
         .await
         .expect("explicit corrupt refresh");
-    sqlx::query("SELECT set_config('ontology.projection_refresh','on',true)")
+    sqlx_core::query::query("SELECT set_config('ontology.projection_refresh','on',true)")
         .execute(&mut *tx)
         .await
         .expect("owned refresh flag");
-    assert!(sqlx::query("UPDATE context_projection_versions SET payload_digest=encode(sha256(convert_to(payload::text,'UTF8')),'hex')").execute(&mut *tx).await.is_err(), "even a valid new payload digest cannot hide corrupt old bytes");
+    assert!(sqlx_core::query::query("UPDATE context_projection_versions SET payload_digest=encode(sha256(convert_to(payload::text,'UTF8')),'hex')").execute(&mut *tx).await.is_err(), "even a valid new payload digest cannot hide corrupt old bytes");
     tx.rollback().await.expect("rollback corrupt refresh");
-    sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER context_projection_immutable; UPDATE context_projection_versions SET payload_digest=encode(sha256(convert_to(payload::text,'UTF8')),'hex'); ALTER TABLE context_projection_versions VALIDATE CONSTRAINT native_test_projection_checksum; ALTER TABLE context_projection_versions ENABLE TRIGGER context_projection_immutable;").execute(store.pool()).await.expect("restore owned fixture");
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER context_projection_immutable; UPDATE context_projection_versions SET payload_digest=encode(sha256(convert_to(payload::text,'UTF8')),'hex'); ALTER TABLE context_projection_versions VALIDATE CONSTRAINT native_test_projection_checksum; ALTER TABLE context_projection_versions ENABLE TRIGGER context_projection_immutable;").execute(store.pool()).await.expect("restore owned fixture");
 }
 
 #[tokio::test]
@@ -6072,16 +6109,17 @@ async fn native_pre_apply_close_checks_real_effects_and_only_terminates_drifted_
         .join(run)
         .join("head.json");
     let head_bytes = fs::read(&head_path).unwrap();
-    let snapshot: Value = sqlx::query_scalar("SELECT jsonb_agg(jsonb_build_array(material_id,revision,content_digest,origin_kind,source_digest) ORDER BY material_id) FROM context_materials").fetch_one(store.pool()).await.unwrap();
+    let snapshot: Value = sqlx_core::query_scalar::query_scalar("SELECT jsonb_agg(jsonb_build_array(material_id,revision,content_digest,origin_kind,source_digest) ORDER BY material_id) FROM context_materials").fetch_one(store.pool()).await.unwrap();
     let config = files.path().join("current-policy.json");
     let mut bytes = fs::read(context_fixture::configuration_path()).unwrap();
     bytes.push(b' ');
     fs::write(&config, bytes).unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     async fn call(
         root: &Path,
         config: &Path,
@@ -6138,7 +6176,7 @@ async fn native_pre_apply_close_checks_real_effects_and_only_terminates_drifted_
             "a".repeat(64)
         };
         let is_committed = state == "committed" || state == "finalized";
-        let apply: String = sqlx::query_scalar("INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state,actual_batch_id,actual_journal_locator,commit_receipt,final_core_receipt_digest) VALUES(gen_random_uuid(),$1::uuid,$2,$3,$4,'{}','[{}]','fictional-attempt','fictional-batch','fictional-journal',$5,$6,$7,$8,$9) RETURNING apply_id::text")
+        let apply: String = sqlx_core::query_scalar::query_scalar("INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state,actual_batch_id,actual_journal_locator,commit_receipt,final_core_receipt_digest) VALUES(gen_random_uuid(),$1::uuid,$2,$3,$4,'{}','[{}]','fictional-attempt','fictional-batch','fictional-journal',$5,$6,$7,$8,$9) RETURNING apply_id::text")
             .bind(&id).bind(effect_run).bind(effect_digest).bind("b".repeat(64)).bind(state)
             .bind(is_committed.then_some("fictional-batch")).bind(is_committed.then_some("fictional-journal"))
             .bind(is_committed.then_some(json!({"fictional":"counterevidence, not a Core receipt"})))
@@ -6151,7 +6189,7 @@ async fn native_pre_apply_close_checks_real_effects_and_only_terminates_drifted_
         );
         assert_eq!(fs::read(&head_path).unwrap(), head_bytes);
         assert!(!head_path.with_file_name("pre-apply-close.json").exists());
-        sqlx::query("DELETE FROM context_apply_batches WHERE apply_id=$1::uuid")
+        sqlx_core::query::query("DELETE FROM context_apply_batches WHERE apply_id=$1::uuid")
             .bind(apply)
             .execute(store.pool())
             .await
@@ -6180,15 +6218,16 @@ async fn native_pre_apply_close_checks_real_effects_and_only_terminates_drifted_
         closed,
         serde_json::from_slice::<Value>(&repeated.stdout).unwrap()
     );
-    let after: Value = sqlx::query_scalar("SELECT jsonb_agg(jsonb_build_array(material_id,revision,content_digest,origin_kind,source_digest) ORDER BY material_id) FROM context_materials").fetch_one(store.pool()).await.unwrap();
+    let after: Value = sqlx_core::query_scalar::query_scalar("SELECT jsonb_agg(jsonb_build_array(material_id,revision,content_digest,origin_kind,source_digest) ORDER BY material_id) FROM context_materials").fetch_one(store.pool()).await.unwrap();
     assert_eq!(
         snapshot, after,
         "closure changes no native material or origin"
     );
-    let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM context_material_versions")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let versions: i64 =
+        sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM context_material_versions")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     assert_eq!(versions as usize, context_fixture::DOCUMENT_COUNT);
     for verb in ["evaluate", "validate", "apply"] {
         assert!(

@@ -11,7 +11,10 @@ use crate::{
 use context_core::{document::parse_markdown_bytes, redaction::redact_secrets};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Postgres, Row, Transaction, postgres::PgListener};
+use sqlx_core::row::Row;
+use sqlx_core::transaction::Transaction;
+use sqlx_postgres::PgListener;
+use sqlx_postgres::Postgres;
 use std::{path::Path, time::Duration};
 use uuid::Uuid;
 
@@ -84,7 +87,7 @@ impl Store {
         assigned: bool,
     ) -> Result<(), Error> {
         let mode = if assigned { "manual" } else { "off" };
-        sqlx::query("INSERT INTO document_grouping(scope,material_id,entity_id,mode,state,source_revision,content_digest,membership_revision) VALUES($1,$2::uuid,$3,$4,$4,$5,$6,$7) ON CONFLICT(scope,source_id) DO UPDATE SET mode=EXCLUDED.mode,state=EXCLUDED.state,source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,membership_revision=EXCLUDED.membership_revision,attempts=0,claim_token=NULL,lease_until=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() WHERE document_grouping.mode<>EXCLUDED.mode OR document_grouping.state<>EXCLUDED.state OR document_grouping.source_revision<>EXCLUDED.source_revision OR document_grouping.content_digest<>EXCLUDED.content_digest OR document_grouping.membership_revision<>EXCLUDED.membership_revision")
+        sqlx_core::query::query("INSERT INTO document_grouping(scope,material_id,entity_id,mode,state,source_revision,content_digest,membership_revision) VALUES($1,$2::uuid,$3,$4,$4,$5,$6,$7) ON CONFLICT(scope,source_id) DO UPDATE SET mode=EXCLUDED.mode,state=EXCLUDED.state,source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,membership_revision=EXCLUDED.membership_revision,attempts=0,claim_token=NULL,lease_until=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() WHERE document_grouping.mode<>EXCLUDED.mode OR document_grouping.state<>EXCLUDED.state OR document_grouping.source_revision<>EXCLUDED.source_revision OR document_grouping.content_digest<>EXCLUDED.content_digest OR document_grouping.membership_revision<>EXCLUDED.membership_revision")
             .bind(scope.as_str()).bind(&identity.material_id).bind(&identity.entity_id).bind(mode).bind(source["source_revision"].as_str().ok_or(Error::Storage)?).bind(source["content_digest"].as_str().ok_or(Error::Storage)?).bind(revision).execute(&mut **tx).await.map_err(|_|Error::Storage)?;
         Ok(())
     }
@@ -102,7 +105,7 @@ impl Store {
                 self.count(1);
                 // Wait for a producer holding an existing dirty row: if it rolls
                 // back, no new notification can wake a consumer that skipped it.
-                let dirty = sqlx::query("SELECT source_id,material_id::text,entity_id FROM document_grouping_dirty WHERE scope=$1 ORDER BY source_id LIMIT 128 FOR UPDATE")
+                let dirty = sqlx_core::query::query("SELECT source_id,material_id::text,entity_id FROM document_grouping_dirty WHERE scope=$1 ORDER BY source_id LIMIT 128 FOR UPDATE")
                 .bind(scope.as_str()).fetch_all(&mut *tx).await.map_err(|_| Error::Storage)?;
                 if dirty.is_empty() {
                     tx.commit().await.map_err(|_| Error::Storage)?;
@@ -118,7 +121,7 @@ impl Store {
                     .filter_map(|row| row.get("entity_id"))
                     .collect();
                 // Fetch only changed current identities before reading payloads.
-                let native = sqlx::query(
+                let native = sqlx_core::query::query(
                     r#"
 WITH current_documents AS MATERIALIZED (
     SELECT m.material_id,m.scope,m.path,m.revision,m.content_digest,p.payload
@@ -160,7 +163,7 @@ ORDER BY material_id
                         ));
                     }
                 }
-                let git=sqlx::query("SELECT e.id,p.source_revision,p.content_digest FROM entities e JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id JOIN sources s ON s.scope=e.scope AND s.id=e.source_id WHERE e.scope=$1 AND e.id=ANY($2::text[]) AND s.kind='git' AND s.status='ok' AND p.present AND p.content_digest IS NOT NULL AND p.source_revision=s.verified_revision AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=s.id) ORDER BY e.id")
+                let git=sqlx_core::query::query("SELECT e.id,p.source_revision,p.content_digest FROM entities e JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id JOIN sources s ON s.scope=e.scope AND s.id=e.source_id WHERE e.scope=$1 AND e.id=ANY($2::text[]) AND s.kind='git' AND s.status='ok' AND p.present AND p.content_digest IS NOT NULL AND p.source_revision=s.verified_revision AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=s.id) ORDER BY e.id")
                 .bind(scope.as_str()).bind(git_ids).fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?;
                 for row in git {
                     sources.push((
@@ -181,14 +184,14 @@ ORDER BY material_id
                 }
                 // One indexed upsert per scope, rather than N network round trips
                 // while holding the shared manual/memory mutation lock.
-                sqlx::query("INSERT INTO document_grouping(scope,material_id,entity_id,mode,state,source_revision,content_digest,membership_revision) SELECT $1,x.material_id::uuid,x.entity_id,'auto','pending',x.source_revision,x.content_digest,COALESCE(d.revision,0) FROM jsonb_to_recordset($2::jsonb) AS x(material_id text,entity_id text,source_id text,source_revision text,content_digest text) LEFT JOIN document_subjects d ON d.scope=$1 AND d.source_id=x.source_id ORDER BY x.source_id ON CONFLICT(scope,source_id) DO UPDATE SET source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,membership_revision=EXCLUDED.membership_revision,state=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state IN ('pending','processing') THEN 'pending' WHEN document_grouping.state='ineligible' THEN CASE WHEN document_grouping.attempts>=3 THEN 'error' ELSE 'pending' END ELSE document_grouping.state END,attempts=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state IN ('pending','processing') THEN 0 ELSE document_grouping.attempts END,claim_token=NULL,lease_until=NULL,suggestions=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest THEN '{}'::jsonb ELSE document_grouping.suggestions END,reason=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest THEN NULL ELSE document_grouping.reason END,updated_at=now() WHERE document_grouping.mode='auto' AND (document_grouping.source_revision IS DISTINCT FROM EXCLUDED.source_revision OR document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state='ineligible')")
+                sqlx_core::query::query("INSERT INTO document_grouping(scope,material_id,entity_id,mode,state,source_revision,content_digest,membership_revision) SELECT $1,x.material_id::uuid,x.entity_id,'auto','pending',x.source_revision,x.content_digest,COALESCE(d.revision,0) FROM jsonb_to_recordset($2::jsonb) AS x(material_id text,entity_id text,source_id text,source_revision text,content_digest text) LEFT JOIN document_subjects d ON d.scope=$1 AND d.source_id=x.source_id ORDER BY x.source_id ON CONFLICT(scope,source_id) DO UPDATE SET source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,membership_revision=EXCLUDED.membership_revision,state=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state IN ('pending','processing') THEN 'pending' WHEN document_grouping.state='ineligible' THEN CASE WHEN document_grouping.attempts>=3 THEN 'error' ELSE 'pending' END ELSE document_grouping.state END,attempts=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state IN ('pending','processing') THEN 0 ELSE document_grouping.attempts END,claim_token=NULL,lease_until=NULL,suggestions=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest THEN '{}'::jsonb ELSE document_grouping.suggestions END,reason=CASE WHEN document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest THEN NULL ELSE document_grouping.reason END,updated_at=now() WHERE document_grouping.mode='auto' AND (document_grouping.source_revision IS DISTINCT FROM EXCLUDED.source_revision OR document_grouping.content_digest IS DISTINCT FROM EXCLUDED.content_digest OR document_grouping.membership_revision IS DISTINCT FROM EXCLUDED.membership_revision OR document_grouping.state='ineligible')")
                 .bind(scope.as_str()).bind(json!(batch)).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
                 // Eligibility is not a new judgment. Preserve terminal decisions and
                 // attempt budgets across projection loss/restoration. Only an
                 // unfinished claim needs cancellation and later continuation.
-                sqlx::query("UPDATE document_grouping SET state='ineligible',claim_token=NULL,lease_until=NULL,updated_at=now() WHERE scope=$1 AND mode='auto' AND state IN ('pending','processing') AND source_id=ANY($2::text[]) AND NOT(source_id=ANY($3::text[]))")
+                sqlx_core::query::query("UPDATE document_grouping SET state='ineligible',claim_token=NULL,lease_until=NULL,updated_at=now() WHERE scope=$1 AND mode='auto' AND state IN ('pending','processing') AND source_id=ANY($2::text[]) AND NOT(source_id=ANY($3::text[]))")
                 .bind(scope.as_str()).bind(&changed).bind(keys).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
-                sqlx::query("DELETE FROM document_grouping_dirty WHERE scope=$1 AND source_id=ANY($2::text[])")
+                sqlx_core::query::query("DELETE FROM document_grouping_dirty WHERE scope=$1 AND source_id=ANY($2::text[])")
                 .bind(scope.as_str()).bind(changed).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
                 tx.commit().await.map_err(|_| Error::Storage)?;
             }
@@ -198,11 +201,11 @@ ORDER BY material_id
 
     async fn claim_document_grouping(&self) -> Result<Option<Claim>, Error> {
         self.count(1);
-        sqlx::query("UPDATE document_grouping SET state='error',claim_token=NULL,lease_until=NULL,reason='분류 작업이 반복 중단됐습니다. 명시적으로 재검토할 수 있습니다.',updated_at=now() WHERE mode='auto' AND state='processing' AND lease_until<clock_timestamp() AND attempts>=3")
+        sqlx_core::query::query("UPDATE document_grouping SET state='error',claim_token=NULL,lease_until=NULL,reason='분류 작업이 반복 중단됐습니다. 명시적으로 재검토할 수 있습니다.',updated_at=now() WHERE mode='auto' AND state='processing' AND lease_until<clock_timestamp() AND attempts>=3")
             .execute(self.pool()).await.map_err(|_|Error::Storage)?;
         let token = Uuid::new_v4().to_string();
         self.count(1);
-        let row=sqlx::query("WITH next AS (SELECT scope,source_id FROM document_grouping WHERE mode='auto' AND attempts<3 AND (state='pending' OR (state='processing' AND lease_until<clock_timestamp())) ORDER BY updated_at,scope,source_id FOR UPDATE LIMIT 1) UPDATE document_grouping g SET state='processing',claim_token=$1::uuid,lease_until=clock_timestamp()+interval '2 minutes',attempts=attempts+1,updated_at=now() FROM next WHERE g.scope=next.scope AND g.source_id=next.source_id RETURNING g.scope,g.source_id,g.material_id::text,g.entity_id,g.source_revision,g.content_digest,g.membership_revision")
+        let row=sqlx_core::query::query("WITH next AS (SELECT scope,source_id FROM document_grouping WHERE mode='auto' AND attempts<3 AND (state='pending' OR (state='processing' AND lease_until<clock_timestamp())) ORDER BY updated_at,scope,source_id FOR UPDATE LIMIT 1) UPDATE document_grouping g SET state='processing',claim_token=$1::uuid,lease_until=clock_timestamp()+interval '2 minutes',attempts=attempts+1,updated_at=now() FROM next WHERE g.scope=next.scope AND g.source_id=next.source_id RETURNING g.scope,g.source_id,g.material_id::text,g.entity_id,g.source_revision,g.content_digest,g.membership_revision")
             .bind(&token).fetch_optional(self.pool()).await.map_err(|_|Error::Storage)?;
         let Some(row) = row else {
             return Ok(None);
@@ -227,7 +230,7 @@ ORDER BY material_id
         claim: &Claim,
     ) -> Result<bool, Error> {
         // SELECT first, then wall-clock CAS: a lock wait must not extend a lease.
-        sqlx::query(
+        sqlx_core::query::query(
             "SELECT source_id FROM document_grouping WHERE scope=$1 AND source_id=$2 FOR UPDATE",
         )
         .bind(claim.scope.as_str())
@@ -235,7 +238,7 @@ ORDER BY material_id
         .fetch_optional(&mut **tx)
         .await
         .map_err(|_| Error::Storage)?;
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM document_grouping WHERE scope=$1 AND source_id=$2 AND mode='auto' AND state='processing' AND source_revision=$3 AND content_digest=$4 AND membership_revision=$5 AND claim_token=$6::uuid AND lease_until>clock_timestamp())")
+        sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM document_grouping WHERE scope=$1 AND source_id=$2 AND mode='auto' AND state='processing' AND source_revision=$3 AND content_digest=$4 AND membership_revision=$5 AND claim_token=$6::uuid AND lease_until>clock_timestamp())")
             .bind(claim.scope.as_str()).bind(&claim.key).bind(&claim.source_revision).bind(&claim.content_digest).bind(claim.membership_revision).bind(&claim.token).fetch_one(&mut **tx).await.map_err(|_|Error::Storage)
     }
 
@@ -244,7 +247,7 @@ ORDER BY material_id
         tx: &mut Transaction<'_, Postgres>,
         scope: Scope,
     ) -> Result<Vec<Value>, Error> {
-        sqlx::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'revision',revision,'definition',definition) FROM subjects WHERE scope=$1 ORDER BY id")
+        sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'revision',revision,'definition',definition) FROM subjects WHERE scope=$1 ORDER BY id")
             .bind(scope.as_str()).fetch_all(&mut **tx).await.map_err(|_|Error::Storage)
     }
 
@@ -253,7 +256,7 @@ ORDER BY material_id
         tx: &mut Transaction<'_, Postgres>,
         claim: &Claim,
     ) -> Result<i64, Error> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx_core::query_scalar::query_scalar(
             "SELECT revision FROM document_subjects WHERE scope=$1 AND source_id=$2",
         )
         .bind(claim.scope.as_str())
@@ -278,14 +281,14 @@ ORDER BY material_id
             return Ok(None);
         }
         let (path, bytes) = if let Some(id) = &claim.identity.material_id {
-            let row=sqlx::query("SELECT scope||'/'||path AS path,content FROM context_materials WHERE material_id=$1::uuid")
+            let row=sqlx_core::query::query("SELECT scope||'/'||path AS path,content FROM context_materials WHERE material_id=$1::uuid")
                 .bind(id).fetch_one(&mut *tx).await.map_err(|_|Error::Storage)?;
             (
                 row.get::<String, _>("path"),
                 row.get::<Vec<u8>, _>("content"),
             )
         } else {
-            let row=sqlx::query("SELECT s.path,p.content FROM entities e JOIN sources s ON s.id=e.source_id AND s.scope=e.scope JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE e.scope=$1 AND e.id=$2")
+            let row=sqlx_core::query::query("SELECT s.path,p.content FROM entities e JOIN sources s ON s.id=e.source_id AND s.scope=e.scope JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE e.scope=$1 AND e.id=$2")
                 .bind(claim.scope.as_str()).bind(&claim.identity.entity_id).fetch_one(&mut *tx).await.map_err(|_|Error::Storage)?;
             (
                 row.get::<String, _>("path"),
@@ -310,7 +313,7 @@ ORDER BY material_id
         reason: &str,
         membership_revision: i64,
     ) -> Result<bool, Error> {
-        let changed=sqlx::query("UPDATE document_grouping SET state=$7,suggestions=$8,reason=$9,membership_revision=$10,policy_digest=$11,claim_token=NULL,lease_until=NULL,updated_at=now() WHERE scope=$1 AND source_id=$2 AND mode='auto' AND state='processing' AND source_revision=$3 AND content_digest=$4 AND membership_revision=$5 AND claim_token=$6::uuid AND lease_until>clock_timestamp()")
+        let changed=sqlx_core::query::query("UPDATE document_grouping SET state=$7,suggestions=$8,reason=$9,membership_revision=$10,policy_digest=$11,claim_token=NULL,lease_until=NULL,updated_at=now() WHERE scope=$1 AND source_id=$2 AND mode='auto' AND state='processing' AND source_revision=$3 AND content_digest=$4 AND membership_revision=$5 AND claim_token=$6::uuid AND lease_until>clock_timestamp()")
             .bind(claim.scope.as_str()).bind(&claim.key).bind(&claim.source_revision).bind(&claim.content_digest).bind(claim.membership_revision).bind(&claim.token).bind(state).bind(suggestions).bind(reason).bind(membership_revision).bind(digest(POLICY.as_bytes())).execute(&mut **tx).await.map_err(|_|Error::Storage)?;
         Ok(changed.rows_affected() == 1)
     }
@@ -345,7 +348,7 @@ ORDER BY material_id
             )
             .await?;
             // Definition drift is not a provider failure or a consumed attempt.
-            sqlx::query("UPDATE document_grouping SET attempts=0 WHERE scope=$1 AND source_id=$2 AND state='pending' AND claim_token IS NULL")
+            sqlx_core::query::query("UPDATE document_grouping SET attempts=0 WHERE scope=$1 AND source_id=$2 AND state='pending' AND claim_token IS NULL")
                 .bind(claim.scope.as_str()).bind(&claim.key).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
             return tx.commit().await.map_err(|_| Error::Storage);
         }
@@ -361,11 +364,11 @@ ORDER BY material_id
                 .iter()
                 .find(|s| s["id"].as_str() == judgment.subject_id.as_deref())
                 .ok_or(Error::Invalid)?;
-            let same:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM document_subjects WHERE scope=$1 AND source_id=$2 AND subject_id=$3 AND subject_revision=$4 AND source_revision=$5 AND content_digest=$6 AND reason=$7)")
+            let same:bool=sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM document_subjects WHERE scope=$1 AND source_id=$2 AND subject_id=$3 AND subject_revision=$4 AND source_revision=$5 AND content_digest=$6 AND reason=$7)")
                 .bind(claim.scope.as_str()).bind(&claim.key).bind(&judgment.subject_id).bind(subject["revision"].as_i64().ok_or(Error::Storage)?).bind(&claim.source_revision).bind(&claim.content_digest).bind(&judgment.reason).fetch_one(&mut *tx).await.map_err(|_|Error::Storage)?;
             if !same {
                 membership += 1;
-                sqlx::query("INSERT INTO document_subjects(scope,material_id,entity_id,subject_id,subject_revision,revision,source_revision,content_digest,reason) VALUES($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(scope,source_id) DO UPDATE SET subject_id=EXCLUDED.subject_id,subject_revision=EXCLUDED.subject_revision,revision=EXCLUDED.revision,source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,reason=EXCLUDED.reason,updated_at=now()")
+                sqlx_core::query::query("INSERT INTO document_subjects(scope,material_id,entity_id,subject_id,subject_revision,revision,source_revision,content_digest,reason) VALUES($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(scope,source_id) DO UPDATE SET subject_id=EXCLUDED.subject_id,subject_revision=EXCLUDED.subject_revision,revision=EXCLUDED.revision,source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,reason=EXCLUDED.reason,updated_at=now()")
                 .bind(claim.scope.as_str()).bind(&claim.identity.material_id).bind(&claim.identity.entity_id).bind(&judgment.subject_id).bind(subject["revision"].as_i64().ok_or(Error::Storage)?).bind(membership).bind(&claim.source_revision).bind(&claim.content_digest).bind(&judgment.reason).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
                 self.append_document_subject_history(&mut tx, claim.scope, &claim.key)
                     .await?;
@@ -494,7 +497,7 @@ ORDER BY material_id
                         .as_ref()
                         .and_then(|s| s["content_digest"].as_str())
                         .unwrap_or(&claim.content_digest);
-                    sqlx::query("UPDATE document_grouping SET source_revision=$3,content_digest=$4,attempts=CASE WHEN $5 THEN greatest(attempts-1,0) ELSE 0 END WHERE scope=$1 AND source_id=$2")
+                    sqlx_core::query::query("UPDATE document_grouping SET source_revision=$3,content_digest=$4,attempts=CASE WHEN $5 THEN greatest(attempts-1,0) ELSE 0 END WHERE scope=$1 AND source_id=$2")
                         .bind(claim.scope.as_str()).bind(&claim.key).bind(source_revision).bind(hash).bind(pending && !drift).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
                 }
             }
@@ -521,7 +524,7 @@ ORDER BY material_id
         {
             return Err(Error::Conflict);
         }
-        let revision = sqlx::query_scalar::<_, i64>(
+        let revision = sqlx_core::query_scalar::query_scalar::<_, i64>(
             "SELECT revision FROM document_subjects WHERE scope=$1 AND source_id=$2",
         )
         .bind(scope.as_str())
@@ -533,7 +536,7 @@ ORDER BY material_id
         if revision != input.revision {
             return Err(Error::Conflict);
         }
-        sqlx::query("INSERT INTO document_grouping(scope,material_id,entity_id,mode,state,source_revision,content_digest,membership_revision) VALUES($1,$2::uuid,$3,'auto','pending',$4,$5,$6) ON CONFLICT(scope,source_id) DO UPDATE SET mode='auto',state='pending',source_revision=$4,content_digest=$5,membership_revision=$6,attempts=0,claim_token=NULL,lease_until=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() WHERE document_grouping.mode<>'auto' OR document_grouping.state NOT IN ('pending','processing') OR document_grouping.source_revision IS DISTINCT FROM $4 OR document_grouping.content_digest IS DISTINCT FROM $5 OR document_grouping.membership_revision IS DISTINCT FROM $6")
+        sqlx_core::query::query("INSERT INTO document_grouping(scope,material_id,entity_id,mode,state,source_revision,content_digest,membership_revision) VALUES($1,$2::uuid,$3,'auto','pending',$4,$5,$6) ON CONFLICT(scope,source_id) DO UPDATE SET mode='auto',state='pending',source_revision=$4,content_digest=$5,membership_revision=$6,attempts=0,claim_token=NULL,lease_until=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() WHERE document_grouping.mode<>'auto' OR document_grouping.state NOT IN ('pending','processing') OR document_grouping.source_revision IS DISTINCT FROM $4 OR document_grouping.content_digest IS DISTINCT FROM $5 OR document_grouping.membership_revision IS DISTINCT FROM $6")
             .bind(scope.as_str()).bind(&input.identity.material_id).bind(&input.identity.entity_id).bind(&input.source_revision).bind(&input.content_digest).bind(revision).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         tx.commit().await.map_err(|_| Error::Storage)?;
         self.document_subject(scope, input.identity).await

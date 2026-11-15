@@ -60,7 +60,7 @@ async fn references(store: &Store, scope: Scope) -> BTreeSet<(String, String)> {
         .collect()
 }
 async fn preserved(store: &Store, ids: &[String]) -> Value {
-    sqlx::query_scalar("SELECT jsonb_build_object('records',(SELECT jsonb_agg(to_jsonb(r)-'reference_paths' ORDER BY entity_id) FROM source_records r WHERE entity_id=ANY($1)),'sources',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM sources s WHERE id IN (SELECT source_id FROM entities WHERE id=ANY($1))),'entities',(SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM entities e WHERE id=ANY($1)))")
+    sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('records',(SELECT jsonb_agg(to_jsonb(r)-'reference_paths' ORDER BY entity_id) FROM source_records r WHERE entity_id=ANY($1)),'sources',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM sources s WHERE id IN (SELECT source_id FROM entities WHERE id=ANY($1))),'entities',(SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM entities e WHERE id=ANY($1)))")
         .bind(ids).fetch_one(store.pool()).await.unwrap()
 }
 
@@ -120,11 +120,13 @@ async fn references_preserve_originals_direction_scope_and_current_source_proofs
         "repository path alone cannot cross app scope"
     );
     let ids = vec![a.entity_id.clone(), b.entity_id.clone()];
-    sqlx::query("UPDATE source_records SET reference_paths='{}' WHERE entity_id=ANY($1)")
-        .bind(&ids)
-        .execute(store.pool())
-        .await
-        .unwrap();
+    sqlx_core::query::query(
+        "UPDATE source_records SET reference_paths='{}' WHERE entity_id=ANY($1)",
+    )
+    .bind(&ids)
+    .execute(store.pool())
+    .await
+    .unwrap();
     let original = preserved(&store, &ids).await;
     let mut stale = proof(&b);
     stale.source_revision = "b".repeat(40);
@@ -219,7 +221,7 @@ async fn references_preserve_originals_direction_scope_and_current_source_proofs
         let scope = scope.to_owned();
         let path = path.to_owned();
         async move {
-            sqlx::query_scalar::<_, String>(
+            sqlx_core::query_scalar::query_scalar::<_, String>(
                 "SELECT 'c_'||material_id::text FROM context_materials WHERE scope=$1 AND path=$2",
             )
             .bind(scope)
@@ -242,10 +244,11 @@ async fn references_preserve_originals_direction_scope_and_current_source_proofs
         3,
         "repeats deduplicate and restricted originals stay excluded"
     );
-    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let store_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     ContextReader::new()
         .import(
             &store,
@@ -256,7 +259,7 @@ async fn references_preserve_originals_direction_scope_and_current_source_proofs
         )
         .await
         .unwrap();
-    let bound:String=sqlx::query_scalar("SELECT e.id FROM entities e JOIN context_source_bindings b ON b.source_id=e.source_id WHERE b.material_id=$1::uuid AND e.scope='personal'").bind(source.strip_prefix("c_")).fetch_one(store.pool()).await.unwrap();
+    let bound:String=sqlx_core::query_scalar::query_scalar("SELECT e.id FROM entities e JOIN context_source_bindings b ON b.source_id=e.source_id WHERE b.material_id=$1::uuid AND e.scope='personal'").bind(source.strip_prefix("c_")).fetch_one(store.pool()).await.unwrap();
     let refs = references(&store, Scope::Personal).await;
     assert!(
         refs.contains(&(bound.clone(), target.clone())) && !refs.iter().any(|(s, _)| s == &source),
