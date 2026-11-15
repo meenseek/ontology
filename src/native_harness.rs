@@ -3843,7 +3843,7 @@ printf '%s\n' "$$" >> "$0.calls"
 printf '%s\n' "$PWD" > "$0.cwd.$$"
 ls -ld "$PWD" >> "$0.cwd.$$"
 printf '%s\n' "$@" > "$0.args.$$"
-cp "${{10}}" "$0.schema.$$"
+cp "${{14}}" "$0.schema.$$"
 {body}
 "#
         );
@@ -4073,7 +4073,7 @@ PYWIRE
             .expect("args must be captured");
         let args = args.lines().collect::<Vec<_>>();
         assert_eq!(
-            &args[..9],
+            &args[..13],
             [
                 "exec",
                 "--ephemeral",
@@ -4083,12 +4083,16 @@ PYWIRE
                 "never",
                 "--sandbox",
                 "read-only",
+                "--config",
+                "project_doc_max_bytes=0",
+                "--disable",
+                "hooks",
                 "--output-schema"
             ]
         );
-        assert_eq!(args.len(), 11);
-        assert_eq!(args[10], "-");
-        assert_eq!(Path::new(args[9]).parent(), Some(Path::new(cwd_path)));
+        assert_eq!(args.len(), 15);
+        assert_eq!(args[14], "-");
+        assert_eq!(Path::new(args[13]).parent(), Some(Path::new(cwd_path)));
         let schema = fs::read(format!("{}.schema.{pid}", binary.display()))
             .expect("schema must be captured");
         if let Some(expected_schema) = expected_schema {
