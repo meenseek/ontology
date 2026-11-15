@@ -8,7 +8,10 @@ use crate::{
 use context_core::redaction::redact_secrets;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::{Postgres, Row, Transaction, postgres::PgListener};
+use sqlx_core::row::Row;
+use sqlx_core::transaction::Transaction;
+use sqlx_postgres::PgListener;
+use sqlx_postgres::Postgres;
 use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::PathBuf,
@@ -52,7 +55,7 @@ pub(crate) async fn on_capture(
     } else {
         ("auto", "pending")
     };
-    sqlx::query(
+    sqlx_core::query::query(
         "INSERT INTO memory_grouping(memory_id,mode,state,source_revision) VALUES($1,$2,$3,1)",
     )
     .bind(id)
@@ -75,12 +78,13 @@ pub(crate) async fn on_correct(
     if scope != Scope::Personal {
         return Ok(input.subject_id.clone());
     }
-    let prior: Option<String> =
-        sqlx::query_scalar("SELECT mode FROM memory_grouping WHERE memory_id=$1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| Error::Storage)?;
+    let prior: Option<String> = sqlx_core::query_scalar::query_scalar(
+        "SELECT mode FROM memory_grouping WHERE memory_id=$1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| Error::Storage)?;
     let prior = prior.as_deref().unwrap_or(if old_subject.is_some() {
         "manual"
     } else {
@@ -105,7 +109,7 @@ pub(crate) async fn on_correct(
     } else {
         ("auto", "pending", None)
     };
-    sqlx::query("INSERT INTO memory_grouping(memory_id,mode,state,source_revision,attempts,lease_until,suggestions,reason,policy_digest,updated_at) VALUES($1,$2,$3,$4,0,NULL,'{}'::jsonb,NULL,NULL,now()) ON CONFLICT(memory_id) DO UPDATE SET mode=$2,state=$3,source_revision=$4,attempts=0,lease_until=NULL,claim_token=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now()")
+    sqlx_core::query::query("INSERT INTO memory_grouping(memory_id,mode,state,source_revision,attempts,lease_until,suggestions,reason,policy_digest,updated_at) VALUES($1,$2,$3,$4,0,NULL,'{}'::jsonb,NULL,NULL,now()) ON CONFLICT(memory_id) DO UPDATE SET mode=$2,state=$3,source_revision=$4,attempts=0,lease_until=NULL,claim_token=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now()")
         .bind(id).bind(mode).bind(state).bind(next_revision).execute(&mut **tx).await.map_err(|_| Error::Storage)?;
     Ok(subject)
 }
@@ -116,7 +120,7 @@ pub(crate) async fn on_withdraw(
     id: &str,
 ) -> Result<(), Error> {
     if scope == Scope::Personal {
-        sqlx::query("UPDATE memory_grouping SET state='off',lease_until=NULL,claim_token=NULL,updated_at=now() WHERE memory_id=$1")
+        sqlx_core::query::query("UPDATE memory_grouping SET state='off',lease_until=NULL,claim_token=NULL,updated_at=now() WHERE memory_id=$1")
             .bind(id).execute(&mut **tx).await.map_err(|_| Error::Storage)?;
     }
     Ok(())
@@ -129,7 +133,7 @@ pub(crate) async fn on_accept(
     next_revision: i64,
 ) -> Result<(), Error> {
     if scope == Scope::Personal {
-        sqlx::query("UPDATE memory_grouping SET source_revision=$2,state=CASE WHEN mode='auto' AND state IN ('pending','processing') THEN 'pending' ELSE state END,attempts=CASE WHEN mode='auto' AND state IN ('pending','processing') THEN 0 ELSE attempts END,lease_until=CASE WHEN mode='auto' AND state IN ('pending','processing') THEN NULL ELSE lease_until END,claim_token=NULL,updated_at=now() WHERE memory_id=$1")
+        sqlx_core::query::query("UPDATE memory_grouping SET source_revision=$2,state=CASE WHEN mode='auto' AND state IN ('pending','processing') THEN 'pending' ELSE state END,attempts=CASE WHEN mode='auto' AND state IN ('pending','processing') THEN 0 ELSE attempts END,lease_until=CASE WHEN mode='auto' AND state IN ('pending','processing') THEN NULL ELSE lease_until END,claim_token=NULL,updated_at=now() WHERE memory_id=$1")
             .bind(id).bind(next_revision).execute(&mut **tx).await.map_err(|_| Error::Storage)?;
     }
     Ok(())
@@ -144,15 +148,16 @@ pub(crate) async fn on_curation_update(
     if scope != Scope::Personal {
         return Ok(false);
     }
-    let mode: String =
-        sqlx::query_scalar("SELECT mode FROM memory_grouping WHERE memory_id=$1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| Error::Storage)?
-            .ok_or(Error::Storage)?;
+    let mode: String = sqlx_core::query_scalar::query_scalar(
+        "SELECT mode FROM memory_grouping WHERE memory_id=$1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| Error::Storage)?
+    .ok_or(Error::Storage)?;
     let automatic = mode == "auto";
-    sqlx::query("UPDATE memory_grouping SET source_revision=$2,state=CASE WHEN mode='auto' THEN 'pending' ELSE state END,attempts=CASE WHEN mode='auto' THEN 0 ELSE attempts END,lease_until=CASE WHEN mode='auto' THEN NULL ELSE lease_until END,claim_token=NULL,suggestions=CASE WHEN mode='auto' THEN '{}'::jsonb ELSE suggestions END,reason=CASE WHEN mode='auto' THEN NULL ELSE reason END,updated_at=now() WHERE memory_id=$1")
+    sqlx_core::query::query("UPDATE memory_grouping SET source_revision=$2,state=CASE WHEN mode='auto' THEN 'pending' ELSE state END,attempts=CASE WHEN mode='auto' THEN 0 ELSE attempts END,lease_until=CASE WHEN mode='auto' THEN NULL ELSE lease_until END,claim_token=NULL,suggestions=CASE WHEN mode='auto' THEN '{}'::jsonb ELSE suggestions END,reason=CASE WHEN mode='auto' THEN NULL ELSE reason END,updated_at=now() WHERE memory_id=$1")
         .bind(id).bind(next_revision).execute(&mut **tx).await.map_err(|_| Error::Storage)?;
     Ok(automatic)
 }
@@ -178,7 +183,7 @@ impl Store {
         }
         let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
         self.lock_memories(&mut tx, scope).await?;
-        let row = sqlx::query(
+        let row = sqlx_core::query::query(
             "SELECT revision,status,subject_id FROM memories WHERE scope=$1 AND id=$2 FOR UPDATE",
         )
         .bind(scope.as_str())
@@ -193,7 +198,7 @@ impl Store {
             return Err(Error::Conflict);
         }
         if let Some(subject) = subject_id {
-            let valid: bool = sqlx::query_scalar(
+            let valid: bool = sqlx_core::query_scalar::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM subjects WHERE scope=$1 AND id=$2)",
             )
             .bind(scope.as_str())
@@ -212,7 +217,7 @@ impl Store {
         };
         let prior_mode: Option<String> = if scope == Scope::Personal {
             Some(
-                sqlx::query_scalar(
+                sqlx_core::query_scalar::query_scalar(
                     "SELECT mode FROM memory_grouping WHERE memory_id=$1 FOR UPDATE",
                 )
                 .bind(id)
@@ -235,7 +240,7 @@ impl Store {
             GroupingPreference::Manual => "manual",
             GroupingPreference::Off => "off",
         };
-        sqlx::query(
+        sqlx_core::query::query(
             "UPDATE memories SET subject_id=$2,revision=revision+1,updated_at=now() WHERE id=$1",
         )
         .bind(id)
@@ -244,7 +249,7 @@ impl Store {
         .await
         .map_err(|_| Error::Storage)?;
         if scope == Scope::Personal {
-            sqlx::query("UPDATE memory_grouping SET mode=$2,state=$3,source_revision=$4,attempts=0,lease_until=NULL,claim_token=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() WHERE memory_id=$1")
+            sqlx_core::query::query("UPDATE memory_grouping SET mode=$2,state=$3,source_revision=$4,attempts=0,lease_until=NULL,claim_token=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() WHERE memory_id=$1")
             .bind(id).bind(mode_name).bind(state).bind(revision+1).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
         }
         self.append_history(&mut tx, scope, id, true).await?;
@@ -258,7 +263,7 @@ impl Store {
         if scope != Scope::Personal {
             return Err(Error::Invalid);
         }
-        let changed = sqlx::query("UPDATE memory_grouping g SET state='pending',source_revision=m.revision,attempts=0,lease_until=NULL,claim_token=NULL,suggestions='{}'::jsonb,reason=NULL,updated_at=now() FROM memories m WHERE g.memory_id=m.id AND m.scope='personal' AND m.id=$1 AND m.status IN ('accepted','proposed') AND g.mode='auto' AND g.state IN ('error','suggested','unmatched') RETURNING m.id")
+        let changed = sqlx_core::query::query("UPDATE memory_grouping g SET state='pending',source_revision=m.revision,attempts=0,lease_until=NULL,claim_token=NULL,suggestions='{}'::jsonb,reason=NULL,updated_at=now() FROM memories m WHERE g.memory_id=m.id AND m.scope='personal' AND m.id=$1 AND m.status IN ('accepted','proposed') AND g.mode='auto' AND g.state IN ('error','suggested','unmatched') RETURNING m.id")
             .bind(id).fetch_optional(self.pool()).await.map_err(|_| Error::Storage)?;
         if changed.is_none() {
             return Err(Error::Conflict);
@@ -268,11 +273,11 @@ impl Store {
 
     async fn claim_grouping(&self) -> Result<Option<(String, i64, String)>, Error> {
         self.count(1);
-        sqlx::query("UPDATE memory_grouping SET state='error',lease_until=NULL,claim_token=NULL,reason='분류 작업이 반복 중단됐습니다.',updated_at=now() WHERE mode='auto' AND state='processing' AND lease_until<now() AND attempts>=3")
+        sqlx_core::query::query("UPDATE memory_grouping SET state='error',lease_until=NULL,claim_token=NULL,reason='분류 작업이 반복 중단됐습니다.',updated_at=now() WHERE mode='auto' AND state='processing' AND lease_until<now() AND attempts>=3")
             .execute(self.pool()).await.map_err(|_| Error::Storage)?;
         let token = Uuid::new_v4().to_string();
         self.count(1);
-        let row = sqlx::query("WITH next AS (SELECT g.memory_id FROM memory_grouping g JOIN memories m ON m.id=g.memory_id WHERE m.scope='personal' AND m.status IN ('accepted','proposed') AND g.mode='auto' AND g.attempts<3 AND (g.state='pending' OR (g.state='processing' AND g.lease_until<now())) ORDER BY g.updated_at,g.memory_id FOR UPDATE OF g LIMIT 1) UPDATE memory_grouping g SET state='processing',lease_until=now()+interval '2 minutes',claim_token=$1::uuid,attempts=attempts+1,updated_at=now() FROM next WHERE g.memory_id=next.memory_id RETURNING g.memory_id,g.source_revision,g.claim_token::text")
+        let row = sqlx_core::query::query("WITH next AS (SELECT g.memory_id FROM memory_grouping g JOIN memories m ON m.id=g.memory_id WHERE m.scope='personal' AND m.status IN ('accepted','proposed') AND g.mode='auto' AND g.attempts<3 AND (g.state='pending' OR (g.state='processing' AND g.lease_until<now())) ORDER BY g.updated_at,g.memory_id FOR UPDATE OF g LIMIT 1) UPDATE memory_grouping g SET state='processing',lease_until=now()+interval '2 minutes',claim_token=$1::uuid,attempts=attempts+1,updated_at=now() FROM next WHERE g.memory_id=next.memory_id RETURNING g.memory_id,g.source_revision,g.claim_token::text")
             .bind(token).fetch_optional(self.pool()).await.map_err(|_| Error::Storage)?;
         Ok(row.map(|r| {
             (
@@ -293,12 +298,14 @@ impl Store {
             let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
             // Acquire ownership's row lock before evaluating wall-clock expiry.
             // A volatile WHERE in a single blocked UPDATE is not a post-lock check.
-            sqlx::query("SELECT memory_id FROM memory_grouping WHERE memory_id=$1 FOR UPDATE")
-                .bind(&id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|_| Error::Storage)?;
-            sqlx::query("UPDATE memory_grouping SET state='error',lease_until=NULL,claim_token=NULL,reason='Codex 분류를 완료하지 못했습니다. 다시 시도할 수 있습니다.',updated_at=now() WHERE memory_id=$1 AND source_revision=$2 AND mode='auto' AND state='processing' AND claim_token=$3::uuid AND lease_until>clock_timestamp()")
+            sqlx_core::query::query(
+                "SELECT memory_id FROM memory_grouping WHERE memory_id=$1 FOR UPDATE",
+            )
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| Error::Storage)?;
+            sqlx_core::query::query("UPDATE memory_grouping SET state='error',lease_until=NULL,claim_token=NULL,reason='Codex 분류를 완료하지 못했습니다. 다시 시도할 수 있습니다.',updated_at=now() WHERE memory_id=$1 AND source_revision=$2 AND mode='auto' AND state='processing' AND claim_token=$3::uuid AND lease_until>clock_timestamp()")
                 .bind(&id).bind(revision).bind(&token).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
             tx.commit().await.map_err(|_| Error::Storage)?;
         }
@@ -306,7 +313,7 @@ impl Store {
     }
 
     async fn classify_grouping(&self, id: &str, revision: i64, token: &str) -> Result<(), Error> {
-        let row = sqlx::query(
+        let row = sqlx_core::query::query(
             "SELECT document,revision,status FROM memories WHERE scope='personal' AND id=$1",
         )
         .bind(id)
@@ -322,7 +329,7 @@ impl Store {
             return Ok(());
         }
         let document: Value = row.get("document");
-        let subjects = sqlx::query("SELECT s.id,s.name,s.revision,s.definition,COALESCE((SELECT jsonb_agg(t.title) FROM (SELECT left(m.document->>'title',120) AS title FROM memories m WHERE m.scope='personal' AND m.subject_id=s.id AND m.status IN ('accepted','proposed') ORDER BY m.updated_at DESC LIMIT 3) t),'[]'::jsonb) AS examples FROM subjects s WHERE s.scope='personal' ORDER BY s.id")
+        let subjects = sqlx_core::query::query("SELECT s.id,s.name,s.revision,s.definition,COALESCE((SELECT jsonb_agg(t.title) FROM (SELECT left(m.document->>'title',120) AS title FROM memories m WHERE m.scope='personal' AND m.subject_id=s.id AND m.status IN ('accepted','proposed') ORDER BY m.updated_at DESC LIMIT 3) t),'[]'::jsonb) AS examples FROM subjects s WHERE s.scope='personal' ORDER BY s.id")
             .fetch_all(self.pool()).await.map_err(|_| Error::Storage)?;
         let definitions: Vec<Value> = subjects.iter().map(|s| json!({"id":s.get::<String,_>("id"),"name":s.get::<String,_>("name"),"revision":s.get::<i64,_>("revision"),"definition":s.get::<Option<Value>,_>("definition")})).collect();
         let candidates: Vec<Value> = subjects
@@ -360,7 +367,7 @@ impl Store {
     ) -> Result<(), Error> {
         let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
         self.lock_memories(&mut tx, Scope::Personal).await?;
-        let row = sqlx::query("SELECT m.revision,m.status,m.subject_id,g.mode,g.state,g.source_revision,g.claim_token::text,g.lease_until>clock_timestamp() AS live_claim FROM memories m JOIN memory_grouping g ON g.memory_id=m.id WHERE m.scope='personal' AND m.id=$1 FOR UPDATE OF m,g")
+        let row = sqlx_core::query::query("SELECT m.revision,m.status,m.subject_id,g.mode,g.state,g.source_revision,g.claim_token::text,g.lease_until>clock_timestamp() AS live_claim FROM memories m JOIN memory_grouping g ON g.memory_id=m.id WHERE m.scope='personal' AND m.id=$1 FOR UPDATE OF m,g")
             .bind(id).fetch_optional(&mut *tx).await.map_err(|_| Error::Storage)?;
         let Some(row) = row else {
             return Ok(());
@@ -375,17 +382,17 @@ impl Store {
         {
             return Ok(());
         }
-        let current: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'revision',revision,'definition',definition) FROM subjects WHERE scope='personal' ORDER BY id")
+        let current: Vec<Value> = sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'revision',revision,'definition',definition) FROM subjects WHERE scope='personal' ORDER BY id")
             .fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?;
         if current != definitions {
-            sqlx::query("UPDATE memory_grouping SET state='pending',attempts=0,lease_until=NULL,claim_token=NULL,updated_at=now() WHERE memory_id=$1 AND source_revision=$2 AND mode='auto' AND state='processing' AND claim_token=$3::uuid AND lease_until>clock_timestamp()")
+            sqlx_core::query::query("UPDATE memory_grouping SET state='pending',attempts=0,lease_until=NULL,claim_token=NULL,updated_at=now() WHERE memory_id=$1 AND source_revision=$2 AND mode='auto' AND state='processing' AND claim_token=$3::uuid AND lease_until>clock_timestamp()")
                 .bind(id).bind(revision).bind(token).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
             return tx.commit().await.map_err(|_| Error::Storage);
         }
         let mut state = "unmatched";
         if judgment.decision == "assign" {
             let subject = judgment.subject_id.as_deref().ok_or(Error::Invalid)?;
-            let valid: bool = sqlx::query_scalar(
+            let valid: bool = sqlx_core::query_scalar::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM subjects WHERE scope='personal' AND id=$1)",
             )
             .bind(subject)
@@ -395,7 +402,7 @@ impl Store {
             if !valid {
                 return Err(Error::Conflict);
             }
-            sqlx::query("UPDATE memories SET subject_id=$2,revision=revision+1,updated_at=now() WHERE id=$1")
+            sqlx_core::query::query("UPDATE memories SET subject_id=$2,revision=revision+1,updated_at=now() WHERE id=$1")
                 .bind(id).bind(subject).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
             self.append_history(&mut tx, Scope::Personal, id, true)
                 .await?;
@@ -414,7 +421,7 @@ impl Store {
         // clock_timestamp, rather than the transaction start time, also fences
         // expiration while waiting for locks or writing history. Roll back all
         // membership/history changes if the final claim is no longer live.
-        let changed = sqlx::query("UPDATE memory_grouping SET state=$2,lease_until=NULL,claim_token=NULL,suggestions=$3,reason=$4,policy_digest=$5,updated_at=now() WHERE memory_id=$1 AND source_revision=$6 AND mode='auto' AND state='processing' AND claim_token=$7::uuid AND lease_until>clock_timestamp()")
+        let changed = sqlx_core::query::query("UPDATE memory_grouping SET state=$2,lease_until=NULL,claim_token=NULL,suggestions=$3,reason=$4,policy_digest=$5,updated_at=now() WHERE memory_id=$1 AND source_revision=$6 AND mode='auto' AND state='processing' AND claim_token=$7::uuid AND lease_until>clock_timestamp()")
             .bind(id).bind(state).bind(suggestions).bind(judgment.reason).bind(digest(POLICY.as_bytes()))
             .bind(revision).bind(token)
             .execute(&mut *tx).await.map_err(|_| Error::Storage)?;
@@ -623,7 +630,7 @@ impl Store {
             self.count(1);
             // One timestamp partitions expired and future leases without a gap:
             // a lease expiring during this statement must still arm a deadline.
-            let row = sqlx::query(match queue {
+            let row = sqlx_core::query::query(match queue {
                 Queue::Memories => r#"
 SELECT EXISTS(
     SELECT 1 FROM memory_grouping g JOIN memories m ON m.id=g.memory_id

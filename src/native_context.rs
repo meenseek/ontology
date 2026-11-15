@@ -9,7 +9,9 @@ use context_core::harness::{
     ContextSource, HarnessError, HarnessResult, SourceMetadata, SourcePathKind,
     SourceStoreIdentity, SourceVersion, StoredSourceState,
 };
-use sqlx::{Connection, PgConnection, Row};
+use sqlx_core::connection::Connection;
+use sqlx_core::row::Row;
+use sqlx_postgres::PgConnection;
 use std::{
     ffi::{CStr, CString, OsString},
     fs::{File, Metadata},
@@ -457,7 +459,7 @@ impl NativeContextSource {
             .map_err(|_| source_error(failure(Stage::SourceMetadata, "lock_poisoned")))?;
         self.store.count(1);
         self.metadata_queries.fetch_add(1, Ordering::Relaxed);
-        let row=self.handle.block_on(sqlx::query("SELECT (SELECT jsonb_build_object('material_id',material_id::text,'revision',revision,'content_digest',content_digest,'deleted',deleted) FROM context_materials WHERE source_path=$1) AS exact,EXISTS(SELECT 1 FROM context_materials WHERE NOT deleted AND ($1='' OR starts_with(source_path,$1||'/'))) AS children,EXISTS(SELECT 1 FROM context_materials WHERE NOT deleted AND source_path=ANY($2)) AS ancestor").bind(&prefix).bind(&ancestors).fetch_one(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceMetadata, error)))?;
+        let row=self.handle.block_on(sqlx_core::query::query("SELECT (SELECT jsonb_build_object('material_id',material_id::text,'revision',revision,'content_digest',content_digest,'deleted',deleted) FROM context_materials WHERE source_path=$1) AS exact,EXISTS(SELECT 1 FROM context_materials WHERE NOT deleted AND ($1='' OR starts_with(source_path,$1||'/'))) AS children,EXISTS(SELECT 1 FROM context_materials WHERE NOT deleted AND source_path=ANY($2)) AS ancestor").bind(&prefix).bind(&ancestors).fetch_one(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceMetadata, error)))?;
         drop(conn);
         if row.get::<bool, _>("ancestor") {
             return Err(source_error(Error::Conflict));
@@ -556,7 +558,7 @@ impl NativeContextSource {
         let unlocked: bool = self
             .handle
             .block_on(
-                sqlx::query_scalar("SELECT pg_advisory_unlock_shared($1)")
+                sqlx_core::query_scalar::query_scalar("SELECT pg_advisory_unlock_shared($1)")
                     .bind(CONTEXT_GATE)
                     .fetch_one(&mut *connection),
             )
@@ -585,7 +587,7 @@ impl NativeContextSource {
         self.store.count(1);
         self.handle
             .block_on(
-                sqlx::query("SELECT pg_advisory_lock_shared($1)")
+                sqlx_core::query::query("SELECT pg_advisory_lock_shared($1)")
                     .bind(CONTEXT_GATE)
                     .execute(&mut *connection),
             )
@@ -598,7 +600,7 @@ impl NativeContextSource {
             // The source remains Failed even if cleanup itself is uncertain.
             self.store.count(1);
             let _ = self.handle.block_on(
-                sqlx::query("SELECT pg_advisory_unlock_shared($1)")
+                sqlx_core::query::query("SELECT pg_advisory_unlock_shared($1)")
                     .bind(CONTEXT_GATE)
                     .execute(&mut *connection),
             );
@@ -665,7 +667,7 @@ impl NativeContextSource {
             .map_err(|_| source_error(failure(Stage::SourceVersions, "lock_poisoned")))?;
         self.store.count(1);
         self.metadata_queries.fetch_add(1, Ordering::Relaxed);
-        let rows=self.handle.block_on(sqlx::query("SELECT source_path,material_id::text,revision,content_digest,byte_len,deleted FROM context_materials WHERE source_path=ANY($1) ORDER BY source_path COLLATE \"C\"").bind(&logical).fetch_all(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceVersions, error)))?;
+        let rows=self.handle.block_on(sqlx_core::query::query("SELECT source_path,material_id::text,revision,content_digest,byte_len,deleted FROM context_materials WHERE source_path=ANY($1) ORDER BY source_path COLLATE \"C\"").bind(&logical).fetch_all(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceVersions, error)))?;
         let states = rows
             .iter()
             .map(|row| Ok((row.get::<String, _>("source_path"), stored_state(row)?)))
@@ -685,7 +687,7 @@ impl NativeContextSource {
             .collect()
     }
 }
-pub(crate) fn stored_state(row: &sqlx::postgres::PgRow) -> HarnessResult<StoredSourceState> {
+pub(crate) fn stored_state(row: &sqlx_postgres::PgRow) -> HarnessResult<StoredSourceState> {
     let revision = u64::try_from(row.get::<i64, _>("revision"))
         .map_err(|_| source_error(failure(Stage::SourceRevisionDecode, "invalid_data")))?;
     let material_id = row.get("material_id");
@@ -734,7 +736,7 @@ impl ContextSource for NativeContextSource {
             .lock()
             .map_err(|_| source_error(Error::Storage))?;
         self.store.count(1);
-        let found = self.handle.block_on(sqlx::query_scalar::<_, bool>(
+        let found = self.handle.block_on(sqlx_core::query_scalar::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.source_path=$1 AND m.material_id::text=$2 AND v.revision=$3 AND v.content_digest=$4 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted AND v.byte_len BETWEEN 0 AND $5)"
         ).bind(path).bind(material_id).bind(i64::try_from(*revision).map_err(|_| source_error(Error::Invalid))?)
             .bind(content_digest).bind(MAX_FILE_BYTES as i64).fetch_one(&mut *connection))
@@ -764,7 +766,7 @@ impl ContextSource for NativeContextSource {
             .lock()
             .map_err(|_| source_error(Error::Storage))?;
         self.store.count(1);
-        let bytes: Option<Vec<u8>> = self.handle.block_on(sqlx::query_scalar(
+        let bytes: Option<Vec<u8>> = self.handle.block_on(sqlx_core::query_scalar::query_scalar(
             "SELECT CASE WHEN v.byte_len BETWEEN 0 AND $5 THEN context_read_content(v.material_id,v.content_digest) END FROM context_materials m JOIN context_material_versions v USING(material_id) WHERE m.source_path=$1 AND m.material_id::text=$2 AND v.revision=$3 AND v.content_digest=$4 AND NOT m.deleted AND NOT m.restricted AND NOT v.deleted AND NOT v.restricted"
         ).bind(parts[1..].join("/")).bind(material_id)
             .bind(i64::try_from(*revision).map_err(|_| source_error(Error::Invalid))?).bind(content_digest)
@@ -869,7 +871,7 @@ impl ContextSource for NativeContextSource {
             .map_err(|_| source_error(failure(Stage::SourceChildren, "lock_poisoned")))?;
         self.store.count(1);
         self.metadata_queries.fetch_add(1, Ordering::Relaxed);
-        let rows:Vec<String>=self.handle.block_on(sqlx::query_scalar("SELECT DISTINCT split_part(CASE WHEN $1='' THEN source_path ELSE substring(source_path FROM length($1)+2) END,'/',1) COLLATE \"C\" AS child FROM context_materials WHERE NOT deleted AND ($1='' OR starts_with(source_path,$1||'/')) ORDER BY child LIMIT $2").bind(prefix).bind((limit+1)as i64).fetch_all(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceChildren, error)))?;
+        let rows:Vec<String>=self.handle.block_on(sqlx_core::query_scalar::query_scalar("SELECT DISTINCT split_part(CASE WHEN $1='' THEN source_path ELSE substring(source_path FROM length($1)+2) END,'/',1) COLLATE \"C\" AS child FROM context_materials WHERE NOT deleted AND ($1='' OR starts_with(source_path,$1||'/')) ORDER BY child LIMIT $2").bind(prefix).bind((limit+1)as i64).fetch_all(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceChildren, error)))?;
         if rows.len() > limit || rows.iter().any(|s| !safe_component(s)) {
             return Err(source_error(Error::Limit));
         }
@@ -908,7 +910,7 @@ impl ContextSource for NativeContextSource {
                 .map_err(|_| source_error(failure(Stage::SourceBody, "lock_poisoned")))?;
             self.store.count(1);
             self.body_queries.fetch_add(1, Ordering::Relaxed);
-            let row=self.handle.block_on(sqlx::query("SELECT material_id::text,revision,content_digest,byte_len,deleted,CASE WHEN byte_len BETWEEN 0 AND $3 AND octet_length(content)<=$3 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted").bind(scope.as_str()).bind(logical).bind(limit as i64).fetch_optional(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceBody, error)))?.ok_or_else(||source_error(Error::NotFound))?;
+            let row=self.handle.block_on(sqlx_core::query::query("SELECT material_id::text,revision,content_digest,byte_len,deleted,CASE WHEN byte_len BETWEEN 0 AND $3 AND octet_length(content)<=$3 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=$2 AND NOT deleted").bind(scope.as_str()).bind(logical).bind(limit as i64).fetch_optional(&mut *conn)).map_err(|error|source_error(sql_error(Stage::SourceBody, error)))?.ok_or_else(||source_error(Error::NotFound))?;
             drop(conn);
             let bytes: Vec<u8> = row
                 .get::<Option<Vec<u8>>, _>("content")
@@ -987,7 +989,7 @@ impl Store {
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.count(1);
-        let released = sqlx::query("SELECT pg_advisory_unlock_all()")
+        let released = sqlx_core::query::query("SELECT pg_advisory_unlock_all()")
             .execute(&mut connection)
             .await
             .map_err(|error| sql_error(Stage::ContextGate, error));
@@ -1018,12 +1020,12 @@ impl Store {
         .map_err(|_| failure(Stage::ContextConnect, "timeout"))?
         .map_err(|error| sql_error(Stage::ContextConnect, error))?;
         self.count(1);
-        sqlx::raw_sql("SET statement_timeout='5s'; SET lock_timeout='3s'")
+        sqlx_core::raw_sql::raw_sql("SET statement_timeout='5s'; SET lock_timeout='3s'")
             .execute(&mut conn)
             .await
             .map_err(|error| sql_error(Stage::ContextConfigure, error))?;
         self.count(1);
-        sqlx::query(if exclusive {
+        sqlx_core::query::query(if exclusive {
             "SELECT pg_advisory_lock($1)"
         } else {
             "SELECT pg_advisory_lock_shared($1)"
@@ -1036,7 +1038,7 @@ impl Store {
     }
     pub(crate) async fn check_context_pending(&self, conn: &mut PgConnection) -> Result<(), Error> {
         self.count(1);
-        let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM context_apply_batches WHERE state IN ('pending','committed'))").fetch_one(&mut *conn).await.map_err(|error|sql_error(Stage::ContextPending, error))?;
+        let pending:bool=sqlx_core::query_scalar::query_scalar("SELECT EXISTS(SELECT 1 FROM context_apply_batches WHERE state IN ('pending','committed'))").fetch_one(&mut *conn).await.map_err(|error|sql_error(Stage::ContextPending, error))?;
         if pending {
             return Err(Error::ContextPending);
         }
@@ -1050,10 +1052,12 @@ impl Store {
     {
         let mut connection = self.dedicated_context_connection(false).await?;
         self.count(1);
-        let store_id = sqlx::query_scalar::<_, String>("SELECT store_id::text FROM context_store")
-            .fetch_one(&mut connection)
-            .await
-            .map_err(|error| sql_error(Stage::ContextIdentity, error));
+        let store_id = sqlx_core::query_scalar::query_scalar::<_, String>(
+            "SELECT store_id::text FROM context_store",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .map_err(|error| sql_error(Stage::ContextIdentity, error));
         let store_id = match store_id {
             Ok(value) => value,
             Err(error) => {
@@ -1172,10 +1176,12 @@ impl Store {
     {
         let mut connection = self.open_context_connection(true).await?;
         self.count(1);
-        let store_id = sqlx::query_scalar::<_, String>("SELECT store_id::text FROM context_store")
-            .fetch_one(&mut connection)
-            .await
-            .map_err(|_| Error::Storage);
+        let store_id = sqlx_core::query_scalar::query_scalar::<_, String>(
+            "SELECT store_id::text FROM context_store",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .map_err(|_| Error::Storage);
         let store_id = match store_id {
             Ok(value) => value,
             Err(error) => {

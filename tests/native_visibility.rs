@@ -20,7 +20,7 @@ async fn graph(store: &Store, scope: Scope, q: &str, focus: Option<&str>) -> Val
         .unwrap()
 }
 async fn material(store: &Store, path: &str) -> String {
-    sqlx::query_scalar(
+    sqlx_core::query_scalar::query_scalar(
         "SELECT material_id::text FROM context_materials WHERE scope='personal' AND path=$1",
     )
     .bind(path)
@@ -48,7 +48,7 @@ async fn purpose_history(store: &Store, scope: &str, identity: &str) -> Result<V
 }
 
 async fn purpose_rows(store: &Store) -> Value {
-    sqlx::query_scalar("SELECT jsonb_build_object('memberships',(SELECT COALESCE(jsonb_agg(to_jsonb(d) ORDER BY scope,source_id),'[]') FROM document_subjects d),'history',(SELECT COALESCE(jsonb_agg(to_jsonb(h) ORDER BY scope,source_id,revision),'[]') FROM document_subject_history h))")
+    sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('memberships',(SELECT COALESCE(jsonb_agg(to_jsonb(d) ORDER BY scope,source_id),'[]') FROM document_subjects d),'history',(SELECT COALESCE(jsonb_agg(to_jsonb(h) ORDER BY scope,source_id,revision),'[]') FROM document_subject_history h))")
         .fetch_one(store.pool()).await.unwrap()
 }
 
@@ -64,7 +64,7 @@ async fn native_projection_owns_graph_visibility_and_binding_never_falls_back() 
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::raw_sql("TRUNCATE document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
+    sqlx_core::raw_sql::raw_sql("TRUNCATE document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
         .execute(store.pool()).await.unwrap();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("vault");
@@ -101,12 +101,12 @@ async fn native_projection_owns_graph_visibility_and_binding_never_falls_back() 
         .await
         .unwrap();
     // Legacy/state-transition fixtures are confined to this disposable DB.
-    sqlx::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER USER")
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_materials DISABLE TRIGGER USER")
         .execute(store.pool())
         .await
         .unwrap();
     // Reproduce native Core's false flag without reading any real restricted source.
-    sqlx::query("UPDATE context_materials SET restricted=false WHERE path IN ('journal/day.md','notes/JOURNAL/day.md','notes/raw/day.md')")
+    sqlx_core::query::query("UPDATE context_materials SET restricted=false WHERE path IN ('journal/day.md','notes/JOURNAL/day.md','notes/raw/day.md')")
         .execute(store.pool()).await.unwrap();
     let git = ImportedRecord {
         source_id: format!("s_{}", digest(b"synthetic stale Git")),
@@ -123,10 +123,11 @@ async fn native_projection_owns_graph_visibility_and_binding_never_falls_back() 
         .apply_import(std::slice::from_ref(&git))
         .await
         .unwrap();
-    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let store_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     for scope in [Scope::Personal, Scope::Meenseek] {
         ContextReader::new()
             .import(
@@ -228,11 +229,11 @@ async fn native_projection_owns_graph_visibility_and_binding_never_falls_back() 
         baseline.push((scope, alias, source_alias, source_digest));
     }
     // Broken derived rows are synthetic fixtures; disable only this disposable table's guards.
-    sqlx::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER")
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_projection_versions DISABLE TRIGGER USER")
         .execute(store.pool())
         .await
         .unwrap();
-    let projection: Value = sqlx::query_scalar(
+    let projection: Value = sqlx_core::query_scalar::query_scalar(
         "DELETE FROM context_projection_versions WHERE material_id=$1::uuid RETURNING payload",
     )
     .bind(&target)
@@ -248,9 +249,9 @@ async fn native_projection_owns_graph_visibility_and_binding_never_falls_back() 
             if state == "excluded" {
                 payload = json!({"status":"excluded","source_digest":projection["source_digest"],"terms":[]});
             }
-            sqlx::query("INSERT INTO context_projection_versions(material_id,revision,payload,payload_digest) VALUES($1::uuid,1,$2,encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex')) ON CONFLICT(material_id,revision) DO UPDATE SET payload=EXCLUDED.payload,payload_digest=EXCLUDED.payload_digest")
+            sqlx_core::query::query("INSERT INTO context_projection_versions(material_id,revision,payload,payload_digest) VALUES($1::uuid,1,$2,encode(sha256(convert_to($2::jsonb::text,'UTF8')),'hex')) ON CONFLICT(material_id,revision) DO UPDATE SET payload=EXCLUDED.payload,payload_digest=EXCLUDED.payload_digest")
                 .bind(&target).bind(payload).execute(store.pool()).await.unwrap();
-            sqlx::query(
+            sqlx_core::query::query(
                 "UPDATE context_materials SET restricted=$2,deleted=$3,search_text=CASE WHEN $2 OR $3 THEN NULL ELSE search_text END,content=CASE WHEN $3 THEN ''::bytea ELSE content END,byte_len=CASE WHEN $3 THEN 0 ELSE byte_len END,content_digest=CASE WHEN $3 THEN encode(sha256(''::bytea),'hex') ELSE content_digest END WHERE material_id=$1::uuid",
             )
             .bind(&target)
@@ -312,7 +313,7 @@ async fn native_projection_owns_graph_visibility_and_binding_never_falls_back() 
             );
         }
     }
-    sqlx::raw_sql("ALTER TABLE context_projection_versions ENABLE TRIGGER USER; ALTER TABLE context_materials ENABLE TRIGGER USER")
+    sqlx_core::raw_sql::raw_sql("ALTER TABLE context_projection_versions ENABLE TRIGGER USER; ALTER TABLE context_materials ENABLE TRIGGER USER")
         .execute(store.pool())
         .await
         .unwrap();

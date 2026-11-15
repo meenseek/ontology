@@ -262,7 +262,7 @@ impl GitReader {
         commit: &str,
         paths: &[String],
         scope: Scope,
-        _guard: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _guard: &mut sqlx_core::transaction::Transaction<'_, sqlx_postgres::Postgres>,
     ) -> Result<usize, Error> {
         self.validate(repo, commit, paths)?;
         match self.read(repo, commit, paths, scope).await {

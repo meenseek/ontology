@@ -9,7 +9,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx_core::row::Row;
+use sqlx_core::transaction::Transaction;
+use sqlx_postgres::Postgres;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,7 +90,7 @@ impl Store {
         let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
         self.lock_memories(&mut tx, scope).await?;
         self.count(1);
-        let old = sqlx::query(
+        let old = sqlx_core::query::query(
             "SELECT revision,name,definition FROM subjects WHERE scope=$1 AND id=$2 FOR UPDATE",
         )
         .bind(scope.as_str())
@@ -104,14 +106,14 @@ impl Store {
             || old.get::<Option<Value>, _>("definition").as_ref() != Some(&definition)
         {
             self.count(1);
-            sqlx::query("UPDATE subjects SET name=$3,definition=$4,revision=revision+1 WHERE scope=$1 AND id=$2")
+            sqlx_core::query::query("UPDATE subjects SET name=$3,definition=$4,revision=revision+1 WHERE scope=$1 AND id=$2")
                 .bind(scope.as_str()).bind(id).bind(name).bind(&definition).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
             self.count(1);
-            sqlx::query("INSERT INTO subject_history(scope,subject_id,revision,name,definition,action) SELECT scope,id,revision,name,definition,'define' FROM subjects WHERE scope=$1 AND id=$2")
+            sqlx_core::query::query("INSERT INTO subject_history(scope,subject_id,revision,name,definition,action) SELECT scope,id,revision,name,definition,'define' FROM subjects WHERE scope=$1 AND id=$2")
                 .bind(scope.as_str()).bind(id).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         }
         self.count(1);
-        let value: Value = sqlx::query_scalar("SELECT to_jsonb(s)-'key_digest'-'payload_digest' FROM subjects s WHERE scope=$1 AND id=$2")
+        let value: Value = sqlx_core::query_scalar::query_scalar("SELECT to_jsonb(s)-'key_digest'-'payload_digest' FROM subjects s WHERE scope=$1 AND id=$2")
             .bind(scope.as_str()).bind(id).fetch_one(&mut *tx).await.map_err(|_|Error::Storage)?;
         tx.commit().await.map_err(|_| Error::Storage)?;
         Ok(value)
@@ -129,7 +131,7 @@ impl Store {
         self.count(1);
         if let Some(material) = &identity.material_id {
             self.context_gate_in(tx, false).await?;
-            let row = sqlx::query("SELECT m.material_id::text,m.scope,m.path,m.revision::text AS source_revision,m.content_digest,m.restricted FROM context_materials m JOIN context_projection_versions p USING(material_id,revision) WHERE m.material_id=$1::uuid AND NOT m.deleted AND NOT m.restricted AND m.path LIKE '%.md' AND p.payload->>'status' IN ('searchable','unavailable') AND p.payload->>'source_digest'=m.content_digest AND ($2='personal' OR EXISTS(SELECT 1 FROM context_source_bindings b JOIN sources s ON s.id=b.source_id WHERE b.material_id=m.material_id AND s.scope=$2)) FOR SHARE OF m,p")
+            let row = sqlx_core::query::query("SELECT m.material_id::text,m.scope,m.path,m.revision::text AS source_revision,m.content_digest,m.restricted FROM context_materials m JOIN context_projection_versions p USING(material_id,revision) WHERE m.material_id=$1::uuid AND NOT m.deleted AND NOT m.restricted AND m.path LIKE '%.md' AND p.payload->>'status' IN ('searchable','unavailable') AND p.payload->>'source_digest'=m.content_digest AND ($2='personal' OR EXISTS(SELECT 1 FROM context_source_bindings b JOIN sources s ON s.id=b.source_id WHERE b.material_id=m.material_id AND s.scope=$2)) FOR SHARE OF m,p")
                 .bind(material).bind(scope.as_str()).fetch_optional(&mut **tx).await.map_err(|_|Error::Storage)?.ok_or(Error::NotFound)?;
             let native_scope: ContextScope = row
                 .get::<String, _>("scope")
@@ -148,13 +150,13 @@ impl Store {
             );
         }
         let entity = identity.entity_id.as_deref().ok_or(Error::Invalid)?;
-        let source: Option<String> = sqlx::query_scalar("SELECT s.id FROM entities e JOIN sources s ON s.id=e.source_id AND s.scope=e.scope WHERE e.scope=$1 AND e.id=$2 AND s.kind='git' FOR SHARE OF s")
+        let source: Option<String> = sqlx_core::query_scalar::query_scalar("SELECT s.id FROM entities e JOIN sources s ON s.id=e.source_id AND s.scope=e.scope WHERE e.scope=$1 AND e.id=$2 AND s.kind='git' FOR SHARE OF s")
             .bind(scope.as_str()).bind(entity).fetch_optional(&mut **tx).await.map_err(|_|Error::Storage)?;
         if source.is_none() {
             return Err(Error::NotFound);
         }
         self.count(1);
-        sqlx::query_scalar("SELECT jsonb_build_object('material_id',NULL,'entity_id',e.id,'source_revision',p.source_revision,'content_digest',p.content_digest) FROM entities e JOIN source_records p ON p.entity_id=e.id AND p.scope=e.scope JOIN sources s ON s.id=e.source_id WHERE e.scope=$1 AND e.id=$2 AND s.id=$3 AND s.status='ok' AND p.present AND p.content_digest IS NOT NULL AND p.source_revision=s.verified_revision AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=s.id) FOR SHARE OF e,p")
+        sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('material_id',NULL,'entity_id',e.id,'source_revision',p.source_revision,'content_digest',p.content_digest) FROM entities e JOIN source_records p ON p.entity_id=e.id AND p.scope=e.scope JOIN sources s ON s.id=e.source_id WHERE e.scope=$1 AND e.id=$2 AND s.id=$3 AND s.status='ok' AND p.present AND p.content_digest IS NOT NULL AND p.source_revision=s.verified_revision AND NOT EXISTS(SELECT 1 FROM context_source_bindings b WHERE b.source_id=s.id) FOR SHARE OF e,p")
             .bind(scope.as_str()).bind(entity).bind(source).fetch_optional(&mut **tx).await.map_err(|_|Error::Storage)?.ok_or(Error::NotFound)
     }
 
@@ -166,7 +168,7 @@ impl Store {
         source: Value,
     ) -> Result<Value, Error> {
         self.count(1);
-        let stored: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(d)||jsonb_build_object('subject_name',s.name,'definition',s.definition,'current_subject_revision',s.revision,'review_needed',d.subject_id IS NOT NULL AND d.subject_revision IS DISTINCT FROM s.revision) FROM document_subjects d LEFT JOIN subjects s ON s.scope=d.scope AND s.id=d.subject_id WHERE d.scope=$1 AND d.source_id=$2")
+        let stored: Option<Value> = sqlx_core::query_scalar::query_scalar("SELECT to_jsonb(d)||jsonb_build_object('subject_name',s.name,'definition',s.definition,'current_subject_revision',s.revision,'review_needed',d.subject_id IS NOT NULL AND d.subject_revision IS DISTINCT FROM s.revision) FROM document_subjects d LEFT JOIN subjects s ON s.scope=d.scope AND s.id=d.subject_id WHERE d.scope=$1 AND d.source_id=$2")
             .bind(scope.as_str()).bind(key).fetch_optional(&mut **tx).await.map_err(|_|Error::Storage)?;
         let mut value = stored.unwrap_or_else(||json!({"revision":0,"subject_id":null,"subject_revision":null,"reason":null,"review_needed":false}));
         if value["revision"] != 0
@@ -177,7 +179,7 @@ impl Store {
         }
         value["current_source"] = source;
         self.count(1);
-        let grouping:Option<Value>=sqlx::query_scalar("SELECT jsonb_build_object('mode',mode,'state',state,'suggestions',suggestions,'reason',reason) FROM document_grouping WHERE scope=$1 AND source_id=$2")
+        let grouping:Option<Value>=sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('mode',mode,'state',state,'suggestions',suggestions,'reason',reason) FROM document_grouping WHERE scope=$1 AND source_id=$2")
             .bind(scope.as_str()).bind(key).fetch_optional(&mut **tx).await.map_err(|_|Error::Storage)?;
         if value["subject_id"].is_string()
             && grouping.as_ref().is_some_and(|g| {
@@ -243,7 +245,7 @@ impl Store {
         }
         if let Some(subject) = &input.subject_id {
             self.count(1);
-            let revision: Option<i64> = sqlx::query_scalar(
+            let revision: Option<i64> = sqlx_core::query_scalar::query_scalar(
                 "SELECT revision FROM subjects WHERE scope=$1 AND id=$2 FOR SHARE",
             )
             .bind(scope.as_str())
@@ -256,7 +258,7 @@ impl Store {
             }
         }
         self.count(1);
-        let old: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(d) FROM document_subjects d WHERE scope=$1 AND source_id=$2 FOR UPDATE")
+        let old: Option<Value> = sqlx_core::query_scalar::query_scalar("SELECT to_jsonb(d) FROM document_subjects d WHERE scope=$1 AND source_id=$2 FOR UPDATE")
             .bind(scope.as_str()).bind(&key).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?;
         if old
             .as_ref()
@@ -275,7 +277,7 @@ impl Store {
         });
         if !same {
             self.count(1);
-            sqlx::query("INSERT INTO document_subjects(scope,material_id,entity_id,subject_id,subject_revision,revision,source_revision,content_digest,reason) VALUES($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(scope,source_id) DO UPDATE SET subject_id=EXCLUDED.subject_id,subject_revision=EXCLUDED.subject_revision,revision=EXCLUDED.revision,source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,reason=EXCLUDED.reason,updated_at=now()")
+            sqlx_core::query::query("INSERT INTO document_subjects(scope,material_id,entity_id,subject_id,subject_revision,revision,source_revision,content_digest,reason) VALUES($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(scope,source_id) DO UPDATE SET subject_id=EXCLUDED.subject_id,subject_revision=EXCLUDED.subject_revision,revision=EXCLUDED.revision,source_revision=EXCLUDED.source_revision,content_digest=EXCLUDED.content_digest,reason=EXCLUDED.reason,updated_at=now()")
                 .bind(scope.as_str()).bind(&input.identity.material_id).bind(&input.identity.entity_id).bind(&input.subject_id).bind(input.subject_revision).bind(input.revision+1).bind(&input.source_revision).bind(&input.content_digest).bind(&input.reason).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
             self.append_document_subject_history(&mut tx, scope, &key)
                 .await?;
@@ -304,7 +306,7 @@ impl Store {
         key: &str,
     ) -> Result<(), Error> {
         self.count(1);
-        sqlx::query("INSERT INTO document_subject_history(scope,source_id,material_id,entity_id,revision,subject_id,subject_revision,source_revision,content_digest,reason) SELECT scope,source_id,material_id,entity_id,revision,subject_id,subject_revision,source_revision,content_digest,reason FROM document_subjects WHERE scope=$1 AND source_id=$2")
+        sqlx_core::query::query("INSERT INTO document_subject_history(scope,source_id,material_id,entity_id,revision,subject_id,subject_revision,source_revision,content_digest,reason) SELECT scope,source_id,material_id,entity_id,revision,subject_id,subject_revision,source_revision,content_digest,reason FROM document_subjects WHERE scope=$1 AND source_id=$2")
             .bind(scope.as_str()).bind(key).execute(&mut **tx).await.map_err(|_|Error::Storage)?;
         Ok(())
     }
@@ -327,7 +329,7 @@ impl Store {
         self.lock_memories(&mut tx, scope).await?;
         self.purpose_source(&mut tx, scope, &identity).await?;
         self.count(1);
-        let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(h)||jsonb_build_object('subject_name',s.name,'definition',s.definition) FROM document_subject_history h LEFT JOIN subject_history s ON s.scope=h.scope AND s.subject_id=h.subject_id AND s.revision=h.subject_revision WHERE h.scope=$1 AND h.source_id=$2 AND ($3::bigint IS NULL OR h.revision<$3) ORDER BY h.revision DESC LIMIT $4")
+        let mut rows: Vec<Value> = sqlx_core::query_scalar::query_scalar("SELECT to_jsonb(h)||jsonb_build_object('subject_name',s.name,'definition',s.definition) FROM document_subject_history h LEFT JOIN subject_history s ON s.scope=h.scope AND s.subject_id=h.subject_id AND s.revision=h.subject_revision WHERE h.scope=$1 AND h.source_id=$2 AND ($3::bigint IS NULL OR h.revision<$3) ORDER BY h.revision DESC LIMIT $4")
             .bind(scope.as_str()).bind(key).bind(before).bind((limit+1) as i64).fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?;
         let more = rows.len() > limit;
         rows.truncate(limit);

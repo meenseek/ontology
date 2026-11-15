@@ -119,7 +119,7 @@ async fn graph_snapshot_contract() {
         .initialize()
         .await
         .expect("initialize isolated schema");
-    sqlx::raw_sql("TRUNCATE context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
+    sqlx_core::raw_sql::raw_sql("TRUNCATE context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
         .execute(store.pool()).await.expect("reset only test rows");
     for size in [0, 1, 120, MAX_GRAPH_NODES + 21] {
         for batch in (0..size)
@@ -372,10 +372,11 @@ async fn graph_snapshot_contract() {
             .await,
         Err(Error::Invalid)
     );
-    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .expect("canonical store identity");
+    let store_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .expect("canonical store identity");
     ContextReader::new()
         .import(
             &store,
@@ -695,13 +696,13 @@ async fn graph_snapshot_contract() {
         }
     }
     // Dense metadata and four-byte labels exercise both count and serialized-byte bounds.
-    sqlx::query("UPDATE sources SET path=repeat('🌌',160)||id WHERE scope='meenseek'")
+    sqlx_core::query::query("UPDATE sources SET path=repeat('🌌',160)||id WHERE scope='meenseek'")
         .execute(store.pool())
         .await
         .expect("large synthetic labels");
-    sqlx::raw_sql("INSERT INTO topics(scope,name) VALUES('meenseek','dense one'),('meenseek','dense two'),('meenseek','dense three'); INSERT INTO entity_topics SELECT e.scope,e.id,t.id FROM entities e JOIN topics t ON t.scope=e.scope WHERE e.scope='meenseek' ON CONFLICT DO NOTHING")
+    sqlx_core::raw_sql::raw_sql("INSERT INTO topics(scope,name) VALUES('meenseek','dense one'),('meenseek','dense two'),('meenseek','dense three'); INSERT INTO entity_topics SELECT e.scope,e.id,t.id FROM entities e JOIN topics t ON t.scope=e.scope WHERE e.scope='meenseek' ON CONFLICT DO NOTHING")
         .execute(store.pool()).await.expect("dense synthetic classification");
-    sqlx::raw_sql("WITH numbered AS (SELECT id, row_number() OVER (ORDER BY id) AS n FROM entities WHERE scope='meenseek') INSERT INTO related_materials(scope,left_id,right_id) SELECT 'meenseek',a.id,b.id FROM numbered a JOIN numbered b ON b.n>a.n AND b.n<=a.n+3 ON CONFLICT DO NOTHING")
+    sqlx_core::raw_sql::raw_sql("WITH numbered AS (SELECT id, row_number() OVER (ORDER BY id) AS n FROM entities WHERE scope='meenseek') INSERT INTO related_materials(scope,left_id,right_id) SELECT 'meenseek',a.id,b.id FROM numbered a JOIN numbered b ON b.n>a.n AND b.n<=a.n+3 ON CONFLICT DO NOTHING")
         .execute(store.pool()).await.expect("dense same-scope relations exercise byte cap");
     // Include markers by giving each one focus, beyond the truncated default node window.
     let dense = fetch(
@@ -899,7 +900,7 @@ async fn sorting_contract(store: &Store) {
         } else {
             "2021-01-01T00:00:00Z"
         };
-        sqlx::query(
+        sqlx_core::query::query(
             "UPDATE memory_history SET changed_at=$2::text::timestamptz WHERE memory_id=$1",
         )
         .bind(record["id"].as_str().unwrap())
@@ -907,7 +908,7 @@ async fn sorting_contract(store: &Store) {
         .execute(store.pool())
         .await
         .unwrap();
-        sqlx::query("UPDATE memories SET created_at=$2::text::timestamptz WHERE id=$1")
+        sqlx_core::query::query("UPDATE memories SET created_at=$2::text::timestamptz WHERE id=$1")
             .bind(record["id"].as_str().unwrap())
             .bind(year)
             .execute(store.pool())

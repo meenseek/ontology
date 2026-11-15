@@ -16,7 +16,7 @@ async fn call(store: &Store, value: Value) -> Value {
 async fn listener_pid(store: &Store) -> i32 {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let pid = sqlx::query_scalar::<_, i32>("SELECT pid FROM pg_stat_activity WHERE application_name='classification_queue_events_test' AND query LIKE 'LISTEN %' AND state='idle' LIMIT 1")
+            let pid = sqlx_core::query_scalar::query_scalar::<_, i32>("SELECT pid FROM pg_stat_activity WHERE application_name='classification_queue_events_test' AND query LIKE 'LISTEN %' AND state='idle' LIMIT 1")
                 .fetch_optional(store.pool()).await.unwrap();
             if let Some(pid) = pid { return pid; }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -39,7 +39,7 @@ async fn settled(worker: &Store) -> u64 {
 }
 
 async fn states(store: &Store, memory: &str, document: &str) -> (String, String) {
-    sqlx::query_as("SELECT (SELECT state FROM memory_grouping WHERE memory_id=$1),(SELECT state FROM document_grouping WHERE source_id=$2 AND scope='personal')")
+    sqlx_core::query_as::query_as("SELECT (SELECT state FROM memory_grouping WHERE memory_id=$1),(SELECT state FROM document_grouping WHERE source_id=$2 AND scope='personal')")
         .bind(memory).bind(document).fetch_one(store.pool()).await.unwrap()
 }
 
@@ -55,9 +55,9 @@ async fn wait_states(store: &Store, memory: &str, document: &str, state: &str) {
 
 async fn pending(store: &Store, memory: &str, document: &str) {
     let mut tx = store.pool().begin().await.unwrap();
-    sqlx::query("UPDATE memory_grouping SET mode='auto',state='pending',attempts=0,claim_token=NULL,lease_until=NULL WHERE memory_id=$1")
+    sqlx_core::query::query("UPDATE memory_grouping SET mode='auto',state='pending',attempts=0,claim_token=NULL,lease_until=NULL WHERE memory_id=$1")
         .bind(memory).execute(&mut *tx).await.unwrap();
-    sqlx::query("UPDATE document_grouping SET mode='auto',state='pending',attempts=0,claim_token=NULL,lease_until=NULL WHERE scope='personal' AND source_id=$1")
+    sqlx_core::query::query("UPDATE document_grouping SET mode='auto',state='pending',attempts=0,claim_token=NULL,lease_until=NULL WHERE scope='personal' AND source_id=$1")
         .bind(document).execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
 }
@@ -65,7 +65,7 @@ async fn pending(store: &Store, memory: &str, document: &str) {
 async fn wait_blocked(store: &Store, blocker: i32, count: i64) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let n: i64 = sqlx::query_scalar(
+            let n: i64 = sqlx_core::query_scalar::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))",
             )
             .bind(blocker)
@@ -93,7 +93,7 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::query("TRUNCATE curation_reviews,memory_grouping,document_grouping,document_grouping_dirty,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects RESTART IDENTITY CASCADE")
+    sqlx_core::query::query("TRUNCATE curation_reviews,memory_grouping,document_grouping,document_grouping_dirty,evidence_snapshots,evidence_contents,memory_history,memories,memory_creations,subjects RESTART IDENTITY CASCADE")
         .execute(store.pool()).await.unwrap();
     let temp = tempfile::tempdir().unwrap();
     let binary = temp.path().join("codex");
@@ -166,16 +166,20 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
     // Rolled-back queue writes produce neither notices nor model work.
     let before = worker_store.calls();
     let mut tx = store.pool().begin().await.unwrap();
-    sqlx::query("UPDATE memory_grouping SET state='pending',attempts=0 WHERE memory_id=$1")
-        .bind(memory)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE document_grouping SET state='pending',attempts=0 WHERE source_id=$1")
-        .bind(&document)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
+    sqlx_core::query::query(
+        "UPDATE memory_grouping SET state='pending',attempts=0 WHERE memory_id=$1",
+    )
+    .bind(memory)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx_core::query::query(
+        "UPDATE document_grouping SET state='pending',attempts=0 WHERE source_id=$1",
+    )
+    .bind(&document)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     tx.rollback().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(worker_store.calls(), before);
@@ -185,12 +189,12 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
     );
 
     // No-op queue updates and zero-row claim cleanup cannot self-notify forever.
-    sqlx::query("UPDATE memory_grouping SET updated_at=now() WHERE memory_id=$1")
+    sqlx_core::query::query("UPDATE memory_grouping SET updated_at=now() WHERE memory_id=$1")
         .bind(memory)
         .execute(store.pool())
         .await
         .unwrap();
-    sqlx::query("UPDATE document_grouping SET updated_at=now() WHERE source_id=$1")
+    sqlx_core::query::query("UPDATE document_grouping SET updated_at=now() WHERE source_id=$1")
         .bind(&document)
         .execute(store.pool())
         .await
@@ -205,20 +209,22 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
     let _ = worker.await;
     pending(&store, memory, &document).await;
     let mut locked = store.pool().begin().await.unwrap();
-    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+    let pid: i32 = sqlx_core::query_scalar::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *locked)
         .await
         .unwrap();
-    sqlx::query("SELECT memory_id FROM memory_grouping WHERE memory_id=$1 FOR UPDATE")
+    sqlx_core::query::query("SELECT memory_id FROM memory_grouping WHERE memory_id=$1 FOR UPDATE")
         .bind(memory)
         .execute(&mut *locked)
         .await
         .unwrap();
-    sqlx::query("SELECT source_id FROM document_grouping WHERE source_id=$1 FOR UPDATE")
-        .bind(&document)
-        .execute(&mut *locked)
-        .await
-        .unwrap();
+    sqlx_core::query::query(
+        "SELECT source_id FROM document_grouping WHERE source_id=$1 FOR UPDATE",
+    )
+    .bind(&document)
+    .execute(&mut *locked)
+    .await
+    .unwrap();
     worker = tokio::spawn(ontology::grouping::run_loop(worker_store.clone()));
     listener_pid(&store).await;
     wait_blocked(&store, pid, 2).await;
@@ -230,11 +236,12 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
     let _ = worker.await;
     pending(&store, memory, &document).await;
     let mut gate = store.pool().begin().await.unwrap();
-    let pid: i32 =
-        sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(478310003)")
-            .fetch_one(&mut *gate)
-            .await
-            .unwrap();
+    let pid: i32 = sqlx_core::query_scalar::query_scalar(
+        "SELECT pg_backend_pid() FROM pg_advisory_xact_lock(478310003)",
+    )
+    .fetch_one(&mut *gate)
+    .await
+    .unwrap();
     worker = tokio::spawn(ontology::grouping::run_loop(worker_store.clone()));
     listener_pid(&store).await;
     wait_blocked(&store, pid, 2).await;
@@ -244,9 +251,9 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
 
     // A committed pending native batch parks workers until its state changes.
     let before_pending = worker_store.calls();
-    sqlx::query("INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT gen_random_uuid(),store_id,'synthetic-queue',repeat('a',64),repeat('b',64),'{}','[{}]','synthetic-queue','synthetic-queue','synthetic-queue','pending' FROM context_store").execute(store.pool()).await.unwrap();
+    sqlx_core::query::query("INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT gen_random_uuid(),store_id,'synthetic-queue',repeat('a',64),repeat('b',64),'{}','[{}]','synthetic-queue','synthetic-queue','synthetic-queue','pending' FROM context_store").execute(store.pool()).await.unwrap();
     pending(&store, memory, &document).await;
-    sqlx::query("SELECT document_grouping_invalidate('personal',NULL,$1)")
+    sqlx_core::query::query("SELECT document_grouping_invalidate('personal',NULL,$1)")
         .bind(&document)
         .execute(store.pool())
         .await
@@ -288,7 +295,7 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
         states(&store, memory, &document).await,
         ("pending".into(), "pending".into())
     );
-    sqlx::query(
+    sqlx_core::query::query(
         "UPDATE context_apply_batches SET state='aborted' WHERE core_run_id='synthetic-queue'",
     )
     .execute(store.pool())
@@ -297,7 +304,7 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
     wait_states(&store, memory, &document, "unmatched").await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM document_grouping_dirty WHERE scope='personal' AND source_id=$1")
+            let remaining: i64 = sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM document_grouping_dirty WHERE scope='personal' AND source_id=$1")
                 .bind(&document).fetch_one(store.pool()).await.unwrap();
             if remaining == 0 { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -312,8 +319,8 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
     // The exact lease deadline, without another write, recovers abandoned work.
     for attempts in [1, 3] {
         let mut tx = store.pool().begin().await.unwrap();
-        sqlx::query("UPDATE memory_grouping SET state='processing',claim_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 second',attempts=$2 WHERE memory_id=$1").bind(memory).bind(attempts).execute(&mut *tx).await.unwrap();
-        sqlx::query("UPDATE document_grouping SET state='processing',claim_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 second',attempts=$2 WHERE source_id=$1").bind(&document).bind(attempts).execute(&mut *tx).await.unwrap();
+        sqlx_core::query::query("UPDATE memory_grouping SET state='processing',claim_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 second',attempts=$2 WHERE memory_id=$1").bind(memory).bind(attempts).execute(&mut *tx).await.unwrap();
+        sqlx_core::query::query("UPDATE document_grouping SET state='processing',claim_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 second',attempts=$2 WHERE source_id=$1").bind(&document).bind(attempts).execute(&mut *tx).await.unwrap();
         tx.commit().await.unwrap();
         settled(&worker_store).await;
         assert_eq!(
@@ -329,11 +336,11 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
         .await;
     }
     // A new off/manual decision cancels a previously armed deadline.
-    sqlx::query("UPDATE memory_grouping SET state='processing',claim_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 second' WHERE memory_id=$1").bind(memory).execute(store.pool()).await.unwrap();
-    sqlx::query("UPDATE document_grouping SET state='processing',claim_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 second' WHERE source_id=$1").bind(&document).execute(store.pool()).await.unwrap();
+    sqlx_core::query::query("UPDATE memory_grouping SET state='processing',claim_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 second' WHERE memory_id=$1").bind(memory).execute(store.pool()).await.unwrap();
+    sqlx_core::query::query("UPDATE document_grouping SET state='processing',claim_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 second' WHERE source_id=$1").bind(&document).execute(store.pool()).await.unwrap();
     settled(&worker_store).await;
-    sqlx::query("UPDATE memory_grouping SET mode='off',state='off',claim_token=NULL,lease_until=NULL WHERE memory_id=$1").bind(memory).execute(store.pool()).await.unwrap();
-    sqlx::query("UPDATE document_grouping SET mode='off',state='off',claim_token=NULL,lease_until=NULL WHERE source_id=$1").bind(&document).execute(store.pool()).await.unwrap();
+    sqlx_core::query::query("UPDATE memory_grouping SET mode='off',state='off',claim_token=NULL,lease_until=NULL WHERE memory_id=$1").bind(memory).execute(store.pool()).await.unwrap();
+    sqlx_core::query::query("UPDATE document_grouping SET mode='off',state='off',claim_token=NULL,lease_until=NULL WHERE source_id=$1").bind(&document).execute(store.pool()).await.unwrap();
     let cancelled = settled(&worker_store).await;
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert_eq!(
@@ -344,7 +351,7 @@ async fn classification_queues_wait_for_commits_and_real_lease_deadlines() {
 
     // Reconnection drains durable work; restart also catches notices sent offline.
     let old_listener = listener_pid(&store).await;
-    sqlx::query("SELECT pg_terminate_backend($1)")
+    sqlx_core::query::query("SELECT pg_terminate_backend($1)")
         .bind(old_listener)
         .execute(store.pool())
         .await

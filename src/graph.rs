@@ -305,7 +305,7 @@ impl Store {
             query.validate()?;
             self.count(1);
             let started = std::time::Instant::now();
-            let value: Value = sqlx::query_scalar(GRAPH_SQL)
+            let value: Value = sqlx_core::query_scalar::query_scalar(GRAPH_SQL)
                 .bind(query.scope.as_str())
                 .bind(&query.q)
                 .bind(&query.focus)
@@ -318,10 +318,10 @@ impl Store {
                     // Keep only operational categories so a future failure can
                     // distinguish pool exhaustion, a DB timeout and transport loss.
                     let kind = match &error {
-                        sqlx::Error::Database(_) => "database",
-                        sqlx::Error::PoolTimedOut => "pool_timeout",
-                        sqlx::Error::PoolClosed => "pool_closed",
-                        sqlx::Error::Io(_) | sqlx::Error::Tls(_) => "transport",
+                        sqlx_core::error::Error::Database(_) => "database",
+                        sqlx_core::error::Error::PoolTimedOut => "pool_timeout",
+                        sqlx_core::error::Error::PoolClosed => "pool_closed",
+                        sqlx_core::error::Error::Io(_) | sqlx_core::error::Error::Tls(_) => "transport",
                         _ => "other",
                     };
                     let code = error.as_database_error().and_then(|db| db.code());
@@ -402,7 +402,7 @@ fn bound_response(mut value: Value, limit: usize) -> Result<Value, Error> {
 mod tests {
     use super::*;
     use crate::{context::inventory, domain::ImportedRecord, domain::SourceKind, store::digest};
-    use sqlx::ConnectOptions;
+    use sqlx_core::connection::ConnectOptions;
 
     #[tokio::test]
     async fn graph_decodes_current_projections_once_within_scope() {
@@ -417,10 +417,12 @@ mod tests {
         // Give this workload its own DB inside verify.sh's disposable server.
         let admin = Store::connect(&url).await.unwrap();
         let database = format!("ontology_test_graph_{}", Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
-            .execute(admin.pool())
-            .await
-            .unwrap();
+        sqlx_core::query::query(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "CREATE DATABASE {database}"
+        )))
+        .execute(admin.pool())
+        .await
+        .unwrap();
         let options = crate::config::database_options(&url)
             .unwrap()
             .database(&database);
@@ -486,17 +488,18 @@ mod tests {
         }
         for (scope, expected_decodes) in [("meenseek", 0), ("personal", 24)] {
             // Both SQL fragments are source constants; fixture values remain bound.
-            let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                "EXPLAIN (ANALYZE, FORMAT JSON) {GRAPH_SQL}"
-            )))
-            .bind(scope)
-            .bind("")
-            .bind(None::<String>)
-            .bind(1_i64)
-            .bind(MAX_GRAPH_LINKS as i64)
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+            let plan: Value =
+                sqlx_core::query_scalar::query_scalar(sqlx_core::sql_str::AssertSqlSafe(format!(
+                    "EXPLAIN (ANALYZE, FORMAT JSON) {GRAPH_SQL}"
+                )))
+                .bind(scope)
+                .bind("")
+                .bind(None::<String>)
+                .bind(1_i64)
+                .bind(MAX_GRAPH_LINKS as i64)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
             assert_eq!(
                 function_rows(&plan[0]["Plan"], "jsonb_to_record"),
                 expected_decodes,
@@ -524,10 +527,12 @@ mod tests {
             "visible native reference semantics are retained"
         );
         store.pool().close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {database}")))
-            .execute(admin.pool())
-            .await
-            .unwrap();
+        sqlx_core::query::query(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP DATABASE {database}"
+        )))
+        .execute(admin.pool())
+        .await
+        .unwrap();
         admin.pool().close().await;
     }
 }

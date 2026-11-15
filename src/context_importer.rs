@@ -6,7 +6,8 @@ use crate::{
     store::{Store, digest},
 };
 use serde_json::{Value, json};
-use sqlx::{PgConnection, Row};
+use sqlx_core::row::Row;
+use sqlx_postgres::PgConnection;
 use std::collections::BTreeMap;
 
 pub fn validate_store_id(value: &str) -> Result<(), Error> {
@@ -129,7 +130,7 @@ impl ContextReader {
         }
         let observation=store.dependency_start("consumer-store-identity", &Vec::<String>::new())?;
         store.count(1);
-        let result:Result<String,Error>=sqlx::query_scalar("SELECT store_id::text FROM context_store").fetch_one(&mut *conn).await.map_err(|_|Error::Storage);
+        let result:Result<String,Error>=sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store").fetch_one(&mut *conn).await.map_err(|_|Error::Storage);
         store.dependency_finish(observation,&result);let actual=result?;
         if actual != expected_store {
             return Err(Error::Conflict);
@@ -143,7 +144,7 @@ impl ContextReader {
         if metadata.iter().any(|m| m.origin == "imported-file") {
             let observation=store.dependency_start("consumer-imported-roots", &(context_scope.as_str(),&paths))?;
             store.count(1);
-            let result=sqlx::query("SELECT material_id::text,source_root FROM context_materials WHERE scope=$1 AND path=ANY($2) AND origin_kind='imported-file'").bind(context_scope.as_str()).bind(&paths).fetch_all(&mut *conn).await.map_err(|_|Error::Storage);
+            let result=sqlx_core::query::query("SELECT material_id::text,source_root FROM context_materials WHERE scope=$1 AND path=ANY($2) AND origin_kind='imported-file'").bind(context_scope.as_str()).bind(&paths).fetch_all(&mut *conn).await.map_err(|_|Error::Storage);
             store.dependency_finish_rows(observation,&result);let rows=result?;
             for row in rows {
                 roots.insert(
@@ -337,7 +338,7 @@ impl ContextReader {
             if !self.bindings.is_empty(){
                 let observation=store.dependency_start("consumer-bindings", &json!(self.bindings))?;
                 store.count(1);
-                let result=sqlx::query("INSERT INTO context_source_bindings(source_id,material_id) SELECT source_id,material_id::uuid FROM jsonb_to_recordset($1) AS x(source_id text,material_id text) ON CONFLICT(source_id) DO UPDATE SET material_id=EXCLUDED.material_id WHERE context_source_bindings.material_id=EXCLUDED.material_id RETURNING source_id")
+                let result=sqlx_core::query::query("INSERT INTO context_source_bindings(source_id,material_id) SELECT source_id,material_id::uuid FROM jsonb_to_recordset($1) AS x(source_id text,material_id text) ON CONFLICT(source_id) DO UPDATE SET material_id=EXCLUDED.material_id WHERE context_source_bindings.material_id=EXCLUDED.material_id RETURNING source_id")
                     .bind(json!(self.bindings)).fetch_all(&mut *conn).await.map_err(|_|Error::Storage);
                 store.dependency_finish_rows(observation,&result);let rows=result?;
                 if rows.len()!=records.len(){return Err(Error::Conflict);}

@@ -35,7 +35,7 @@ async fn expanded_judgment_input_never_calls_memory_or_document_provider() {
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::raw_sql("TRUNCATE document_grouping,document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
+    sqlx_core::raw_sql::raw_sql("TRUNCATE document_grouping,document_subjects,document_subject_history,subject_history,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches,memories,memory_creations,subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE")
         .execute(store.pool()).await.unwrap();
     let temp = tempfile::tempdir().unwrap();
     let binary = temp.path().join("codex");
@@ -54,18 +54,20 @@ async fn expanded_judgment_input_never_calls_memory_or_document_provider() {
     let memory = json!({"title":"합성 한도","body":"일반 자료"});
     let original_input = json!({"record":memory,"subjects":subjects});
     assert!(original_input.to_string().len() < 65_536);
-    let definitions_before: Value =
-        sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM subjects s")
+    let definitions_before: Value = sqlx_core::query_scalar::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM subjects s",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+
+    let saved = call(&store, json!({"op":"remember","scope":"personal","idempotency_key":"expanded-memory-input","memory":memory})).await;
+    let memory_before: Value =
+        sqlx_core::query_scalar::query_scalar("SELECT document FROM memories WHERE id=$1")
+            .bind(saved["id"].as_str().unwrap())
             .fetch_one(store.pool())
             .await
             .unwrap();
-
-    let saved = call(&store, json!({"op":"remember","scope":"personal","idempotency_key":"expanded-memory-input","memory":memory})).await;
-    let memory_before: Value = sqlx::query_scalar("SELECT document FROM memories WHERE id=$1")
-        .bind(saved["id"].as_str().unwrap())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
     let memory_capture = temp.path().join("memory-input");
     provider(&binary, &memory_capture);
     assert!(store.grouping_once().await.unwrap());
@@ -127,11 +129,12 @@ async fn expanded_judgment_input_never_calls_memory_or_document_provider() {
     .await;
     assert_eq!(memory_after["grouping"]["state"], "error");
     assert_eq!(memory_after["revision"], saved["revision"]);
-    let stored: Value = sqlx::query_scalar("SELECT document FROM memories WHERE id=$1")
-        .bind(saved["id"].as_str().unwrap())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let stored: Value =
+        sqlx_core::query_scalar::query_scalar("SELECT document FROM memories WHERE id=$1")
+            .bind(saved["id"].as_str().unwrap())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     assert_eq!(stored, memory_before);
     let document_after = call(
         &store,
@@ -155,18 +158,20 @@ async fn expanded_judgment_input_never_calls_memory_or_document_provider() {
         .await,
         history_before
     );
-    let content: String =
-        sqlx::query_scalar("SELECT content FROM source_records WHERE entity_id=$1")
-            .bind(&source.entity_id)
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+    let content: String = sqlx_core::query_scalar::query_scalar(
+        "SELECT content FROM source_records WHERE entity_id=$1",
+    )
+    .bind(&source.entity_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     assert_eq!(content, body);
-    let definitions_after: Value =
-        sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM subjects s")
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+    let definitions_after: Value = sqlx_core::query_scalar::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM subjects s",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     assert_eq!(definitions_after, definitions_before);
     unsafe {
         std::env::remove_var("ONTOLOGY_CODEX_BINARY");

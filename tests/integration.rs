@@ -58,13 +58,13 @@ async fn retired_workspace_preserves_legacy_data_without_entrypoints() {
 
     let store = store().await;
     let id = uuid::Uuid::new_v4().to_string();
-    let saved: Value = sqlx::query_scalar("INSERT INTO career_workflows(id,store_id,application_key,outcome_key,progress) SELECT $1::uuid,store_id,$2,'synthetic-outcome','{\"stage\":\"review\",\"synthetic\":true}'::jsonb FROM context_store RETURNING to_jsonb(career_workflows)")
+    let saved: Value = sqlx_core::query_scalar::query_scalar("INSERT INTO career_workflows(id,store_id,application_key,outcome_key,progress) SELECT $1::uuid,store_id,$2,'synthetic-outcome','{\"stage\":\"review\",\"synthetic\":true}'::jsonb FROM context_store RETURNING to_jsonb(career_workflows)")
         .bind(&id).bind(&id).fetch_one(store.pool()).await.expect("isolated legacy row");
     store
         .initialize()
         .await
         .expect("retired migration stays registered");
-    let migration: String = sqlx::query_scalar(
+    let migration: String = sqlx_core::query_scalar::query_scalar(
         "SELECT digest FROM ontology_migrations WHERE name='017-career-workflows.sql'",
     )
     .fetch_one(store.pool())
@@ -177,17 +177,18 @@ async fn retired_workspace_preserves_legacy_data_without_entrypoints() {
         Error::Invalid.to_string(),
         "unsupported CLI rejects before connecting to a database"
     );
-    let retained: Value =
-        sqlx::query_scalar("SELECT to_jsonb(t) FROM career_workflows t WHERE id=$1::uuid")
-            .bind(&id)
-            .fetch_one(store.pool())
-            .await
-            .expect("legacy data remains");
+    let retained: Value = sqlx_core::query_scalar::query_scalar(
+        "SELECT to_jsonb(t) FROM career_workflows t WHERE id=$1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(store.pool())
+    .await
+    .expect("legacy data remains");
     assert_eq!(
         retained, saved,
         "startup and retired requests preserve the complete synthetic row"
     );
-    sqlx::query("DELETE FROM career_workflows WHERE id=$1::uuid")
+    sqlx_core::query::query("DELETE FROM career_workflows WHERE id=$1::uuid")
         .bind(&id)
         .execute(store.pool())
         .await
@@ -207,7 +208,7 @@ async fn database_contract() {
         Err(Error::Baseline)
     );
     // The test database is created by the verification runner; only its own rows are reset.
-    sqlx::query("TRUNCATE document_subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.expect("reset test fixture");
+    sqlx_core::query::query("TRUNCATE document_subjects,confirmation_history,related_materials,entity_areas,entity_topics,source_records,entities,sources,topics RESTART IDENTITY CASCADE").execute(store.pool()).await.expect("reset test fixture");
     for size in [0, 1, 100] {
         let records = (0..size)
             .map(|i| record(i, Scope::Meenseek))
@@ -252,7 +253,7 @@ async fn database_contract() {
         .expect("personal list");
     assert_eq!(list["total"], 1);
     assert_eq!(list["items"][0]["id"], personal.entity_id);
-    let invalid = sqlx::query("UPDATE entities SET source_id=$1 WHERE id=$2")
+    let invalid = sqlx_core::query::query("UPDATE entities SET source_id=$1 WHERE id=$2")
         .bind(&personal.source_id)
         .bind(&first.entity_id)
         .execute(store.pool())
@@ -262,7 +263,7 @@ async fn database_contract() {
         "composite scope foreign key must reject cross-scope source"
     );
     assert!(
-        sqlx::query(
+        sqlx_core::query::query(
             "INSERT INTO entity_areas(scope,entity_id,area) VALUES('meenseek',$1,'made-up')"
         )
         .bind(&first.entity_id)
@@ -977,21 +978,23 @@ async fn api_protection_contract() {
             .await,
         Err(Error::Invalid)
     );
-    let personal_topic:i64=sqlx::query_scalar("INSERT INTO topics(scope,name) VALUES('personal','범위 밖 주제') ON CONFLICT(scope,name) DO UPDATE SET name=EXCLUDED.name RETURNING id").fetch_one(store.pool()).await.expect("personal topic");
+    let personal_topic:i64=sqlx_core::query_scalar::query_scalar("INSERT INTO topics(scope,name) VALUES('personal','범위 밖 주제') ON CONFLICT(scope,name) DO UPDATE SET name=EXCLUDED.name RETURNING id").fetch_one(store.pool()).await.expect("personal topic");
     assert!(
-        sqlx::query("INSERT INTO entity_topics(scope,entity_id,topic_id) VALUES('meenseek',$1,$2)")
-            .bind(&company.entity_id)
-            .bind(personal_topic)
-            .execute(store.pool())
-            .await
-            .is_err(),
+        sqlx_core::query::query(
+            "INSERT INTO entity_topics(scope,entity_id,topic_id) VALUES('meenseek',$1,$2)"
+        )
+        .bind(&company.entity_id)
+        .bind(personal_topic)
+        .execute(store.pool())
+        .await
+        .is_err(),
         "cross-scope topic mapping must fail"
     );
 }
 
 async fn reset_schema(store: &Store) {
     // store() has checked the explicitly supplied loopback ontology_test_ database.
-    sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    sqlx_core::raw_sql::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
         .execute(store.pool())
         .await
         .expect("reset only the isolated test database schema");
@@ -1009,7 +1012,7 @@ async fn data_snapshot(store: &Store, upgraded: bool) -> Value {
         'entity_topics',(SELECT jsonb_agg(to_jsonb(t) ORDER BY entity_id,topic_id) FROM entity_topics t),
         'links',(SELECT jsonb_agg(to_jsonb(r) ORDER BY left_id,right_id) FROM related_materials r),
         'history',(SELECT jsonb_agg(to_jsonb(h) ORDER BY id) FROM confirmation_history h))"#;
-    let mut result: Value = sqlx::query_scalar(query)
+    let mut result: Value = sqlx_core::query_scalar::query_scalar(query)
         .fetch_one(store.pool())
         .await
         .expect("snapshot every persisted user table");
@@ -1037,7 +1040,7 @@ async fn data_snapshot(store: &Store, upgraded: bool) -> Value {
     result
 }
 async fn schema_snapshot(store: &Store) -> Value {
-    sqlx::query_scalar(r#"SELECT jsonb_build_object(
+    sqlx_core::query_scalar::query_scalar(r#"SELECT jsonb_build_object(
         'columns',(SELECT jsonb_agg(jsonb_build_array(table_name,column_name,ordinal_position,data_type,is_nullable,column_default,is_identity) ORDER BY table_name,ordinal_position) FROM information_schema.columns WHERE table_schema='public'),
         'constraints',(SELECT jsonb_agg(jsonb_build_array(c.relname,k.conname,pg_get_constraintdef(k.oid)) ORDER BY c.relname,k.conname) FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'),
         'indexes',(SELECT jsonb_agg(jsonb_build_array(tablename,indexname,indexdef) ORDER BY tablename,indexname) FROM pg_indexes WHERE schemaname='public'))"#)
@@ -1050,18 +1053,18 @@ async fn migration_preserves_baseline_contract() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     reset_schema(&store).await;
-    sqlx::raw_sql(BASELINE)
+    sqlx_core::raw_sql::raw_sql(BASELINE)
         .execute(store.pool())
         .await
         .expect("create historical baseline");
-    sqlx::raw_sql("CREATE TABLE ontology_baseline (singleton boolean PRIMARY KEY CHECK(singleton), digest text NOT NULL)")
+    sqlx_core::raw_sql::raw_sql("CREATE TABLE ontology_baseline (singleton boolean PRIMARY KEY CHECK(singleton), digest text NOT NULL)")
         .execute(store.pool()).await.expect("create historical baseline marker");
-    sqlx::query("INSERT INTO ontology_baseline VALUES(true,$1)")
+    sqlx_core::query::query("INSERT INTO ontology_baseline VALUES(true,$1)")
         .bind(digest(BASELINE.as_bytes()))
         .execute(store.pool())
         .await
         .expect("pin original baseline digest");
-    sqlx::raw_sql(r#"
+    sqlx_core::raw_sql::raw_sql(r#"
         INSERT INTO areas VALUES('strategy-portfolio','전략·포트폴리오'),('market-customer','시장·고객 이해');
         INSERT INTO sources(id,scope,repository,path,status,last_success_at,verified_commit,failure_code) VALUES
           ('old-source-a','meenseek','/fixture/git','a.md','ok',now(),'aaaaaaaa',NULL),
@@ -1085,7 +1088,7 @@ async fn migration_preserves_baseline_contract() {
     let before = data_snapshot(&store, false).await;
     let old_schema = schema_snapshot(&store).await;
     // Failure after earlier ALTERs must roll back both those ALTERs and the migration marker.
-    sqlx::query("ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check")
+    sqlx_core::query::query("ALTER TABLE sources DROP CONSTRAINT sources_failure_code_check")
         .execute(store.pool())
         .await
         .expect("inject mid-migration failure");
@@ -1093,7 +1096,7 @@ async fn migration_preserves_baseline_contract() {
     assert_eq!(store.initialize().await, Err(Error::Baseline));
     assert_eq!(schema_snapshot(&store).await, failure_schema);
     assert_eq!(data_snapshot(&store, false).await, before);
-    sqlx::query("ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR failure_code='git-read-failed')")
+    sqlx_core::query::query("ALTER TABLE sources ADD CONSTRAINT sources_failure_code_check CHECK(failure_code IS NULL OR failure_code='git-read-failed')")
         .execute(store.pool()).await.expect("restore fixture baseline constraint");
     assert_eq!(schema_snapshot(&store).await, old_schema);
     store
@@ -1101,7 +1104,7 @@ async fn migration_preserves_baseline_contract() {
         .await
         .expect("upgrade the historical baseline");
     assert_eq!(data_snapshot(&store, true).await, before);
-    let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM sources")
+    let kinds: Vec<String> = sqlx_core::query_scalar::query_scalar("SELECT kind FROM sources")
         .fetch_all(store.pool())
         .await
         .expect("migrated providers");
@@ -1110,28 +1113,30 @@ async fn migration_preserves_baseline_contract() {
     store.initialize().await.expect("repeat upgrade safely");
     assert_eq!(data_snapshot(&store, true).await, before);
     assert_eq!(schema_snapshot(&store).await, upgraded_schema);
-    sqlx::query(
+    sqlx_core::query::query(
         "UPDATE ontology_migrations SET digest='drift' WHERE name='001-source-providers.sql'",
     )
     .execute(store.pool())
     .await
     .expect("inject digest drift");
     assert_eq!(store.initialize().await, Err(Error::Baseline));
-    sqlx::query("UPDATE ontology_migrations SET digest=$1 WHERE name='001-source-providers.sql'")
-        .bind(digest(SOURCE_PROVIDERS_MIGRATION.as_bytes()))
-        .execute(store.pool())
-        .await
-        .expect("restore migration digest");
-    sqlx::query("INSERT INTO ontology_migrations VALUES('unexpected.sql','unknown')")
+    sqlx_core::query::query(
+        "UPDATE ontology_migrations SET digest=$1 WHERE name='001-source-providers.sql'",
+    )
+    .bind(digest(SOURCE_PROVIDERS_MIGRATION.as_bytes()))
+    .execute(store.pool())
+    .await
+    .expect("restore migration digest");
+    sqlx_core::query::query("INSERT INTO ontology_migrations VALUES('unexpected.sql','unknown')")
         .execute(store.pool())
         .await
         .expect("inject unknown migration");
     assert_eq!(store.initialize().await, Err(Error::Baseline));
-    sqlx::query("DELETE FROM ontology_migrations WHERE name='unexpected.sql'")
+    sqlx_core::query::query("DELETE FROM ontology_migrations WHERE name='unexpected.sql'")
         .execute(store.pool())
         .await
         .expect("remove injected marker");
-    sqlx::query(
+    sqlx_core::query::query(
         "UPDATE ontology_migrations SET name='renamed.sql' WHERE name='001-source-providers.sql'",
     )
     .execute(store.pool())
@@ -1151,7 +1156,7 @@ async fn migration_preserves_baseline_contract() {
 async fn vault_import_contract() {
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("context reset");
+    sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("context reset");
     let temp = tempfile::tempdir().expect("fixture");
     let root = temp.path().canonicalize().expect("root");
     std::fs::create_dir_all(root.join("personal")).expect("scope");
@@ -1166,10 +1171,11 @@ async fn vault_import_contract() {
         .import_context(&root, &scopes, &inventory.inventory_digest)
         .await
         .expect("original bytes");
-    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .expect("store id");
+    let store_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .expect("store id");
     std::fs::remove_dir_all(&root).expect("no old transport");
     let mut reader = ontology::context_importer::ContextReader::new();
     assert_eq!(
@@ -1203,7 +1209,7 @@ async fn context_http_read_download_scope_and_protection_contract() {
     use tower::ServiceExt;
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
-    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
+    sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
         .execute(store.pool())
         .await
         .expect("isolated original fixtures");
@@ -1318,7 +1324,7 @@ async fn context_http_read_download_scope_and_protection_contract() {
     assert!(bytes.len() < 1024);
     // Cardinality affects only bounded metadata transfer; a page never prefetches its bodies.
     for size in [0usize, 1, 25] {
-        sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
+        sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions, context_material_version_records,context_content_blobs,context_content_chunks, context_manual_edits,context_materials, context_apply_batches")
             .execute(store.pool())
             .await
             .expect("reset complete isolated context fixture");
@@ -1328,7 +1334,7 @@ async fn context_http_read_download_scope_and_protection_contract() {
             .expect("restore same visible imported dataset");
         for number in 0..size {
             let path = format!("{number:02}.md");
-            sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('profile',$1,'/synthetic',$2,$3,$3,$4,7,false,'fixture')")
+            sqlx_core::query::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text) VALUES('profile',$1,'/synthetic',$2,$3,$3,$4,7,false,'fixture')")
                 .bind(&path).bind(format!("profile/{path}")).bind(digest(b"fixture")).bind(b"fixture".as_slice()).execute(store.pool()).await.expect("synthetic metadata cardinality");
         }
         let before = store.calls();
@@ -1761,13 +1767,13 @@ async fn context_http_read_download_scope_and_protection_contract() {
             .is_empty()
     );
     // Synthetic persistence records exercise the real read-only HTTP boundary.
-    let apply: String = sqlx::query_scalar("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-http',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s RETURNING apply_id::text")
+    let apply: String = sqlx_core::query_scalar::query_scalar("WITH i AS (SELECT gen_random_uuid() AS id) INSERT INTO context_apply_batches(apply_id,store_id,core_run_id,prepared_run_digest,candidate_digest,expected_source_versions,context_targets,core_apply_attempt_id,expected_batch_id,expected_journal_locator,state) SELECT i.id,s.store_id,'synthetic-http',repeat('a',64),repeat('b',64),'{}','[{}]',i.id::text,i.id::text,i.id::text,'pending' FROM i CROSS JOIN context_store s RETURNING apply_id::text")
         .fetch_one(store.pool()).await.expect("synthetic pending HTTP fixture");
-    sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,imported_at,origin_kind,content,content_digest,byte_len,restricted,search_text,last_apply_id) VALUES('personal','native.md',NULL,'personal/native.md',NULL,NULL,'native',$1,$2,6,false,'native',$3::uuid)")
+    sqlx_core::query::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,imported_at,origin_kind,content,content_digest,byte_len,restricted,search_text,last_apply_id) VALUES('personal','native.md',NULL,'personal/native.md',NULL,NULL,'native',$1,$2,6,false,'native',$3::uuid)")
         .bind(b"native".as_slice()).bind(digest(b"native")).bind(&apply).execute(store.pool()).await.expect("native fixture before synthetic commit");
     for state in ["pending", "committed"] {
         if state == "committed" {
-            sqlx::query("UPDATE context_apply_batches SET state='committed',actual_batch_id=expected_batch_id,actual_journal_locator=expected_journal_locator,commit_receipt='{\"synthetic\":true}' WHERE apply_id=$1::uuid")
+            sqlx_core::query::query("UPDATE context_apply_batches SET state='committed',actual_batch_id=expected_batch_id,actual_journal_locator=expected_journal_locator,commit_receipt='{\"synthetic\":true}' WHERE apply_id=$1::uuid")
                 .bind(&apply).execute(store.pool()).await.expect("synthetic committed fixture");
         }
         for endpoint in [
@@ -1805,7 +1811,7 @@ async fn context_http_read_download_scope_and_protection_contract() {
             );
         }
     }
-    sqlx::query("UPDATE context_apply_batches SET state='finalized',final_core_receipt_digest=repeat('c',64) WHERE apply_id=$1::uuid")
+    sqlx_core::query::query("UPDATE context_apply_batches SET state='finalized',final_core_receipt_digest=repeat('c',64) WHERE apply_id=$1::uuid")
         .bind(&apply).execute(store.pool()).await.expect("synthetic final fixture");
     let response = app
         .clone()
@@ -1922,13 +1928,13 @@ async fn context_005_upgrade_preserves_exact_imports_and_backfills_one_version()
     let _guard = TEST_LOCK.lock().await;
     let store = store().await;
     reset_schema(&store).await;
-    sqlx::raw_sql(BASELINE)
+    sqlx_core::raw_sql::raw_sql(BASELINE)
         .execute(store.pool())
         .await
         .expect("historical baseline");
-    sqlx::raw_sql("CREATE TABLE ontology_baseline(singleton boolean PRIMARY KEY CHECK(singleton),digest text NOT NULL); CREATE TABLE ontology_migrations(name text PRIMARY KEY,digest text NOT NULL)")
+    sqlx_core::raw_sql::raw_sql("CREATE TABLE ontology_baseline(singleton boolean PRIMARY KEY CHECK(singleton),digest text NOT NULL); CREATE TABLE ontology_migrations(name text PRIMARY KEY,digest text NOT NULL)")
         .execute(store.pool()).await.expect("historical migration ledger");
-    sqlx::query("INSERT INTO ontology_baseline VALUES(true,$1)")
+    sqlx_core::query::query("INSERT INTO ontology_baseline VALUES(true,$1)")
         .bind(digest(BASELINE.as_bytes()))
         .execute(store.pool())
         .await
@@ -1939,7 +1945,7 @@ async fn context_005_upgrade_preserves_exact_imports_and_backfills_one_version()
             .map(|(id, label)| serde_json::json!({"id":id,"label":label}))
             .collect::<Vec<_>>()
     );
-    sqlx::query(
+    sqlx_core::query::query(
         "INSERT INTO areas SELECT id,label FROM jsonb_to_recordset($1) AS x(id text,label text)",
     )
     .bind(areas)
@@ -1968,11 +1974,11 @@ async fn context_005_upgrade_preserves_exact_imports_and_backfills_one_version()
             include_str!("../schema/migrations/005-context-materials.sql"),
         ),
     ] {
-        sqlx::raw_sql(sql)
+        sqlx_core::raw_sql::raw_sql(sql)
             .execute(store.pool())
             .await
             .expect("migrate through 005 only");
-        sqlx::query("INSERT INTO ontology_migrations VALUES($1,$2)")
+        sqlx_core::query::query("INSERT INTO ontology_migrations VALUES($1,$2)")
             .bind(name)
             .bind(digest(sql.as_bytes()))
             .execute(store.pool())
@@ -1992,21 +1998,22 @@ async fn context_005_upgrade_preserves_exact_imports_and_backfills_one_version()
         let target = root.join("personal").join(path);
         std::fs::create_dir_all(target.parent().expect("synthetic parent")).expect("directories");
         std::fs::write(target, content).expect("exact synthetic bytes");
-        sqlx::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text,imported_at) VALUES('personal',$1,$2,$3,$4,$4,$5,$6,$7,$8,'2025-01-02T03:04:05Z')")
+        sqlx_core::query::query("INSERT INTO context_materials(scope,path,source_root,source_path,source_digest,content_digest,content,byte_len,restricted,search_text,imported_at) VALUES('personal',$1,$2,$3,$4,$4,$5,$6,$7,$8,'2025-01-02T03:04:05Z')")
             .bind(path).bind(root.to_str().expect("UTF8 root")).bind(format!("personal/{path}")).bind(digest(content)).bind(content).bind(content.len() as i64).bind(restricted)
             .bind(if restricted {None} else {std::str::from_utf8(content).ok()}).execute(store.pool()).await.expect("populated 005 originals");
     }
-    let before: Value =
-        sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) ORDER BY path) FROM context_materials m")
-            .fetch_one(store.pool())
-            .await
-            .expect("complete old bytes and provenance");
+    let before: Value = sqlx_core::query_scalar::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(m) ORDER BY path) FROM context_materials m",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("complete old bytes and provenance");
     store.initialize().await.expect("006 additive migration");
-    let after: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) - ARRAY['material_id','revision','deleted','origin_kind','created_at','last_apply_id','last_manual_edit_id'] ORDER BY path) FROM context_materials m").fetch_one(store.pool()).await.expect("original columns");
+    let after: Value = sqlx_core::query_scalar::query_scalar("SELECT jsonb_agg(to_jsonb(m) - ARRAY['material_id','revision','deleted','origin_kind','created_at','last_apply_id','last_manual_edit_id'] ORDER BY path) FROM context_materials m").fetch_one(store.pool()).await.expect("original columns");
     assert_eq!(before, after);
-    let exact: bool = sqlx::query_scalar("SELECT bool_and(m.revision=1 AND NOT m.deleted AND m.origin_kind='imported-file' AND m.created_at=m.imported_at AND m.last_apply_id IS NULL AND ROW(m.content,m.content_digest,m.byte_len,m.restricted,m.search_text,m.deleted,m.last_apply_id,m.created_at) IS NOT DISTINCT FROM ROW(v.content,v.content_digest,v.byte_len,v.restricted,v.search_text,v.deleted,v.apply_id,v.recorded_at)) FROM context_materials m JOIN context_material_versions v USING(material_id,revision)").fetch_one(store.pool()).await.expect("backfilled bytes and original timestamps");
+    let exact: bool = sqlx_core::query_scalar::query_scalar("SELECT bool_and(m.revision=1 AND NOT m.deleted AND m.origin_kind='imported-file' AND m.created_at=m.imported_at AND m.last_apply_id IS NULL AND ROW(m.content,m.content_digest,m.byte_len,m.restricted,m.search_text,m.deleted,m.last_apply_id,m.created_at) IS NOT DISTINCT FROM ROW(v.content,v.content_digest,v.byte_len,v.restricted,v.search_text,v.deleted,v.apply_id,v.recorded_at)) FROM context_materials m JOIN context_material_versions v USING(material_id,revision)").fetch_one(store.pool()).await.expect("backfilled bytes and original timestamps");
     assert!(exact);
-    let stable: Value = sqlx::query_scalar("SELECT jsonb_build_object('store',(SELECT to_jsonb(s) FROM context_store s),'materials',(SELECT jsonb_agg(to_jsonb(m) ORDER BY path) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v))")
+    let stable: Value = sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('store',(SELECT to_jsonb(s) FROM context_store s),'materials',(SELECT jsonb_agg(to_jsonb(m) ORDER BY path) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v))")
         .fetch_one(store.pool()).await.expect("new canonical records");
     let scopes: Vec<ContextScope> = vec!["personal".parse().expect("synthetic scope")];
     let manifest = inventory(&root, &scopes).expect("same originals");
@@ -2019,13 +2026,14 @@ async fn context_005_upgrade_preserves_exact_imports_and_backfills_one_version()
                 .expect("idempotent imported originals")["inserted"],
             0
         );
-        let unchanged: Value = sqlx::query_scalar("SELECT jsonb_build_object('store',(SELECT to_jsonb(s) FROM context_store s),'materials',(SELECT jsonb_agg(to_jsonb(m) ORDER BY path) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v))")
+        let unchanged: Value = sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('store',(SELECT to_jsonb(s) FROM context_store s),'materials',(SELECT jsonb_agg(to_jsonb(m) ORDER BY path) FROM context_materials m),'history',(SELECT jsonb_agg(to_jsonb(v) ORDER BY material_id,revision) FROM context_material_versions v))")
             .fetch_one(store.pool()).await.expect("unchanged canonical records");
         assert_eq!(unchanged, stable);
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM context_material_versions")
-            .fetch_one(store.pool())
-            .await
-            .expect("one history per original");
+        let count: i64 =
+            sqlx_core::query_scalar::query_scalar("SELECT count(*) FROM context_material_versions")
+                .fetch_one(store.pool())
+                .await
+                .expect("one history per original");
         assert_eq!(count, 3);
     }
 }

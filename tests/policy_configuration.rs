@@ -109,7 +109,7 @@ async fn native_harness_reloads_changed_configuration_before_replay_database_acc
     );
     let store = Store::connect(&url).await.unwrap();
     store.initialize().await.unwrap();
-    sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.unwrap();
+    sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.unwrap();
     let sha = seed(&store).await;
     let source = view();
     let source_root = source.path().canonicalize().unwrap();
@@ -127,10 +127,11 @@ async fn native_harness_reloads_changed_configuration_before_replay_database_acc
     let mut bytes = fs::read(context_fixture::configuration_path()).unwrap();
     bytes.push(b' ');
     fs::write(&config, bytes).unwrap();
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     for (verb, flag, file) in [
         ("prepare", "--plan", "plan.json"),
         ("replay", "--prepared-run", "prepared.json"),

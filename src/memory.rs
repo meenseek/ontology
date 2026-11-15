@@ -44,7 +44,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx_core::row::Row;
+use sqlx_core::transaction::Transaction;
+use sqlx_postgres::Postgres;
 use uuid::Uuid;
 
 pub const MAX_INPUT_BYTES: usize = 16_384;
@@ -623,10 +625,10 @@ impl Store {
         let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
         self.lock_memories(&mut tx, scope).await?;
         self.count(1);
-        let value: Value = sqlx::query_scalar("INSERT INTO subjects(id,scope,name,key_digest,payload_digest,definition) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(scope,key_digest) DO UPDATE SET key_digest=EXCLUDED.key_digest WHERE subjects.payload_digest=EXCLUDED.payload_digest RETURNING jsonb_build_object('id',id,'scope',scope,'name',name,'created_at',created_at,'revision',revision,'definition',definition)")
+        let value: Value = sqlx_core::query_scalar::query_scalar("INSERT INTO subjects(id,scope,name,key_digest,payload_digest,definition) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(scope,key_digest) DO UPDATE SET key_digest=EXCLUDED.key_digest WHERE subjects.payload_digest=EXCLUDED.payload_digest RETURNING jsonb_build_object('id',id,'scope',scope,'name',name,'created_at',created_at,'revision',revision,'definition',definition)")
             .bind(format!("p_{}",Uuid::new_v4())).bind(scope.as_str()).bind(name).bind(digest(key.as_bytes())).bind(payload_digest).bind(definition).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?.ok_or(Error::Conflict)?;
         self.count(1);
-        sqlx::query("INSERT INTO subject_history(scope,subject_id,revision,name,definition,action) SELECT scope,id,revision,name,definition,'create' FROM subjects WHERE scope=$1 AND id=$2 ON CONFLICT DO NOTHING")
+        sqlx_core::query::query("INSERT INTO subject_history(scope,subject_id,revision,name,definition,action) SELECT scope,id,revision,name,definition,'create' FROM subjects WHERE scope=$1 AND id=$2 ON CONFLICT DO NOTHING")
             .bind(scope.as_str()).bind(value["id"].as_str()).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         tx.commit().await.map_err(|_| Error::Storage)?;
         Ok(value)
@@ -636,18 +638,19 @@ impl Store {
         let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
         self.lock_memories(&mut tx, scope).await?;
         self.count(1);
-        let exists: Option<String> =
-            sqlx::query_scalar("SELECT id FROM subjects WHERE scope=$1 AND id=$2 FOR UPDATE")
-                .bind(scope.as_str())
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|_| Error::Storage)?;
+        let exists: Option<String> = sqlx_core::query_scalar::query_scalar(
+            "SELECT id FROM subjects WHERE scope=$1 AND id=$2 FOR UPDATE",
+        )
+        .bind(scope.as_str())
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| Error::Storage)?;
         if exists.is_none() {
             return Err(Error::NotFound);
         }
         self.count(1);
-        let moved: Vec<String> = sqlx::query_scalar(
+        let moved: Vec<String> = sqlx_core::query_scalar::query_scalar(
             "UPDATE memories SET subject_id=NULL,revision=revision+1,updated_at=now() WHERE scope=$1 AND subject_id=$2 RETURNING id",
         )
         .bind(scope.as_str())
@@ -657,43 +660,44 @@ impl Store {
         .map_err(|_| Error::Storage)?;
         if !moved.is_empty() {
             self.count(1);
-            sqlx::query("INSERT INTO memory_history(scope,memory_id,revision,status,subject_id,document,grouping_only) SELECT scope,id,revision,status,subject_id,document,true FROM memories WHERE scope=$1 AND id=ANY($2::text[])")
+            sqlx_core::query::query("INSERT INTO memory_history(scope,memory_id,revision,status,subject_id,document,grouping_only) SELECT scope,id,revision,status,subject_id,document,true FROM memories WHERE scope=$1 AND id=ANY($2::text[])")
                 .bind(scope.as_str()).bind(&moved).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
             self.count(1);
-            sqlx::query("INSERT INTO evidence_snapshots(scope,memory_id,revision,entity_id,digest) SELECT m.scope,m.id,m.revision,x->>'entity_id',x->>'content_digest' FROM memories m CROSS JOIN LATERAL jsonb_array_elements(m.document->'evidence') x WHERE m.scope=$1 AND m.id=ANY($2::text[]) AND EXISTS(SELECT 1 FROM evidence_snapshots previous WHERE previous.scope=m.scope AND previous.memory_id=m.id AND previous.revision=m.revision-1 AND previous.entity_id=x->>'entity_id' AND previous.digest=x->>'content_digest')")
+            sqlx_core::query::query("INSERT INTO evidence_snapshots(scope,memory_id,revision,entity_id,digest) SELECT m.scope,m.id,m.revision,x->>'entity_id',x->>'content_digest' FROM memories m CROSS JOIN LATERAL jsonb_array_elements(m.document->'evidence') x WHERE m.scope=$1 AND m.id=ANY($2::text[]) AND EXISTS(SELECT 1 FROM evidence_snapshots previous WHERE previous.scope=m.scope AND previous.memory_id=m.id AND previous.revision=m.revision-1 AND previous.entity_id=x->>'entity_id' AND previous.digest=x->>'content_digest')")
                 .bind(scope.as_str()).bind(&moved).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
             if scope == Scope::Personal {
                 self.count(1);
-                sqlx::query("UPDATE memory_grouping g SET mode='off',state='off',source_revision=m.revision,attempts=0,lease_until=NULL,claim_token=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() FROM memories m WHERE g.memory_id=m.id AND m.scope='personal' AND m.id=ANY($1::text[])")
+                sqlx_core::query::query("UPDATE memory_grouping g SET mode='off',state='off',source_revision=m.revision,attempts=0,lease_until=NULL,claim_token=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() FROM memories m WHERE g.memory_id=m.id AND m.scope='personal' AND m.id=ANY($1::text[])")
                     .bind(&moved).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
             }
         }
         if scope == Scope::Personal {
             self.count(1);
-            sqlx::query("UPDATE memory_grouping g SET state='pending',source_revision=m.revision,attempts=0,lease_until=NULL,claim_token=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() FROM memories m WHERE g.memory_id=m.id AND m.scope='personal' AND g.mode='auto' AND g.state='suggested' AND g.suggestions->'candidate_ids' ? $1")
+            sqlx_core::query::query("UPDATE memory_grouping g SET state='pending',source_revision=m.revision,attempts=0,lease_until=NULL,claim_token=NULL,suggestions='{}'::jsonb,reason=NULL,policy_digest=NULL,updated_at=now() FROM memories m WHERE g.memory_id=m.id AND m.scope='personal' AND g.mode='auto' AND g.state='suggested' AND g.suggestions->'candidate_ids' ? $1")
                 .bind(id).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
         }
         self.count(1);
-        let documents: Vec<String> = sqlx::query_scalar("UPDATE document_subjects SET subject_id=NULL,subject_revision=NULL,revision=revision+1,reason='목적 그룹의 명시적 삭제로 소속 해제',updated_at=now() WHERE scope=$1 AND subject_id=$2 RETURNING source_id")
+        let documents: Vec<String> = sqlx_core::query_scalar::query_scalar("UPDATE document_subjects SET subject_id=NULL,subject_revision=NULL,revision=revision+1,reason='목적 그룹의 명시적 삭제로 소속 해제',updated_at=now() WHERE scope=$1 AND subject_id=$2 RETURNING source_id")
             .bind(scope.as_str()).bind(id).fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?;
         if !documents.is_empty() {
-            sqlx::query("UPDATE document_grouping g SET mode='off',state='off',membership_revision=d.revision,claim_token=NULL,lease_until=NULL,attempts=0,suggestions='{}'::jsonb,reason=NULL,updated_at=now() FROM document_subjects d WHERE g.scope=d.scope AND g.source_id=d.source_id AND d.scope=$1 AND d.source_id=ANY($2::text[])")
+            sqlx_core::query::query("UPDATE document_grouping g SET mode='off',state='off',membership_revision=d.revision,claim_token=NULL,lease_until=NULL,attempts=0,suggestions='{}'::jsonb,reason=NULL,updated_at=now() FROM document_subjects d WHERE g.scope=d.scope AND g.source_id=d.source_id AND d.scope=$1 AND d.source_id=ANY($2::text[])")
                 .bind(scope.as_str()).bind(&documents).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
             self.count(1);
-            sqlx::query("INSERT INTO document_subject_history(scope,source_id,material_id,entity_id,revision,subject_id,subject_revision,source_revision,content_digest,reason) SELECT scope,source_id,material_id,entity_id,revision,subject_id,subject_revision,source_revision,content_digest,reason FROM document_subjects WHERE scope=$1 AND source_id=ANY($2::text[])")
+            sqlx_core::query::query("INSERT INTO document_subject_history(scope,source_id,material_id,entity_id,revision,subject_id,subject_revision,source_revision,content_digest,reason) SELECT scope,source_id,material_id,entity_id,revision,subject_id,subject_revision,source_revision,content_digest,reason FROM document_subjects WHERE scope=$1 AND source_id=ANY($2::text[])")
                 .bind(scope.as_str()).bind(&documents).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         }
         self.count(1);
-        sqlx::query("INSERT INTO subject_history(scope,subject_id,revision,name,definition,action) SELECT scope,id,revision+1,name,definition,'delete' FROM subjects WHERE scope=$1 AND id=$2")
+        sqlx_core::query::query("INSERT INTO subject_history(scope,subject_id,revision,name,definition,action) SELECT scope,id,revision+1,name,definition,'delete' FROM subjects WHERE scope=$1 AND id=$2")
             .bind(scope.as_str()).bind(id).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         self.count(1);
-        let deleted: Option<String> =
-            sqlx::query_scalar("DELETE FROM subjects WHERE scope=$1 AND id=$2 RETURNING id")
-                .bind(scope.as_str())
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|_| Error::Storage)?;
+        let deleted: Option<String> = sqlx_core::query_scalar::query_scalar(
+            "DELETE FROM subjects WHERE scope=$1 AND id=$2 RETURNING id",
+        )
+        .bind(scope.as_str())
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| Error::Storage)?;
         if deleted.is_none() {
             return Err(Error::Conflict);
         }
@@ -726,7 +730,7 @@ impl Store {
             })
             .transpose()?;
         self.count(1);
-        let rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('id',id,'scope',scope,'name',name,'created_at',created_at,'revision',revision,'definition',definition,'_cursor',jsonb_build_object('id',id,'name',name)) FROM subjects WHERE scope=$1 AND strpos(lower(name),lower($2))>0 AND ($3::text IS NULL OR (name COLLATE \"C\",id)>($3 COLLATE \"C\",$4)) ORDER BY name COLLATE \"C\",id LIMIT $5")
+        let rows:Vec<Value>=sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('id',id,'scope',scope,'name',name,'created_at',created_at,'revision',revision,'definition',definition,'_cursor',jsonb_build_object('id',id,'name',name)) FROM subjects WHERE scope=$1 AND strpos(lower(name),lower($2))>0 AND ($3::text IS NULL OR (name COLLATE \"C\",id)>($3 COLLATE \"C\",$4)) ORDER BY name COLLATE \"C\",id LIMIT $5")
             .bind(scope.as_str()).bind(query).bind(cursor.as_ref().map(|v| &v.name)).bind(cursor.as_ref().map(|v| &v.id)).bind((limit+1) as i64).fetch_all(self.pool()).await.map_err(|_|Error::Storage)?;
         Ok(page(rows, limit))
     }
@@ -739,7 +743,7 @@ impl Store {
         validate_search(query)?;
         limit_valid(limit)?;
         self.count(1);
-        let rows:Vec<Value>=sqlx::query_scalar(memory_query!(r#"SELECT option FROM (
+        let rows:Vec<Value>=sqlx_core::query_scalar::query_scalar(memory_query!(r#"SELECT option FROM (
  SELECT e.id,s.path,false AS native,jsonb_build_object('entity_id',e.id,'source_id',s.id,'kind',s.kind,'path',s.path,'repository',s.repository,'source_revision',p.source_revision,'content_digest',p.content_digest,'generation',s.generation) AS option
  FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id
  WHERE e.scope=$1 AND s.status='ok' AND p.present AND p.content_digest IS NOT NULL AND p.source_revision=s.verified_revision AND strpos(lower(s.path),lower($2))>0
@@ -762,7 +766,7 @@ impl Store {
         input.validate()?;
         if let Some(subject) = &input.subject_id {
             self.count(1);
-            let exists: bool = sqlx::query_scalar(
+            let exists: bool = sqlx_core::query_scalar::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM subjects WHERE scope=$1 AND id=$2)",
             )
             .bind(scope.as_str())
@@ -786,7 +790,7 @@ impl Store {
             Vec::new()
         } else {
             self.count(1);
-            sqlx::query(concat!(r#"WITH requested AS MATERIALIZED (SELECT document FROM memories WHERE scope=$1 AND id=ANY($2)),
+            sqlx_core::query::query(concat!(r#"WITH requested AS MATERIALIZED (SELECT document FROM memories WHERE scope=$1 AND id=ANY($2)),
  pins AS MATERIALIZED (SELECT value AS x FROM jsonb_array_elements($3::jsonb)
  UNION ALL SELECT x FROM requested r CROSS JOIN LATERAL jsonb_array_elements(r.document->'evidence') x WHERE left(x->>'entity_id',2)='m_')
  SELECT n.id,n.revision,n.status,n.document,
@@ -851,7 +855,7 @@ impl Store {
             let observation =
                 self.dependency_start("memory-source-rows", &(scope.as_str(), &source_ids))?;
             self.count(1);
-            let result=sqlx::query("SELECT e.id,s.id AS source_id,s.kind,s.repository,s.path,s.status,s.generation,s.verified_revision,p.present,p.source_revision,p.content_digest,p.content FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE e.scope=$1 AND e.id=ANY($2) ORDER BY s.id FOR SHARE OF s,p")
+            let result=sqlx_core::query::query("SELECT e.id,s.id AS source_id,s.kind,s.repository,s.path,s.status,s.generation,s.verified_revision,p.present,p.source_revision,p.content_digest,p.content FROM entities e JOIN sources s ON s.scope=e.scope AND s.id=e.source_id JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE e.scope=$1 AND e.id=ANY($2) ORDER BY s.id FOR SHARE OF s,p")
                 .bind(scope.as_str()).bind(source_ids).fetch_all(&mut **tx).await.map_err(|_|Error::Storage);
             self.dependency_finish_rows(observation, &result);
             result?
@@ -895,7 +899,7 @@ impl Store {
         self.check_memory_size(tx, &document).await?;
         if options.persist_evidence && !contents.is_empty() {
             self.count(1);
-            sqlx::query("INSERT INTO evidence_contents(scope,digest,content) SELECT DISTINCT $1,digest,content FROM jsonb_to_recordset($2) AS x(digest text,content text) ON CONFLICT DO NOTHING")
+            sqlx_core::query::query("INSERT INTO evidence_contents(scope,digest,content) SELECT DISTINCT $1,digest,content FROM jsonb_to_recordset($2) AS x(digest text,content text) ON CONFLICT DO NOTHING")
                 .bind(scope.as_str()).bind(json!(contents)).execute(&mut **tx).await.map_err(|_|Error::Storage)?;
         }
         Ok(document)
@@ -910,11 +914,12 @@ impl Store {
     ) -> Result<(), Error> {
         // Match the database constraint, including JSONB spacing and escaped text.
         self.count(1);
-        let fits: bool = sqlx::query_scalar("SELECT octet_length($1::jsonb::text) <= 24576")
-            .bind(document)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|_| Error::Storage)?;
+        let fits: bool =
+            sqlx_core::query_scalar::query_scalar("SELECT octet_length($1::jsonb::text) <= 24576")
+                .bind(document)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|_| Error::Storage)?;
         if !fits {
             return Err(Error::Limit);
         }
@@ -943,7 +948,7 @@ impl Store {
         let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
         self.lock_memories(&mut tx, scope).await?;
         self.count(1);
-        if let Some(row)=sqlx::query("SELECT memory_id,payload_digest FROM memory_creations WHERE scope=$1 AND key_digest=$2").bind(scope.as_str()).bind(&key_hash).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)? {
+        if let Some(row)=sqlx_core::query::query("SELECT memory_id,payload_digest FROM memory_creations WHERE scope=$1 AND key_digest=$2").bind(scope.as_str()).bind(&key_hash).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)? {
             if row.get::<String,_>("payload_digest")!=payload_hash { return Err(Error::Conflict); }
             let id=row.get::<String,_>("memory_id");
             self.count(1);tx.commit().await.map_err(|_|Error::Storage)?;
@@ -965,9 +970,9 @@ impl Store {
             .await?;
         let id = format!("m_{}", Uuid::new_v4());
         self.count(1);
-        sqlx::query("INSERT INTO memory_creations(scope,key_digest,payload_digest,memory_id) VALUES($1,$2,$3,$4)").bind(scope.as_str()).bind(key_hash).bind(payload_hash).bind(&id).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+        sqlx_core::query::query("INSERT INTO memory_creations(scope,key_digest,payload_digest,memory_id) VALUES($1,$2,$3,$4)").bind(scope.as_str()).bind(key_hash).bind(payload_hash).bind(&id).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         self.count(1);
-        sqlx::query("INSERT INTO memories(id,scope,subject_id,revision,status,document) VALUES($1,$2,$3,1,$4,$5)").bind(&id).bind(scope.as_str()).bind(&input.subject_id).bind(if proposal {"proposed"} else {"accepted"}).bind(document).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+        sqlx_core::query::query("INSERT INTO memories(id,scope,subject_id,revision,status,document) VALUES($1,$2,$3,1,$4,$5)").bind(&id).bind(scope.as_str()).bind(&input.subject_id).bind(if proposal {"proposed"} else {"accepted"}).bind(document).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         crate::grouping::on_capture(&mut tx, scope, &id, &input).await?;
         self.append_history(&mut tx, scope, &id, false).await?;
         self.pin_evidence(&mut tx, scope, &id, None).await?;
@@ -983,7 +988,7 @@ impl Store {
         grouping_only: bool,
     ) -> Result<(), Error> {
         self.count(1);
-        sqlx::query("INSERT INTO memory_history(scope,memory_id,revision,status,subject_id,document,grouping_only) SELECT scope,id,revision,status,subject_id,document,$3 FROM memories WHERE scope=$1 AND id=$2").bind(scope.as_str()).bind(id).bind(grouping_only).execute(&mut **tx).await.map_err(|_|Error::Storage)?;
+        sqlx_core::query::query("INSERT INTO memory_history(scope,memory_id,revision,status,subject_id,document,grouping_only) SELECT scope,id,revision,status,subject_id,document,$3 FROM memories WHERE scope=$1 AND id=$2").bind(scope.as_str()).bind(id).bind(grouping_only).execute(&mut **tx).await.map_err(|_|Error::Storage)?;
         Ok(())
     }
     async fn revalidate_memory_evidence(
@@ -1015,18 +1020,18 @@ impl Store {
         if !native.is_empty() {
             let observation=self.dependency_start("accept-native-locks",&(scope.as_str(),&native))?;
             self.count(1);
-            let result=sqlx::query("SELECT id FROM memories WHERE scope=$1 AND id=ANY($2) ORDER BY id FOR SHARE").bind(scope.as_str()).bind(native).fetch_all(&mut **tx).await.map_err(|_|Error::Storage);
+            let result=sqlx_core::query::query("SELECT id FROM memories WHERE scope=$1 AND id=ANY($2) ORDER BY id FOR SHARE").bind(scope.as_str()).bind(native).fetch_all(&mut **tx).await.map_err(|_|Error::Storage);
             self.dependency_finish_rows(observation,&result);result?;
         }
         if !sources.is_empty() {
             let observation=self.dependency_start("accept-source-locks",&(scope.as_str(),&sources))?;
             self.count(1);
-            let result=sqlx::query("SELECT s.id FROM sources s JOIN source_records p ON p.scope=s.scope JOIN entities e ON e.scope=s.scope AND e.source_id=s.id AND e.id=p.entity_id WHERE s.scope=$1 AND s.id=ANY($2) ORDER BY s.id FOR SHARE OF s,p").bind(scope.as_str()).bind(sources).fetch_all(&mut **tx).await.map_err(|_| Error::Storage);
+            let result=sqlx_core::query::query("SELECT s.id FROM sources s JOIN source_records p ON p.scope=s.scope JOIN entities e ON e.scope=s.scope AND e.source_id=s.id AND e.id=p.entity_id WHERE s.scope=$1 AND s.id=ANY($2) ORDER BY s.id FOR SHARE OF s,p").bind(scope.as_str()).bind(sources).fetch_all(&mut **tx).await.map_err(|_| Error::Storage);
             self.dependency_finish_rows(observation,&result);result?;
         }
         let current_observation = self.dependency_start("accept-current", &(scope.as_str(), id))?;
         self.count(1);
-        let current: Result<bool, Error> = sqlx::query_scalar(concat!("SELECT NOT EXISTS(SELECT 1 FROM jsonb_array_elements(m.document->'evidence') x LEFT JOIN entities e ON e.scope=m.scope AND e.id=x->>'entity_id' LEFT JOIN sources s ON s.scope=e.scope AND s.id=e.source_id LEFT JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE NOT ", evidence_current!(), ") FROM memories m WHERE m.scope=$1 AND m.id=$2"))
+        let current: Result<bool, Error> = sqlx_core::query_scalar::query_scalar(concat!("SELECT NOT EXISTS(SELECT 1 FROM jsonb_array_elements(m.document->'evidence') x LEFT JOIN entities e ON e.scope=m.scope AND e.id=x->>'entity_id' LEFT JOIN sources s ON s.scope=e.scope AND s.id=e.source_id LEFT JOIN source_records p ON p.scope=e.scope AND p.entity_id=e.id WHERE NOT ", evidence_current!(), ") FROM memories m WHERE m.scope=$1 AND m.id=$2"))
             .bind(scope.as_str()).bind(id).fetch_one(&mut **tx).await.map_err(|_| Error::Storage);
         self.dependency_finish(current_observation, &current);
         if !current? {
@@ -1059,11 +1064,11 @@ impl Store {
         let mut tx = self.pool().begin().await.map_err(|_| Error::Storage)?;
         self.lock_memories(&mut tx, scope).await?;
         self.count(1);
-        let row=sqlx::query("SELECT revision,status,subject_id,document FROM memories WHERE scope=$1 AND id=$2 FOR UPDATE").bind(scope.as_str()).bind(id).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?;
+        let row=sqlx_core::query::query("SELECT revision,status,subject_id,document FROM memories WHERE scope=$1 AND id=$2 FOR UPDATE").bind(scope.as_str()).bind(id).fetch_optional(&mut *tx).await.map_err(|_|Error::Storage)?;
         let Some(row) = row else {
             if action == "forget" {
                 self.count(1);
-                let gone: bool = sqlx::query_scalar(
+                let gone: bool = sqlx_core::query_scalar::query_scalar(
                     "SELECT EXISTS(SELECT 1 FROM memory_creations WHERE scope=$1 AND memory_id=$2)",
                 )
                 .bind(scope.as_str())
@@ -1082,17 +1087,17 @@ impl Store {
         }
         if action == "forget" {
             self.count(1);
-            sqlx::query("WITH forgotten AS (UPDATE curation_reviews SET candidate=jsonb_build_object('source_id',source_id,'basis',candidate->'basis'),review=review-'reason',result=jsonb_build_object('outcome','forgotten','memory_id',$2,'review_id',id) WHERE scope=$1 AND result->>'memory_id'=$2 RETURNING id) DELETE FROM curation_reviews r WHERE r.scope=$1 AND r.id NOT IN (SELECT id FROM forgotten) AND (r.source_id=$2 OR r.candidate->'finding'->'target'->>'id'=$2 OR EXISTS(SELECT 1 FROM jsonb_array_elements(r.candidate->'basis') x WHERE x->>'entity_id'=$2))")
+            sqlx_core::query::query("WITH forgotten AS (UPDATE curation_reviews SET candidate=jsonb_build_object('source_id',source_id,'basis',candidate->'basis'),review=review-'reason',result=jsonb_build_object('outcome','forgotten','memory_id',$2,'review_id',id) WHERE scope=$1 AND result->>'memory_id'=$2 RETURNING id) DELETE FROM curation_reviews r WHERE r.scope=$1 AND r.id NOT IN (SELECT id FROM forgotten) AND (r.source_id=$2 OR r.candidate->'finding'->'target'->>'id'=$2 OR EXISTS(SELECT 1 FROM jsonb_array_elements(r.candidate->'basis') x WHERE x->>'entity_id'=$2))")
                 .bind(scope.as_str()).bind(id).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
             self.count(1);
-            sqlx::query("WITH removed_references AS (DELETE FROM evidence_snapshots WHERE scope=$1 AND entity_id=$2) DELETE FROM memories WHERE scope=$1 AND id=$2")
+            sqlx_core::query::query("WITH removed_references AS (DELETE FROM evidence_snapshots WHERE scope=$1 AND entity_id=$2) DELETE FROM memories WHERE scope=$1 AND id=$2")
                 .bind(scope.as_str())
                 .bind(id)
                 .execute(&mut *tx)
                 .await
                 .map_err(|_| Error::Storage)?;
             self.count(1);
-            sqlx::query("DELETE FROM evidence_contents c WHERE scope=$1 AND NOT EXISTS(SELECT 1 FROM evidence_snapshots r WHERE r.scope=c.scope AND r.digest=c.digest)")
+            sqlx_core::query::query("DELETE FROM evidence_contents c WHERE scope=$1 AND NOT EXISTS(SELECT 1 FROM evidence_snapshots r WHERE r.scope=c.scope AND r.digest=c.digest)")
                 .bind(scope.as_str()).execute(&mut *tx).await.map_err(|_| Error::Storage)?;
             self.count(1);
             tx.commit().await.map_err(|_| Error::Storage)?;
@@ -1136,7 +1141,7 @@ impl Store {
             crate::grouping::on_accept(&mut tx, scope, id, revision + 1).await?;
         }
         self.count(1);
-        sqlx::query("UPDATE memories SET revision=revision+1,status=$3,subject_id=$4,document=$5,updated_at=now() WHERE scope=$1 AND id=$2").bind(scope.as_str()).bind(id).bind(status).bind(subject_id).bind(document).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+        sqlx_core::query::query("UPDATE memories SET revision=revision+1,status=$3,subject_id=$4,document=$5,updated_at=now() WHERE scope=$1 AND id=$2").bind(scope.as_str()).bind(id).bind(status).bind(subject_id).bind(document).execute(&mut *tx).await.map_err(|_|Error::Storage)?;
         self.append_history(&mut tx, scope, id, false).await?;
         self.pin_evidence(
             &mut tx,
@@ -1159,7 +1164,7 @@ impl Store {
     pub async fn memory_detail(&self, scope: Scope, id: &str) -> Result<Value, Error> {
         native_id(id, "m_")?;
         self.count(1);
-        sqlx::query_scalar(memory_query!(
+        sqlx_core::query_scalar::query_scalar(memory_query!(
             " SELECT value FROM visible WHERE scope=$1 AND id=$2"
         ))
         .bind(scope.as_str())
@@ -1182,7 +1187,7 @@ impl Store {
             revision_valid(revision)?;
         }
         self.count(1);
-        let rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('revision',revision,'status',status,'subject_id',subject_id,'document',document,'changed_at',changed_at) FROM memory_history WHERE scope=$1 AND memory_id=$2 AND ($3::bigint IS NULL OR revision<$3) ORDER BY revision DESC LIMIT $4").bind(scope.as_str()).bind(id).bind(before).bind((limit+1) as i64).fetch_all(self.pool()).await.map_err(|_|Error::Storage)?;
+        let rows:Vec<Value>=sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('revision',revision,'status',status,'subject_id',subject_id,'document',document,'changed_at',changed_at) FROM memory_history WHERE scope=$1 AND memory_id=$2 AND ($3::bigint IS NULL OR revision<$3) ORDER BY revision DESC LIMIT $4").bind(scope.as_str()).bind(id).bind(before).bind((limit+1) as i64).fetch_all(self.pool()).await.map_err(|_|Error::Storage)?;
         if rows.is_empty() && before.is_none() {
             return Err(Error::NotFound);
         }
@@ -1227,7 +1232,7 @@ impl Store {
             })
             .transpose()?;
         self.count(1);
-        let rows:Vec<Value>=sqlx::query_scalar(memory_query!(" SELECT value || jsonb_build_object('_cursor',jsonb_build_object('id',id,'at',(extract(epoch FROM content_updated_at)*1000000)::bigint)) FROM visible WHERE scope=$1 AND status=$2 AND ($3::text IS NULL OR subject_id=$3) AND strpos(lower(concat(document->>'title',' ',document->>'body')),lower($4))>0 AND ($5::bigint IS NULL OR (-(extract(epoch FROM content_updated_at)*1000000)::bigint,id)>(-$5,$6)) AND ($7 OR effective) ORDER BY content_updated_at DESC,id LIMIT $8"))
+        let rows:Vec<Value>=sqlx_core::query_scalar::query_scalar(memory_query!(" SELECT value || jsonb_build_object('_cursor',jsonb_build_object('id',id,'at',(extract(epoch FROM content_updated_at)*1000000)::bigint)) FROM visible WHERE scope=$1 AND status=$2 AND ($3::text IS NULL OR subject_id=$3) AND strpos(lower(concat(document->>'title',' ',document->>'body')),lower($4))>0 AND ($5::bigint IS NULL OR (-(extract(epoch FROM content_updated_at)*1000000)::bigint,id)>(-$5,$6)) AND ($7 OR effective) ORDER BY content_updated_at DESC,id LIMIT $8"))
             .bind(scope.as_str()).bind(status.unwrap_or(MemoryStatus::Accepted).as_str()).bind(subject).bind(query).bind(cursor.as_ref().map(|v| v.at)).bind(cursor.as_ref().map(|v| &v.id)).bind(status.is_some()).bind((limit+1) as i64).fetch_all(self.pool()).await.map_err(|_|Error::Storage)?;
         Ok(page(rows, limit))
     }
@@ -1238,7 +1243,7 @@ impl Store {
         scope: Scope,
     ) -> Result<(), Error> {
         self.count(1);
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,478312))")
+        sqlx_core::query::query("SELECT pg_advisory_xact_lock(hashtextextended($1,478312))")
             .bind(scope.as_str())
             .execute(&mut **tx)
             .await
@@ -1255,7 +1260,7 @@ impl Store {
         self.count(1);
         // Status changes carry forward only the bytes actually held by the previous revision.
         // Corrections attach the source bodies validated and held by prepare_memory in this transaction.
-        sqlx::query("INSERT INTO evidence_snapshots(scope,memory_id,revision,entity_id,digest) SELECT m.scope,m.id,m.revision,x->>'entity_id',x->>'content_digest' FROM memories m CROSS JOIN LATERAL jsonb_array_elements(m.document->'evidence') x WHERE m.scope=$1 AND m.id=$2 AND ($3::bigint IS NULL OR EXISTS(SELECT 1 FROM evidence_snapshots r WHERE r.scope=m.scope AND r.memory_id=m.id AND r.revision=$3 AND r.entity_id=x->>'entity_id' AND r.digest=x->>'content_digest'))")
+        sqlx_core::query::query("INSERT INTO evidence_snapshots(scope,memory_id,revision,entity_id,digest) SELECT m.scope,m.id,m.revision,x->>'entity_id',x->>'content_digest' FROM memories m CROSS JOIN LATERAL jsonb_array_elements(m.document->'evidence') x WHERE m.scope=$1 AND m.id=$2 AND ($3::bigint IS NULL OR EXISTS(SELECT 1 FROM evidence_snapshots r WHERE r.scope=m.scope AND r.memory_id=m.id AND r.revision=$3 AND r.entity_id=x->>'entity_id' AND r.digest=x->>'content_digest'))")
             .bind(scope.as_str()).bind(id).bind(previous).execute(&mut **tx).await.map_err(|_| Error::Storage)?;
         Ok(())
     }
@@ -1270,7 +1275,7 @@ impl Store {
         revision_valid(revision)?;
         evidence_id(entity_id)?;
         self.count(1);
-        sqlx::query_scalar("SELECT jsonb_build_object('memory_id',h.memory_id,'revision',h.revision,'evidence',x,'content',c.content,'available',c.content IS NOT NULL,'historical',true) FROM memory_history h CROSS JOIN LATERAL jsonb_array_elements(h.document->'evidence') x LEFT JOIN evidence_snapshots r ON r.scope=h.scope AND r.memory_id=h.memory_id AND r.revision=h.revision AND r.entity_id=x->>'entity_id' LEFT JOIN evidence_contents c ON c.scope=r.scope AND c.digest=r.digest WHERE h.scope=$1 AND h.memory_id=$2 AND h.revision=$3 AND x->>'entity_id'=$4")
+        sqlx_core::query_scalar::query_scalar("SELECT jsonb_build_object('memory_id',h.memory_id,'revision',h.revision,'evidence',x,'content',c.content,'available',c.content IS NOT NULL,'historical',true) FROM memory_history h CROSS JOIN LATERAL jsonb_array_elements(h.document->'evidence') x LEFT JOIN evidence_snapshots r ON r.scope=h.scope AND r.memory_id=h.memory_id AND r.revision=h.revision AND r.entity_id=x->>'entity_id' LEFT JOIN evidence_contents c ON c.scope=r.scope AND c.digest=r.digest WHERE h.scope=$1 AND h.memory_id=$2 AND h.revision=$3 AND x->>'entity_id'=$4")
             .bind(scope.as_str()).bind(id).bind(revision).bind(entity_id).fetch_optional(self.pool()).await.map_err(|_| Error::Storage)?.ok_or(Error::NotFound)
     }
 }

@@ -123,7 +123,7 @@ async fn run() -> Result<(), &'static str> {
     let store = Store::connect(&url)
         .await
         .map_err(|_| "test database unavailable")?;
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = sqlx_core::query_scalar::query_scalar(
         "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'",
     )
     .fetch_one(store.pool())

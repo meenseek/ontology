@@ -20,7 +20,9 @@ use context_core::{
 };
 use pulldown_cmark::{Event, Parser, Tag};
 use serde_json::{Value, json};
-use sqlx::{PgConnection, Row, postgres::PgRow};
+use sqlx_core::row::Row;
+use sqlx_postgres::PgConnection;
+use sqlx_postgres::PgRow;
 use std::{
     collections::BTreeSet,
     path::{Component, Path, PathBuf},
@@ -329,7 +331,7 @@ pub(crate) async fn append_projections(
     }
     let records = Value::Array(records.to_vec());
     store.count(1);
-    let conflict: bool = sqlx::query_scalar(
+    let conflict: bool = sqlx_core::query_scalar::query_scalar(
         r#"
         WITH incoming AS (
             SELECT material_id::uuid AS material_id,revision,payload
@@ -350,7 +352,7 @@ pub(crate) async fn append_projections(
         return Err(Error::Storage);
     }
     store.count(1);
-    sqlx::query(r#"
+    sqlx_core::query::query(r#"
         INSERT INTO context_projection_versions(material_id,revision,payload,payload_digest)
         SELECT material_id::uuid,revision,payload,encode(sha256(convert_to(payload::text,'UTF8')),'hex')
         FROM jsonb_to_recordset($1) AS x(material_id text,revision bigint,payload jsonb)
@@ -374,7 +376,7 @@ async fn refresh_projections(
     }
     let records = Value::Array(records.to_vec());
     store.count(1);
-    let corrupt: bool = sqlx::query_scalar(
+    let corrupt: bool = sqlx_core::query_scalar::query_scalar(
         r#"
         WITH incoming AS (
             SELECT material_id::uuid AS material_id,revision
@@ -394,7 +396,7 @@ async fn refresh_projections(
         return Err(Error::Storage);
     }
     store.count(1);
-    sqlx::query(r#"
+    sqlx_core::query::query(r#"
         INSERT INTO context_projection_versions(material_id,revision,payload,payload_digest)
         SELECT material_id::uuid,revision,payload,encode(sha256(convert_to(payload::text,'UTF8')),'hex')
         FROM jsonb_to_recordset($1) AS x(material_id text,revision bigint,payload jsonb)
@@ -463,7 +465,7 @@ pub(crate) async fn exact_metadata(
         return Ok(Vec::new());
     }
     store.count(1);
-    Ok(sqlx::query("SELECT path,material_id::text,revision,content_digest,byte_len,restricted,deleted,origin_kind,source_path,source_digest FROM context_materials WHERE scope=$1 AND path=ANY($2) ORDER BY path COLLATE \"C\"")
+    Ok(sqlx_core::query::query("SELECT path,material_id::text,revision,content_digest,byte_len,restricted,deleted,origin_kind,source_path,source_digest FROM context_materials WHERE scope=$1 AND path=ANY($2) ORDER BY path COLLATE \"C\"")
         .bind(scope.as_str()).bind(paths).fetch_all(conn).await.map_err(|_|Error::Storage)?.iter().map(ExactMetadata::from_row).collect())
 }
 /// Empty/invalid input makes no body query; every valid live batch makes exactly one.
@@ -523,12 +525,13 @@ async fn exact_documents_with_limits(
         }
     }
     store.count(1);
-    let store_id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(|_| Error::Storage)?;
+    let store_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|_| Error::Storage)?;
     store.count(1);
-    let bodies=sqlx::query("SELECT path,CASE WHEN byte_len BETWEEN 0 AND $3 AND octet_length(content)<=$3 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=ANY($2) AND NOT deleted ORDER BY path COLLATE \"C\"")
+    let bodies=sqlx_core::query::query("SELECT path,CASE WHEN byte_len BETWEEN 0 AND $3 AND octet_length(content)<=$3 THEN content END AS content FROM context_materials WHERE scope=$1 AND path=ANY($2) AND NOT deleted ORDER BY path COLLATE \"C\"")
         .bind(scope.as_str()).bind(&paths).bind(limits.original as i64).fetch(conn);
     let mut bodies = bodies;
     let mut documents = Vec::with_capacity(metadata.len());
@@ -655,7 +658,7 @@ async fn manifest(
     scopes: &[String],
 ) -> Result<(Vec<PgRow>, String), Error> {
     store.count(1);
-    let rows=sqlx::query("SELECT m.material_id::text,m.revision,m.scope,m.path,m.content_digest,m.byte_len,m.restricted,m.deleted,p.payload->>'status' AS status,p.payload_digest,encode(sha256(convert_to(p.payload::text,'UTF8')),'hex') AS actual_projection_digest FROM context_materials m LEFT JOIN context_projection_versions p USING(material_id,revision) WHERE m.scope=ANY($1) ORDER BY m.material_id,m.revision,m.path LIMIT 10001")
+    let rows=sqlx_core::query::query("SELECT m.material_id::text,m.revision,m.scope,m.path,m.content_digest,m.byte_len,m.restricted,m.deleted,p.payload->>'status' AS status,p.payload_digest,encode(sha256(convert_to(p.payload::text,'UTF8')),'hex') AS actual_projection_digest FROM context_materials m LEFT JOIN context_projection_versions p USING(material_id,revision) WHERE m.scope=ANY($1) ORDER BY m.material_id,m.revision,m.path LIMIT 10001")
         .bind(scopes).fetch_all(conn).await.map_err(|_|Error::Storage)?;
     if rows.len() > MAX_FILES {
         return Err(Error::Limit);
@@ -706,11 +709,13 @@ impl Store {
     pub async fn context_identity(&self) -> Result<Value, Error> {
         let mut tx = self.lock_context(false).await?;
         self.count(1);
-        let result = sqlx::query_scalar::<_, String>("SELECT store_id::text FROM context_store")
-            .fetch_one(&mut *tx)
-            .await
-            .map(|id| json!({"store_id":id}))
-            .map_err(|_| Error::Storage);
+        let result = sqlx_core::query_scalar::query_scalar::<_, String>(
+            "SELECT store_id::text FROM context_store",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map(|id| json!({"store_id":id}))
+        .map_err(|_| Error::Storage);
         self.finish_context(tx, result).await
     }
     pub async fn projection_status(&self, selected: &[ContextScope]) -> Result<Value, Error> {
@@ -741,7 +746,7 @@ impl Store {
         let mut tx = self.lock_context(true).await?;
         let result=async{let(rows,sha)=manifest(self,&mut tx,&scopes).await?;if sha!=expected{return Err(Error::Conflict);}
             self.count(1);
-            sqlx::query("SELECT set_config('ontology.projection_refresh','on',true)").execute(&mut *tx).await.map_err(|_|Error::Storage)?;
+            sqlx_core::query::query("SELECT set_config('ontology.projection_refresh','on',true)").execute(&mut *tx).await.map_err(|_|Error::Storage)?;
             let mut total=0u64;let mut inserted=0;
             for page in rows.chunks(100) {
                 let mut ids=Vec::new();
@@ -750,7 +755,7 @@ impl Store {
                     if !r.get::<bool,_>("deleted")&&eligible(&scope,&r.get::<String,_>("path"),r.get("restricted"))&&length<=10*1024*1024 {ids.push(r.get::<String,_>("material_id"));}
                     if r.get::<Option<String>,_>("payload_digest")!=r.get::<Option<String>,_>("actual_projection_digest"){return Err(Error::Storage);}
                 }
-                let bodies=if ids.is_empty(){Vec::new()}else{self.count(1);sqlx::query("SELECT material_id::text,CASE WHEN byte_len BETWEEN 0 AND 10485760 AND octet_length(content)<=10485760 THEN content END AS content FROM context_materials WHERE material_id::text=ANY($1)").bind(&ids).fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?};
+                let bodies=if ids.is_empty(){Vec::new()}else{self.count(1);sqlx_core::query::query("SELECT material_id::text,CASE WHEN byte_len BETWEEN 0 AND 10485760 AND octet_length(content)<=10485760 THEN content END AS content FROM context_materials WHERE material_id::text=ANY($1)").bind(&ids).fetch_all(&mut *tx).await.map_err(|_|Error::Storage)?};
                 let mut projections=Vec::with_capacity(page.len());
                 for r in page {let scope:ContextScope=r.get::<String,_>("scope").parse()?;let id:String=r.get("material_id");
                     let body=bodies.iter().find(|b|b.get::<String,_>("material_id")==id).and_then(|b|b.get::<Option<Vec<u8>>,_>("content"));
@@ -797,7 +802,7 @@ impl Store {
             }
             if edges {
                 self.count(1);
-                let rows=sqlx::query(r#"
+                let rows=sqlx_core::query::query(r#"
                     WITH edges AS (
                         SELECT DISTINCT m.scope,m.path,m.material_id,m.revision,
                             r->>'from' AS from_entity,r->>'type' AS relation_type,r->>'to' AS to_entity
@@ -814,7 +819,7 @@ impl Store {
                 return bounded(json!({"items":items,"limit":limit}));
             }
             let terms:Vec<String>=groups.iter().flatten().cloned().collect();
-            let mut q=sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT m.scope,m.path,m.material_id::text,m.revision,jsonb_build_object('source_digest',p.payload->'source_digest','title',left(p.payload->>'title',4096),'body',left(p.payload->>'body',400),'exportable',p.payload->'exportable') AS payload,(SELECT count(*) FROM jsonb_array_elements_text(p.payload->'terms') t WHERE t=ANY(");
+            let mut q=sqlx_core::query_builder::QueryBuilder::<sqlx_postgres::Postgres>::new("SELECT m.scope,m.path,m.material_id::text,m.revision,jsonb_build_object('source_digest',p.payload->'source_digest','title',left(p.payload->>'title',4096),'body',left(p.payload->>'body',400),'exportable',p.payload->'exportable') AS payload,(SELECT count(*) FROM jsonb_array_elements_text(p.payload->'terms') t WHERE t=ANY(");
             q.push_bind(&terms).push(")) AS relevance FROM context_materials m JOIN context_projection_versions p USING(material_id,revision) WHERE NOT m.deleted AND m.scope=ANY(");
             q.push_bind(&scopes).push(") AND p.payload->>'status'='searchable'");
             for group in &groups {q.push(" AND (p.payload->'terms') ?| ").push_bind(group);}

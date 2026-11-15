@@ -37,8 +37,8 @@ struct Diagnostic {
 }
 
 impl Diagnostic {
-    fn sql(stage: Stage, error: &sqlx::Error) -> Self {
-        use sqlx::Error::*;
+    fn sql(stage: Stage, error: &sqlx_core::error::Error) -> Self {
+        use sqlx_core::error::Error::*;
         let error_kind = match error {
             Database(_) => "database",
             Io(_) => "io",
@@ -87,7 +87,7 @@ impl Diagnostic {
     }
 }
 
-pub(crate) fn sql_error(stage: Stage, error: sqlx::Error) -> Error {
+pub(crate) fn sql_error(stage: Stage, error: sqlx_core::error::Error) -> Error {
     Diagnostic::sql(stage, &error).emit()
 }
 
@@ -105,7 +105,7 @@ pub(crate) fn failure(stage: Stage, kind: &'static str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::error::{DatabaseError, ErrorKind};
+    use sqlx_core::error::{DatabaseError, ErrorKind};
     use std::{borrow::Cow, error::Error as StdError, fmt};
 
     #[derive(Debug)]
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn database_diagnostic_keeps_only_stage_kind_and_valid_code() {
-        let error = sqlx::Error::Database(Box::new(PrivateDatabaseError("57014")));
+        let error = sqlx_core::error::Error::Database(Box::new(PrivateDatabaseError("57014")));
         let value = serde_json::to_value(Diagnostic::sql(Stage::SourceBody, &error)).unwrap();
         assert_eq!(
             value,
@@ -148,7 +148,8 @@ mod tests {
                 "error_kind":"database", "sqlstate":"57014", "os_code":null
             })
         );
-        let error = sqlx::Error::Database(Box::new(PrivateDatabaseError("secret-code")));
+        let error =
+            sqlx_core::error::Error::Database(Box::new(PrivateDatabaseError("secret-code")));
         assert!(
             Diagnostic::sql(Stage::SourceBody, &error)
                 .sqlstate
@@ -158,11 +159,11 @@ mod tests {
 
     #[test]
     fn io_and_protocol_diagnostics_do_not_format_messages() {
-        let error = sqlx::Error::Io(std::io::Error::from_raw_os_error(54));
+        let error = sqlx_core::error::Error::Io(std::io::Error::from_raw_os_error(54));
         let value = serde_json::to_value(Diagnostic::sql(Stage::ContextConnect, &error)).unwrap();
         assert_eq!(value["os_code"], 54);
         assert_eq!(value["error_kind"], "io");
-        let error = sqlx::Error::Protocol("private source body; credential".into());
+        let error = sqlx_core::error::Error::Protocol("private source body; credential".into());
         let value = serde_json::to_value(Diagnostic::sql(Stage::SourceMetadata, &error)).unwrap();
         assert_eq!(value["error_kind"], "protocol");
         assert!(!value.to_string().contains("private"));

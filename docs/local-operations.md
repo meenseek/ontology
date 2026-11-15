@@ -1320,6 +1320,9 @@ bash scripts/verify.sh
 형식·컴파일·Clippy·테스트·의존성 보안 점검, pnpm 잠금 파일 기준 설치와 웹 테스트·타입
 검사·빌드·운영 의존성 보안 점검을 수행한다. 기존 audit와 install 정책을 유지한다.
 
+DB 클라이언트는 `sqlx-core`와 `sqlx-postgres`를 직접 사용한다. 사용하지 않는 SQLite·MySQL
+드라이버와 SQLx facade·매크로 경로는 의존성에서 제외하며 버전·기능은 `Cargo.toml`이 소유한다.
+
 검증 범위는 native Core의 source/version binding·역할·적용·복구 경계, native context
 consumer와 갱신, Git 커밋 가져오기와 실패·부재 처리, 사용자 기록 보존, 검색·분류·연결·이력,
 기억 상태·정정·중복 방지·근거 보존, 자동 갱신과 실패 격리, scope·변경 충돌, 로컬 요청 보호와

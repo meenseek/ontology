@@ -6199,7 +6199,7 @@ wait
     fn test_configured_control_digest() -> String {
         let store = test_store();
         test_runtime().block_on(async {
-            sqlx::query_scalar("SELECT content_digest FROM context_materials WHERE scope='profile' AND path='rules/control.md'").fetch_one(store.pool()).await.expect("fixture policy metadata")
+            sqlx_core::query_scalar::query_scalar("SELECT content_digest FROM context_materials WHERE scope='profile' AND path='rules/control.md'").fetch_one(store.pool()).await.expect("fixture policy metadata")
         })
     }
 
@@ -6283,7 +6283,7 @@ wait
                 );
                 let store = Store::connect(&url).await.expect("test database");
                 store.initialize().await.expect("test migrations");
-                sqlx::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset owned native CLI fixture");
+                sqlx_core::query::query("TRUNCATE document_grouping,document_subjects,context_source_bindings,context_projection_versions,context_material_version_records,context_content_blobs,context_content_chunks,context_manual_edits,context_materials,context_apply_batches").execute(store.pool()).await.expect("reset owned native CLI fixture");
                 let fixture = context_fixture::build();
                 let root = fixture.path().canonicalize().expect("synthetic fixture root");
                 let scopes = context_fixture::SCOPES

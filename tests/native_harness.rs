@@ -98,7 +98,7 @@ pub async fn seed(store: &Store) -> String {
         .import_context(&root, &scopes, &inventory.inventory_digest)
         .await
         .expect("isolated fixture import");
-    sqlx::query_scalar("SELECT content_digest FROM context_materials WHERE scope='profile' AND path='rules/control.md'").fetch_one(store.pool()).await.expect("actual policy metadata")
+    sqlx_core::query_scalar::query_scalar("SELECT content_digest FROM context_materials WHERE scope='profile' AND path='rules/control.md'").fetch_one(store.pool()).await.expect("actual policy metadata")
 }
 pub fn view() -> tempfile::TempDir {
     let view = tempfile::tempdir().expect("view");
@@ -487,10 +487,11 @@ pub async fn apply(
     run: String,
     prepared: PreparedHarnessRun,
 ) -> (HarnessExecutionRecord, HarnessApplyAttemptReceipt) {
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .expect("store identity");
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .expect("store identity");
     store
         .with_native_commit(view, id, move |session| {
             let source = session.fresh_source().expect("fresh gate");
@@ -516,10 +517,11 @@ pub async fn command(
     verb: &str,
     extra: &[String],
 ) -> std::process::Output {
-    let id: String = sqlx::query_scalar("SELECT store_id::text FROM context_store")
-        .fetch_one(store.pool())
-        .await
-        .expect("store identity");
+    let id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT store_id::text FROM context_store")
+            .fetch_one(store.pool())
+            .await
+            .expect("store identity");
     tokio::process::Command::new(env!("CARGO_BIN_EXE_ontology"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
