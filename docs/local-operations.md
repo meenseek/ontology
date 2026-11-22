@@ -1179,13 +1179,15 @@ cargo run --locked -- sync-once && bash scripts/dev.sh
 
 `python3 scripts/local_backup.py`는 기존 로컬 DB를 GnuPG AES256으로 직접 암호화한다.
 Python 3.11 이상, Docker CLI와 GnuPG가 필요하다. 평문 dump 파일을 디스크에 만들지
-않으며, 설치별 설정·실행본은 `~/Library/Application Support/ontology-backup`에 둔다.
+않으며, 설치별 설정·실행본은 macOS에서 `~/Library/Application Support/ontology-backup`,
+Linux에서 `${XDG_DATA_HOME:-~/.local/share}/ontology-backup`에 둔다.
 앱 자동 실행과 별도 설치이므로 기존 HTTP 앱·DB·원문과 다른 자동화 일정을 바꾸지 않는다.
 
 ```bash
 python3 scripts/local_backup.py install --mount /Volumes/backup-volume \
   --destination /Volumes/backup-volume/ontology/backups/encrypted \
-  --store-id EXISTING_STORE_ID --container EXISTING_ONTOLOGY_CONTAINER
+  --store-id EXISTING_STORE_ID --container EXISTING_ONTOLOGY_CONTAINER \
+  [--retention-daily 14 --retention-weekly 8 --retention-monthly 6]
 python3 scripts/local_backup.py run --force
 python3 scripts/local_backup.py enable
 python3 scripts/local_backup.py status
@@ -1193,9 +1195,11 @@ python3 scripts/local_backup.py verify --key-file /absolute/private/recovery-key
 ```
 
 실제 기존 볼륨과 저장소 신원을 확인한 값만 전달한다. 설치 시 기록한 볼륨 UUID·DB 신원과
-일치할 때만 저장하며 외장 디스크가 없으면 내부 디스크에 대신 저장하지 않는다. 무작위
-암호는 macOS Keychain의 `ontology.encrypted-backup` 항목에 저장한다. 비밀번호·원문은
-로그나 명령 인자로 출력하지 않는다. Keychain 접근이 거절되거나 잠겨 있으면 실패한다.
+일치할 때만 저장하며 외장 디스크가 없으면 내부 디스크에 대신 저장하지 않는다. 볼륨 신원은
+macOS에서 `diskutil`의 VolumeUUID, Linux에서 `findmnt`의 파일시스템 UUID로 대조한다. 무작위
+암호는 macOS Keychain의 `ontology.encrypted-backup` 항목, Linux에서는 설치 폴더의 0600
+`backup.key`에 저장한다. 설치만 키를 만들며 `run`은 키가 없거나 권한이 넓으면 실패한다.
+비밀번호·원문은 로그나 명령 인자로 출력하지 않는다. Keychain 접근이 거절되거나 잠겨 있으면 실패한다.
 
 각 백업은 원 DB와 같은 transaction snapshot의 전체 table 행·column·제약·index,
 large object와 sequence를 기준으로 별도 빈 DB에 실제 복원하여 대조한다. Sequence는
@@ -1204,13 +1208,18 @@ MVCC snapshot 밖에서 변하므로 dump 전후 값이 달라지면 실패한�
 `committed`가 있으면 실패한다. 이 백업은 DB 원문·첨부·revision·history·앱 기록의 복구용이며,
 진행 중 Core 파일 저널·실행 상태, 설정 비밀값이나 전체 Mac의 복구본은 아니다.
 
-`enable`은 실제 복원 성공 뒤에만 launchd를 등록한다. 로그인 때와 이후 매시간 실행하되
+`enable`은 실제 복원 성공 뒤에만 macOS launchd 또는 Linux systemd user timer
+(`OnCalendar=hourly`, `Persistent=true`)를 등록한다. Linux user timer는 사용자 세션이 있을
+때만 실행되며, 로그인 전·로그아웃 중 실행은 소유자가 `loginctl enable-linger`를 직접 켠
+경우에만 가능하다. 등록 명령이 실패하면 이번에 쓴 unit 파일을 지워 다시 시도할 수 있게 한다. 로그인 때와 이후 매시간 실행하되
 한국시간 날짜 기준 이미 성공한 날은 백업하지 않는다. 잠자기·전원 종료 중에는 실행되지
 않으며 다음 실제 호출에서 미처리 날짜의 현재 상태를 백업한다. 과거 시점의 데이터를
 복원한 것으로 표시하지 않는다. 결과와 실패 사유는 설치 폴더의 `status.json`, 예약 실행은
 `schedule.log`에서 확인한다. 등록만으로 미래 예약 실행이나 실패 알림 전달을 보장하지 않는다.
 
-보존은 최신 일별 14개·ISO 주별 8개·월별 6개의 합집합이다. 같은 파일을 중복 복사하지
+보존은 최신 일별·ISO 주별·월별 대표의 합집합이다. 기본값은 14·8·6개이며 설치 때
+`--retention-*`로 정한 값을 설치 설정에 기록한다. 소스 갱신을 위한 재설치에서 이 인자를
+생략하면 기존 설치의 보존값을 유지한다. 같은 파일을 중복 복사하지
 않는다. 현재 생성한 백업의 복원 검증을 통과한 뒤에만 이 도구가 만든 완성 백업을 정리한다.
 서명이 아닌 암호화된 manifest와 파일 hash로 생성 신원을 대조하며, 알 수 없는 파일·다른
 키·변경된 파일이 있으면 삭제하지 않는다. 기존 수동·평문 백업은 이 정책의 대상이 아니다.
@@ -1220,7 +1229,8 @@ MVCC snapshot 밖에서 변하므로 dump 전후 값이 달라지면 실패한�
 복구 암호는 백업 파일과 분리해 별도 비밀번호 관리자 또는 오프라인 매체에도 보관한다.
 `export-key --output /absolute/private/recovery-key.txt`는 새 파일에만 0600으로 기록하며
 화면에 값을 출력하지 않는다. 보관을 확인한 뒤 전달용 평문 파일은 소유자가 제거한다.
-Mac에만 있는 Keychain 항목은 기기 분실에 대비한 별도 복구 키를 대신하지 않는다.
+Mac Keychain 항목이나 Linux 설치 폴더의 키 파일은 원본 DB와 같은 기기에 있으므로 기기
+분실·디스크 고장에 대비한 별도 복구 키를 대신하지 않는다.
 
 소스 갱신은 검증·독립 리뷰 후 같은 `install`로 기존 binding·키를 유지하며 실행본을
 갱신한다. 다른 destination·볼륨·저장소·키로 덮어쓰지 않는다. 작업 중단 시 임시 복원 DB는
