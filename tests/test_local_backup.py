@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 
@@ -77,6 +78,117 @@ class BackupTests(unittest.TestCase):
         self.assertNotIn("399", keep)
         self.assertLessEqual(len(keep), 14 + 8 + 6)
         self.assertGreater(len(keep), 14)
+
+    def test_configured_retention_counts_bound_kept_generations(self):
+        start = datetime(2026, 10, 18, 1, tzinfo=timezone.utc)
+        records = [{"id": str(i), "created_at": (start - timedelta(days=i)).isoformat()}
+                   for i in range(400)]
+        keep = backup.retention_keep(records, counts={"daily": 7, "weekly": 4, "monthly": 3})
+        self.assertTrue({str(i) for i in range(7)} <= keep)
+        self.assertLessEqual(len(keep), 7 + 4 + 3)
+        self.assertNotIn("120", keep)
+
+    def test_linux_key_file_is_private_and_stable(self):
+        with patch.object(backup, "LINUX", True):
+            first = backup.key("fixture-store", create=True)
+            self.assertEqual(backup.key("fixture-store"), first)
+        path = self.runtime / "backup.key"
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        path.chmod(0o644)
+        with patch.object(backup, "LINUX", True), \
+                self.assertRaisesRegex(backup.BackupError, "permissions_too_open"):
+            backup.key("fixture-store")
+
+    def test_linux_missing_key_is_not_silently_created_by_a_run(self):
+        with patch.object(backup, "LINUX", True), \
+                self.assertRaisesRegex(backup.BackupError, "backup_key_unavailable"):
+            backup.key("fixture-store")
+        self.assertFalse((self.runtime / "backup.key").exists())
+
+    def test_linux_volume_identity_comes_from_findmnt(self):
+        listing = json.dumps({"filesystems": [{"target": "/mnt/fixture", "uuid": "FIXTUREUUID"}]}).encode()
+        with patch.object(backup, "LINUX", True), patch.object(backup, "command", return_value=listing) as run:
+            self.assertEqual(backup.volume_info(Path("/mnt/fixture")),
+                             {"VolumeUUID": "FIXTUREUUID", "MountPoint": "/mnt/fixture"})
+        self.assertEqual(run.call_args.args[0][0], "findmnt")
+        empty = json.dumps({"filesystems": [{"target": "/mnt/fixture", "uuid": None}]}).encode()
+        with patch.object(backup, "LINUX", True), patch.object(backup, "command", return_value=empty), \
+                self.assertRaisesRegex(backup.BackupError, "identity_unavailable"):
+            backup.volume_info(Path("/mnt/fixture"))
+
+    def test_linux_schedule_requires_verified_backup_and_writes_user_units(self):
+        units = self.base / "units"
+        backup.write_json(self.runtime / "status.json", {"status": "failed"})
+        with patch.object(backup, "LINUX", True), patch.object(backup, "UNIT_DIR", units), \
+                self.assertRaisesRegex(backup.BackupError, "successful_restore_required"):
+            backup.enable(self.config)
+        backup.write_json(self.runtime / "status.json", {"status": "success", "verification":
+            {"full_rows_columns_schema_large_objects_equal": True}})
+        with patch.object(backup, "LINUX", True), patch.object(backup, "UNIT_DIR", units), \
+                patch.object(backup, "command") as run:
+            result = backup.enable(self.config)
+        self.assertEqual(result["scheduler"], "systemd_user_timer")
+        timer = (units / "ontology-backup.timer").read_text()
+        service = (units / "ontology-backup.service").read_text()
+        self.assertIn("OnCalendar=hourly", timer)
+        self.assertIn("Persistent=true", timer)
+        self.assertIn(str(self.runtime / "local_backup.py") + " run", service)
+        self.assertEqual(run.call_args_list[-1].args[0][-2:], ["--now", "ontology-backup.timer"])
+        with patch.object(backup, "LINUX", True), patch.object(backup, "UNIT_DIR", units), \
+                self.assertRaisesRegex(backup.BackupError, "schedule_already_exists"):
+            backup.enable(self.config)
+
+    def install_args(self, **retention):
+        mount = self.base / "volume"
+        (mount / "encrypted").mkdir(parents=True, exist_ok=True)
+        values = {"mount": str(mount), "destination": str(mount / "encrypted"),
+                  "store_id": "fixture-store", "container": "synthetic-container",
+                  "retention_daily": None, "retention_weekly": None, "retention_monthly": None}
+        values.update(retention)
+        return backup.argparse.Namespace(**values)
+
+    @contextlib.contextmanager
+    def install_environment(self, **extra):
+        session = unittest.mock.MagicMock()
+        session.__enter__.return_value.query.return_value = b"fixture-store\n"
+        with patch.object(backup, "LINUX", True), patch.object(Path, "is_mount", return_value=True), \
+                patch.object(backup, "volume_info", return_value={"VolumeUUID": "U", "MountPoint": "m"}), \
+                patch.object(backup, "check_container"), patch.object(backup, "Session", return_value=session), \
+                patch.object(backup, "command", return_value=b"0" * 40), \
+                patch.object(backup.shutil, "which", return_value="/usr/bin/fixture"), \
+                patch.object(backup, "destination"):
+            for name, value in extra.items():
+                stack = patch.object(backup, name, value)
+                stack.start()
+                self.addCleanup(stack.stop)
+            yield
+
+    def test_reinstall_without_retention_flags_keeps_configured_retention(self):
+        shutil.rmtree(self.runtime)
+        with self.install_environment():
+            first = backup.install(self.install_args(retention_daily=7, retention_weekly=4, retention_monthly=3))
+            self.assertEqual(first["retention"], {"daily": 7, "weekly": 4, "monthly": 3})
+            again = backup.install(self.install_args())
+        self.assertEqual(again["retention"], {"daily": 7, "weekly": 4, "monthly": 3})
+        self.assertEqual(backup.read_json(self.runtime / "config.json")["retention"],
+                         {"daily": 7, "weekly": 4, "monthly": 3})
+
+    def test_failed_first_linux_install_leaves_no_blocking_runtime(self):
+        shutil.rmtree(self.runtime)
+        with self.install_environment(file_key=unittest.mock.Mock(side_effect=backup.BackupError("key_write_failed"))):
+            with self.assertRaisesRegex(backup.BackupError, "key_write_failed"):
+                backup.install(self.install_args())
+        self.assertFalse(self.runtime.exists())
+
+    def test_failed_systemctl_removes_written_units_for_retry(self):
+        units = self.base / "units"
+        backup.write_json(self.runtime / "status.json", {"status": "success", "verification":
+            {"full_rows_columns_schema_large_objects_equal": True}})
+        with patch.object(backup, "LINUX", True), patch.object(backup, "UNIT_DIR", units), \
+                patch.object(backup, "command", side_effect=backup.BackupError("command_failed:systemctl")):
+            with self.assertRaisesRegex(backup.BackupError, "systemctl"):
+                backup.enable(self.config)
+        self.assertEqual(list(units.iterdir()), [])
 
     def test_due_is_a_korean_calendar_day_and_missing_success_retries(self):
         self.assertTrue(backup.due({}))

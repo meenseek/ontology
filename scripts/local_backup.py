@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Encrypted local PostgreSQL backups and isolated, exact restore checks (macOS).
+"""Encrypted local PostgreSQL backups and isolated, exact restore checks (macOS, Linux).
 
 Only this tool's encrypted generations are eligible for retention. Credentials and
 plaintext database exports never belong in Git, argv, logs or the backup volume.
@@ -27,9 +27,16 @@ import time
 from zoneinfo import ZoneInfo
 
 
-RUNTIME = Path.home() / "Library/Application Support/ontology-backup"
+LINUX = sys.platform.startswith("linux")
+if LINUX:
+    RUNTIME = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "ontology-backup"
+    UNIT_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd/user"
+else:
+    RUNTIME = Path.home() / "Library/Application Support/ontology-backup"
+    UNIT_DIR = None
 PLIST = Path.home() / "Library/LaunchAgents/ontology-backup.plist"
 LABEL = "ontology-backup"
+DEFAULT_RETENTION = {"daily": 14, "weekly": 8, "monthly": 6}
 KEY_SERVICE = "ontology.encrypted-backup"
 GENERATION = re.compile(r"ontology-\d{8}T\d{6}Z-[a-f0-9]{16}\Z")
 RESTORE_DB = re.compile(r"ontology_backup_verify_[a-f0-9]{32}\Z")
@@ -100,7 +107,25 @@ def command(argv, *, data=None, timeout=30):
     return result.stdout
 
 
+def file_key(*, create=False):
+    """Linux key: a 0600 file in the private runtime, never on the backup volume."""
+    path = RUNTIME / "backup.key"
+    if create and not path.exists():
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(secrets.token_urlsafe(48).encode() + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    require(path.exists(), "backup_key_unavailable")
+    require(regular(path).stat().st_mode & 0o077 == 0, "backup_key_permissions_too_open")
+    value = path.read_bytes().strip()
+    require(re.fullmatch(rb"[A-Za-z0-9_-]{64}", value) is not None, "invalid_backup_key")
+    return value
+
+
 def key(account, *, create=False):
+    if LINUX:
+        return file_key(create=create)
     result = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", KEY_SERVICE,
                              "-a", account, "-w"], capture_output=True, timeout=15)
     if result.returncode == 44 and create:
@@ -121,7 +146,22 @@ def key_id(value):
 
 
 def volume_info(mount):
+    if LINUX:
+        values = json.loads(command(["findmnt", "-J", "-o", "TARGET,UUID", "--mountpoint", str(mount)]))
+        filesystems = values.get("filesystems") or []
+        require(len(filesystems) == 1 and filesystems[0].get("uuid"), "backup_volume_identity_unavailable")
+        return {"VolumeUUID": filesystems[0]["uuid"], "MountPoint": filesystems[0]["target"]}
     return plistlib.loads(command(["/usr/sbin/diskutil", "info", "-plist", str(mount)]))
+
+
+def schedule_files():
+    if LINUX:
+        return [UNIT_DIR / (LABEL + ".service"), UNIT_DIR / (LABEL + ".timer")]
+    return [PLIST]
+
+
+def schedule_present():
+    return any(path.exists() for path in schedule_files())
 
 
 def destination(config):
@@ -380,13 +420,15 @@ def recover_restore(config):
     (RUNTIME / "restore-lease.json").unlink()
 
 
-def retention_keep(records, zone="Asia/Seoul"):
-    """Union of latest 14 day, 8 ISO-week and 6 month representatives."""
+def retention_keep(records, zone="Asia/Seoul", counts=None):
+    """Union of the latest daily, ISO-week and month representatives."""
+    counts = {**DEFAULT_RETENTION, **(counts or {})}
     ordered = sorted(records, key=lambda r: r["created_at"], reverse=True)
     keep = set()
     tz = ZoneInfo(zone)
-    for count, bucket in [(14, lambda d: d.date()), (8, lambda d: d.isocalendar()[:2]),
-                          (6, lambda d: (d.year, d.month))]:
+    for count, bucket in [(counts["daily"], lambda d: d.date()),
+                          (counts["weekly"], lambda d: d.isocalendar()[:2]),
+                          (counts["monthly"], lambda d: (d.year, d.month))]:
         seen = set()
         for record in ordered:
             date = datetime.fromisoformat(record["created_at"]).astimezone(tz)
@@ -424,7 +466,7 @@ def prune(config, password, root):
                 and manifest.get("verification") == record.get("verification"),
                 "retention_manifest_mismatch")
         records.append(record)
-    keep = retention_keep(records)
+    keep = retention_keep(records, counts=config.get("retention"))
     removed = []
     for record in records:
         if record["id"] in keep:
@@ -546,7 +588,9 @@ def run_backup(config, *, force=False):
 def install(args):
     root = Path(__file__).resolve().parents[1]
     canonical_path(RUNTIME)
-    require(not PLIST.is_symlink(), "symlink_schedule_refused")
+    require(not any(path.is_symlink() for path in schedule_files()), "symlink_schedule_refused")
+    requested = {"daily": args.retention_daily, "weekly": args.retention_weekly,
+                 "monthly": args.retention_monthly}
     mount = canonical_path(args.mount)
     require(mount.is_mount(), "backup_volume_not_mounted")
     config = {"mount": str(mount), "destination": str(canonical_path(args.destination)),
@@ -558,36 +602,57 @@ def install(args):
     check_container(config)
     with Session(config) as connection:
         require(connection.query("SELECT store_id::text FROM context_store;").decode().strip() == args.store_id, "wrong_store")
-    password = key(args.store_id, create=True)
-    config["key_id"] = key_id(password)
-    if (RUNTIME / "config.json").exists():
-        previous = read_json(RUNTIME / "config.json")
-        require(all(previous.get(field) == config.get(field) for field in
-                    ["mount", "destination", "volume_uuid", "store_id", "container", "key_id"]),
-                "existing_backup_binding_differs")
-    else:
-        require(not RUNTIME.exists() and not PLIST.exists(), "incomplete_existing_installation")
-        RUNTIME.mkdir(mode=0o700)
-        (RUNTIME / "gnupg").mkdir(mode=0o700)
-    installed = RUNTIME / "local_backup.py"
-    temporary = installed.with_suffix(".py.new")
-    require(not temporary.exists(), "unfinished_runtime_update")
-    shutil.copy2(__file__, temporary)
-    os.replace(temporary, installed)
-    write_json(RUNTIME / "config.json", config)
+    previous = read_json(RUNTIME / "config.json") if (RUNTIME / "config.json").exists() else None
+    retention = {**DEFAULT_RETENTION, **((previous or {}).get("retention") or {}),
+                 **{k: v for k, v in requested.items() if v is not None}}
+    require(all(isinstance(v, int) and v >= 1 for v in retention.values()), "invalid_retention")
+    config["retention"] = retention
+    created_runtime = False
+    if previous is None:
+        require(not RUNTIME.exists() and not schedule_present(), "incomplete_existing_installation")
+    try:
+        if not LINUX:
+            # macOS keeps the key outside the runtime: read it before creating folders
+            # so a refused Keychain leaves nothing that blocks a plain retry.
+            password = key(args.store_id, create=True)
+        if previous is None:
+            RUNTIME.mkdir(mode=0o700, parents=True)
+            created_runtime = True
+            (RUNTIME / "gnupg").mkdir(mode=0o700)
+        if LINUX:
+            password = key(args.store_id, create=previous is None)
+        config["key_id"] = key_id(password)
+        if previous is not None:
+            require(all(previous.get(field) == config.get(field) for field in
+                        ["mount", "destination", "volume_uuid", "store_id", "container", "key_id"]),
+                    "existing_backup_binding_differs")
+        installed = RUNTIME / "local_backup.py"
+        temporary = installed.with_suffix(".py.new")
+        require(not temporary.exists(), "unfinished_runtime_update")
+        shutil.copy2(__file__, temporary)
+        os.replace(temporary, installed)
+        write_json(RUNTIME / "config.json", config)
+    except BaseException:
+        if created_runtime and not (RUNTIME / "config.json").exists():
+            # Only the folder this call created, before any configuration existed.
+            shutil.rmtree(RUNTIME, ignore_errors=True)
+        raise
     destination(config)
-    return {"status": "installed", "schedule_enabled": PLIST.exists(), "runtime": str(RUNTIME),
-            "key_id": config["key_id"], "source_sha256": digest_file(Path(__file__))}
+    return {"status": "installed", "schedule_enabled": schedule_present(), "runtime": str(RUNTIME),
+            "key_id": config["key_id"], "retention": retention,
+            "source_sha256": digest_file(Path(__file__))}
 
 
 def enable(config):
     state = read_json(RUNTIME / "status.json")
     require(state.get("status") == "success" and state.get("verification", {}).get("full_rows_columns_schema_large_objects_equal"), "successful_restore_required_before_schedule")
-    require(not PLIST.exists(), "schedule_already_exists")
+    require(not schedule_present(), "schedule_already_exists")
     python = shutil.which("python3")
     require(python, "python3_required")
     log = RUNTIME / "schedule.log"
     log.touch(mode=0o600)
+    if LINUX:
+        return enable_systemd(python, log)
     values = {"Label": LABEL, "ProgramArguments": [python, str(RUNTIME / "local_backup.py"), "run"],
         "RunAtLoad": True, "StartInterval": 3600, "ProcessType": "Background",
         "StandardOutPath": str(log), "StandardErrorPath": str(log)}
@@ -596,6 +661,44 @@ def enable(config):
     PLIST.chmod(0o600)
     command(["launchctl", "bootstrap", "gui/" + str(os.getuid()), str(PLIST)])
     return {"status": "enabled", "check_interval_seconds": 3600, "backup_frequency": "once_per_KST_calendar_day"}
+
+
+def systemd_units(python, log):
+    service = "\n".join([
+        "[Unit]", "Description=Encrypted ontology backup with restore verification", "",
+        "[Service]", "Type=oneshot",
+        "Environment=XDG_DATA_HOME={}".format(RUNTIME.parent),
+        "ExecStart={} {} run".format(python, RUNTIME / "local_backup.py"),
+        "StandardOutput=append:{}".format(log), "StandardError=append:{}".format(log), ""])
+    timer = "\n".join([
+        "[Unit]", "Description=Hourly due check for the daily ontology backup", "",
+        "[Timer]", "OnCalendar=hourly", "Persistent=true", "", "[Install]", "WantedBy=timers.target", ""])
+    return service, timer
+
+
+def enable_systemd(python, log):
+    require(all(" " not in str(p) and "%" not in str(p) for p in (python, RUNTIME, log)),
+            "unit_path_with_space_or_specifier_refused")
+    UNIT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    service_path, timer_path = schedule_files()
+    written = []
+    try:
+        for path, text in zip((service_path, timer_path), systemd_units(python, log)):
+            with path.open("x") as stream:
+                written.append(path)
+                stream.write(text)
+            path.chmod(0o600)
+        command(["systemctl", "--user", "daemon-reload"])
+        command(["systemctl", "--user", "enable", "--now", LABEL + ".timer"])
+    except BaseException:
+        # Remove only the unit files this call wrote so enable can be retried.
+        for path in written:
+            path.unlink(missing_ok=True)
+        with contextlib.suppress(BackupError):
+            command(["systemctl", "--user", "daemon-reload"])
+        raise
+    return {"status": "enabled", "check_interval_seconds": 3600,
+            "backup_frequency": "once_per_KST_calendar_day", "scheduler": "systemd_user_timer"}
 
 
 def verify(config, key_file=None):
@@ -617,7 +720,7 @@ def verify(config, key_file=None):
             "manifest_identity_mismatch")
     verification = restore_check(config, value, generation, manifest["fingerprint"])
     result = {"verified_at": now().isoformat(), "generation": str(generation),
-              "key_source": "recovery_file" if key_file else "keychain",
+              "key_source": "recovery_file" if key_file else ("runtime_key_file" if LINUX else "keychain"),
               **verification}
     write_json(RUNTIME / "recovery-verification.json", result)
     return result
@@ -632,11 +735,14 @@ def main():
     setup.add_argument("--destination", required=True)
     setup.add_argument("--store-id", required=True)
     setup.add_argument("--container", required=True)
+    setup.add_argument("--retention-daily", type=int, default=None)
+    setup.add_argument("--retention-weekly", type=int, default=None)
+    setup.add_argument("--retention-monthly", type=int, default=None)
     run = sub.add_parser("run", help="Back up and fully restore-verify when due")
     run.add_argument("--force", action="store_true")
     sub.add_parser("enable", help="Activate only after a successful full restore")
     sub.add_parser("status", help="Read current configuration and last result")
-    verify_parser = sub.add_parser("verify", help="Restore-check the latest backup, optionally without Keychain")
+    verify_parser = sub.add_parser("verify", help="Restore-check the latest backup, optionally with a separate recovery key file")
     verify_parser.add_argument("--key-file", help="Private independently held recovery key file")
     export = sub.add_parser("export-key", help="Write the key to an owner-chosen private file; never print it")
     export.add_argument("--output", required=True)
@@ -658,7 +764,7 @@ def main():
             if args.action == "status":
                 state = RUNTIME / "status.json"
                 result = {"config": config, "last_result": read_json(state) if state.exists() else None,
-                          "schedule_file_present": PLIST.exists()}
+                          "schedule_file_present": schedule_present()}
             elif args.action == "export-key":
                 target = canonical_path(args.output)
                 require(not target.is_relative_to(Path(config["mount"])), "key_must_be_on_a_separate_volume")
