@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Select the executable before sourcing database configuration.
-if [[ -v ONTOLOGY_CLI_BINARY ]]; then
+if [[ "${ONTOLOGY_CLI_BINARY+x}" == x ]]; then
   ontology_cli_executable="$ONTOLOGY_CLI_BINARY"
   if [[ "$ontology_cli_executable" != /* ]]; then
     printf '%s\n' 'ONTOLOGY_CLI_BINARY requires an absolute executable path' >&2
