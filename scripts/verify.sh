@@ -2,7 +2,7 @@
 # Create and remove only the container owned by this invocation; never touch app databases.
 verify_brain_wrapper() (
   set -euo pipefail
-  unset WRAPPER_EXIT
+  unset WRAPPER_EXIT ONTOLOGY_CLI_BINARY
   wrapper_source="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/brain.sh"
   wrapper_fixture="$(mktemp -d "${TMPDIR:-/tmp}/ontology-wrapper.XXXXXX")"
   trap 'rm -rf "$wrapper_fixture"' EXIT
@@ -14,11 +14,13 @@ verify_brain_wrapper() (
 set -euo pipefail
 printf '%s\0' "$@" > "$WRAPPER_CAPTURE/argv"
 printf '%s' "$DATABASE_URL" > "$WRAPPER_CAPTURE/database"
+printf '%s' "$0" > "$WRAPPER_CAPTURE/executable"
 cat > "$WRAPPER_CAPTURE/stdin"
 exit "${WRAPPER_EXIT:-0}"
 CHILD
   chmod +x "$wrapper_fixture/target/debug/ontology"
   export WRAPPER_CAPTURE="$wrapper_fixture/capture"
+  export XDG_DATA_HOME="$wrapper_fixture/user data"
   wrapper="$wrapper_fixture/scripts/brain.sh"
   printf 'binary input\0with spaces\nlast line' > "$wrapper_fixture/input"
   printf 'DATABASE_URL=postgresql://dummy-from-env\n' > "$wrapper_fixture/.env"
@@ -65,6 +67,45 @@ CHILD
     fi
     [[ ! -e "$WRAPPER_CAPTURE/argv" ]]
   done
+  pin="$wrapper_fixture/pinned executable"
+  cp "$wrapper_fixture/target/debug/ontology" "$pin"
+  printf 'DATABASE_URL=postgresql://dummy-from-env\nONTOLOGY_CLI_BINARY=/wrong-executable\nXDG_DATA_HOME=/wrong-install-root\n' > "$wrapper_fixture/.env"
+  env -u DATABASE_URL ONTOLOGY_CLI_BINARY="$pin" bash "$wrapper" context < "$wrapper_fixture/input"
+  [[ "$(cat "$WRAPPER_CAPTURE/executable")" == "$pin" ]]
+  cmp "$wrapper_fixture/input" "$WRAPPER_CAPTURE/stdin"
+  rm -f "$WRAPPER_CAPTURE/argv"
+  if env DATABASE_URL=postgresql://dummy-explicit ONTOLOGY_CLI_BINARY=relative bash "$wrapper" context < /dev/null; then
+    echo 'Wrapper accepted a relative runtime pin' >&2; exit 1
+  fi
+  [[ ! -e "$WRAPPER_CAPTURE/argv" ]]
+  if [[ "$OSTYPE" == linux* ]]; then
+    installed="$XDG_DATA_HOME/ontology/cli"
+    key=1111111111111111111111111111111111111111111111111111111111111111
+    mkdir -p "$installed/releases/$key"
+    cp "$pin" "$installed/releases/$key/ontology"
+    ln -s "releases/$key" "$installed/current"
+    env -u DATABASE_URL bash "$wrapper" context < "$wrapper_fixture/input"
+    [[ "$(cat "$WRAPPER_CAPTURE/executable")" == "$installed/releases/$key/ontology" ]]
+    cmp "$wrapper_fixture/input" "$WRAPPER_CAPTURE/stdin"
+    rm -f "$WRAPPER_CAPTURE/argv" "$installed/releases/$key/ontology"
+    if env DATABASE_URL=postgresql://dummy-explicit bash "$wrapper" context < /dev/null; then
+      echo 'Wrapper fell back after discovering a broken installation' >&2; exit 1
+    fi
+    [[ ! -e "$WRAPPER_CAPTURE/argv" ]]
+    rm "$installed/current"
+    ln -s "$wrapper_fixture/target/debug" "$installed/current"
+    if env DATABASE_URL=postgresql://dummy-explicit bash "$wrapper" context < /dev/null; then
+      echo 'Wrapper ran an unmanaged executable through current' >&2; exit 1
+    fi
+    [[ ! -e "$WRAPPER_CAPTURE/argv" ]]
+    rm "$installed/current"
+    cp "$pin" "$installed/releases/$key/ontology"
+    ln -s "releases/$key"$'\n' "$installed/current"
+    if env DATABASE_URL=postgresql://dummy-explicit bash "$wrapper" context < /dev/null; then
+      echo 'Wrapper stripped a newline from an invalid release link' >&2; exit 1
+    fi
+    [[ ! -e "$WRAPPER_CAPTURE/argv" ]]
+  fi
 )
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

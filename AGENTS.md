@@ -54,6 +54,10 @@ A repository-only review or development task uses this repository and its synthe
 
 [상세 계약](docs/local-operations.md#앱-시작과-종료).
 
+### Ubuntu Native CLI 설치와 확인
+
+일상 실행, 사용본 확인, 갱신, 이전 실행본 지정은 [Ubuntu Native CLI 운영](docs/local-operations.md#ubuntu-native-cli-설치와-확인)을 따른다.
+
 ### 이전 설치 이름에서 데이터 옮기기
 
 [상세 계약](docs/local-operations.md#이전-설치-이름에서-데이터-옮기기).

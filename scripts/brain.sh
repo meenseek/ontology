@@ -1,6 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Select the executable before sourcing database configuration.
+if [[ "${ONTOLOGY_CLI_BINARY+x}" == x ]]; then
+  ontology_cli_executable="$ONTOLOGY_CLI_BINARY"
+  if [[ "$ontology_cli_executable" != /* ]]; then
+    printf '%s\n' 'ONTOLOGY_CLI_BINARY requires an absolute executable path' >&2
+    exit 126
+  fi
+else
+  ontology_cli_executable=target/debug/ontology
+  data_home="${XDG_DATA_HOME:-}"
+  if [[ "$data_home" != /* && "${HOME:-}" == /* ]]; then
+    data_home="$HOME/.local/share"
+  fi
+  if [[ "$OSTYPE" == linux* && "$data_home" == /* ]]; then
+    cli_root="$data_home/ontology/cli"
+    current="$cli_root/current"
+    if [[ -e "$current" || -L "$current" ]]; then
+      IFS= read -r -d '' target < <(readlink -z -- "$current") || target=''
+      if [[ ! "$target" =~ ^releases/[0-9a-f]{64}$ || -L "$cli_root" || -L "$cli_root/releases" || -L "$cli_root/$target" || -L "$cli_root/$target/ontology" ]]; then
+        printf 'Ontology CLI current is not a managed release: %s\n' "$current" >&2
+        exit 126
+      fi
+      ontology_cli_executable="$cli_root/$target/ontology"
+    fi
+  fi
+fi
+readonly ontology_cli_executable
 # The existing local environment is trusted shell configuration; stdin remains untouched.
 if [[ -z "${DATABASE_URL:-}" ]]; then
   if [[ -f .env ]]; then set -a; source .env >/dev/null 2>&1; set +a; fi
@@ -24,4 +51,8 @@ if [[ "${1:-}" == harness ]]; then
     set -- "$@" --policy-config "$ONTOLOGY_POLICY_CONFIG"
   fi
 fi
-exec target/debug/ontology "$@"
+if [[ "$ontology_cli_executable" == /* && ( ! -f "$ontology_cli_executable" || ! -x "$ontology_cli_executable" ) ]]; then
+  printf 'Ontology CLI executable unavailable: %s\n' "$ontology_cli_executable" >&2
+  exit 126
+fi
+exec "$ontology_cli_executable" "$@"
