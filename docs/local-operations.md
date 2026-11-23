@@ -196,6 +196,25 @@ Mac에 로그인하면 앱을 자동으로 켜 두어 [온톨로지 주소](http
 절차를 대신하지 않는다. 서버 시작 시 설치된 실행 파일의 migration을 검사·적용하므로
 schema 업그레이드는 반드시 위 절차를 먼저 마친다.
 
+### Ubuntu Native CLI 설치와 확인
+
+일상 호출은 저장소 루트에서 `bash scripts/brain.sh context` 또는 `bash scripts/brain.sh harness`로 시작한다. 필요한 JSON과 옵션은 [Native 원문 보존과 조회](#native-원문-보존과-조회), [검토된 원문 변경](#검토된-원문-변경)에 있다. Ubuntu에서 설치를 활성화하면 두 명령 모두 사용자 전용 `${XDG_DATA_HOME:-$HOME/.local/share}/ontology/cli/current`가 가리키는 릴리스의 `ontology`를 호출한다. 설치하기 전에는 기존 개발 실행본 `target/debug/ontology`를 사용한다. 원문 조회와 Harness에는 기존 PostgreSQL 연결이 필요하다.
+
+사용 중인 실행본은 `python3 -B scripts/cli_release.py status`로 확인한다. 출력의 `binary`는 정확한 실행 경로다. `build_revision`은 빌드에 사용한 Git 커밋이며 `binary_sha256`은 디스크의 실행 파일을 대조한 값이다. `current`가 연결돼 있는데 파일이 없거나 실행할 수 없으면 호출이 실패한다.
+
+처음 설치하거나 검증된 엔진 변경을 반영할 때는 Python 3.11 이상과 저장소가 정한 Rust 툴체인, Cargo 잠금 의존성의 로컬 캐시를 준비한다. `REVISION`은 검토한 전체 커밋 ID, `STORE_ID`는 기존 연결 계약이 확인한 native 저장소 ID다.
+
+```bash
+python3 -B scripts/cli_release.py install --revision "$REVISION" --store-id "$STORE_ID"
+python3 -B scripts/cli_release.py status
+```
+
+설치기는 해당 커밋의 Cargo 설정과 잠금 파일, Rust 코드·vendor·schema 및 바이너리에 포함되는 정책 문서를 사용한다. 이 입력이 같은 실행본은 일반 운영 문서나 wrapper의 커밋이 달라져도 재사용한다. 입력이 바뀌면 새 릴리스를 한 번 빌드한다. 후보의 SHA와 기존 native 저장소의 identity를 확인한 뒤에만 `current`를 전환한다. 출력의 `rebuilt`으로 빌드 여부를 확인할 수 있다. 기존 Ubuntu 웹앱은 별도의 설치와 시작 경로를 쓴다.
+
+여러 명령에 걸친 Harness 작업은 시작 시 `status`의 `binary` 경로를 기록하고, 같은 설치·정책 경계에서는 각 호출에 `ONTOLOGY_CLI_BINARY`로 그 절대 경로를 넘긴다. 같은 환경에서 이전 릴리스로 되돌릴 때는 해당 릴리스의 `build_revision`으로 위 설치 명령을 실행하고 상태를 확인한다. 정책 바인딩이 바뀌기 전에 준비한 실행의 복구에는 당시의 호출 경로·바이너리·정책 설정과 별도 복구 승인이 필요하다. 복구나 진행 중인 실행이 참조하는 파일은 그 참조가 끝날 때까지 보존한다.
+
+정상 종료와 후보 검증 실패 시 임시 `.staging`은 제거된다. 강제 중단 뒤 남았으면 설치 프로세스가 모두 종료됐는지와 `status`의 활성본을 확인하고, 그 중단으로 생긴 `.staging`만 정리한 뒤 다시 설치한다.
+
 ### 다른 Mac에서 같은 맥락 사용
 
 이 절차는 한 Mac에서 다른 Mac으로 옮기는 단방향 인계다. 두 Mac의 DB를 자동 동기화하지
