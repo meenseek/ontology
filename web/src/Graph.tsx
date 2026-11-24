@@ -345,10 +345,13 @@ function screenSprite(material: SpriteMaterial, node: PositionedNode, part: "bod
 }
 const endpoint = (value: string | number | { id?: string | number } | undefined) => typeof value === "object" ? value.id : value;
 const membershipKey = (id: string, level: number) => JSON.stringify([level, id]);
+const INTERACTIVE_PIXEL_RATIO = 1.25;
+const INTERACTION_QUIET_MS = 360;
 export default function Graph({ positions, snapshot, nodes, links, selected, filteredGroup = null, hasDisplayFilters = false, explorerOpen = false, rotate, allConnections = false, reduced, visible, fit, disabled, onSelect, onClearSelection, onFit, onToggleRotation, onFailure }: Props) {
   const ui = useMemo(() => uiColors(), []);
   const container = useRef<HTMLDivElement>(null);
   const graph = useRef<ForceGraphMethods<PositionedNode, RenderLink> | undefined>(undefined);
+  const noteRenderInteraction = useRef<(() => void) | null>(null);
   const cameraMotion = useRef(new CameraMotion());
   const coreReturn = useRef<CameraPose | null>(null);
   const restoringCoreReturn = useRef<CameraPose | null>(null);
@@ -378,6 +381,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   const zoomMiniMap = useCallback((factor: number) => {
     const view = getCamera();
     if (!view) return;
+    noteRenderInteraction.current?.();
     const controls = graph.current!.controls() as OrbitControls;
     cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null;
     const pose = zoomCameraPose(view.pose, factor, Math.max(1, controls.minDistance), controls.maxDistance);
@@ -543,6 +547,8 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     retainedLinks.current = next;
     return { nodes, links };
   }, [displayNodes, visualLinks]);
+  const modelPositions = useMemo(() => new Map(nodes.map(node => [node.id, node])), [nodes]);
+  const dragPositions = useRef<{ nodes: PositionedNode[] | null; revision: number }>({ nodes: null, revision: -1 });
   const motionClock = useRef<StarClock>({ seconds: 0, lastTime: null });
   const motionReduced = useRef(reduced); motionReduced.current = reduced;
   const resources = useMemo(() => {
@@ -615,12 +621,79 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
   useEffect(() => {
     const instance = graph.current;
     if (!ready || !instance) return;
-    const renderer = instance.renderer(); renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const renderer = instance.renderer();
+    const fullRatio = () => Math.min(window.devicePixelRatio, 2);
+    renderer.setPixelRatio(fullRatio());
+    const context = renderer.getContext();
+    const gl = "fenceSync" in context ? context : null;
+    let downshiftTimer: number | undefined, restoreTimer: number | undefined, resizeFrame: number | undefined;
+    let pendingDraw: WebGLSync | null = null, attemptedDownshift = false;
+    const interactionRatio = () => Math.min(fullRatio(), INTERACTIVE_PIXEL_RATIO);
+    const clearPendingDraw = () => {
+      if (pendingDraw) gl?.deleteSync(pendingDraw);
+      pendingDraw = null;
+    };
+    const resizeForInteraction = () => {
+      downshiftTimer = undefined;
+      attemptedDownshift = true;
+      if (!gl || gl.isContextLost()) return;
+      pendingDraw = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      if (!pendingDraw) return;
+      // Stop queuing full-resolution renders while the current drawing buffer
+      // is still in use. Wait without blocking input on software renderers.
+      instance.pauseAnimation();
+      gl.flush();
+      const deadline = performance.now() + 120;
+      const resizeWhenReady = () => {
+        if (!pendingDraw) return;
+        const status = gl.clientWaitSync(pendingDraw, 0, 0);
+        if (status === gl.TIMEOUT_EXPIRED && performance.now() < deadline) {
+          resizeFrame = requestAnimationFrame(resizeWhenReady);
+          return;
+        }
+        clearPendingDraw();
+        // A delayed frame must not lower the resolution after the quiet timer.
+        if (restoreTimer !== undefined && (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED)) {
+          renderer.setPixelRatio(interactionRatio());
+        }
+        resizeFrame = requestAnimationFrame(() => {
+          resizeFrame = undefined;
+          if (document.visibilityState !== "hidden" && !gl.isContextLost()) instance.resumeAnimation();
+        });
+      };
+      resizeFrame = requestAnimationFrame(resizeWhenReady);
+    };
+    const restoreResolution = () => {
+      if (positions.dragging || positions.settling || positions.layoutMoving || cameraMotion.current.moving) {
+        restoreTimer = window.setTimeout(restoreResolution, INTERACTION_QUIET_MS);
+        return;
+      }
+      restoreTimer = undefined;
+      attemptedDownshift = false;
+      if (renderer.getPixelRatio() !== fullRatio()) renderer.setPixelRatio(fullRatio());
+    };
+    // Change only the WebGL drawing buffer. Camera coordinates, hit targets,
+    // and DOM labels still use the same CSS pixels throughout the gesture.
+    noteRenderInteraction.current = () => {
+      const ratio = interactionRatio();
+      if (restoreTimer === undefined && renderer.getPixelRatio() <= ratio) return;
+      if (downshiftTimer === undefined && resizeFrame === undefined && !attemptedDownshift && renderer.getPixelRatio() !== ratio)
+        downshiftTimer = window.setTimeout(resizeForInteraction, 0);
+      window.clearTimeout(restoreTimer);
+      restoreTimer = window.setTimeout(restoreResolution, INTERACTION_QUIET_MS);
+    };
     const canvas = renderer.domElement;
     const lost = (event: Event) => { event.preventDefault(); instance.pauseAnimation(); onFailure(); };
     canvas.addEventListener("webglcontextlost", lost);
-    return () => { canvas.removeEventListener("webglcontextlost", lost); };
-  }, [ready, onFailure]);
+    return () => {
+      noteRenderInteraction.current = null;
+      window.clearTimeout(downshiftTimer);
+      window.clearTimeout(restoreTimer);
+      if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
+      clearPendingDraw();
+      canvas.removeEventListener("webglcontextlost", lost);
+    };
+  }, [ready, visible, onFailure, positions]);
   useEffect(() => {
     const instance = graph.current;
     if (!ready || !instance) return;
@@ -903,9 +976,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     }
     // The callback already contains the new 3D position; its drag-end delta has the opposite sign.
     positions.move(node.id, node);
-    const current = new Map(nodes.map(value => [value.id, value]));
-    for (const rendered of data.nodes) fixPosition(rendered, current.get(rendered.id)!);
-    instance.d3ReheatSimulation();
+    if (positions.dragging) noteRenderInteraction.current?.();
+    for (const rendered of data.nodes) fixPosition(rendered, modelPositions.get(rendered.id)!);
+    // DragControls has already reset the graph's countdown before invoking us.
+    dragPositions.current.nodes = data.nodes;
+    dragPositions.current.revision = positions.revision;
   };
   useEffect(() => {
     const layer = labelLayer.current;
@@ -1076,10 +1151,13 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       }
       if (instance && lastPositions !== positions.revision) {
         lastPositions = positions.revision;
-        const byId = new Map(nodes.map(node => [node.id, node]));
-        for (const node of data.nodes) fixPosition(node, byId.get(node.id)!);
-        // With cooldownTicks=0 this refreshes objects/edges without a simulation tick.
-        instance.d3ReheatSimulation();
+        const dragAlreadyCopied = positions.dragging && dragPositions.current.nodes === data.nodes &&
+          dragPositions.current.revision === lastPositions;
+        if (!dragAlreadyCopied) {
+          for (const node of data.nodes) fixPosition(node, modelPositions.get(node.id)!);
+          // With cooldownTicks=0 this refreshes objects/edges without a simulation tick.
+          instance.d3ReheatSimulation();
+        }
       }
       const controls = instance?.controls() as OrbitControls | undefined;
       const focusedElement = document.activeElement instanceof HTMLElement && document.activeElement.matches(".graph-group-target") && container.current?.contains(document.activeElement) ? document.activeElement : null;
@@ -1294,7 +1372,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       if (scene.onBeforeRender === advance) scene.onBeforeRender = before;
       if (scene.onAfterRender === project) scene.onAfterRender = after;
     };
-  }, [ready, labelFontRevision, minimapRevision, snapshot.nodes, nodes, displayNodes, displayLinks, outlineLinks, allConnections, collapsedCounts, cores, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal, groupTitle, pinnedNames, readingMembers, showAllCore]);
+  }, [ready, labelFontRevision, minimapRevision, snapshot.nodes, nodes, modelPositions, displayNodes, displayLinks, outlineLinks, allConnections, collapsedCounts, cores, spatialCounts, spatialGroups, spatialLevel, summaryCounts, changedFootprints, glyphMembers, selected, size, visible, positions, data, reduced, rotate, positionCamera, cameraKey, viewKey, fit, activeExpandedCore, spatialReveal, writeCamera, reveal, groupTitle, pinnedNames, readingMembers, showAllCore]);
   const object = useCallback((node: PositionedNode) => {
     const group = new Group();
     group.userData.nodeId = node.id;
@@ -1459,6 +1537,7 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
     onLostPointerCapture={event => { if (pointer.current?.pointerId === event.pointerId) pointer.current = null; }}
     onPointerMoveCapture={event => {
       gesture.current.move(event.pointerId, event.clientX, event.clientY);
+      if (!disabled && event.pointerType === "touch" && activePointers.current.size > 1) noteRenderInteraction.current?.();
       hoverPointer.current = event.pointerType === "mouse" || event.pointerType === "pen";
       if (disabled || positions.dragging || (event.pointerType !== "mouse" && event.pointerType !== "pen")) { cursor.current = null; return; }
       const rect = event.currentTarget.getBoundingClientRect();
@@ -1471,7 +1550,11 @@ export default function Graph({ positions, snapshot, nodes, links, selected, fil
       if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
       cursor.current = null; hoverPointer.current = false; hoveredId.current = null; setHover(null);
     }}
-    onWheelCapture={event => { if (event.target === graph.current?.renderer().domElement) { cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null; } }}
+    onWheelCapture={event => {
+      if (event.target !== graph.current?.renderer().domElement) return;
+      if (!disabled) noteRenderInteraction.current?.();
+      cameraMotion.current.stop(); pendingReturn.current = null; restoringCoreReturn.current = null;
+    }}
     onPointerDownCapture={event => {
       hoverPointer.current = event.pointerType === "mouse" || event.pointerType === "pen";
       if (!hoverPointer.current) { hoveredId.current = null; setHover(null); }
